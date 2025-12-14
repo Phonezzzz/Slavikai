@@ -1,0 +1,28 @@
+[tool.ruff]
+line-length = 100                # ширина строки (TS-style)
+target-version = "py312"         # твой Python
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]         # базовые ошибки: pycodestyle, pyflakes, warning-и
+ignore = []                      # не игнорируем ничего, ты же любишь строго
+extend-select = ["I", "B", "UP"] # дополнительные правила
+extend-ignore = []               # можешь забить сюда E501 если не хочешь длинные строки
+
+[tool.ruff.format]
+quote-style = "double"           # как prettier
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = false
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+exclude = ["venv", ".venv", "build", "dist", "tests"]
+
+[tool.pytest.ini_options]
+addopts = "--cov=core --cov=llm --cov=tools --cov=memory --cov=shared --cov=config --cov-report=term-missing --cov-fail-under=80"
+testpaths = ["tests"]

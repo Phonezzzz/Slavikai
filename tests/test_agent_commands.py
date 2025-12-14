@@ -1,0 +1,23 @@
+from __future__ import annotations
+
+from core.agent import Agent
+from llm.brain_base import Brain
+from llm.types import LLMResult, ModelConfig
+from shared.models import LLMMessage
+
+
+class SimpleBrain(Brain):
+    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+        return LLMResult(text="ok")
+
+
+def test_agent_unknown_tool_command() -> None:
+    agent = Agent(brain=SimpleBrain())
+    resp = agent.handle_tool_command("/unknown")
+    assert "неизвестен" in resp.lower() or "неактивен" in resp.lower()
+
+
+def test_agent_shell_disabled_in_safe_mode() -> None:
+    agent = Agent(brain=SimpleBrain(), enable_tools={"safe_mode": True})
+    resp = agent.handle_tool_command("/sh ls")
+    assert "safe mode" in resp.lower() or "отключён" in resp.lower()

@@ -1,0 +1,8 @@
+{
+  "allowed_commands": [
+    "echo"
+  ],
+  "timeout_seconds": 10,
+  "max_output_chars": 6000,
+  "sandbox_root": "sandbox"
+}
