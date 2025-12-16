@@ -7,9 +7,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -19,9 +19,11 @@ from PySide6.QtWidgets import (
 )
 
 from core.agent import Agent
+from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import ToolResult
 from ui.audio_player import ChatAudioPlayer, ChatAudioRecorder
 from ui.chat_message_widget import ChatMessageWidget
+from ui.feedback_dialog import FeedbackDialog
 
 SANDBOX_AUDIO = Path("sandbox/audio")
 SANDBOX_AUDIO.mkdir(parents=True, exist_ok=True)
@@ -62,7 +64,8 @@ class ChatView(QWidget):
         agent: Agent,
         audio_player: ChatAudioPlayer,
         on_send_callback: Callable[[str], None],
-        on_feedback_callback: Callable[[str, str, str, str | None], None] | None = None,
+        on_feedback_callback: Callable[[str, FeedbackRating, list[FeedbackLabel], str | None], None]
+        | None = None,
     ):
         super().__init__()
         self.agent = agent
@@ -73,6 +76,7 @@ class ChatView(QWidget):
         self.record_state = RecordState.IDLE
         self.last_prompt = ""
         self.last_response = ""
+        self.last_interaction_id: str | None = None
         self.thread_pool = QThreadPool.globalInstance()
         self._message_widgets: list[ChatMessageWidget] = []
         self._current_record_path: Path | None = None
@@ -92,13 +96,13 @@ class ChatView(QWidget):
 
         self.feedback_layout = QHBoxLayout()
         self.good_btn = QPushButton("👍")
+        self.ok_btn = QPushButton("😐")
         self.bad_btn = QPushButton("👎")
-        self.offtopic_btn = QPushButton("🤷")
 
         for btn, tag in [
-            (self.good_btn, "good"),
-            (self.bad_btn, "bad"),
-            (self.offtopic_btn, "offtopic"),
+            (self.good_btn, FeedbackRating.GOOD),
+            (self.ok_btn, FeedbackRating.OK),
+            (self.bad_btn, FeedbackRating.BAD),
         ]:
             btn.clicked.connect(lambda _, t=tag: self.rate_response(t))
             self.feedback_layout.addWidget(btn)
@@ -135,6 +139,7 @@ class ChatView(QWidget):
 
     def append_response(self, response: str) -> None:
         self.last_response = response
+        self.last_interaction_id = self.agent.last_chat_interaction_id
         self._add_message(f"🤖 AI: {response}", is_assistant=True, spoken_text=response)
         hints_meta = getattr(self.agent, "last_hints_meta", [])
         if hints_meta:
@@ -155,17 +160,27 @@ class ChatView(QWidget):
         scrollbar = self.scroll_area.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def rate_response(self, rating: str) -> None:
-        if self.on_feedback_callback and self.last_response:
-            hint: str | None = None
-            if rating in ("bad", "offtopic"):
-                hint, ok = QInputDialog.getText(
-                    self, "Подсказка модели", "Кратко укажите, что исправить:", text=""
-                )
-                if not ok:
-                    hint = None
-            self.on_feedback_callback(self.last_prompt, self.last_response, rating, hint)
-            self._set_status(f"💬 Оценка сохранена: {rating}")
+    def rate_response(self, rating: FeedbackRating) -> None:
+        if not self.on_feedback_callback:
+            return
+        if not self.last_response:
+            self._set_status("Нет ответа для оценки.")
+            return
+        if not self.last_interaction_id:
+            self._set_status("Нет interaction_id для оценки (InteractionLog не записан).")
+            return
+
+        dialog = FeedbackDialog(rating=rating, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.get_result()
+        self.on_feedback_callback(
+            self.last_interaction_id,
+            rating,
+            data.labels,
+            data.free_text,
+        )
+        self._set_status(f"💬 Feedback сохранён: {rating.value}")
 
     def handle_tts_request(self, widget: ChatMessageWidget) -> None:
         if widget.tts_file_path:

@@ -41,7 +41,7 @@ class StubPlanner:
 
 
 def test_agent_llm_error_path(tmp_path: Path) -> None:
-    agent = Agent(brain=ErrorBrain())
+    agent = Agent(brain=ErrorBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.memory = MemoryManager(str(tmp_path / "mem.db"))
     agent.feedback = FeedbackManager(str(tmp_path / "fb.db"))
     agent.memory.save(
@@ -51,8 +51,8 @@ def test_agent_llm_error_path(tmp_path: Path) -> None:
     assert "Ошибка модели" in resp
 
 
-def test_agent_plan_command_with_stub_planner(monkeypatch) -> None:
-    agent = Agent(brain=SimpleBrain())
+def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     stub = StubPlanner()
     agent.planner = stub  # type: ignore[assignment]
     result = agent.handle_tool_command("/plan goal")
@@ -60,8 +60,8 @@ def test_agent_plan_command_with_stub_planner(monkeypatch) -> None:
     assert stub.executed
 
 
-def test_agent_set_mode_invalid() -> None:
-    agent = Agent(brain=SimpleBrain())
+def test_agent_set_mode_invalid(tmp_path: Path) -> None:
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     try:
         agent.set_mode("dual")
     except ValueError as exc:
@@ -71,7 +71,7 @@ def test_agent_set_mode_invalid() -> None:
 
 
 def test_save_feedback_major_hint(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain())
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.feedback = FeedbackManager(str(tmp_path / "fb.db"))
     agent.save_feedback("p", "a", "bad", hint=None)
     records = agent.feedback.get_recent_records(1)

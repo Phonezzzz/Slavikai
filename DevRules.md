@@ -35,7 +35,7 @@
   - `tools/filesystem_tool.py::_normalize_path(...)`;
   - `tools/workspace_tools.py::_ensure_in_workspace(...)`;
   - `tools/project_tool.py::_normalize_path(...)`.
-- Общего sandbox-хелпера в `shared/*` сейчас нет (NOT IMPLEMENTED).
+- Общий хелпер для нормализации путей в песочнице существует в `shared/sandbox.py` (сейчас используется для `ShellTool.sandbox_root`).
 
 ## 5) Safe-mode (обязательный контур безопасности)
 
@@ -70,3 +70,11 @@
 ## 9) Репозиторий и артефакты
 
 - В проекте есть runtime-артефакты (`logs/*`, `sandbox/*`, `memory/*.db`) и виртуальная среда. Новые артефакты такого рода **не добавлять** в git; вынос/очистка — отдельная задача (см. `updated_roadmap.md`).
+
+## 10) Memory Companion: инварианты (policies-first, без auto-changes)
+
+- **Запрещены** авто‑апдейты `Memory` в runtime (никаких “сам сохранил важное” без явного approve).
+- **Запрещены** авто‑создание/изменение `PolicyRule` в runtime: правила появляются только как **Approved** после ручного review.
+- Отсутствие фидбэка после ответа = `unknown` (это **не** `good` и не повод менять поведение).
+- BatchReview запускается **только вручную** и генерирует только `PolicyRuleCandidate[]` (не правила).
+- Trigger/Action для policies должны быть **типизированы** (никаких “dict на всё”): структуры обязаны валидироваться.

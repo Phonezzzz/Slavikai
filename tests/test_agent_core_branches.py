@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from core.agent import SAFE_MODE_TOOLS_OFF, Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
@@ -18,8 +20,8 @@ def _dummy_tool(ok: bool, output: str = "done") -> ToolResult:
     return ToolResult.failure("fail")
 
 
-def test_image_commands_success_and_error() -> None:
-    agent = Agent(brain=SimpleBrain())
+def test_image_commands_success_and_error(tmp_path: Path) -> None:
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
     agent.tool_registry.register(
         "image_generate", lambda req: _dummy_tool(True, "img-ok"), enabled=True
@@ -33,8 +35,8 @@ def test_image_commands_success_and_error() -> None:
     assert "Ошибка инструмента" in err_resp
 
 
-def test_tts_stt_error_paths() -> None:
-    agent = Agent(brain=SimpleBrain())
+def test_tts_stt_error_paths(tmp_path: Path) -> None:
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
     agent.tool_registry.register("tts", lambda req: _dummy_tool(False), enabled=True)
     agent.tool_registry.register("stt", lambda req: _dummy_tool(False), enabled=True)
@@ -48,8 +50,8 @@ def test_tts_stt_error_paths() -> None:
     assert "fail" in (stt_result.error or "")
 
 
-def test_safe_mode_blocks_web_not_workspace() -> None:
-    agent = Agent(brain=SimpleBrain())
+def test_safe_mode_blocks_web_not_workspace(tmp_path: Path) -> None:
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     # заменить registry, чтобы web включить и проверить safe mode
     agent.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
     agent.tool_registry.register("web", lambda req: _dummy_tool(True, "ok"), enabled=True)

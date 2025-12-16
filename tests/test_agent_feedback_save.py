@@ -12,7 +12,7 @@ def test_save_feedback_variants(tmp_path) -> None:
         def generate(self, messages, config: ModelConfig | None = None):  # type: ignore[override]
             return LLMResult(text="ok")
 
-    agent = Agent(brain=BrainStub())
+    agent = Agent(brain=BrainStub(), memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.feedback = FeedbackManager(str(tmp_path / "fb.db"))
 
     agent.save_feedback("p", "a", "good", hint=None)

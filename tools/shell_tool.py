@@ -14,6 +14,7 @@ from config.shell_config import (
     save_shell_config,
 )
 from shared.models import ToolRequest, ToolResult
+from shared.sandbox import SandboxViolationError, normalize_shell_sandbox_root
 
 DISALLOWED_PATTERNS: Final[list[re.Pattern[str]]] = [
     re.compile(r"\brm\b\s+-rf\b", re.IGNORECASE),
@@ -54,19 +55,25 @@ def _validate_args(args: list[str], allowed_commands: set[str]) -> str | None:
     return None
 
 
-def handle_shell(command: str, config: ShellConfig | None = None) -> ToolResult:
+def handle_shell(
+    command: str, config: ShellConfig | None = None, config_path: Path | None = None
+) -> ToolResult:
     """
     Безопасный shell-инструмент:
     /sh <команда> — выполнит системную команду с фильтрацией.
     """
-    cfg = config or load_shell_config(DEFAULT_SHELL_CONFIG_PATH)
-    allowed_commands = set(cfg.allowed_commands)
     if not command.strip():
         return ToolResult.failure("Команда пуста.")
 
     if _is_unsafe(command):
         return ToolResult.failure("🚫 Опасная команда заблокирована.")
 
+    try:
+        cfg = config or load_shell_config(config_path or DEFAULT_SHELL_CONFIG_PATH)
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult.failure(f"Ошибка загрузки shell config: {exc}")
+
+    allowed_commands = set(cfg.allowed_commands)
     try:
         args = shlex.split(command)
     except ValueError as exc:
@@ -76,8 +83,20 @@ def handle_shell(command: str, config: ShellConfig | None = None) -> ToolResult:
     if validation_error:
         return ToolResult.failure(validation_error)
 
-    sandbox_root = Path(cfg.sandbox_root)
-    sandbox_root.mkdir(parents=True, exist_ok=True)
+    try:
+        sandbox_root = normalize_shell_sandbox_root(cfg.sandbox_root)
+    except SandboxViolationError as exc:
+        return ToolResult.failure(
+            "sandbox_root должен оставаться внутри sandbox/.",
+            meta={"raw": exc.raw_path, "normalized": str(exc.normalized_path)},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult.failure(f"Ошибка sandbox_root: {exc}")
+
+    try:
+        sandbox_root.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult.failure(f"Не удалось подготовить sandbox_root: {exc}")
 
     try:
         started = time.monotonic()
@@ -112,6 +131,14 @@ def handle_shell(command: str, config: ShellConfig | None = None) -> ToolResult:
 
 def handle_shell_request(request: ToolRequest) -> ToolResult:
     cmd = str(request.args.get("command") or "").strip()
+    config_path_raw = request.args.get("config_path")
+    if config_path_raw is not None and not isinstance(config_path_raw, str):
+        return ToolResult.failure("config_path должен быть строкой.")
+    config_path = (
+        Path(config_path_raw.strip())
+        if isinstance(config_path_raw, str) and config_path_raw.strip()
+        else DEFAULT_SHELL_CONFIG_PATH
+    )
     if "shell_config" in request.args:
         # горячее применение настроек из UI
         cfg_payload = request.args.get("shell_config")
@@ -130,10 +157,12 @@ def handle_shell_request(request: ToolRequest) -> ToolResult:
                     max_output_chars=int(max_out_raw),
                     sandbox_root=str(sandbox_raw),
                 )
-                save_shell_config(cfg, DEFAULT_SHELL_CONFIG_PATH)
+                normalize_shell_sandbox_root(cfg.sandbox_root)
+                save_shell_config(cfg, config_path)
+                return handle_shell(cmd, config=cfg, config_path=config_path)
             except Exception as exc:  # noqa: BLE001
                 return ToolResult.failure(f"Ошибка применения shell config: {exc}")
-    return handle_shell(cmd)
+    return handle_shell(cmd, config_path=config_path)
 
 
 class ShellTool:

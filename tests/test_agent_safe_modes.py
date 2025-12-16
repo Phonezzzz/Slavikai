@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
@@ -21,8 +23,8 @@ class DummyTool:
         return ToolResult.success({"output": request.name})
 
 
-def test_safe_mode_off_allows_tools() -> None:
-    agent = Agent(brain=SimpleBrain())
+def test_safe_mode_off_allows_tools(tmp_path: Path) -> None:
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     registry = ToolRegistry(safe_block={"web", "shell"})
     dummy = DummyTool()
     registry.register("web", dummy, enabled=True)
@@ -34,8 +36,8 @@ def test_safe_mode_off_allows_tools() -> None:
     assert dummy.calls == 1
 
 
-def test_safe_mode_on_blocks_web_shell() -> None:
-    agent = Agent(brain=SimpleBrain())
+def test_safe_mode_on_blocks_web_shell(tmp_path: Path) -> None:
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     registry = ToolRegistry(safe_block={"web", "shell"})
     dummy = DummyTool()
     registry.register("web", dummy, enabled=True)

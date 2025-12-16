@@ -32,6 +32,7 @@ class ShellConfig:
 
 def load_shell_config(path: Path | None = None) -> ShellConfig:
     cfg_path = path or DEFAULT_SHELL_CONFIG_PATH
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     if not cfg_path.exists():
         return ShellConfig()
     try:

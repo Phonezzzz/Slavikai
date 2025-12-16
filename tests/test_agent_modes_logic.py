@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.dual_brain import DualBrain
@@ -51,13 +53,15 @@ class FakeExecutor:
         return plan
 
 
-def _prepare_agent(mode: str) -> tuple[Agent, FakeExecutor, CountingBrain, CountingBrain | None]:
+def _prepare_agent(
+    mode: str, *, tmp_path: Path
+) -> tuple[Agent, FakeExecutor, CountingBrain, CountingBrain | None]:
     main = CountingBrain("main")
     critic = CountingBrain("1. rewritten\n2. done") if mode != "single" else None
     brain = DualBrain(main, critic) if critic else main
     if isinstance(brain, DualBrain):
         brain.set_mode(mode)
-    agent = Agent(brain=brain)
+    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.planner = StubPlanner()  # type: ignore[assignment]
     executor = FakeExecutor()
     agent.executor = executor  # type: ignore[assignment]
@@ -68,8 +72,8 @@ def _prepare_agent(mode: str) -> tuple[Agent, FakeExecutor, CountingBrain, Count
     return agent, executor, main, critic
 
 
-def test_agent_single_executes_plan() -> None:
-    agent, executor, main, critic = _prepare_agent("single")
+def test_agent_single_executes_plan(tmp_path: Path) -> None:
+    agent, executor, main, critic = _prepare_agent("single", tmp_path=tmp_path)
     resp = agent.respond([LLMMessage(role="user", content="план задачи")])
     assert "orig1" in resp
     assert agent.last_plan and all(
@@ -79,16 +83,16 @@ def test_agent_single_executes_plan() -> None:
     assert critic is None
 
 
-def test_agent_dual_uses_critic_plan() -> None:
-    agent, executor, main, critic = _prepare_agent("dual")
+def test_agent_dual_uses_critic_plan(tmp_path: Path) -> None:
+    agent, executor, main, critic = _prepare_agent("dual", tmp_path=tmp_path)
     agent.respond([LLMMessage(role="user", content="план задачи")])
     assert agent.last_plan
     assert agent.last_plan and agent.last_plan.steps[0].description.startswith("rewritten")
     assert critic and critic.calls >= 1
 
 
-def test_agent_critic_only_not_execute_tools() -> None:
-    agent, executor, main, critic = _prepare_agent("critic-only")
+def test_agent_critic_only_not_execute_tools(tmp_path: Path) -> None:
+    agent, executor, main, critic = _prepare_agent("critic-only", tmp_path=tmp_path)
     resp = agent.respond([LLMMessage(role="user", content="план задачи")])
     assert not executor.run_called
     assert "rewritten" in resp or "done" in resp

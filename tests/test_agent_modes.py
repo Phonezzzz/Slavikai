@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from core.agent import Agent
@@ -38,10 +39,10 @@ class FakeMemory:
         return []
 
 
-def test_critic_only_does_not_execute_plan() -> None:
+def test_critic_only_does_not_execute_plan(tmp_path: Path) -> None:
     main = CounterBrain()
     critic = CounterBrain()
-    agent = Agent(brain=main, critic=critic)
+    agent = Agent(brain=main, critic=critic, memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.set_mode("critic-only")
     response = agent.respond([LLMMessage(role="user", content="План построй это")])
     assert "Критик" in response or response
@@ -49,9 +50,9 @@ def test_critic_only_does_not_execute_plan() -> None:
     assert critic.calls >= 1
 
 
-def test_context_uses_hints_meta() -> None:
+def test_context_uses_hints_meta(tmp_path: Path) -> None:
     main = CounterBrain()
-    agent = Agent(brain=main)
+    agent = Agent(brain=main, memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.vectors = FakeVectors()
     agent.feedback = FakeFeedback()
     agent.memory = FakeMemory()

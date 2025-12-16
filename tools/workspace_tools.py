@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -203,7 +204,7 @@ class RunCodeTool:
             if not path.exists():
                 return ToolResult.failure("Файл не найден.")
             proc = subprocess.run(
-                ["python", str(path)],
+                [sys.executable, str(path)],
                 cwd=SANDBOX_ROOT,
                 capture_output=True,
                 text=True,

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.agent import Agent
-from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
+from shared.models import JSONValue, LLMMessage, ToolResult
 from tools.workspace_tools import WORKSPACE_ROOT
 
 
@@ -364,8 +364,7 @@ class WorkspacePanel(QWidget):
     def _call_tool(self, name: str, args: dict[str, JSONValue]) -> ToolResult | None:
         try:
             tool_args: dict[str, JSONValue] = {k: v for k, v in args.items() if v is not None}
-            result = self.agent.tool_registry.call(ToolRequest(name=name, args=tool_args))
-            return result
+            return self.agent.call_tool(name=name, args=tool_args, raw_input=f"ui:{name}")
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"Ошибка инструмента: {exc}")
             return None

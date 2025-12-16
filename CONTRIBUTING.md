@@ -7,14 +7,23 @@
 
 ## Установка и запуск
 
-1) Создайте виртуальное окружение и установите зависимости:
+1) Создайте виртуальное окружение и установите зависимости (рекомендуется через `Makefile`):
 
-- `python3 -m venv .venv`
-- `source .venv/bin/activate`
-- `pip install -r requirements.txt`
+- `make venv`
+- (опционально) `make activate` → покажет команду для активации venv в текущем shell
 
 2) Запуск UI (PySide6):
 
+- foreground: `make run`
+- background: `make up` / `make down` (pid+log в `.run/`)
+
+---
+
+Альтернатива без `make`:
+
+- `python3 -m venv venv`
+- `source venv/bin/activate`
+- `pip install -r requirements.txt`
 - `python3 main.py`
 
 ## Конфигурация (фактические точки интеграции)
@@ -35,6 +44,10 @@
 Проект настроен на `ruff` + `mypy (strict)` + `pytest-cov` (см. `pyproject.toml`).
 
 Рекомендуемый порядок:
+
+- `make check` (one-shot прогон всех проверок)
+
+Или вручную:
 
 - `ruff check .`
 - `ruff format --check .`

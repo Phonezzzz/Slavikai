@@ -8,6 +8,7 @@ from config.model_store import load_model_configs
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
+from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import LLMMessage
 from ui.audio_player import ChatAudioPlayer
 from ui.chat_view import ChatView
@@ -104,10 +105,19 @@ class MainWindow(QMainWindow):
         self.logs.append_log(f"[User]: {text}\n[Response]: {response}")
 
     def handle_feedback(
-        self, prompt: str, answer: str, rating: str, hint: str | None = None
+        self,
+        interaction_id: str,
+        rating: FeedbackRating,
+        labels: list[FeedbackLabel],
+        free_text: str | None = None,
     ) -> None:
-        self.agent.save_feedback(prompt, answer, rating, hint=hint)
-        self.logs.append_log(f"[FEEDBACK] {rating} — {prompt[:30]}")
+        self.agent.record_feedback_event(
+            interaction_id=interaction_id,
+            rating=rating,
+            labels=labels,
+            free_text=free_text,
+        )
+        self.logs.append_log(f"[FEEDBACK] {rating.value} labels={len(labels)} id={interaction_id}")
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.agent)

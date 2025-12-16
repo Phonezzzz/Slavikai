@@ -71,8 +71,8 @@ Workspace — это каталог `sandbox/project/`.
 - `workspace_patch` — применить `unified diff` к одному файлу (строгая проверка, лимиты на размер/строки).
 - `workspace_run` — запустить `.py` через `sys.executable` (таймаут, cwd=`sandbox/`).
 
-UI-редактор находится в `ui/workspace_panel.py` и вызывает эти инструменты напрямую через
-`agent.tool_registry.call(ToolRequest(...))` (см. `_call_tool`).
+UI-редактор находится в `ui/workspace_panel.py` и вызывает эти инструменты через публичный API
+`agent.call_tool(...)` (см. `_call_tool`).
 
 ## Ограничения (sandbox, safe-mode)
 

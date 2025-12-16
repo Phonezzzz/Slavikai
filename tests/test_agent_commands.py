@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
@@ -11,13 +13,17 @@ class SimpleBrain(Brain):
         return LLMResult(text="ok")
 
 
-def test_agent_unknown_tool_command() -> None:
-    agent = Agent(brain=SimpleBrain())
+def test_agent_unknown_tool_command(tmp_path: Path) -> None:
+    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     resp = agent.handle_tool_command("/unknown")
     assert "неизвестен" in resp.lower() or "неактивен" in resp.lower()
 
 
-def test_agent_shell_disabled_in_safe_mode() -> None:
-    agent = Agent(brain=SimpleBrain(), enable_tools={"safe_mode": True})
+def test_agent_shell_disabled_in_safe_mode(tmp_path: Path) -> None:
+    agent = Agent(
+        brain=SimpleBrain(),
+        enable_tools={"safe_mode": True},
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+    )
     resp = agent.handle_tool_command("/sh ls")
     assert "safe mode" in resp.lower() or "отключён" in resp.lower()

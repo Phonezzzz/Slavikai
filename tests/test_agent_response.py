@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
@@ -43,9 +45,9 @@ class FakeExecutor:
         return plan
 
 
-def test_agent_simple_response() -> None:
+def test_agent_simple_response(tmp_path: Path) -> None:
     brain = SimpleBrain("hello")
-    agent = Agent(brain=brain)
+    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
@@ -55,9 +57,9 @@ def test_agent_simple_response() -> None:
     assert brain.calls >= 1
 
 
-def test_agent_plan_execution_path() -> None:
+def test_agent_plan_execution_path(tmp_path: Path) -> None:
     brain = SimpleBrain("ok")
-    agent = Agent(brain=brain)
+    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.planner = FakePlanner()  # type: ignore[assignment]
     agent.executor = FakeExecutor()  # type: ignore[assignment]
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
