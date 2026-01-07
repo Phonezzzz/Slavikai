@@ -18,6 +18,7 @@ class ModelConfig:
     extra_headers: dict[str, str] = field(default_factory=dict)
     system_prompt: str | None = None
     mode: Literal["default", "planner", "critic"] = "default"
+    thinking_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class LLMUsage:
 @dataclass
 class LLMResult:
     text: str
+    reasoning: str | None = None
     usage: LLMUsage | None = None
     raw: dict[str, JSONValue] | None = None
 

@@ -5,6 +5,7 @@ from typing import Final
 
 import requests
 
+from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
 from llm.types import LLMResult, LLMUsage, ModelConfig
 from shared.models import JSONValue, LLMMessage
@@ -29,7 +30,9 @@ class LocalHttpBrain(Brain):
             or os.getenv("LOCAL_LLM_URL")
             or DEFAULT_LOCAL_ENDPOINT
         )
-        self.api_key = api_key or default_config.api_key or os.getenv("LOCAL_LLM_API_KEY")
+        self.api_key = (
+            api_key or default_config.api_key or os.getenv("LOCAL_LLM_API_KEY")
+        )
 
     def _resolve_config(self, override: ModelConfig | None) -> ModelConfig:
         if override:
@@ -43,12 +46,16 @@ class LocalHttpBrain(Brain):
         headers.update(config.extra_headers)
         return headers
 
-    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+    def generate(
+        self, messages: list[LLMMessage], config: ModelConfig | None = None
+    ) -> LLMResult:
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = {
             "model": cfg.model,
-            "messages": [message.__dict__ for message in self._inject_system(messages, cfg)],
+            "messages": [
+                message.__dict__ for message in self._inject_system(messages, cfg)
+            ],
             "temperature": cfg.temperature,
         }
         if cfg.max_tokens is not None:
@@ -77,6 +84,12 @@ class LocalHttpBrain(Brain):
         if not isinstance(message_raw, dict):
             raise RuntimeError("Некорректный формат message.")
         content = str(message_raw.get("content", ""))
+        reasoning_raw = message_raw.get("reasoning")
+        reasoning = (
+            str(reasoning_raw).strip()
+            if isinstance(reasoning_raw, str) and reasoning_raw.strip()
+            else None
+        )
 
         usage: LLMUsage | None = None
         usage_block = data.get("usage")
@@ -87,9 +100,18 @@ class LocalHttpBrain(Brain):
                 total_tokens=int(usage_block.get("total_tokens", 0)),
             )
 
-        return LLMResult(text=content, usage=usage, raw=data)
+        return LLMResult(text=content, reasoning=reasoning, usage=usage, raw=data)
 
-    def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
-        if config.system_prompt and (not messages or messages[0].role != "system"):
-            return [LLMMessage(role="system", content=config.system_prompt), *messages]
-        return messages
+    def _inject_system(
+        self, messages: list[LLMMessage], config: ModelConfig
+    ) -> list[LLMMessage]:
+        system_messages: list[LLMMessage] = []
+        if config.thinking_enabled:
+            system_messages.append(LLMMessage(role="system", content=THINKING_PROMPT))
+        if config.system_prompt:
+            system_messages.append(
+                LLMMessage(role="system", content=config.system_prompt)
+            )
+        if not system_messages:
+            return messages
+        return [*system_messages, *messages]

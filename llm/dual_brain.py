@@ -8,8 +8,9 @@ DualMode = str  # simple alias to avoid Literal explosion here
 
 
 class DualBrain(Brain):
-    """
-    Две модели: основная отвечает, критик проверяет ответ.
+    """Контейнер для двух моделей: main + critic.
+
+    Координация dual-логики выполняется на уровне Agent/сервисов.
     """
 
     def __init__(self, main_brain: Brain, critic_brain: Brain):
@@ -22,26 +23,9 @@ class DualBrain(Brain):
             raise ValueError("Некорректный режим DualBrain")
         self.mode = mode
 
-    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+    def generate(
+        self, messages: list[LLMMessage], config: ModelConfig | None = None
+    ) -> LLMResult:
         if self.mode == "critic-only":
             return self.critic.generate(messages, config)
-
-        main_reply = self.main.generate(messages, config)
-
-        if self.mode == "single":
-            return main_reply
-
-        review_prompt = [
-            LLMMessage(role="system", content="Ты — критик и рецензент."),
-            LLMMessage(
-                role="user",
-                content=f"Проверь ответ модели:\n{main_reply.text}\nи предложи улучшения.",
-            ),
-        ]
-        critic_reply = self.critic.generate(review_prompt, config)
-        combined = f"💬 Ответ:\n{main_reply.text}\n\n🧠 Критик:\n{critic_reply.text}"
-        return LLMResult(
-            text=combined,
-            usage=main_reply.usage,
-            raw={"main": main_reply.raw, "critic": critic_reply.raw},
-        )
+        return self.main.generate(messages, config)
