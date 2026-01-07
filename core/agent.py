@@ -25,7 +25,11 @@ from memory.feedback_manager import FeedbackManager
 from memory.memory_companion_store import MemoryCompanionStore
 from memory.memory_manager import MemoryManager
 from memory.vector_index import VectorIndex
-from shared.batch_review_models import BatchReviewRun, CandidateStatus, PolicyRuleCandidate
+from shared.batch_review_models import (
+    BatchReviewRun,
+    CandidateStatus,
+    PolicyRuleCandidate,
+)
 from shared.memory_companion_models import (
     BlockedReason,
     ChatInteractionLog,
@@ -186,7 +190,9 @@ class Agent:
             executed = self.executor.run(
                 plan,
                 tool_gateway=ToolGateway(self.tool_registry),
-                critic_callback=self._critic_step if self._should_use_step_critic() else None,
+                critic_callback=(
+                    self._critic_step if self._should_use_step_critic() else None
+                ),
             )
             self.last_plan = executed
             reviewed = self._review_plan(executed)
@@ -196,14 +202,18 @@ class Agent:
         try:
             self.tracer.log("reasoning_start", "Генерация ответа моделью")
             policy_application = self._apply_policies(last_content)
-            messages_with_context = self._build_context_messages(self.short_term, last_content)
+            messages_with_context = self._build_context_messages(
+                self.short_term, last_content
+            )
             messages_with_context = self._append_policy_instructions(
                 messages_with_context, policy_application
             )
             reply = self.brain.generate(messages_with_context)
             reply_text = reply.text if isinstance(reply, LLMResult) else str(reply)
             reviewed = self._review_answer(reply_text)
-            self.tracer.log("reasoning_end", "Ответ получен", {"reply_preview": reviewed[:120]})
+            self.tracer.log(
+                "reasoning_end", "Ответ получен", {"reply_preview": reviewed[:120]}
+            )
             self.save_to_memory(last_content, reviewed)
             self._log_chat_interaction(
                 raw_input=last_content,
@@ -257,7 +267,8 @@ class Agent:
                     name="shell",
                     args={
                         "command": " ".join(args),
-                        "config_path": str(getattr(self, "shell_config_path", "")) or None,
+                        "config_path": str(getattr(self, "shell_config_path", ""))
+                        or None,
                     },
                 )
                 tool_result = self._call_tool_logged(command, req)
@@ -266,7 +277,9 @@ class Agent:
             if cmd == "project":
                 if not args:
                     return "[Нужно указать подкоманду: index|find]"
-                req = ToolRequest(name="project", args={"cmd": args[0], "args": args[1:]})
+                req = ToolRequest(
+                    name="project", args={"cmd": args[0], "args": args[1:]}
+                )
                 tool_result = self._call_tool_logged(command, req)
                 return self._format_tool_result(tool_result)
 
@@ -286,7 +299,10 @@ class Agent:
             if cmd == "trace":
                 logs = self.tracer.read_recent(40)
                 result = "\n".join(
-                    [f"[{log['timestamp']}] {log['event']}: {log['message']}" for log in logs]
+                    [
+                        f"[{log['timestamp']}] {log['event']}: {log['message']}"
+                        for log in logs
+                    ]
                 )
                 self._log_chat_interaction(raw_input=command, response_text=result)
                 return result
@@ -367,7 +383,9 @@ class Agent:
         )
         self._interaction_store.log_interaction(log)
 
-    def _classify_tool_result(self, result: ToolResult) -> tuple[ToolStatus, BlockedReason | None]:
+    def _classify_tool_result(
+        self, result: ToolResult
+    ) -> tuple[ToolStatus, BlockedReason | None]:
         if result.ok:
             return ToolStatus.OK, None
         error = (result.error or "").strip()
@@ -415,7 +433,10 @@ class Agent:
     ) -> list[LLMMessage]:
         if not policy_application.instructions:
             return messages
-        lines = ["Политики (approved):", *[f"- {t}" for t in policy_application.instructions]]
+        lines = [
+            "Политики (approved):",
+            *[f"- {t}" for t in policy_application.instructions],
+        ]
         return [*messages, LLMMessage(role="system", content="\n".join(lines))]
 
     def record_feedback_event(
@@ -450,7 +471,10 @@ class Agent:
         self.tracer.log(
             "feedback_event_saved",
             rating.value,
-            {"labels": [label.value for label in unique_labels], "interaction_id": interaction_id},
+            {
+                "labels": [label.value for label in unique_labels],
+                "interaction_id": interaction_id,
+            },
         )
 
     def handle_auto_command(self, goal: str) -> str:
@@ -470,12 +494,16 @@ class Agent:
         self.memory.save(item)
         self.tracer.log("memory_saved", prompt[:100])
 
-    def save_feedback(self, prompt: str, answer: str, rating: str, hint: str | None = None) -> None:
+    def save_feedback(
+        self, prompt: str, answer: str, rating: str, hint: str | None = None
+    ) -> None:
         severity = "minor"
         if rating in {"bad", "offtopic"}:
             severity = "major"
             hint = hint or "Перепроверь факты и избегай галлюцинаций."
-        self.feedback.save_feedback(prompt, answer, rating, severity=severity, hint=hint)
+        self.feedback.save_feedback(
+            prompt, answer, rating, severity=severity, hint=hint
+        )
         self.tracer.log("feedback_saved", rating, {"prompt": prompt[:80]})
 
     def set_mode(self, mode: str) -> None:
@@ -505,7 +533,9 @@ class Agent:
     def _format_plan(self, plan: TaskPlan) -> str:
         lines = []
         for index, step in enumerate(plan.steps, start=1):
-            status_key = step.status.value if hasattr(step.status, "value") else str(step.status)
+            status_key = (
+                step.status.value if hasattr(step.status, "value") else str(step.status)
+            )
             status_icon = {
                 "pending": "⏳",
                 "in_progress": "🔄",
@@ -535,11 +565,15 @@ class Agent:
                         content=f"Проверь план и предложи улучшения:\n{plan_text}",
                     ),
                 ]
-                critic = self.brain.critic if isinstance(self.brain, DualBrain) else None
+                critic = (
+                    self.brain.critic if isinstance(self.brain, DualBrain) else None
+                )
                 if critic is None:
                     return plan_text
                 review = critic.generate(critic_messages)
-                review_text = review.text if isinstance(review, LLMResult) else str(review)
+                review_text = (
+                    review.text if isinstance(review, LLMResult) else str(review)
+                )
                 return f"{plan_text}\n\n🧠 Критик плана:\n{review_text}"
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("Не удалось получить критику плана: %s", exc)
@@ -619,11 +653,15 @@ class Agent:
                         content=f"Проверь ответ и кратко укажи ошибки/улучшения:\n{answer}",
                     ),
                 ]
-                critic = self.brain.critic if isinstance(self.brain, DualBrain) else None
+                critic = (
+                    self.brain.critic if isinstance(self.brain, DualBrain) else None
+                )
                 if critic is None:
                     return answer
                 review = critic.generate(critic_messages)
-                review_text = review.text if isinstance(review, LLMResult) else str(review)
+                review_text = (
+                    review.text if isinstance(review, LLMResult) else str(review)
+                )
                 return f"{answer}\n\n🧠 Критик:\n{review_text}"
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("Не удалось получить критику ответа: %s", exc)
@@ -693,7 +731,9 @@ class Agent:
             args["format"] = fmt
         return self.call_tool("tts", args=args, raw_input="api:tts")
 
-    def transcribe_audio(self, file_path: str, language: str | None = None) -> ToolResult:
+    def transcribe_audio(
+        self, file_path: str, language: str | None = None
+    ) -> ToolResult:
         args: dict[str, JSONValue] = {"file_path": file_path}
         if language:
             args["language"] = language
@@ -728,7 +768,9 @@ class Agent:
     def update_tools_enabled(self, state: dict[str, bool]) -> None:
         self.tools_enabled.update(state)
         save_tools_config(ToolsConfig(**self.tools_enabled))
-        self.tracer.log("tools_updated", "Инструменты обновлены", {"tools": self.tools_enabled})
+        self.tracer.log(
+            "tools_updated", "Инструменты обновлены", {"tools": self.tools_enabled}
+        )
         for name, enabled in state.items():
             if name in self.tool_registry.list_tools():
                 self.tool_registry.set_enabled(name, enabled)
@@ -746,7 +788,9 @@ class Agent:
         return self.tool_registry.read_recent_calls(limit)
 
     def get_recent_feedback_events(self, limit: int = 50) -> list[FeedbackEvent]:
-        return self._interaction_store.get_recent_feedback(user_id=self.user_id, limit=limit)
+        return self._interaction_store.get_recent_feedback(
+            user_id=self.user_id, limit=limit
+        )
 
     def get_feedback_stats(self) -> dict[FeedbackRating, int]:
         return self._interaction_store.get_feedback_stats(user_id=self.user_id)
@@ -791,13 +835,17 @@ class Agent:
         override_priority: int | None = None,
         override_confidence: float | None = None,
     ) -> PolicyRule:
-        candidate = self._interaction_store.get_policy_rule_candidate(candidate_id=candidate_id)
+        candidate = self._interaction_store.get_policy_rule_candidate(
+            candidate_id=candidate_id
+        )
         if candidate is None:
             raise ValueError(f"Candidate not found: {candidate_id!r}")
         if candidate.user_id != self.user_id:
             raise ValueError("Candidate принадлежит другому user_id.")
         if candidate.status is not CandidateStatus.PROPOSED:
-            raise ValueError(f"Candidate status must be proposed, got: {candidate.status.value!r}")
+            raise ValueError(
+                f"Candidate status must be proposed, got: {candidate.status.value!r}"
+            )
         if decay_half_life_days <= 0:
             raise ValueError("decay_half_life_days должен быть > 0.")
 
@@ -812,7 +860,9 @@ class Agent:
             else candidate.proposed_action
         )
         priority = (
-            override_priority if override_priority is not None else candidate.priority_suggestion
+            override_priority
+            if override_priority is not None
+            else candidate.priority_suggestion
         )
         confidence = (
             float(override_confidence)
@@ -822,7 +872,9 @@ class Agent:
         if not (0.0 <= confidence <= 1.0):
             raise ValueError("confidence должен быть в диапазоне 0..1.")
 
-        feedback_ids = sorted({e.feedback_id for e in candidate.evidence if e.feedback_id})
+        feedback_ids = sorted(
+            {e.feedback_id for e in candidate.evidence if e.feedback_id}
+        )
         provenance = (
             f"batch_review_run_id:{candidate.batch_review_run_id};"
             f"candidate_id:{candidate.candidate_id}"
@@ -873,13 +925,17 @@ class Agent:
         priority_suggestion: int,
         confidence_suggestion: float,
     ) -> PolicyRuleCandidate:
-        candidate = self._interaction_store.get_policy_rule_candidate(candidate_id=candidate_id)
+        candidate = self._interaction_store.get_policy_rule_candidate(
+            candidate_id=candidate_id
+        )
         if candidate is None:
             raise ValueError(f"Candidate not found: {candidate_id!r}")
         if candidate.user_id != self.user_id:
             raise ValueError("Candidate принадлежит другому user_id.")
         if candidate.status is not CandidateStatus.PROPOSED:
-            raise ValueError(f"Candidate status must be proposed, got: {candidate.status.value!r}")
+            raise ValueError(
+                f"Candidate status must be proposed, got: {candidate.status.value!r}"
+            )
 
         trigger = policy_trigger_from_json(proposed_trigger_json)
         action = policy_action_from_json(proposed_action_json)
@@ -894,19 +950,25 @@ class Agent:
             updated_at=now,
         )
         self.tracer.log("policy_candidate_updated", candidate_id)
-        updated = self._interaction_store.get_policy_rule_candidate(candidate_id=candidate_id)
+        updated = self._interaction_store.get_policy_rule_candidate(
+            candidate_id=candidate_id
+        )
         if updated is None:
             raise RuntimeError("Candidate missing after update (unexpected).")
         return updated
 
     def reject_policy_rule_candidate(self, *, candidate_id: str) -> None:
-        candidate = self._interaction_store.get_policy_rule_candidate(candidate_id=candidate_id)
+        candidate = self._interaction_store.get_policy_rule_candidate(
+            candidate_id=candidate_id
+        )
         if candidate is None:
             raise ValueError(f"Candidate not found: {candidate_id!r}")
         if candidate.user_id != self.user_id:
             raise ValueError("Candidate принадлежит другому user_id.")
         if candidate.status is not CandidateStatus.PROPOSED:
-            raise ValueError(f"Candidate status must be proposed, got: {candidate.status.value!r}")
+            raise ValueError(
+                f"Candidate status must be proposed, got: {candidate.status.value!r}"
+            )
 
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         self._interaction_store.reject_policy_rule_candidate(
@@ -916,7 +978,9 @@ class Agent:
         )
         self.tracer.log("policy_candidate_rejected", candidate_id)
 
-    def _build_context_messages(self, messages: list[LLMMessage], query: str) -> list[LLMMessage]:
+    def _build_context_messages(
+        self, messages: list[LLMMessage], query: str
+    ) -> list[LLMMessage]:
         context_parts = []
 
         recent_notes = self.memory.get_recent(3, kind=MemoryKind.NOTE)
@@ -925,14 +989,20 @@ class Agent:
             for note in recent_notes:
                 context_parts.append(f"- {note.content[:200]}")
 
-        hints_meta = self.feedback.get_recent_hints_meta(2, severity_filter=["major", "fatal"])
+        hints_meta = self.feedback.get_recent_hints_meta(
+            2, severity_filter=["major", "fatal"]
+        )
         if hints_meta:
             context_parts.append("Подсказки от пользователя:")
             for hint_meta in hints_meta:
-                context_parts.append(f"- ({hint_meta.get('severity')}) {hint_meta.get('hint')}")
+                context_parts.append(
+                    f"- ({hint_meta.get('severity')}) {hint_meta.get('hint')}"
+                )
             self.last_hints_used = [h["hint"] for h in hints_meta]
             self.last_hints_meta = hints_meta
-            self.tracer.log("auto_hint_applied", "Использованы подсказки", {"hints": hints_meta})
+            self.tracer.log(
+                "auto_hint_applied", "Использованы подсказки", {"hints": hints_meta}
+            )
         else:
             self.last_hints_used = []
             self.last_hints_meta = []
