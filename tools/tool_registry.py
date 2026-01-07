@@ -30,9 +30,10 @@ class ToolRegistry:
         self._call_logger = call_logger or ToolCallLogger()
         self._safe_mode = False
         self._safe_block = safe_block or set()
-        self._safe_prev: dict[str, bool] = {}
 
-    def register(self, name: str, handler: Tool | ToolHandler, enabled: bool = True) -> None:
+    def register(
+        self, name: str, handler: Tool | ToolHandler, enabled: bool = True
+    ) -> None:
         resolved: ToolHandler
         if isinstance(handler, Tool):
             resolved = handler.handle
@@ -50,25 +51,39 @@ class ToolRegistry:
         descriptor = self._tools.get(name)
         return bool(descriptor and descriptor.enabled)
 
-    def call(self, request: ToolRequest) -> ToolResult:
+    def call(
+        self, request: ToolRequest, *, bypass_safe_mode: bool = False
+    ) -> ToolResult:
         descriptor = self._tools.get(request.name)
         if not descriptor:
             self._logger.warning("tool_not_found", extra={"tool": request.name})
             self._log_call(
-                request.name, ok=False, error="Инструмент не зарегистрирован", args=request.args
+                request.name,
+                ok=False,
+                error="Инструмент не зарегистрирован",
+                args=request.args,
             )
             return ToolResult.failure(f"Инструмент {request.name} не зарегистрирован")
 
-        if self._safe_mode and request.name in self._safe_block:
+        if (
+            self._safe_mode
+            and request.name in self._safe_block
+            and not bypass_safe_mode
+        ):
             self._logger.info("tool_safe_blocked", extra={"tool": request.name})
             self._log_call(
-                request.name, ok=False, error="Safe mode: инструмент отключён", args=request.args
+                request.name,
+                ok=False,
+                error="Safe mode: инструмент отключён",
+                args=request.args,
             )
             return ToolResult.failure("Safe mode: инструмент отключён")
 
         if not descriptor.enabled:
             self._logger.info("tool_disabled_call", extra={"tool": request.name})
-            self._log_call(request.name, ok=False, error="Инструмент отключён", args=request.args)
+            self._log_call(
+                request.name, ok=False, error="Инструмент отключён", args=request.args
+            )
             return ToolResult.failure(f"Инструмент {request.name} отключён")
 
         self._logger.info("tool_call_start", extra={"tool": request.name})
@@ -79,10 +94,14 @@ class ToolRegistry:
                 extra={"tool": request.name, "ok": result.ok, "error": result.error},
             )
             self._log_call(
-                request.name, ok=result.ok, error=result.error, meta=result.meta, args=request.args
+                request.name,
+                ok=result.ok,
+                error=result.error,
+                meta=result.meta,
+                args=request.args,
             )
             return result
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._logger.exception("tool_call_error", extra={"tool": request.name})
             self._log_call(request.name, ok=False, error=str(exc), args=request.args)
             return ToolResult.failure(f"Ошибка инструмента {request.name}: {exc}")
@@ -108,16 +127,14 @@ class ToolRegistry:
 
     def apply_safe_mode(self, enabled: bool) -> None:
         if enabled:
+            if self._safe_mode:
+                self._logger.info("safe_mode_enabled")
+                return
             self._safe_mode = True
             self._logger.info("safe_mode_enabled")
-            for name in self._safe_block:
-                if name in self._tools:
-                    self._safe_prev[name] = self._tools[name].enabled
-                    self._tools[name].enabled = False
-        else:
-            self._safe_mode = False
+            return
+        if not self._safe_mode:
             self._logger.info("safe_mode_disabled")
-            for name, prev_enabled in self._safe_prev.items():
-                if name in self._tools:
-                    self._tools[name].enabled = prev_enabled
-            self._safe_prev.clear()
+            return
+        self._safe_mode = False
+        self._logger.info("safe_mode_disabled")

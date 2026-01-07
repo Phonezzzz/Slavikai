@@ -23,6 +23,7 @@ class ToolStatus(str, Enum):
 
 
 class BlockedReason(str, Enum):
+    APPROVAL_REQUIRED = "approval_required"
     SAFE_MODE_BLOCKED = "safe_mode_blocked"
     SANDBOX_VIOLATION = "sandbox_violation"
     TOOL_DISABLED = "tool_disabled"

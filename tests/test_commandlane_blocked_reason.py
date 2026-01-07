@@ -16,7 +16,9 @@ from shared.models import LLMMessage
 
 
 class SimpleBrain(Brain):
-    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+    def generate(
+        self, messages: list[LLMMessage], config: ModelConfig | None = None
+    ) -> LLMResult:
         return LLMResult(text="ok")
 
 
@@ -43,7 +45,22 @@ def test_commandlane_logs_tool_not_registered(tmp_path: Path) -> None:
 
 def test_commandlane_logs_sandbox_violation(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(db_path))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(db_path),
+        enable_tools={
+            "fs": True,
+            "shell": False,
+            "web": False,
+            "project": False,
+            "image_analyze": False,
+            "image_generate": False,
+            "tts": False,
+            "stt": False,
+            "workspace_run": False,
+            "safe_mode": False,
+        },
+    )
 
     _ = agent.handle_tool_command("/fs read ../etc/passwd")
 
@@ -63,9 +80,11 @@ def test_commandlane_logs_validation_error(tmp_path: Path) -> None:
             "shell": True,
             "web": False,
             "project": True,
-            "img": False,
+            "image_analyze": False,
+            "image_generate": False,
             "tts": False,
             "stt": False,
+            "workspace_run": True,
             "safe_mode": False,
         },
     )
@@ -88,9 +107,11 @@ def test_commandlane_logs_safe_mode_blocked(tmp_path: Path) -> None:
             "shell": True,
             "web": True,
             "project": True,
-            "img": False,
+            "image_analyze": False,
+            "image_generate": False,
             "tts": False,
             "stt": False,
+            "workspace_run": True,
             "safe_mode": True,
         },
     )
@@ -100,7 +121,7 @@ def test_commandlane_logs_safe_mode_blocked(tmp_path: Path) -> None:
     store = MemoryCompanionStore(db_path)
     log = _get_tool_log(store, "shell")
     assert log.tool_status == ToolStatus.BLOCKED
-    assert log.blocked_reason == BlockedReason.SAFE_MODE_BLOCKED
+    assert log.blocked_reason == BlockedReason.APPROVAL_REQUIRED
 
 
 def test_commandlane_logs_tool_disabled(tmp_path: Path) -> None:
@@ -113,9 +134,11 @@ def test_commandlane_logs_tool_disabled(tmp_path: Path) -> None:
             "shell": False,
             "web": False,
             "project": True,
-            "img": False,
+            "image_analyze": False,
+            "image_generate": False,
             "tts": False,
             "stt": False,
+            "workspace_run": True,
             "safe_mode": False,
         },
     )

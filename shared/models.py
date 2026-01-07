@@ -29,12 +29,16 @@ class ToolResult:
 
     @classmethod
     def success(
-        cls, data: dict[str, JSONValue] | None = None, meta: dict[str, JSONValue] | None = None
+        cls,
+        data: dict[str, JSONValue] | None = None,
+        meta: dict[str, JSONValue] | None = None,
     ) -> ToolResult:
         return cls(ok=True, data=data or {}, meta=meta)
 
     @classmethod
-    def failure(cls, error: str, meta: dict[str, JSONValue] | None = None) -> ToolResult:
+    def failure(
+        cls, error: str, meta: dict[str, JSONValue] | None = None
+    ) -> ToolResult:
         return cls(ok=False, data={}, error=error, meta=meta)
 
 
@@ -131,3 +135,11 @@ class ToolCallRecord:
     error: str | None = None
     meta: dict[str, JSONValue] | None = None
     args: dict[str, JSONValue] | None = None
+
+
+@dataclass(frozen=True)
+class WorkspaceDiffEntry:
+    path: str
+    added: int
+    removed: int
+    diff: str

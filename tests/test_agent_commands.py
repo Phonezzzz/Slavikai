@@ -9,7 +9,9 @@ from shared.models import LLMMessage
 
 
 class SimpleBrain(Brain):
-    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+    def generate(
+        self, messages: list[LLMMessage], config: ModelConfig | None = None
+    ) -> LLMResult:
         return LLMResult(text="ok")
 
 
@@ -26,4 +28,4 @@ def test_agent_shell_disabled_in_safe_mode(tmp_path: Path) -> None:
         memory_companion_db_path=str(tmp_path / "mc.db"),
     )
     resp = agent.handle_tool_command("/sh ls")
-    assert "safe mode" in resp.lower() or "отключён" in resp.lower()
+    assert "требуется подтверждение" in resp.lower()
