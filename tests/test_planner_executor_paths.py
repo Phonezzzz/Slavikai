@@ -24,8 +24,8 @@ def test_executor_stops_after_error() -> None:
     plan = TaskPlan(
         goal="test",
         steps=[
-            PlanStep(description="web search"),
-            PlanStep(description="shell command"),
+            PlanStep(description="web search", operation="web"),
+            PlanStep(description="shell command", operation="shell"),
             PlanStep(description="other"),
         ],
     )

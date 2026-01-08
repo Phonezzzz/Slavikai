@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from memory.feedback_manager import FeedbackManager
+from shared.memory_companion_models import (
+    ChatInteractionLog,
+    FeedbackLabel,
+    FeedbackRating,
+    InteractionKind,
+    InteractionMode,
+)
 
 
 def test_save_feedback_variants(tmp_path) -> None:
@@ -13,16 +19,41 @@ def test_save_feedback_variants(tmp_path) -> None:
             return LLMResult(text="ok")
 
     agent = Agent(brain=BrainStub(), memory_companion_db_path=str(tmp_path / "mc.db"))
-    agent.feedback = FeedbackManager(str(tmp_path / "fb.db"))
 
-    agent.save_feedback("p", "a", "good", hint=None)
-    agent.save_feedback("p2", "a2", "bad", hint="fix")
-    agent.save_feedback("p3", "a3", "offtopic", hint=None)
+    for interaction_id in ("1", "2", "3"):
+        agent._interaction_store.log_interaction(  # noqa: SLF001
+            ChatInteractionLog(
+                interaction_id=interaction_id,
+                user_id=agent.user_id,
+                interaction_kind=InteractionKind.CHAT,
+                raw_input="prompt",
+                mode=InteractionMode.STANDARD,
+                created_at="2024-01-01 00:00:00",
+                response_text="answer",
+            )
+        )
 
-    records = agent.feedback.get_recent_records(5)
-    ratings = {r["rating"] for r in records}
-    assert "good" in ratings and "bad" in ratings and "offtopic" in ratings
-    majors = [r for r in records if r["severity"] in {"major", "fatal"}]
-    assert majors, "major записи должны быть"
-    hints = [r for r in records if r.get("hint")]
-    assert any("fix" in r["hint"] for r in hints)
+    agent.record_feedback_event(
+        interaction_id="1",
+        rating=FeedbackRating.GOOD,
+        labels=[],
+        free_text=None,
+    )
+    agent.record_feedback_event(
+        interaction_id="2",
+        rating=FeedbackRating.BAD,
+        labels=[FeedbackLabel.INCORRECT],
+        free_text="fix",
+    )
+    agent.record_feedback_event(
+        interaction_id="3",
+        rating=FeedbackRating.BAD,
+        labels=[FeedbackLabel.OFF_TOPIC],
+        free_text=None,
+    )
+
+    hints = agent._collect_feedback_hints(5)  # noqa: SLF001
+    ratings = {hint["rating"] for hint in hints}
+    assert "bad" in ratings
+    assert any(hint["severity"] in {"major", "fatal"} for hint in hints)
+    assert any("fix" in hint["hint"] for hint in hints)

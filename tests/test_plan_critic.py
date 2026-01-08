@@ -16,11 +16,20 @@ class DummyBrain:
         return LLMResult(text=self._text)
 
 
+class StubPlanner:
+    def parse_plan_text(self, text: str):
+        return [line.strip().lstrip("0123456789. ") for line in text.splitlines() if line.strip()]
+
+    def assign_operations(self, plan: TaskPlan) -> TaskPlan:
+        return plan
+
+
 def test_plan_critic_rewrites_plan(tmp_path: Path) -> None:
     main = DummyBrain("unused")
     critic = DummyBrain("1. new step\n2. finish")
     dual = DualBrain(main, critic)
     agent = Agent(brain=dual, critic=None, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent.planner = StubPlanner()  # type: ignore[assignment]
     plan = TaskPlan(goal="goal", steps=[PlanStep(description="old")])
 
     improved = agent._critic_plan(plan)  # noqa: SLF001

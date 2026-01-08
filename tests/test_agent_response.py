@@ -51,7 +51,6 @@ def test_agent_simple_response(tmp_path: Path) -> None:
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
-    agent.feedback.get_recent_hints_meta = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     response = agent.respond([LLMMessage(role="user", content="привет")])
     assert "hello" in response
     assert brain.calls >= 1
@@ -65,7 +64,6 @@ def test_agent_plan_execution_path(tmp_path: Path) -> None:
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
-    agent.feedback.get_recent_hints_meta = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     result = agent.respond([LLMMessage(role="user", content="планируй задачу")])
     assert "step1" in result or "ok" in result
     assert agent.executor.run_called  # type: ignore[attr-defined]

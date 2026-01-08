@@ -20,7 +20,13 @@ class DummyGateway(ToolGateway):
 def test_executor_success_and_error() -> None:
     tracer = Tracer()
     executor = Executor(tracer)
-    plan = TaskPlan(goal="test", steps=[PlanStep(description="web"), PlanStep(description="fail")])
+    plan = TaskPlan(
+        goal="test",
+        steps=[
+            PlanStep(description="web", operation="web"),
+            PlanStep(description="fail", operation="web"),
+        ],
+    )
     finished = executor.run(plan, tool_gateway=DummyGateway(ok=True), critic_callback=None)
     assert all(step.status == PlanStepStatus.DONE for step in finished.steps[:1])
 

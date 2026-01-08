@@ -7,8 +7,14 @@ from config.mode_config import load_mode, save_mode
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
-from memory.feedback_manager import FeedbackManager
 from memory.memory_manager import MemoryManager
+from shared.memory_companion_models import (
+    ChatInteractionLog,
+    FeedbackLabel,
+    FeedbackRating,
+    InteractionKind,
+    InteractionMode,
+)
 from shared.models import LLMMessage, MemoryKind, MemoryRecord, PlanStep, PlanStepStatus, TaskPlan
 
 
@@ -40,10 +46,35 @@ class StubPlanner:
         return plan
 
 
+class StubExecutor:
+    def __init__(self) -> None:
+        self.run_called = False
+
+    def run(self, plan: TaskPlan, tool_gateway=None, critic_callback=None) -> TaskPlan:  # noqa: ANN001
+        self.run_called = True
+        for step in plan.steps:
+            step.status = PlanStepStatus.DONE
+            step.result = "done"
+        return plan
+
+
+def _log_interaction(agent: Agent, interaction_id: str) -> None:
+    agent._interaction_store.log_interaction(  # noqa: SLF001
+        ChatInteractionLog(
+            interaction_id=interaction_id,
+            user_id=agent.user_id,
+            interaction_kind=InteractionKind.CHAT,
+            raw_input="prompt",
+            mode=InteractionMode.STANDARD,
+            created_at="2024-01-01 00:00:00",
+            response_text="answer",
+        )
+    )
+
+
 def test_agent_llm_error_path(tmp_path: Path) -> None:
     agent = Agent(brain=ErrorBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.memory = MemoryManager(str(tmp_path / "mem.db"))
-    agent.feedback = FeedbackManager(str(tmp_path / "fb.db"))
     agent.memory.save(
         MemoryRecord(id="1", content="c", tags=[], timestamp="t", kind=MemoryKind.NOTE)
     )
@@ -54,10 +85,12 @@ def test_agent_llm_error_path(tmp_path: Path) -> None:
 def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
     agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     stub = StubPlanner()
+    executor = StubExecutor()
     agent.planner = stub  # type: ignore[assignment]
+    agent.executor = executor  # type: ignore[assignment]
     result = agent.handle_tool_command("/plan goal")
     assert "step-one" in result
-    assert stub.executed
+    assert executor.run_called
 
 
 def test_agent_set_mode_invalid(tmp_path: Path) -> None:
@@ -72,11 +105,15 @@ def test_agent_set_mode_invalid(tmp_path: Path) -> None:
 
 def test_save_feedback_major_hint(tmp_path: Path) -> None:
     agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
-    agent.feedback = FeedbackManager(str(tmp_path / "fb.db"))
-    agent.save_feedback("p", "a", "bad", hint=None)
-    records = agent.feedback.get_recent_records(1)
-    assert records and records[0]["severity"] == "major"
-    assert records[0]["hint"]
+    _log_interaction(agent, "1")
+    agent.record_feedback_event(
+        interaction_id="1",
+        rating=FeedbackRating.BAD,
+        labels=[FeedbackLabel.HALLUCINATION],
+    )
+    hints = agent._collect_feedback_hints(1, severity_filter=["major", "fatal"])  # noqa: SLF001
+    assert hints and hints[0]["severity"] in {"major", "fatal"}
+    assert hints[0]["hint"]
 
 
 def test_mode_config_invalid_file(tmp_path: Path) -> None:

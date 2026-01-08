@@ -38,6 +38,12 @@ class StubPlanner:
 
         return Planner()._parse_plan_text(text)  # noqa: SLF001
 
+    def parse_plan_text(self, text: str):
+        return self._parse_plan_text(text)
+
+    def assign_operations(self, plan: TaskPlan) -> TaskPlan:
+        return plan
+
 
 class FakeExecutor:
     def __init__(self) -> None:
@@ -68,7 +74,6 @@ def _prepare_agent(
     agent.memory.get_recent = lambda *a, **k: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
-    agent.feedback.get_recent_hints_meta = lambda *a, **k: []  # type: ignore[attr-defined]
     return agent, executor, main, critic
 
 
