@@ -25,6 +25,11 @@ class ChangeType(str, Enum):
     RENAME = "rename"
 
 
+class RetryPolicy(str, Enum):
+    NONE = "none"
+    LIMITED = "limited"
+
+
 @dataclass(frozen=True)
 class MWVMessage:
     role: Literal["system", "user", "assistant", "tool"]
@@ -79,3 +84,12 @@ class RunContext:
     approved_categories: list[str] = field(default_factory=list)
     max_retries: int = 2
     attempt: int = 1
+
+
+@dataclass(frozen=True)
+class RetryDecision:
+    policy: RetryPolicy
+    allow_retry: bool
+    reason: str
+    attempt: int
+    max_retries: int
