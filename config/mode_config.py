@@ -6,6 +6,7 @@ from pathlib import Path
 DEFAULT_MODE = "single"
 DEFAULT_PATH = Path("config/mode.json")
 ALLOWED_MODES = {"single", "dual", "critic-only"}
+DEPRECATED_MODES = {"dual", "critic-only"}
 
 
 def load_mode(path: Path = DEFAULT_PATH) -> str:

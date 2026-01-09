@@ -17,8 +17,5 @@ def test_tools_config_roundtrip(tmp_path: Path) -> None:
 
 def test_mode_config_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "mode.json"
-    save_mode("dual", path)
-    assert load_mode(path) == "dual"
-
-    save_mode("critic-only", path)
-    assert load_mode(path) == "critic-only"
+    save_mode("single", path)
+    assert load_mode(path) == "single"

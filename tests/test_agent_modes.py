@@ -38,15 +38,13 @@ class FakeMemory:
         return []
 
 
-def test_critic_only_does_not_execute_plan(tmp_path: Path) -> None:
+def test_deprecated_mode_ignored_for_chat(tmp_path: Path) -> None:
     main = CounterBrain()
-    critic = CounterBrain()
-    agent = Agent(brain=main, critic=critic, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(brain=main, memory_companion_db_path=str(tmp_path / "mc.db"))
     agent.set_mode("critic-only")
     response = agent.respond([LLMMessage(role="user", content="Привет")])
     assert response == "ok"
     assert main.calls == 1
-    assert critic.calls == 0
 
 
 def test_context_uses_hints_meta(tmp_path: Path) -> None:

@@ -228,6 +228,7 @@ class Agent:
         self._workspace_diff_baselines: dict[str, str] = {}
         self._workspace_diffs: dict[str, WorkspaceDiffEntry] = {}
         self._init_mode_from_config()
+        self._log_deprecated_dualbrain()
 
     def respond(self, messages: list[LLMMessage]) -> str:
         if not messages:
@@ -1134,12 +1135,16 @@ class Agent:
         self.tracer.log("memory_saved", prompt[:100])
 
     def set_mode(self, mode: str) -> None:
-        if isinstance(self.brain, DualBrain):
-            self.brain.set_mode(mode)
-            self.tracer.log("mode_set", mode)
-        elif mode != "single":
-            raise ValueError("Режимы dual/critic-only недоступны без критика.")
+        if mode != "single":
+            self.tracer.log(
+                "deprecated_feature",
+                "DualBrain mode ignored",
+                {"mode": mode},
+            )
+            save_mode(mode)
+            return
         save_mode(mode)
+        self.tracer.log("mode_set", mode)
 
     def reconfigure_models(
         self,
@@ -1503,18 +1508,11 @@ class Agent:
         if self._brain_manager:
             return self._brain_manager.build()
         if self._external_brain:
-            if self._external_critic:
-                return DualBrain(self._external_brain, self._external_critic)
             return self._external_brain
         if self.main_config is None:
             raise RuntimeError("Не выбрана модель. Укажите model id в настройках.")
         main_brain = create_brain(self.main_config, api_key=self.main_api_key)
-        critic_brain = (
-            create_brain(self.critic_config, api_key=self.critic_api_key)
-            if self.critic_config
-            else None
-        )
-        return DualBrain(main_brain, critic_brain) if critic_brain else main_brain
+        return main_brain
 
     def _register_tools(self) -> None:
         self.tool_registry.register(
@@ -1601,10 +1599,35 @@ class Agent:
     def _init_mode_from_config(self) -> None:
         try:
             mode = load_mode()
-            if isinstance(self.brain, DualBrain):
-                self.brain.set_mode(mode)
+            if mode != "single":
+                self.tracer.log(
+                    "deprecated_feature",
+                    "DualBrain mode ignored",
+                    {"mode": mode},
+                )
+                return
+            self.tracer.log("mode_set", mode)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("Не удалось загрузить режим: %s", exc)
+
+    def _log_deprecated_dualbrain(self) -> None:
+        deprecated: list[str] = []
+        if self._external_critic is not None:
+            deprecated.append("external_critic")
+        if self.critic_config is not None:
+            deprecated.append("critic_config")
+        if self.critic_api_key is not None:
+            deprecated.append("critic_api_key")
+        if deprecated:
+            self.tracer.log(
+                "deprecated_feature",
+                "DualBrain/critic disabled in MWV runtime",
+                {"features": deprecated},
+            )
+            self.logger.warning(
+                "Deprecated DualBrain/critic config ignored: %s",
+                ", ".join(deprecated),
+            )
 
     def _load_tools(self) -> dict[str, bool]:
         try:

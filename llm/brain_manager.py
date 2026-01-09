@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
-from llm.dual_brain import DualBrain
 from llm.types import ModelConfig
 
 
@@ -18,8 +18,8 @@ class BrainManager:
     critic_api_key: str | None = None
 
     def build(self) -> Brain:
+        logger = logging.getLogger("SlavikAI.BrainManager")
         main_brain = create_brain(self.main_config, api_key=self.main_api_key)
         if self.critic_config:
-            critic_brain = create_brain(self.critic_config, api_key=self.critic_api_key)
-            return DualBrain(main_brain, critic_brain)
+            logger.warning("Deprecated: critic_config ignored; DualBrain disabled in MWV runtime.")
         return main_brain

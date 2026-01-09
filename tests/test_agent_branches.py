@@ -95,12 +95,8 @@ def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
 
 def test_agent_set_mode_invalid(tmp_path: Path) -> None:
     agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
-    try:
-        agent.set_mode("dual")
-    except ValueError as exc:
-        assert "Режимы" in str(exc)
-    else:  # pragma: no cover - safety
-        raise AssertionError("Должно было выбросить ValueError")
+    agent.set_mode("dual")
+    assert agent._current_mode() == "single"  # noqa: SLF001
 
 
 def test_save_feedback_major_hint(tmp_path: Path) -> None:

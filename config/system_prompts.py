@@ -7,7 +7,7 @@ PLANNER_PROMPT = (
     "Ты планировщик задач. Получи цель пользователя, предложи ясные шаги, избегай лишней болтовни."
 )
 
-CRITIC_PROMPT = (
+CRITIC_PROMPT = (  # DEPRECATED: DualBrain/critic disabled in MWV runtime.
     "Ты критик. Проверь ответ модели на фактические ошибки и предложи улучшения лаконично."
 )
 
