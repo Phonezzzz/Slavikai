@@ -346,8 +346,9 @@ class Agent:
         decision: RouteDecision,
         record_in_history: bool,
     ) -> str:
+        trace_id = str(uuid.uuid4())
         mwv_messages = self._to_mwv_messages(messages)
-        context = self._build_mwv_context()
+        context = self._build_mwv_context(trace_id=trace_id)
         manager = ManagerRuntime(task_builder=self._mwv_task_builder(decision))
         worker = WorkerRuntime(runner=self._mwv_worker_runner)
         verifier_runtime = VerifierRuntime()
@@ -378,12 +379,22 @@ class Agent:
             )
             return result
 
-        run_result = manager.run_flow(
-            mwv_messages,
-            context,
-            worker=_worker,
-            verifier=_verifier,
-        )
+        try:
+            run_result = manager.run_flow(
+                mwv_messages,
+                context,
+                worker=_worker,
+                verifier=_verifier,
+            )
+        except ApprovalRequired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return self._handle_mwv_error(
+                exc,
+                raw_input=raw_input,
+                record_in_history=record_in_history,
+                trace_id=trace_id,
+            )
         if run_result.verification_result.status != VerificationStatus.PASSED:
             self._inc_metric("verifier_fail_count")
         response = self._format_mwv_response(run_result)
@@ -394,12 +405,13 @@ class Agent:
             self._append_short_term([LLMMessage(role="assistant", content=response)])
         return response
 
-    def _build_mwv_context(self) -> RunContext:
+    def _build_mwv_context(self, *, trace_id: str | None = None) -> RunContext:
         session_id = self.session_id or "local"
         approved = sorted(self.approved_categories)
+        resolved_trace_id = trace_id or str(uuid.uuid4())
         return RunContext(
             session_id=session_id,
-            trace_id=str(uuid.uuid4()),
+            trace_id=resolved_trace_id,
             workspace_root=str(WORKSPACE_ROOT),
             safe_mode=bool(self.tools_enabled.get("safe_mode", False)),
             approved_categories=[str(item) for item in approved],
@@ -634,6 +646,24 @@ class Agent:
                 return "нет деталей"
             return f"exit_code={verification.exit_code}"
         return text.splitlines()[0][:160]
+
+    def _handle_mwv_error(
+        self,
+        exc: Exception,
+        *,
+        raw_input: str,
+        record_in_history: bool,
+        trace_id: str,
+    ) -> str:
+        self.logger.exception("MWV flow error: %s", exc)
+        self.tracer.log("mwv_error", str(exc), {"trace_id": trace_id})
+        response = f"[MWV error: {exc}] trace_id={trace_id}"
+        if self.memory_config.auto_save_dialogue:
+            self.save_to_memory(raw_input, response)
+        self._log_chat_interaction(raw_input=raw_input, response_text=response)
+        if record_in_history:
+            self._append_short_term([LLMMessage(role="assistant", content=response)])
+        return response
 
     def _truncate_lines(self, text: str, max_lines: int, max_chars: int) -> list[str]:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
