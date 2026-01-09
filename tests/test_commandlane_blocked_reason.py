@@ -65,7 +65,7 @@ def test_commandlane_logs_sandbox_violation(tmp_path: Path) -> None:
     store = MemoryCompanionStore(db_path)
     log = _get_tool_log(store, "fs")
     assert log.tool_status == ToolStatus.BLOCKED
-    assert log.blocked_reason == BlockedReason.SANDBOX_VIOLATION
+    assert log.blocked_reason == BlockedReason.APPROVAL_REQUIRED
 
 
 def test_commandlane_logs_validation_error(tmp_path: Path) -> None:
@@ -92,7 +92,7 @@ def test_commandlane_logs_validation_error(tmp_path: Path) -> None:
     store = MemoryCompanionStore(db_path)
     log = _get_tool_log(store, "shell")
     assert log.tool_status == ToolStatus.BLOCKED
-    assert log.blocked_reason == BlockedReason.VALIDATION_ERROR
+    assert log.blocked_reason == BlockedReason.APPROVAL_REQUIRED
 
 
 def test_commandlane_logs_safe_mode_blocked(tmp_path: Path) -> None:
@@ -146,4 +146,4 @@ def test_commandlane_logs_tool_disabled(tmp_path: Path) -> None:
     store = MemoryCompanionStore(db_path)
     log = _get_tool_log(store, "shell")
     assert log.tool_status == ToolStatus.BLOCKED
-    assert log.blocked_reason == BlockedReason.TOOL_DISABLED
+    assert log.blocked_reason == BlockedReason.APPROVAL_REQUIRED

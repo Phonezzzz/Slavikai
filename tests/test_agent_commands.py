@@ -26,4 +26,7 @@ def test_agent_shell_disabled_in_safe_mode(tmp_path: Path) -> None:
         memory_companion_db_path=str(tmp_path / "mc.db"),
     )
     resp = agent.handle_tool_command("/sh ls")
-    assert "требуется подтверждение" in resp.lower()
+    lowered = resp.lower()
+    assert "что случилось" in lowered
+    assert "требуется подтверждение" in lowered
+    assert "command_lane" in lowered

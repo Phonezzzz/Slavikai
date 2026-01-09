@@ -521,6 +521,35 @@ class Agent:
         }
 
     def _format_mwv_response(self, result: MWVRunResult) -> str:
+        trace_id = result.task.trace_id
+        if result.work_result.status == WorkStatus.FAILURE:
+            summary = self._summarize_work_failure(result.work_result)
+            return self._format_stop_response(
+                what="MWV остановлен: ошибка выполнения",
+                why=summary,
+                next_steps=[
+                    "Проверь шаги выполнения и уточни запрос.",
+                    "Запусти задачу снова с более узким фокусом.",
+                ],
+                trace_id=trace_id,
+            )
+        if result.verification_result.status != VerificationStatus.PASSED:
+            note = self._mwv_verifier_note(result.verification_result)
+            status_label = (
+                "Ошибка проверки"
+                if result.verification_result.status == VerificationStatus.ERROR
+                else "Проверки не прошли"
+            )
+            return self._format_stop_response(
+                what=status_label,
+                why=note,
+                next_steps=[
+                    "Открой trace по trace_id и посмотри детали проверки.",
+                    "Запусти scripts/check.sh вручную для диагностики.",
+                    "Исправь проблему и повтори запрос.",
+                ],
+                trace_id=trace_id,
+            )
         outcome = self._mwv_outcome_label(result)
         lines = [
             f"Итог: {outcome}",
@@ -657,7 +686,15 @@ class Agent:
     ) -> str:
         self.logger.exception("MWV flow error: %s", exc)
         self.tracer.log("mwv_error", str(exc), {"trace_id": trace_id})
-        response = f"[MWV error: {exc}] trace_id={trace_id}"
+        response = self._format_stop_response(
+            what="MWV internal error",
+            why=str(exc),
+            next_steps=[
+                "Проверь логи и trace по trace_id.",
+                "Повтори запрос или уточни входные данные.",
+            ],
+            trace_id=trace_id,
+        )
         if self.memory_config.auto_save_dialogue:
             self.save_to_memory(raw_input, response)
         self._log_chat_interaction(raw_input=raw_input, response_text=response)
@@ -714,19 +751,24 @@ class Agent:
     def _format_skill_block(self, decision: SkillMatchDecision) -> str:
         if decision.status == "deprecated" and decision.match is not None:
             replaced = decision.replaced_by or "нет замены"
-            return (
-                "Навык помечен как deprecated и не будет запускаться.\n"
-                f"- skill_id: {decision.match.entry.id}\n"
-                f"- replaced_by: {replaced}\n"
-                "Уточни запрос или укажи новый skill."
+            return self._format_stop_response(
+                what="Навык deprecated и заблокирован",
+                why=f"skill_id={decision.match.entry.id}; replaced_by={replaced}",
+                next_steps=[
+                    "Укажи новый skill_id или замену.",
+                    "Переформулируй запрос.",
+                ],
             )
         if decision.status == "ambiguous":
             ids = [match.entry.id for match in decision.alternatives]
             listed = ", ".join(ids) if ids else "unknown"
-            return (
-                "Найдено несколько подходящих навыков, нужен выбор.\n"
-                f"- candidates: {listed}\n"
-                "Уточни запрос или укажи нужный skill."
+            return self._format_stop_response(
+                what="Найдено несколько подходящих навыков",
+                why=f"candidates={listed}",
+                next_steps=[
+                    "Укажи нужный skill_id.",
+                    "Уточни запрос, чтобы матч был однозначным.",
+                ],
             )
         return "Навык не может быть применен."
 
@@ -769,10 +811,10 @@ class Agent:
                 self.last_plan = plan
                 executed: TaskPlan = self.executor.run(
                     plan,
-                    tool_gateway=ToolGateway(
-                        self.tool_registry,
+                    tool_gateway=self._build_tool_gateway(
                         pre_call=self._workspace_diff_pre_call,
                         post_call=self._workspace_diff_post_call,
+                        safe_mode_override=True,
                     ),
                 )
                 result = self._format_plan(executed)
@@ -784,7 +826,7 @@ class Agent:
                 operation = args[0] if args else "list"
                 path_arg = args[1] if len(args) > 1 else ""
                 req = ToolRequest(name="fs", args={"op": operation, "path": path_arg})
-                tool_result = self._call_tool_logged(command, req)
+                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
                 result = self._format_tool_result(tool_result)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
@@ -793,7 +835,7 @@ class Agent:
             if cmd == "web":
                 query = " ".join(args)
                 req = ToolRequest(name="web", args={"query": query})
-                tool_result = self._call_tool_logged(command, req)
+                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
                 result = self._format_tool_result(tool_result)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
@@ -807,7 +849,7 @@ class Agent:
                         "config_path": str(getattr(self, "shell_config_path", "")) or None,
                     },
                 )
-                tool_result = self._call_tool_logged(command, req)
+                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
                 result = self._format_tool_result(tool_result)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
@@ -820,7 +862,7 @@ class Agent:
                     self._log_chat_interaction(raw_input=command, response_text=response)
                     return response
                 req = ToolRequest(name="project", args={"cmd": args[0], "args": args[1:]})
-                tool_result = self._call_tool_logged(command, req)
+                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
                 result = self._format_tool_result(tool_result)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
@@ -829,7 +871,7 @@ class Agent:
             if cmd in {"imggen", "img_generate"}:
                 prompt = " ".join(args) or "image"
                 req = ToolRequest(name="image_generate", args={"prompt": prompt})
-                tool_result = self._call_tool_logged(command, req)
+                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
                 result = self._format_tool_result(tool_result)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
@@ -849,7 +891,7 @@ class Agent:
                     req = ToolRequest(name="image_analyze", args={"base64": raw_value})
                 else:
                     req = ToolRequest(name="image_analyze", args={"path": raw_value})
-                tool_result = self._call_tool_logged(command, req)
+                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
                 result = self._format_tool_result(tool_result)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
@@ -932,8 +974,10 @@ class Agent:
         self.session_id = session_id
         self.approved_categories = set(approved_categories)
 
-    def _approval_context(self) -> ApprovalContext:
+    def _approval_context(self, *, safe_mode_override: bool | None = None) -> ApprovalContext:
         safe_mode = bool(self.tools_enabled.get("safe_mode", False))
+        if safe_mode_override is not None:
+            safe_mode = safe_mode_override
         normalized: set[ApprovalCategory] = set(self.approved_categories)
         return ApprovalContext(
             safe_mode=safe_mode,
@@ -946,6 +990,7 @@ class Agent:
         *,
         pre_call: Callable[[ToolRequest], object | None] | None = None,
         post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
+        safe_mode_override: bool | None = None,
     ) -> ToolGateway:
         def _post_call(request: ToolRequest, result: ToolResult, context: object | None) -> None:
             if post_call:
@@ -956,7 +1001,7 @@ class Agent:
             self.tool_registry,
             pre_call=pre_call,
             post_call=_post_call,
-            approval_context=self._approval_context(),
+            approval_context=self._approval_context(safe_mode_override=safe_mode_override),
             log_event=self.tracer.log,
         )
 
@@ -1167,13 +1212,23 @@ class Agent:
         request = ToolRequest(name=name, args=args or {})
         return self._call_tool_logged(raw_input or f"tool:{name}", request)
 
-    def _call_tool_logged(self, raw_input: str, request: ToolRequest) -> ToolResult:
+    def _call_tool_logged(
+        self,
+        raw_input: str,
+        request: ToolRequest,
+        *,
+        safe_mode_override: bool | None = None,
+    ) -> ToolResult:
         pre_call = None
         post_call = None
         if not raw_input.startswith("ui:"):
             pre_call = self._workspace_diff_pre_call
             post_call = self._workspace_diff_post_call
-        gateway = self._build_tool_gateway(pre_call=pre_call, post_call=post_call)
+        gateway = self._build_tool_gateway(
+            pre_call=pre_call,
+            post_call=post_call,
+            safe_mode_override=safe_mode_override,
+        )
         try:
             result = gateway.call(request)
         except ApprovalRequired:
@@ -1397,6 +1452,25 @@ class Agent:
             return prefix
         return f"{prefix}\n{response}".strip()
 
+    def _format_stop_response(
+        self,
+        *,
+        what: str,
+        why: str,
+        next_steps: list[str],
+        trace_id: str | None = None,
+    ) -> str:
+        steps = next_steps or ["Уточни запрос или попробуй снова."]
+        lines = [
+            f"Что случилось: {what}",
+            f"Почему: {why}",
+            "Что делать дальше:",
+            *[f"- {step}" for step in steps[:3]],
+        ]
+        if trace_id:
+            lines.append(f"trace_id={trace_id}")
+        return "\n".join(lines).strip()
+
     def _handle_approval_required(
         self,
         request: ApprovalRequest,
@@ -1406,9 +1480,18 @@ class Agent:
         command_lane: bool = False,
     ) -> str:
         self.last_approval_request = request
-        error_text = "[Требуется подтверждение действия]"
+        required = ", ".join(request.required_categories) if request.required_categories else "n/a"
+        why_parts = [f"category={request.category}", f"required={required}"]
         if command_lane:
-            error_text = self._format_command_lane_response(error_text)
+            why_parts.append("mode=command_lane (без MWV)")
+        error_text = self._format_stop_response(
+            what="Требуется подтверждение действия",
+            why="; ".join(why_parts),
+            next_steps=[
+                "Подтверди действие или отмени его.",
+                "При необходимости уточни команду.",
+            ],
+        )
         self._log_chat_interaction(raw_input=raw_input, response_text=error_text)
         if record_in_history:
             self._append_short_term([LLMMessage(role="assistant", content=error_text)])

@@ -52,6 +52,10 @@
 
 См. `docs/COMMAND_LANE_POLICY.md` — команды `/...` считаются ручным режимом и не входят в MWV.
 
+## Stop responses
+
+Единый формат остановки см. в `docs/STOP_RESPONSES.md`.
+
 ## Ограничения
 
 - Политика **не** меняет смысл MWV/Verifier.

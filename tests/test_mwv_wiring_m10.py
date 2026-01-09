@@ -104,7 +104,10 @@ def test_m10_verifier_failure_returns_diagnostics(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(agent_module, "VerifierRuntime", DummyVerifierRuntime)
     response = agent.respond([LLMMessage(role="user", content="почини тесты")])
 
-    assert "Verifier: FAIL" in response
+    lowered = response.lower()
+    assert "что случилось" in lowered
+    assert "проверки" in lowered
     assert "tests failed" in response
-    assert "Итог:" in response
+    assert "что делать дальше" in lowered
+    assert "trace_id=" in response
     assert brain.calls == 0

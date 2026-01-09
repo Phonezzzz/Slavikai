@@ -115,8 +115,10 @@ def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="alpha request")])
 
-    assert "несколько" in response.lower()
-    assert "уточни" in response.lower()
+    lowered = response.lower()
+    assert "что случилось" in lowered
+    assert "несколько" in lowered
+    assert "что делать дальше" in lowered
     assert brain.calls == 0
 
 
@@ -135,6 +137,8 @@ def test_skill_deprecated_blocks_with_instruction(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="legacy request")])
 
-    assert "deprecated" in response.lower()
-    assert "уточни" in response.lower()
+    lowered = response.lower()
+    assert "что случилось" in lowered
+    assert "deprecated" in lowered
+    assert "что делать дальше" in lowered
     assert brain.calls == 0
