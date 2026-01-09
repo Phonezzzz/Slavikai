@@ -27,8 +27,8 @@ def test_executor_success_and_error() -> None:
             PlanStep(description="fail", operation="web"),
         ],
     )
-    finished = executor.run(plan, tool_gateway=DummyGateway(ok=True), critic_callback=None)
+    finished = executor.run(plan, tool_gateway=DummyGateway(ok=True))
     assert all(step.status == PlanStepStatus.DONE for step in finished.steps[:1])
 
-    finished_error = executor.run(plan, tool_gateway=DummyGateway(ok=False), critic_callback=None)
+    finished_error = executor.run(plan, tool_gateway=DummyGateway(ok=False))
     assert any(step.status == PlanStepStatus.ERROR for step in finished_error.steps)

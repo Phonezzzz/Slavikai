@@ -17,7 +17,7 @@ class ModelConfig:
     api_key: str | None = None
     extra_headers: dict[str, str] = field(default_factory=dict)
     system_prompt: str | None = None
-    mode: Literal["default", "planner", "critic"] = "default"
+    mode: Literal["default", "planner"] = "default"
     thinking_enabled: bool = False
 
 

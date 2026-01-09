@@ -8,13 +8,13 @@ from shared.models import PlanStep, PlanStepStatus, TaskPlan, ToolRequest, ToolR
 from tools.tool_registry import ToolRegistry
 
 
-def test_executor_with_tool_and_critic_rejects() -> None:
+def test_executor_with_tool_failure_marks_error() -> None:
     registry = ToolRegistry()
 
-    def echo_handler(_: ToolRequest) -> ToolResult:
-        return ToolResult.success({"output": "ok"})
+    def failing_handler(_: ToolRequest) -> ToolResult:
+        return ToolResult.failure("fail")
 
-    registry.register("web", echo_handler, enabled=True)
+    registry.register("web", failing_handler, enabled=True)
     gateway = ToolGateway(registry)
     plan = TaskPlan(
         goal="test",
@@ -24,15 +24,10 @@ def test_executor_with_tool_and_critic_rejects() -> None:
         ],
     )
 
-    def critic(step: PlanStep) -> tuple[bool, str | None]:
-        if "web" in step.description:
-            return False, "no web"
-        return True, None
-
     executor = Executor()
-    executed = executor.run(plan, tool_gateway=gateway, critic_callback=critic)
+    executed = executor.run(plan, tool_gateway=gateway)
     assert executed.steps[0].status == PlanStepStatus.ERROR
-    assert "no web" in (executed.steps[0].result or "")
+    assert "fail" in (executed.steps[0].result or "")
 
 
 class DummyGateway:

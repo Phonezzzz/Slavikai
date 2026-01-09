@@ -36,16 +36,12 @@ class OpenRouterBrain(Brain):
         headers.update(config.extra_headers)
         return headers
 
-    def generate(
-        self, messages: list[LLMMessage], config: ModelConfig | None = None
-    ) -> LLMResult:
+    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = {
             "model": cfg.model,
-            "messages": [
-                message.__dict__ for message in self._inject_system(messages, cfg)
-            ],
+            "messages": [message.__dict__ for message in self._inject_system(messages, cfg)],
             "temperature": cfg.temperature,
         }
         if cfg.max_tokens is not None:
@@ -92,16 +88,12 @@ class OpenRouterBrain(Brain):
 
         return LLMResult(text=content, reasoning=reasoning, usage=usage, raw=data)
 
-    def _inject_system(
-        self, messages: list[LLMMessage], config: ModelConfig
-    ) -> list[LLMMessage]:
+    def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
         system_messages: list[LLMMessage] = []
         if config.thinking_enabled:
             system_messages.append(LLMMessage(role="system", content=THINKING_PROMPT))
         if config.system_prompt:
-            system_messages.append(
-                LLMMessage(role="system", content=config.system_prompt)
-            )
+            system_messages.append(LLMMessage(role="system", content=config.system_prompt))
         if not system_messages:
             return messages
         return [*system_messages, *messages]

@@ -33,16 +33,3 @@ def test_executor_stops_after_error() -> None:
     assert finished.steps[0].status == PlanStepStatus.DONE
     assert finished.steps[1].status == PlanStepStatus.ERROR
     assert finished.steps[2].status == PlanStepStatus.PENDING
-
-
-def test_executor_critic_rejects_step() -> None:
-    tracer = Tracer()
-    executor = Executor(tracer)
-    plan = TaskPlan(goal="test", steps=[PlanStep(description="web search")])
-
-    def critic(step: PlanStep):
-        return False, "nope"
-
-    finished = executor.run(plan, tool_gateway=FlakyGateway(), critic_callback=critic)
-    assert finished.steps[0].status == PlanStepStatus.ERROR
-    assert "nope" in (finished.steps[0].result or "")

@@ -31,9 +31,7 @@ class ToolRegistry:
         self._safe_mode = False
         self._safe_block = safe_block or set()
 
-    def register(
-        self, name: str, handler: Tool | ToolHandler, enabled: bool = True
-    ) -> None:
+    def register(self, name: str, handler: Tool | ToolHandler, enabled: bool = True) -> None:
         resolved: ToolHandler
         if isinstance(handler, Tool):
             resolved = handler.handle
@@ -51,9 +49,7 @@ class ToolRegistry:
         descriptor = self._tools.get(name)
         return bool(descriptor and descriptor.enabled)
 
-    def call(
-        self, request: ToolRequest, *, bypass_safe_mode: bool = False
-    ) -> ToolResult:
+    def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
         descriptor = self._tools.get(request.name)
         if not descriptor:
             self._logger.warning("tool_not_found", extra={"tool": request.name})
@@ -65,11 +61,7 @@ class ToolRegistry:
             )
             return ToolResult.failure(f"Инструмент {request.name} не зарегистрирован")
 
-        if (
-            self._safe_mode
-            and request.name in self._safe_block
-            and not bypass_safe_mode
-        ):
+        if self._safe_mode and request.name in self._safe_block and not bypass_safe_mode:
             self._logger.info("tool_safe_blocked", extra={"tool": request.name})
             self._log_call(
                 request.name,
@@ -81,9 +73,7 @@ class ToolRegistry:
 
         if not descriptor.enabled:
             self._logger.info("tool_disabled_call", extra={"tool": request.name})
-            self._log_call(
-                request.name, ok=False, error="Инструмент отключён", args=request.args
-            )
+            self._log_call(request.name, ok=False, error="Инструмент отключён", args=request.args)
             return ToolResult.failure(f"Инструмент {request.name} отключён")
 
         self._logger.info("tool_call_start", extra={"tool": request.name})

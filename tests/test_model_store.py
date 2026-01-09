@@ -21,9 +21,8 @@ def test_model_config_roundtrip(tmp_path: Path) -> None:
         system_prompt="hi",
     )
     path = tmp_path / "model.json"
-    save_model_configs(cfg, None, path)
-    loaded_main, loaded_critic = load_model_configs(path)
-    assert loaded_critic is None
+    save_model_configs(cfg, path)
+    loaded_main = load_model_configs(path)
     assert loaded_main and loaded_main.model == "gpt-test"
 
     data = model_config_to_dict(cfg)

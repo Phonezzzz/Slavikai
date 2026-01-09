@@ -56,9 +56,7 @@ class ToolCallLogger:
                 MAX_TOOL_LOG_BYTES,
             )
         except OSError as exc:
-            self._logger.warning(
-                "ToolCallLogger: ошибка ротации лога %s: %s", self.path, exc
-            )
+            self._logger.warning("ToolCallLogger: ошибка ротации лога %s: %s", self.path, exc)
 
     def log(
         self,

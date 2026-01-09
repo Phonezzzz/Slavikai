@@ -7,10 +7,8 @@ from pathlib import Path
 from aiohttp.test_utils import TestClient, TestServer
 
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
-from core.critic_policy import decide_critic
 from core.tracer import Tracer
 from llm.brain_base import Brain
-from llm.dual_brain import DualBrain
 from llm.types import LLMResult, ModelConfig
 from server.http_api import create_app
 from shared.models import LLMMessage
@@ -20,9 +18,7 @@ class DummyBrain(Brain):
     def __init__(self, text: str) -> None:
         self._text = text
 
-    def generate(
-        self, messages: list[LLMMessage], config: ModelConfig | None = None
-    ) -> LLMResult:
+    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
         return LLMResult(text=self._text)
 
 
@@ -30,19 +26,14 @@ class DummyAgent:
     def __init__(self, trace_path: Path) -> None:
         self.tracer = Tracer(path=trace_path)
         self.tools_enabled = {"safe_mode": True}
-        self.brain = DualBrain(DummyBrain("ok"), DummyBrain("critic"))
-        self.last_critic_response = None
-        self.last_critic_status = "disabled"
-        self.last_critic_reasons: list[str] = []
+        self.brain = DummyBrain("ok")
         self.last_approval_request: ApprovalRequest | None = None
         self.last_chat_interaction_id: str | None = None
         self._feedback_events: list[dict[str, object]] = []
         self.session_id: str | None = None
         self.approved_categories: set[str] = set()
 
-    def set_session_context(
-        self, session_id: str | None, approved_categories: set[str]
-    ) -> None:
+    def set_session_context(self, session_id: str | None, approved_categories: set[str]) -> None:
         self.session_id = session_id
         self.approved_categories = set(approved_categories)
 
@@ -50,36 +41,10 @@ class DummyAgent:
         content = messages[-1].content if messages else ""
         self.tracer.log("user_input", content)
         self.last_approval_request = None
-        mode = self.brain.mode if isinstance(self.brain, DualBrain) else "single"
-        decision = decide_critic(mode=mode, messages=messages)
-        self.last_critic_reasons = decision.reasons
-        self.tracer.log(
-            "critic_decision",
-            "Critic decision",
-            {"reasons": decision.reasons, "should_run": decision.should_run_critic},
-        )
         response_text = "ok"
-        if decision.should_run_critic:
-            self.last_critic_response = "critic ok"
-            if any(reason.startswith("risk:") for reason in decision.reasons):
-                self.last_critic_status = "risky"
-            else:
-                self.last_critic_status = "ok"
-            self.tracer.log(
-                "critic_response",
-                "Critic response",
-                {"status": self.last_critic_status},
-            )
-            if mode == "critic-only":
-                response_text = "critic: ok"
-        else:
-            self.last_critic_status = "disabled"
-            self.last_critic_response = None
 
         required = {"SUDO", "EXEC_ARBITRARY"}
-        if "danger" in content.lower() and not required.issubset(
-            self.approved_categories
-        ):
+        if "danger" in content.lower() and not required.issubset(self.approved_categories):
             prompt = ApprovalPrompt(
                 what="Выполнить команду: rm -rf /",
                 why="Для выполнения запроса пользователя.",
@@ -122,9 +87,7 @@ class DummyAgent:
         )
 
 
-async def _create_client(
-    agent: DummyAgent, trace_path: Path, monkeypatch
-) -> TestClient:
+async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
     app = create_app(agent=agent, max_request_bytes=1_000_000)
     server = TestServer(app)
@@ -144,7 +107,7 @@ def test_models_endpoint(monkeypatch, tmp_path) -> None:
             assert resp.status == 200
             payload = await resp.json()
             ids = [item.get("id") for item in payload.get("data", [])]
-            assert ids == ["slavik-single", "slavik-dual", "slavik-critic"]
+            assert ids == ["slavik"]
         finally:
             await client.close()
 
@@ -161,7 +124,7 @@ def test_chat_completions_returns_meta(monkeypatch, tmp_path) -> None:
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "Привет"}],
                     "stream": False,
                 },
@@ -172,7 +135,6 @@ def test_chat_completions_returns_meta(monkeypatch, tmp_path) -> None:
             assert isinstance(meta.get("trace_id"), str)
             assert isinstance(meta.get("session_id"), str)
             assert meta.get("safe_mode") is True
-            assert meta.get("critic_status") == "disabled"
         finally:
             await client.close()
 
@@ -189,7 +151,7 @@ def test_stream_not_supported(monkeypatch, tmp_path) -> None:
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "Привет"}],
                     "stream": True,
                 },
@@ -215,7 +177,7 @@ def test_unknown_sampling_param_logged(monkeypatch, tmp_path) -> None:
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "Объясни VectorIndex"}],
                     "top_k": 50,
                 },
@@ -246,7 +208,7 @@ def test_unknown_structural_field_rejected(monkeypatch, tmp_path) -> None:
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "Привет"}],
                     "unknown_field": 123,
                 },
@@ -271,7 +233,7 @@ def test_trace_endpoint_returns_events(monkeypatch, tmp_path) -> None:
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "Тест"}],
                 },
             )
@@ -312,7 +274,7 @@ def test_approve_session_reflected(monkeypatch, tmp_path) -> None:
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "Привет"}],
                 },
                 headers={"X-Slavik-Session": session_id},
@@ -321,63 +283,6 @@ def test_approve_session_reflected(monkeypatch, tmp_path) -> None:
             payload = await resp.json()
             meta = payload.get("slavik_meta", {})
             assert meta.get("session_approved") is True
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-def test_dual_triggers_critic_and_trace(monkeypatch, tmp_path) -> None:
-    trace_path = tmp_path / "trace.log"
-    agent = DummyAgent(trace_path)
-
-    async def run() -> None:
-        client = await _create_client(agent, trace_path, monkeypatch)
-        try:
-            resp = await client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "slavik-dual",
-                    "messages": [{"role": "user", "content": "sudo rm -rf /etc"}],
-                },
-            )
-            assert resp.status == 200
-            payload = await resp.json()
-            meta = payload.get("slavik_meta", {})
-            assert meta.get("critic_status") != "disabled"
-
-            trace_id = meta.get("trace_id")
-            trace_resp = await client.get(f"/slavik/trace/{trace_id}")
-            assert trace_resp.status == 200
-            trace_payload = await trace_resp.json()
-            events = trace_payload.get("events", [])
-            assert any(event.get("event") == "critic_response" for event in events)
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-def test_critic_only_returns_critique(monkeypatch, tmp_path) -> None:
-    trace_path = tmp_path / "trace.log"
-    agent = DummyAgent(trace_path)
-
-    async def run() -> None:
-        client = await _create_client(agent, trace_path, monkeypatch)
-        try:
-            resp = await client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "slavik-critic",
-                    "messages": [{"role": "user", "content": "Проверь запрос"}],
-                },
-            )
-            assert resp.status == 200
-            payload = await resp.json()
-            message = payload.get("choices", [])[0].get("message", {})
-            assert message.get("content") == "critic: ok"
-            meta = payload.get("slavik_meta", {})
-            assert meta.get("critic_status") != "disabled"
         finally:
             await client.close()
 
@@ -394,7 +299,7 @@ def test_approval_required_response(monkeypatch, tmp_path) -> None:
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "danger action"}],
                 },
             )
@@ -422,7 +327,7 @@ def test_approval_flow_and_session_reset(monkeypatch, tmp_path) -> None:
             first = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "danger action"}],
                 },
                 headers={"X-Slavik-Session": session_id},
@@ -441,7 +346,7 @@ def test_approval_flow_and_session_reset(monkeypatch, tmp_path) -> None:
             second = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "danger action"}],
                 },
                 headers={"X-Slavik-Session": session_id},
@@ -451,7 +356,7 @@ def test_approval_flow_and_session_reset(monkeypatch, tmp_path) -> None:
             new_session = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "slavik-single",
+                    "model": "slavik",
                     "messages": [{"role": "user", "content": "danger action"}],
                 },
                 headers={"X-Slavik-Session": "session-new"},

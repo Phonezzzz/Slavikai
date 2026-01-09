@@ -26,9 +26,7 @@ def test_build_approval_request_returns_none_without_intents() -> None:
 
 
 def test_detect_action_intents_workspace_write_outside_and_secrets() -> None:
-    intents = detect_action_intents(
-        ToolRequest(name="workspace_write", args={"path": "../.env"})
-    )
+    intents = detect_action_intents(ToolRequest(name="workspace_write", args={"path": "../.env"}))
     categories = {intent.category for intent in intents}
     assert categories == {
         "FS_OUTSIDE_WORKSPACE",

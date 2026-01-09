@@ -43,7 +43,7 @@ curl http://127.0.0.1:8000/v1/models
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "slavik-single",
+    "model": "slavik",
     "messages": [
       { "role": "user", "content": "Привет" }
     ],
@@ -82,7 +82,7 @@ curl -s http://127.0.0.1:8000/slavik/approve-session \
 
 ## Как подключать Open WebUI (Phase 6)
 - Base URL: `http://127.0.0.1:8000/v1`
-- Модели: `slavik-single`, `slavik-dual`, `slavik-critic`
+- Модели: `slavik`
 
 ## Известные ограничения (Phase 3)
 - Streaming отключён (HTTP 400 `streaming_not_supported`).

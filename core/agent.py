@@ -9,10 +9,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from config.memory_config import MemoryConfig, load_memory_config
-from config.mode_config import load_mode, save_mode
 from config.model_store import load_model_configs, save_model_configs
 from config.shell_config import DEFAULT_SHELL_CONFIG_PATH
-from config.system_prompts import CRITIC_PROMPT
 from config.tools_config import ToolsConfig, load_tools_config, save_tools_config
 from core.approval_policy import (
     ApprovalCategory,
@@ -22,12 +20,6 @@ from core.approval_policy import (
 )
 from core.auto_agent import AutoAgent
 from core.batch_review import BatchReviewer
-from core.critic_policy import (
-    CriticDecision,
-    CriticFailure,
-    CriticMode,
-    classify_critic_status,
-)
 from core.executor import Executor
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
@@ -51,7 +43,6 @@ from core.tracer import Tracer
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.brain_manager import BrainManager
-from llm.dual_brain import DualBrain
 from llm.types import ModelConfig
 from memory.memory_companion_store import MemoryCompanionStore
 from memory.memory_manager import MemoryManager
@@ -78,7 +69,6 @@ from shared.models import (
     LLMMessage,
     MemoryKind,
     MemoryRecord,
-    PlanStep,
     TaskPlan,
     ToolCallRecord,
     ToolRequest,
@@ -163,24 +153,18 @@ class Agent:
     def __init__(
         self,
         brain: Brain | None = None,
-        critic: Brain | None = None,
         enable_tools: dict[str, bool] | None = None,
         main_config: ModelConfig | None = None,
-        critic_config: ModelConfig | None = None,
         main_api_key: str | None = None,
-        critic_api_key: str | None = None,
         brain_manager: BrainManager | None = None,
         user_id: str = "local",
         memory_companion_db_path: str | None = None,
     ) -> None:
-        saved_main, saved_critic = load_model_configs()
+        saved_main = load_model_configs()
         self.main_config = main_config or saved_main
-        self.critic_config = critic_config or saved_critic
         self.main_api_key = main_api_key
-        self.critic_api_key = critic_api_key
         self.shell_config_path = str(DEFAULT_SHELL_CONFIG_PATH)
         self._external_brain = brain
-        self._external_critic = critic
         self._brain_manager = brain_manager
         self.user_id = user_id
         self.memory_config: MemoryConfig = load_memory_config()
@@ -207,7 +191,6 @@ class Agent:
         self.memory = MemoryManager("memory/memory.db")
         self.vectors = VectorIndex("memory/vectors.db")
         self.short_term: list[LLMMessage] = []
-        self.critic_short_term: list[LLMMessage] = []
         self.conversation_id = str(uuid.uuid4())
         self.session_id: str | None = None
         self.approved_categories: set[ApprovalCategory] = set()
@@ -216,10 +199,6 @@ class Agent:
         self.last_hints_used: list[str] = []
         self.last_hints_meta: list[dict[str, str]] = []
         self.last_context_text: str | None = None
-        self.last_critic_response: str | None = None
-        self.last_critic_status: str = "disabled"
-        self.last_critic_reasons: list[str] = []
-        self._critic_step_rejected = False
         self.last_approval_request: ApprovalRequest | None = None
         self.last_reasoning: str | None = None
         self.workspace_file_path: str | None = None
@@ -227,8 +206,6 @@ class Agent:
         self.workspace_selection: str | None = None
         self._workspace_diff_baselines: dict[str, str] = {}
         self._workspace_diffs: dict[str, WorkspaceDiffEntry] = {}
-        self._init_mode_from_config()
-        self._log_deprecated_dualbrain()
 
     def respond(self, messages: list[LLMMessage]) -> str:
         if not messages:
@@ -239,9 +216,7 @@ class Agent:
         try:
             if record_in_history:
                 self._append_short_term(messages)
-                self._append_short_term(messages, history=self.critic_short_term)
             self.tracer.log("user_input", last_content)
-            self._reset_critic_state()
             self._reset_approval_state()
             self.last_reasoning = None
             self._reset_workspace_diffs()
@@ -619,10 +594,6 @@ class Agent:
         return trimmed
 
     def _get_main_brain(self) -> Brain:
-        if isinstance(self.brain, DualBrain):
-            if self.brain.mode == "critic-only":
-                self.tracer.log("critic_mode_ignored", "Critic-only mode ignored in MWV routing")
-            return self.brain.main
         return self.brain
 
     def handle_tool_command(self, command: str) -> str:
@@ -784,25 +755,8 @@ class Agent:
         self._workspace_diff_baselines.clear()
         self._workspace_diffs.clear()
 
-    def _reset_critic_state(self) -> None:
-        self.last_critic_response = None
-        self.last_critic_status = "disabled"
-        self.last_critic_reasons = []
-        self._critic_step_rejected = False
-
     def _reset_approval_state(self) -> None:
         self.last_approval_request = None
-
-    def _current_mode(self) -> CriticMode:
-        if isinstance(self.brain, DualBrain):
-            mode = self.brain.mode
-            if mode == "single":
-                return "single"
-            if mode == "dual":
-                return "dual"
-            if mode == "critic-only":
-                return "critic-only"
-        return "single"
 
     def set_session_context(
         self,
@@ -1134,32 +1088,16 @@ class Agent:
         self.memory.save(item)
         self.tracer.log("memory_saved", prompt[:100])
 
-    def set_mode(self, mode: str) -> None:
-        if mode != "single":
-            self.tracer.log(
-                "deprecated_feature",
-                "DualBrain mode ignored",
-                {"mode": mode},
-            )
-            save_mode(mode)
-            return
-        save_mode(mode)
-        self.tracer.log("mode_set", mode)
-
     def reconfigure_models(
         self,
         main_config: ModelConfig,
-        critic_config: ModelConfig | None = None,
         main_api_key: str | None = None,
-        critic_api_key: str | None = None,
     ) -> None:
-        """Переинициализирует мозги с новыми настройками."""
+        """Переинициализирует мозг с новыми настройками."""
         self.main_config = main_config
-        self.critic_config = critic_config
         self.main_api_key = main_api_key
-        self.critic_api_key = critic_api_key
         self.brain = self._build_brain()
-        save_model_configs(self.main_config, self.critic_config)
+        save_model_configs(self.main_config)
         self.tracer.log("brain_reconfigured", "Мозг переинициализирован")
 
     def _format_plan(self, plan: TaskPlan) -> str:
@@ -1184,54 +1122,6 @@ class Agent:
         error = result.error or "Неизвестная ошибка"
         return f"[Ошибка инструмента: {error}]"
 
-    def _record_critic_decision(self, decision: CriticDecision, mode: str) -> None:
-        self.last_critic_reasons = list(decision.reasons)
-        self.tracer.log(
-            "critic_decision",
-            "Critic decision",
-            {
-                "mode": mode,
-                "should_run": decision.should_run_critic,
-                "reasons": decision.reasons,
-            },
-        )
-
-    def _finalize_critic_status(self, decision: CriticDecision, critic_text: str | None) -> None:
-        if self._critic_step_rejected:
-            self.last_critic_status = "risky"
-        else:
-            self.last_critic_status = classify_critic_status(
-                decision=decision, critic_text=critic_text
-            )
-        self.last_critic_response = critic_text
-        meta: dict[str, JSONValue] = {"status": self.last_critic_status}
-        if critic_text is not None:
-            meta["text"] = critic_text
-        preview = (critic_text or "")[:120]
-        self.tracer.log("critic_response", preview or "Critic response", meta)
-
-    def _handle_critic_failure(
-        self,
-        exc: Exception,
-        decision: CriticDecision,
-        *,
-        raw_input: str | None = None,
-        record_in_history: bool = False,
-    ) -> str:
-        self.last_critic_status = "internal_error"
-        self.last_critic_response = None
-        self.tracer.log(
-            "critic_error",
-            f"Ошибка критика: {exc}",
-            {"reasons": decision.reasons},
-        )
-        error_text = f"[Ошибка критика: {exc}]"
-        if raw_input is not None:
-            self._log_chat_interaction(raw_input=raw_input, response_text=error_text)
-            if record_in_history:
-                self._append_short_term([LLMMessage(role="assistant", content=error_text)])
-        return error_text
-
     def _handle_approval_required(
         self,
         request: ApprovalRequest,
@@ -1245,261 +1135,6 @@ class Agent:
         if record_in_history:
             self._append_short_term([LLMMessage(role="assistant", content=error_text)])
         return error_text
-
-    def _run_answer_critic(self, *, user_message: str, main_reply: str) -> str:
-        critic = self._get_critic_brain()
-        if critic is None:
-            raise CriticFailure("Критик недоступен.")
-        critic_messages = self._build_critic_messages(
-            user_message=user_message,
-            main_reply=main_reply,
-        )
-        try:
-            critic_reply = critic.generate(critic_messages)
-        except Exception as exc:  # noqa: BLE001
-            raise CriticFailure(str(exc)) from exc
-        critic_text = critic_reply.text
-        self.tracer.log(
-            "critic_review",
-            "Ответ проверен критиком",
-            {"stage": "answer"},
-        )
-        return critic_text
-
-    def _run_critic_only(self, *, user_message: str) -> str:
-        critic = self._get_critic_brain()
-        if critic is None:
-            raise CriticFailure("Критик недоступен.")
-        critic_messages = self._build_critic_only_messages(user_message=user_message)
-        try:
-            critic_reply = critic.generate(critic_messages)
-        except Exception as exc:  # noqa: BLE001
-            raise CriticFailure(str(exc)) from exc
-        critic_text = critic_reply.text
-        self.tracer.log(
-            "critic_review",
-            "Ответ критика получен",
-            {"stage": "critic-only"},
-        )
-        return critic_text
-
-    def _review_plan(
-        self,
-        plan: TaskPlan,
-        *,
-        store_critic: bool = False,
-        enforce_critic: bool = False,
-    ) -> tuple[str, str | None]:
-        plan_text = self._format_plan(plan)
-        if isinstance(self.brain, DualBrain) and self.brain.mode != "single":
-            try:
-                critic_messages = [
-                    LLMMessage(role="system", content=CRITIC_PROMPT),
-                    LLMMessage(
-                        role="user",
-                        content=f"Проверь план и предложи улучшения:\n{plan_text}",
-                    ),
-                ]
-                critic = self._get_critic_brain()
-                if critic is None:
-                    raise CriticFailure("Критик недоступен.")
-                review = critic.generate(critic_messages)
-                review_text = review.text
-                self.tracer.log(
-                    "critic_review",
-                    "План проверен критиком",
-                    {"stage": "plan", "text": review_text},
-                )
-                if store_critic:
-                    return plan_text, review_text
-                return f"{plan_text}\n\n🧠 Критик плана:\n{review_text}", None
-            except CriticFailure as exc:
-                self.tracer.log("critic_error", f"Критик не доступен: {exc}")
-                if enforce_critic:
-                    raise
-            except Exception as exc:  # noqa: BLE001
-                self.tracer.log("critic_error", f"Критик не доступен: {exc}")
-                if enforce_critic:
-                    raise CriticFailure(str(exc)) from exc
-                self.logger.warning("Не удалось получить критику плана: %s", exc)
-        return plan_text, None
-
-    def _critic_plan(self, plan: TaskPlan, *, enforce_critic: bool = False) -> TaskPlan:
-        if not isinstance(self.brain, DualBrain):
-            return plan
-        plan_text = self._format_plan(plan)
-        try:
-            critic_messages = [
-                LLMMessage(role="system", content=CRITIC_PROMPT),
-                LLMMessage(
-                    role="user",
-                    content=(
-                        "Проверь план и предложи улучшения. Верни только список шагов:\n"
-                        f"{plan_text}"
-                    ),
-                ),
-            ]
-            critic = self._get_critic_brain()
-            if critic is None:
-                raise CriticFailure("Критик недоступен.")
-            review = critic.generate(critic_messages)
-            review_text = review.text
-            self.tracer.log(
-                "critic_review",
-                "План переписан критиком",
-                {"stage": "plan_rewrite", "text": review_text},
-            )
-            new_steps = self.planner.parse_plan_text(review_text) or []
-            if len(new_steps) >= 2:
-                rewritten = TaskPlan(
-                    goal=plan.goal,
-                    steps=[PlanStep(description=s) for s in new_steps],
-                )
-                return self.planner.assign_operations(rewritten)
-        except CriticFailure as exc:
-            self.tracer.log("critic_error", f"Критик не доступен: {exc}")
-            if enforce_critic:
-                raise
-        except Exception as exc:  # noqa: BLE001
-            self.tracer.log("critic_error", f"Критик не доступен: {exc}")
-            if enforce_critic:
-                raise CriticFailure(str(exc)) from exc
-            self.logger.warning("Не удалось получить критику плана: %s", exc)
-        return plan
-
-    def _critic_step(
-        self, step: PlanStep, *, enforce_critic: bool = False
-    ) -> tuple[bool, str | None]:
-        if not isinstance(self.brain, DualBrain):
-            return True, None
-        try:
-            critic_messages = [
-                LLMMessage(role="system", content=CRITIC_PROMPT),
-                LLMMessage(
-                    role="user",
-                    content=(
-                        f"Оцени шаг плана: '{step.description}'. "
-                        "Ответь 'approve' если выполнять безопасно, иначе укажи краткую причину."
-                    ),
-                ),
-            ]
-            critic = self._get_critic_brain()
-            if critic is None:
-                raise CriticFailure("Критик недоступен.")
-            review = critic.generate(critic_messages)
-            review_text = review.text
-            if "approve" in review_text.lower():
-                self.tracer.log(
-                    "critic_step_approved",
-                    step.description,
-                )
-                return True, None
-            self._critic_step_rejected = True
-            self.tracer.log(
-                "critic_step_rejected",
-                step.description,
-                {"note": review_text.strip()},
-            )
-            return False, review_text.strip()
-        except CriticFailure as exc:
-            if enforce_critic:
-                raise
-            self.tracer.log("critic_error", f"Критик не доступен: {exc}")
-            return False, str(exc)
-        except Exception as exc:  # noqa: BLE001
-            self.tracer.log("critic_error", f"Критик не доступен: {exc}")
-            if enforce_critic:
-                raise CriticFailure(str(exc)) from exc
-            return False, str(exc)
-
-    def _should_use_step_critic(self) -> bool:
-        return isinstance(self.brain, DualBrain) and self.brain.mode == "dual"
-
-    def _should_use_dual_response(self) -> bool:
-        return isinstance(self.brain, DualBrain) and self.brain.mode == "dual"
-
-    def get_primary_brain(self) -> Brain:
-        if isinstance(self.brain, DualBrain):
-            if self.brain.mode == "critic-only":
-                return self.brain.critic
-            return self.brain.main
-        return self.brain
-
-    def _get_primary_brain(self) -> Brain:
-        return self.get_primary_brain()
-
-    def _get_critic_brain(self) -> Brain | None:
-        if isinstance(self.brain, DualBrain):
-            return self.brain.critic
-        return None
-
-    def _get_plan_brain_config(self) -> tuple[Brain | None, ModelConfig | None]:
-        if isinstance(self.brain, DualBrain):
-            if self.brain.mode == "critic-only":
-                return self.brain.critic, self.critic_config or self.main_config
-            return self.brain.main, self.main_config
-        return self.brain, self.main_config
-
-    def _history_without_latest_user(self, history: list[LLMMessage]) -> list[LLMMessage]:
-        if history and history[-1].role == "user":
-            return history[:-1]
-        return history
-
-    def _append_context_message(
-        self,
-        messages: list[LLMMessage],
-        context_text: str | None,
-    ) -> list[LLMMessage]:
-        if not context_text:
-            return messages
-        return [*messages, LLMMessage(role="system", content=context_text)]
-
-    def _build_critic_messages(
-        self,
-        *,
-        user_message: str,
-        main_reply: str,
-    ) -> list[LLMMessage]:
-        history = self._history_without_latest_user(self.critic_short_term)
-        messages = self._append_context_message(history, self.last_context_text)
-        critic_prompt = (
-            "Пользователь:\n"
-            f"{user_message}\n\n"
-            "Ответ основной модели:\n"
-            f"{main_reply}\n\n"
-            "Дай краткую критику/улучшения."
-        )
-        return [
-            *messages,
-            LLMMessage(role="system", content=CRITIC_PROMPT),
-            LLMMessage(role="user", content=critic_prompt),
-        ]
-
-    def _build_critic_only_messages(
-        self,
-        *,
-        user_message: str,
-        plan_text: str | None = None,
-    ) -> list[LLMMessage]:
-        history = self._history_without_latest_user(self.critic_short_term)
-        messages = self._append_context_message(history, self.last_context_text)
-        if plan_text:
-            critic_prompt = (
-                "Пользователь:\n"
-                f"{user_message}\n\n"
-                "План:\n"
-                f"{plan_text}\n\n"
-                "Дай краткую критику и возможные риски."
-            )
-        else:
-            critic_prompt = (
-                f"Пользователь:\n{user_message}\n\nДай краткую критику и возможные риски."
-            )
-        return [
-            *messages,
-            LLMMessage(role="system", content=CRITIC_PROMPT),
-            LLMMessage(role="user", content=critic_prompt),
-        ]
 
     def _review_answer(self, answer: str) -> str:
         return answer
@@ -1595,39 +1230,6 @@ class Agent:
         self.workspace_file_path = path
         self.workspace_file_content = content
         self.workspace_selection = selection
-
-    def _init_mode_from_config(self) -> None:
-        try:
-            mode = load_mode()
-            if mode != "single":
-                self.tracer.log(
-                    "deprecated_feature",
-                    "DualBrain mode ignored",
-                    {"mode": mode},
-                )
-                return
-            self.tracer.log("mode_set", mode)
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning("Не удалось загрузить режим: %s", exc)
-
-    def _log_deprecated_dualbrain(self) -> None:
-        deprecated: list[str] = []
-        if self._external_critic is not None:
-            deprecated.append("external_critic")
-        if self.critic_config is not None:
-            deprecated.append("critic_config")
-        if self.critic_api_key is not None:
-            deprecated.append("critic_api_key")
-        if deprecated:
-            self.tracer.log(
-                "deprecated_feature",
-                "DualBrain/critic disabled in MWV runtime",
-                {"features": deprecated},
-            )
-            self.logger.warning(
-                "Deprecated DualBrain/critic config ignored: %s",
-                ", ".join(deprecated),
-            )
 
     def _load_tools(self) -> dict[str, bool]:
         try:

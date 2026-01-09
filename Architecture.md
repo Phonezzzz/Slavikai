@@ -1,19 +1,18 @@
-# Architecture — Slavik AI Desktop Assistant
+# Architecture — Slavik AI
 
 ## Цель системы
-Локальный ассистент с PySide6 UI, DualBrain (основная + критик), пошаговым планированием и набором инструментов (файлы, shell, web, проектный индекс, workspace, TTS/STT, картинки) с трассировкой и памятью.
+Локальный агент с пошаговым планированием и набором инструментов (файлы, shell, web, проектный индекс, workspace, TTS/STT, картинки) с трассировкой и памятью.
 
 ## Слои и компоненты
-- **Core** (`core/*`): `Agent` маршрутизирует запросы, включает Safe Mode для инструментов, строит контекст (memory, feedback hints, prefs, vector search, workspace). `Planner` генерирует 2–8 шагов (LLM или эвристика). `Executor` выполняет шаги последовательно, может звать критика шагов. `AutoAgent` — примитивный параллельный запуск подагентов без инструментов. `Tracer` пишет reasoning/шаги в `logs/trace.log`.
-- **LLM** (`llm/*`): `OpenRouterBrain`, `LocalHttpBrain`, `DualBrain` (single/dual/critic-only), фабрика `create_brain`, менеджер `BrainManager`. Конфиги — `config/model_config.json`, режимы — `config/mode.json`.
+- **Core** (`core/*`): `Agent` маршрутизирует запросы, включает Safe Mode для инструментов, строит контекст (memory, feedback hints, prefs, vector search, workspace). `Planner` генерирует 2–8 шагов (LLM или эвристика). `Executor` выполняет шаги последовательно. `AutoAgent` — примитивный параллельный запуск подагентов без инструментов. `Tracer` пишет reasoning/шаги в `logs/trace.log`.
+- **LLM** (`llm/*`): `OpenRouterBrain`, `LocalHttpBrain`, фабрика `create_brain`, менеджер `BrainManager`. Конфиги — `config/model_config.json`.
 - **Tools Layer** (`tools/*`): регистрируются через `ToolRegistry`, лог вызовов `logs/tool_calls.log`, Safe Mode блокирует `web` и `shell`. Инструменты: filesystem (sandbox), shell (whitelist), web search/fetch (Serper + HTTP fetch), project index/search (VectorIndex), workspace (list/read/write/patch/run в sandbox/project), TTS/STT (HTTP), image analyze/generate (локально), http client (лимиты).
 - **Memory & Index** (`memory/*`): `MemoryManager` (SQLite, строгая валидация записей/prefs/facts), `FeedbackManager` (rating/severity/hint, авто-инжект major/fatal), `VectorIndex` (sentence-transformers, namespaces `code`/`docs`, лимиты per-namespace и total).
-- **UI** (`ui/*`): главная форма `MainWindow` с панелями Mode/Tools/Chat/Logs/ToolLogs/Reasoning/Trace/Docs/Feedback/Workspace. Chat — TTS/STT, feedback кнопки. WorkspacePanel — дерево sandbox/project, редактор, patch preview, run .py.
 - **Sandbox/Safety**: fs/shell/workspace ограничены `sandbox` (shell cwd `sandbox`, workspace `sandbox/project`). Safe Mode в реестре отключает `web` и `shell` (другие сетевые инструменты пока не блокируются). ProjectTool не привязан к sandbox (риск).
 
 ## Поток одного запроса
 1) Если сообщение — команда `/fs|/web|/sh|/plan|/auto|/project|/img...` → прямой вызов инструмента через ToolRegistry.
-2) Иначе: классификация сложности (`simple|complex`). Для complex — построение плана (LLM/эвристика), опциональная критика плана/шагов, исполнение шагов через Executor+ToolGateway.
+2) Иначе: классификация сложности (`simple|complex`). Для complex — построение плана (LLM/эвристика), исполнение шагов через Executor+ToolGateway.
 3) Для простых ответов — Brain.generate с добавленным контекстом (memory, feedback hints, prefs, vector index, workspace file/selection). Результат сохраняется в память, трассируется.
 
 ## Память и индекс
@@ -23,12 +22,10 @@
 
 ## Workspace слой
 - Инструменты `workspace_list/read/write/patch/run` работают в `sandbox/project`, ограниченные расширения (.py/.md/.txt/.json/.toml/.yaml/.yml), лимит размера (2 MB), run только .py с таймаутом.
-- UI WorkspacePanel: дерево, редактор, diff preview, apply patch (single-file), run script, передача выделения/содержимого в контекст агента.
 
 ## Наблюдаемость
 - Trace: `logs/trace.log` — reasoning, шаги плана, ошибки.
 - Tool calls: `logs/tool_calls.log` — инструмент, ok/error, meta/args.
-- UI ReasoningPanel/TraceView/ToolLogsView отображают планы, контекст и последние вызовы.
 
 ## Ограничения и пробелы
 - Safe Mode покрывает только `web` и `shell`; TTS/STT/web-fetch/project index не блокируются.

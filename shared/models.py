@@ -36,9 +36,7 @@ class ToolResult:
         return cls(ok=True, data=data or {}, meta=meta)
 
     @classmethod
-    def failure(
-        cls, error: str, meta: dict[str, JSONValue] | None = None
-    ) -> ToolResult:
+    def failure(cls, error: str, meta: dict[str, JSONValue] | None = None) -> ToolResult:
         return cls(ok=False, data={}, error=error, meta=meta)
 
 

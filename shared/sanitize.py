@@ -69,11 +69,7 @@ def _sanitize_value(key: str | None, value: Any) -> JSONValue:
         raw_bytes = _to_bytes(value)
         if key_lower in PAYLOAD_KEYS or len(raw_bytes) > MAX_FIELD_PREVIEW:
             return _truncate_payload(value)
-        return (
-            value.decode("utf-8", errors="replace")
-            if isinstance(value, bytes)
-            else value
-        )
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
 
     return str(value)
 
@@ -84,9 +80,7 @@ def sanitize_record(
     max_bytes: int = MAX_RECORD_BYTES,
 ) -> dict[str, JSONValue]:
     sanitized = {k: _sanitize_value(k, v) for k, v in record.items()}
-    encoded = json.dumps(sanitized, ensure_ascii=False).encode(
-        "utf-8", errors="replace"
-    )
+    encoded = json.dumps(sanitized, ensure_ascii=False).encode("utf-8", errors="replace")
     if len(encoded) <= max_bytes:
         return sanitized
 
@@ -94,9 +88,7 @@ def sanitize_record(
     for heavy_key in ("args", "meta"):
         if heavy_key in sanitized:
             sanitized[heavy_key] = _truncate_payload(sanitized[heavy_key])
-    encoded = json.dumps(sanitized, ensure_ascii=False).encode(
-        "utf-8", errors="replace"
-    )
+    encoded = json.dumps(sanitized, ensure_ascii=False).encode("utf-8", errors="replace")
     if len(encoded) <= max_bytes:
         return sanitized
 

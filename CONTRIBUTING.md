@@ -12,24 +12,13 @@
 - `make venv`
 - (опционально) `make activate` → покажет команду для активации venv в текущем shell
 
-2) Запуск UI (PySide6):
+2) Запуск backend (пример):
 
-- foreground: `make run`
-- background: `make up` / `make down` (pid+log в `.run/`)
-
----
-
-Альтернатива без `make`:
-
-- `python3 -m venv venv`
-- `source venv/bin/activate`
-- `pip install -r requirements.txt`
-- `python3 main.py`
+- `python -m server`
 
 ## Конфигурация (фактические точки интеграции)
 
-- Модели: `config/model_config.json` (если файла нет — UI стартует с `DummyBrain`/`DummyCritic`, см. `ui/main_window.py`).
-- Режим DualBrain: `config/mode.json` (`single`, `dual`, `critic-only`, см. `config/mode_config.py`).
+- Модели: `config/model_config.json`.
 - Переключатели инструментов: `config/tools.json` (создаётся при сохранении, см. `config/tools_config.py`).
 - Shell whitelist: по умолчанию `config/shell_config.json` (см. `config/shell_config.py`, `tools/shell_tool.py`).
 
@@ -96,7 +85,6 @@ Workspace ограничен `sandbox/project/`:
 - патчи: `workspace_patch` (строгий `unified diff`, лимиты);
 - запуск кода: `workspace_run` (только `.py`, таймаут).
 
-UI панель для работы с Workspace: `ui/workspace_panel.py`.
 
 ## Commit rules и CI
 

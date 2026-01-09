@@ -8,7 +8,6 @@ from core.tool_gateway import ToolGateway
 from core.tracer import Tracer
 from shared.models import PlanStep, PlanStepStatus, TaskPlan, ToolRequest, ToolResult
 
-CriticCallback = Callable[[PlanStep], tuple[bool, str | None]]
 AgentCallback = Callable[[PlanStep], str]
 
 _TEXT_EXTENSIONS = {".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml"}
@@ -37,7 +36,7 @@ def _extract_path(text: str, allowed_exts: set[str] | None = None) -> str | None
 
 
 class Executor:
-    """Выполняет шаги плана с трассировкой и опциональной критикой."""
+    """Выполняет шаги плана с трассировкой."""
 
     def __init__(self, tracer: Tracer | None = None) -> None:
         self.tracer = tracer or Tracer()
@@ -47,22 +46,11 @@ class Executor:
         plan: TaskPlan,
         tool_gateway: ToolGateway | None = None,
         agent_callback: AgentCallback | None = None,
-        critic_callback: CriticCallback | None = None,
     ) -> TaskPlan:
-        self.tracer.log(
-            "execution_start", f"Начато выполнение плана ({len(plan.steps)} шагов)"
-        )
+        self.tracer.log("execution_start", f"Начато выполнение плана ({len(plan.steps)} шагов)")
         for index, step in enumerate(plan.steps, start=1):
             self.tracer.log("step_started", f"{index}. {step.description}")
             step.status = PlanStepStatus.IN_PROGRESS
-
-            if critic_callback:
-                ok, note = critic_callback(step)
-                if not ok:
-                    step.status = PlanStepStatus.ERROR
-                    step.result = f"Отклонено критиком: {note or 'нет причины'}"
-                    self.tracer.log("step_failed", step.result or "")
-                    break
 
             try:
                 if agent_callback:
@@ -83,17 +71,13 @@ class Executor:
             except Exception as exc:  # noqa: BLE001
                 step.status = PlanStepStatus.ERROR
                 step.result = str(exc)
-                self.tracer.log(
-                    "step_failed", f"{index}. {step.description}", {"error": str(exc)}
-                )
+                self.tracer.log("step_failed", f"{index}. {step.description}", {"error": str(exc)})
                 break
 
         self.tracer.log("execution_end", "План выполнен.")
         return plan
 
-    def _execute_with_tools(
-        self, step: PlanStep, plan: TaskPlan, gateway: ToolGateway
-    ) -> str:
+    def _execute_with_tools(self, step: PlanStep, plan: TaskPlan, gateway: ToolGateway) -> str:
         if step.operation is None:
             return f"Выполнен: {step.description}"
 
@@ -112,15 +96,11 @@ class Executor:
         elif step.operation == "shell":
             request = ToolRequest(name="shell", args={"command": "echo step"})
         elif step.operation == "project":
-            request = ToolRequest(
-                name="project", args={"cmd": "find", "args": [plan.goal]}
-            )
+            request = ToolRequest(name="project", args={"cmd": "find", "args": [plan.goal]})
         elif step.operation == "tts":
             request = ToolRequest(name="tts", args={"text": plan.goal})
         elif step.operation == "stt":
-            audio_path = _extract_path(
-                step.description, _AUDIO_EXTENSIONS
-            ) or _extract_path(
+            audio_path = _extract_path(step.description, _AUDIO_EXTENSIONS) or _extract_path(
                 plan.goal,
                 _AUDIO_EXTENSIONS,
             )
@@ -128,9 +108,7 @@ class Executor:
                 raise RuntimeError("Не указан аудиофайл для распознавания.")
             request = ToolRequest(name="stt", args={"file_path": audio_path})
         elif step.operation == "image_analyze":
-            image_path = _extract_path(
-                step.description, _IMAGE_EXTENSIONS
-            ) or _extract_path(
+            image_path = _extract_path(step.description, _IMAGE_EXTENSIONS) or _extract_path(
                 plan.goal,
                 _IMAGE_EXTENSIONS,
             )

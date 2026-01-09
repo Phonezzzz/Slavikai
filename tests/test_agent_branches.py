@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from config.mode_config import load_mode, save_mode
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
@@ -50,7 +48,7 @@ class StubExecutor:
     def __init__(self) -> None:
         self.run_called = False
 
-    def run(self, plan: TaskPlan, tool_gateway=None, critic_callback=None) -> TaskPlan:  # noqa: ANN001
+    def run(self, plan: TaskPlan, tool_gateway=None) -> TaskPlan:  # noqa: ANN001
         self.run_called = True
         for step in plan.steps:
             step.status = PlanStepStatus.DONE
@@ -93,12 +91,6 @@ def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
     assert executor.run_called
 
 
-def test_agent_set_mode_invalid(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
-    agent.set_mode("dual")
-    assert agent._current_mode() == "single"  # noqa: SLF001
-
-
 def test_save_feedback_major_hint(tmp_path: Path) -> None:
     agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
     _log_interaction(agent, "1")
@@ -110,14 +102,3 @@ def test_save_feedback_major_hint(tmp_path: Path) -> None:
     hints = agent._collect_feedback_hints(1, severity_filter=["major", "fatal"])  # noqa: SLF001
     assert hints and hints[0]["severity"] in {"major", "fatal"}
     assert hints[0]["hint"]
-
-
-def test_mode_config_invalid_file(tmp_path: Path) -> None:
-    bad_path = tmp_path / "mode.json"
-    bad_path.write_text("{notjson", encoding="utf-8")
-    try:
-        load_mode(bad_path)
-    except RuntimeError:
-        pass
-    save_mode("single", bad_path)
-    assert json.loads(bad_path.read_text())["mode"] == "single"

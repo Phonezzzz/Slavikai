@@ -37,7 +37,7 @@ class FakeExecutor:
     def __init__(self) -> None:
         self.run_called = False
 
-    def run(self, plan: TaskPlan, tool_gateway=None, critic_callback=None) -> TaskPlan:
+    def run(self, plan: TaskPlan, tool_gateway=None) -> TaskPlan:
         self.run_called = True
         for step in plan.steps:
             step.status = PlanStepStatus.DONE

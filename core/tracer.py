@@ -51,9 +51,7 @@ def _rotate_log_if_needed(
             if src.exists():
                 src.rename(path.with_name(f"{path.name}.{index + 1}"))
         path.rename(path.with_name(f"{path.name}.1"))
-        logger.info(
-            "Tracer: лог %s превысил %d байт, выполнена ротация", path, max_bytes
-        )
+        logger.info("Tracer: лог %s превысил %d байт, выполнена ротация", path, max_bytes)
     except OSError as exc:
         logger.warning("Tracer: ошибка ротации лога %s: %s", path, exc)
 
@@ -66,9 +64,7 @@ class Tracer:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._logger = logging.getLogger("SlavikAI.Tracer")
 
-    def log(
-        self, event_type: str, message: str, meta: dict[str, JSONValue] | None = None
-    ) -> None:
+    def log(self, event_type: str, message: str, meta: dict[str, JSONValue] | None = None) -> None:
         record: TraceRecord = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "event": event_type,

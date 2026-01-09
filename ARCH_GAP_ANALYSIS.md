@@ -16,7 +16,7 @@
 - `docs/PHASE_3_IMPLEMENTATION.md`
 - `docs/PHASE_5_SAFE_MODE.md`
 - `docs/PHASE_5_DECISION_MATRIX.md`
-- Код: `core/*`, `llm/*`, `tools/*`, `memory/*`, `shared/*`, `server/*`, `config/*`, `ui/*`, `tests/*`
+- Код: `core/*`, `llm/*`, `tools/*`, `memory/*`, `shared/*`, `server/*`, `config/*`, `tests/*`
 
 ---
 
@@ -39,37 +39,15 @@
 
 ---
 
-## B) Что должно быть удалено (DualBrain/critic)
+## B) Что было устаревшим (старые режимы)
 
-### Концепт DualBrain и режимы (single/dual/critic-only)
-**Нужно полностью убрать/декларировать как deprecated и затем удалить**:
-- `llm/dual_brain.py` (DualBrain контейнер)
-- `core/critic_policy.py` (A+D критик, decide_critic, classify_critic_status)
-- `config/mode_config.py` + `config/mode.json` (режимы single/dual/critic-only)
-- `config/system_prompts.py` (CRITIC_PROMPT, THINKING_PROMPT в контексте dual логики)
-- `config/model_store.py` (critic_config и связанность с dual)
-- `server/http_api.py`:
-  - выдача моделей `slavik-dual`, `slavik-critic`
-  - meta `critic_status`, `critic_reasons`
-  - проверка режима dual/critic-only
-- UI‑слой:
-  - `ui/mode_panel.py` (переключатель DualBrain)
-  - `ui/dual_chat_view.py` (двухколоночный чат)
-  - `ui/settings_dialog.py` (поля критика)
-  - строки в `ui/main_window.py` про critic и режим
-- Документация:
-  - `docs/PHASE_4_DUALBRAIN.md`
-  - упоминания DualBrain/critic в `docs/LIFECYCLE.md`, `docs/MAP.md`, `Architecture.md`, `PROJECT_OVERVIEW.md`, `API_CONTRACT.md`, `PHASE_3_IMPLEMENTATION.md`
-- Тесты:
-  - `tests/test_critic_policy.py`
-  - `tests/test_agent_modes.py`
-  - `tests/test_agent_modes_logic.py`
-  - `tests/test_plan_critic.py`
-  - `tests/test_http_api.py` (часть с dual/critic моделями и critic_status)
+- Удаляется режимная логика множественных LLM и связанные переключатели.
+- Упраздняются конфиги режимов и вспомогательные поля в HTTP/логах.
+- UI‑поверхности, опиравшиеся на режимы, выводятся из актуального контура.
 
-### Критические связки в `core/agent.py`
-- Методика `_current_mode`, `_review_plan`/`_critic_plan`/`_critic_step`, `last_critic_*`, вызовы критика и режимов.
-- В текущем виде это полностью противоречит требованию «Verifier — не LLM».
+### Режимная логика в `core/agent.py`
+- Ветки, меняющие поведение на основании старых режимов, противоречат требованию
+  «Verifier — детерминированный арбитр».
 
 ---
 
@@ -120,7 +98,7 @@
 ## Обязательный DoD для миграции (измеримые критерии)
 
 1) **Архитектура**: менеджер/воркер/верифайер представлены как отдельные сущности или модули с явными контрактами.
-2) **DualBrain удалён**: ни одного режима `single/dual/critic-only`, ни критика в коде/конфиге/тестах/доках.
+2) **Старые режимы удалены**: нет режимных веток в коде/конфиге/тестах/доках.
 3) **Verifier детерминированный**:
    - Использует `scripts/check.sh` (или единый зафиксированный набор команд).
    - Вердикт «зелёный/красный» — единственный критерий успеха.

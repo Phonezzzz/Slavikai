@@ -9,9 +9,7 @@ from shared.models import LLMMessage
 
 
 class SimpleBrain(Brain):
-    def generate(
-        self, messages: list[LLMMessage], config: ModelConfig | None = None
-    ) -> LLMResult:
+    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
         return LLMResult(text="ok")
 
 

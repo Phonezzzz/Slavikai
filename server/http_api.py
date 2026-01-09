@@ -19,17 +19,12 @@ from config.http_server_config import (
 )
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
-from llm.dual_brain import DualBrain
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
 from tools.tool_logger import DEFAULT_LOG_PATH as TOOL_CALLS_LOG
 
-ALLOWED_MODELS: Final[dict[str, str]] = {
-    "slavik-single": "single",
-    "slavik-dual": "dual",
-    "slavik-critic": "critic-only",
-}
+ALLOWED_MODELS: Final[set[str]] = {"slavik"}
 ALLOWED_ROLES: Final[set[str]] = {"system", "user", "assistant", "tool"}
 ALLOWED_MESSAGE_KEYS: Final[set[str]] = {"role", "content", "tool_calls"}
 ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = {
@@ -56,9 +51,7 @@ EXTRA_SAMPLING_KEYS: Final[set[str]] = {
 }
 SAMPLING_PREFIXES: Final[tuple[str, ...]] = ("ollama_", "mirostat")
 TOOL_PIPELINE_ENABLED: Final[bool] = False
-_CATEGORY_MAP: Final[dict[str, ApprovalCategory]] = {
-    item: item for item in ALL_CATEGORIES
-}
+_CATEGORY_MAP: Final[dict[str, ApprovalCategory]] = {item: item for item in ALL_CATEGORIES}
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
@@ -116,9 +109,6 @@ class TracerProtocol(Protocol):
 class AgentProtocol(Protocol):
     brain: object
     tools_enabled: dict[str, bool]
-    last_critic_response: str | None
-    last_critic_status: str | None
-    last_critic_reasons: list[str]
     last_approval_request: ApprovalRequest | None
     last_chat_interaction_id: str | None
     tracer: TracerProtocol
@@ -247,9 +237,7 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
     if model not in ALLOWED_MODELS:
         return None, f"Неизвестная модель: {model}"
 
-    messages, msg_error, tool_calling_present = _validate_messages(
-        payload.get("messages")
-    )
+    messages, msg_error, tool_calling_present = _validate_messages(payload.get("messages"))
     if msg_error:
         return None, msg_error
     if messages is None:
@@ -289,28 +277,6 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
         ),
         "",
     )
-
-
-def _infer_critic_status(agent: AgentProtocol) -> str:
-    explicit_status = getattr(agent, "last_critic_status", None)
-    if isinstance(explicit_status, str) and explicit_status.strip():
-        return explicit_status
-    if isinstance(agent.brain, DualBrain):
-        if agent.brain.mode == "single":
-            return "disabled"
-        if agent.last_critic_response:
-            return "ok"
-        return "uncertain"
-    return "disabled"
-
-
-def _apply_mode(agent: AgentProtocol, mode: str) -> None:
-    if isinstance(agent.brain, DualBrain):
-        agent.brain.set_mode(mode)
-        agent.tracer.log("mode_set", mode)
-        return
-    if mode != "single":
-        raise ValueError("Режимы dual/critic-only недоступны без критика.")
 
 
 def _parse_trace_log(path: Path) -> list[TraceRecord]:
@@ -453,12 +419,8 @@ def _filter_tool_calls(
                     "tool": str(data.get("tool") or ""),
                     "ok": bool(data.get("ok")),
                     "error": data.get("error"),
-                    "args": (
-                        data.get("args") if isinstance(data.get("args"), dict) else {}
-                    ),
-                    "meta": (
-                        data.get("meta") if isinstance(data.get("meta"), dict) else {}
-                    ),
+                    "args": (data.get("args") if isinstance(data.get("args"), dict) else {}),
+                    "meta": (data.get("meta") if isinstance(data.get("meta"), dict) else {}),
                 }
             )
     return results
@@ -483,9 +445,7 @@ def _serialize_trace_events(
 
 async def handle_models(request: web.Request) -> web.Response:
     models = [
-        {"id": "slavik-single", "object": "model", "owned_by": "slavik"},
-        {"id": "slavik-dual", "object": "model", "owned_by": "slavik"},
-        {"id": "slavik-critic", "object": "model", "owned_by": "slavik"},
+        {"id": "slavik", "object": "model", "owned_by": "slavik"},
     ]
     return _json_response({"object": "list", "data": models})
 
@@ -555,11 +515,9 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             code="tool_calling_not_supported",
         )
 
-    mode = ALLOWED_MODELS[parsed.model]
     trace_id: str | None = None
     try:
         async with agent_lock:
-            _apply_mode(agent, mode)
             loop = asyncio.get_running_loop()
             response_text = await loop.run_in_executor(
                 None,
@@ -567,13 +525,6 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                 parsed.messages,
             )
             trace_id = agent.last_chat_interaction_id
-    except ValueError as exc:
-        return _error_response(
-            status=400,
-            message=str(exc),
-            error_type="invalid_request_error",
-            code="model_not_available",
-        )
     except Exception as exc:  # noqa: BLE001
         return _error_response(
             status=500,
@@ -623,19 +574,14 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         )
 
     session_approved = bool(approved_categories)
-    critic_status = _infer_critic_status(agent)
     safe_mode = bool(agent.tools_enabled.get("safe_mode", False))
 
     slavik_meta: dict[str, JSONValue] = {
         "trace_id": trace_id,
         "session_id": session_id,
-        "critic_status": critic_status,
         "session_approved": session_approved,
         "safe_mode": safe_mode,
     }
-    critic_reasons = getattr(agent, "last_critic_reasons", [])
-    if isinstance(critic_reasons, list) and critic_reasons:
-        slavik_meta["critic_reasons"] = critic_reasons
 
     response_payload: dict[str, JSONValue] = {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -869,9 +815,7 @@ async def handle_approve_session(request: web.Request) -> web.Response:
 
     approved_categories: set[ApprovalCategory] = set()
     if categories:
-        approved_categories = await session_store.approve(
-            session_id.strip(), categories
-        )
+        approved_categories = await session_store.approve(session_id.strip(), categories)
         if agent is not None:
             try:
                 agent.tracer.log(

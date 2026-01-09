@@ -158,16 +158,10 @@ def decide_action(
         return ApprovalDecision("allow", "no_intent", [], [])
     if not context.safe_mode:
         return ApprovalDecision("allow", "safe_mode_disabled", intents, [])
-    required = [
-        intent
-        for intent in intents
-        if intent.category not in context.approved_categories
-    ]
+    required = [intent for intent in intents if intent.category not in context.approved_categories]
     if required:
         categories = _unique_categories(required)
-        return ApprovalDecision(
-            "require_approval", "category_not_approved", required, categories
-        )
+        return ApprovalDecision("require_approval", "category_not_approved", required, categories)
     return ApprovalDecision("allow", "approved", intents, [])
 
 

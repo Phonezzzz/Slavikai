@@ -1,4 +1,4 @@
-# API_CONTRACT - Slavik <-> Open WebUI (Phase 2)
+# API_CONTRACT - Slavik <-> Open WebUI
 
 Этот документ фиксирует API‑контракт между UI (Open WebUI) и backend‑агентом Slavik.
 Контракт задаёт форматы, но не внедряет логику: весь интеллект остаётся в Python‑backend.
@@ -22,9 +22,7 @@
 ## 2) Модели и режимы
 
 ### Виртуальные модели (OpenAI‑совместимый список)
-- `slavik-single` → `DualBrain` в режиме `single`
-- `slavik-dual` → `DualBrain` в режиме `dual`
-- `slavik-critic` → `DualBrain` в режиме `critic-only`
+- `slavik` → основной режим исполнения
 
 ## 3) Ошибки (единый формат)
 
@@ -62,9 +60,7 @@
 {
   "object": "list",
   "data": [
-    { "id": "slavik-single", "object": "model", "owned_by": "slavik" },
-    { "id": "slavik-dual", "object": "model", "owned_by": "slavik" },
-    { "id": "slavik-critic", "object": "model", "owned_by": "slavik" }
+    { "id": "slavik", "object": "model", "owned_by": "slavik" }
   ]
 }
 ```
@@ -78,7 +74,7 @@
 **Request (минимум):**
 ```json
 {
-  "model": "slavik-dual",
+  "model": "slavik",
   "messages": [
     { "role": "user", "content": "..." }
   ],
@@ -102,7 +98,7 @@
   "id": "chatcmpl-uuid",
   "object": "chat.completion",
   "created": 1710000000,
-  "model": "slavik-dual",
+  "model": "slavik",
   "choices": [
     {
       "index": 0,
@@ -116,7 +112,6 @@
   "slavik_meta": {
     "trace_id": "uuid",
     "session_id": "uuid",
-    "critic_status": "ok | risky | bad_plan | uncertain | disabled",
     "session_approved": false,
     "safe_mode": true
   }
@@ -147,7 +142,6 @@
 
 **Опционально (когда будет доступно):**
 - `plan` со списком шагов (`description`, `status`, `operation`, `result`).
-- `critic_notes` (краткие замечания критика).
 
 ---
 
@@ -220,21 +214,17 @@
 - InteractionLog + Feedback: `memory/memory_companion.db` (`memory/memory_companion_store.py`).
 - План/шаги: `core/agent.py` (`last_plan`, `last_plan_original`) — пока в памяти процесса.
 
-## 6) Набросок статусов
-- `critic_status`: `ok | risky | bad_plan | uncertain | disabled`
-- `tool_status` / `blocked_reason`: см. `shared/memory_companion_models.py`
-
-## 7) Совместимость
+## 6) Совместимость
 - OpenAI‑совместимый формат для `/v1/chat/completions` и `/v1/models`.
 - Любые расширения — строго под ключом `slavik_meta` и через `/slavik/*` endpoints.
 
-## 8) Примеры (минимальные контракт‑тесты)
+## 7) Примеры (минимальные контракт‑тесты)
 
-### 8.1 Обычный запрос (stream=false)
+### 7.1 Обычный запрос (stream=false)
 **Request:**
 ```json
 {
-  "model": "slavik-dual",
+  "model": "slavik",
   "messages": [
     { "role": "user", "content": "Сделай краткое резюме проекта." }
   ],
@@ -248,7 +238,7 @@
   "id": "chatcmpl-uuid",
   "object": "chat.completion",
   "created": 1710000000,
-  "model": "slavik-dual",
+  "model": "slavik",
   "choices": [
     {
       "index": 0,
@@ -260,11 +250,11 @@
 }
 ```
 
-### 8.2 Неизвестный sampling‑параметр (игнорируется)
+### 7.2 Неизвестный sampling‑параметр (игнорируется)
 **Request:**
 ```json
 {
-  "model": "slavik-single",
+  "model": "slavik",
   "messages": [
     { "role": "user", "content": "Объясни, что такое VectorIndex." }
   ],
@@ -278,7 +268,7 @@
   "id": "chatcmpl-uuid",
   "object": "chat.completion",
   "created": 1710000000,
-  "model": "slavik-single",
+  "model": "slavik",
   "choices": [
     {
       "index": 0,
@@ -291,11 +281,11 @@
 ```
 Примечание: в trace должна появиться warning‑запись о проигнорированном `top_k`.
 
-### 8.3 stream=true (не поддержан)
+### 7.3 stream=true (не поддержан)
 **Request:**
 ```json
 {
-  "model": "slavik-dual",
+  "model": "slavik",
   "messages": [
     { "role": "user", "content": "Привет" }
   ],
@@ -316,11 +306,11 @@
 }
 ```
 
-### 8.4 Tool-calling при отключённом tool‑pipeline
+### 7.4 Tool-calling при отключённом tool‑pipeline
 **Request:**
 ```json
 {
-  "model": "slavik-dual",
+  "model": "slavik",
   "messages": [
     { "role": "user", "content": "Список файлов" },
     {

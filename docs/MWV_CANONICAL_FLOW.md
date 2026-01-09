@@ -1,7 +1,7 @@
 # MWV_CANONICAL_FLOW — канонический поток Manager → Worker → Verifier
 
 Документ фиксирует единственный допустимый runtime‑поток для MWV.
-LLM‑критики и DualBrain не используются как арбитр.
+LLM не используется как арбитр.
 
 ## 1) Маршрутизация (chat vs mwv)
 

@@ -30,27 +30,19 @@ def model_config_from_dict(data: dict[str, Any]) -> ModelConfig:
     )
 
 
-def load_model_configs(
-    path: Path = MODEL_CONFIG_PATH,
-) -> tuple[ModelConfig | None, ModelConfig | None]:
+def load_model_configs(path: Path = MODEL_CONFIG_PATH) -> ModelConfig | None:
     if not path.exists():
-        return None, None
+        return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    main_cfg = model_config_from_dict(data["main"]) if "main" in data else None
-    critic_cfg = model_config_from_dict(data["critic"]) if "critic" in data else None
-    return main_cfg, critic_cfg
+    if "main" in data:
+        return model_config_from_dict(data["main"])
+    return None
 
 
-def save_model_configs(
-    main: ModelConfig | None,
-    critic: ModelConfig | None = None,
-    path: Path = MODEL_CONFIG_PATH,
-) -> None:
+def save_model_configs(main: ModelConfig | None, path: Path = MODEL_CONFIG_PATH) -> None:
     payload: dict[str, Any] = {}
     if main:
         payload["main"] = model_config_to_dict(main)
-    if critic:
-        payload["critic"] = model_config_to_dict(critic)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
