@@ -751,13 +751,16 @@ class Agent:
         cmd = parts[0][1:].lower()
         args = parts[1:]
         self.tracer.log("tool_invoked", cmd, {"args": args})
+        def _wrap(response: str) -> str:
+            return self._format_command_lane_response(response)
 
         try:
             if cmd == "auto":
                 goal = " ".join(args)
                 result = self.handle_auto_command(goal)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             if cmd == "plan":
                 goal = " ".join(args)
@@ -773,8 +776,9 @@ class Agent:
                     ),
                 )
                 result = self._format_plan(executed)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             if cmd == "fs":
                 operation = args[0] if args else "list"
@@ -782,16 +786,18 @@ class Agent:
                 req = ToolRequest(name="fs", args={"op": operation, "path": path_arg})
                 tool_result = self._call_tool_logged(command, req)
                 result = self._format_tool_result(tool_result)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             if cmd == "web":
                 query = " ".join(args)
                 req = ToolRequest(name="web", args={"query": query})
                 tool_result = self._call_tool_logged(command, req)
                 result = self._format_tool_result(tool_result)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             if cmd == "sh":
                 req = ToolRequest(
@@ -803,33 +809,38 @@ class Agent:
                 )
                 tool_result = self._call_tool_logged(command, req)
                 result = self._format_tool_result(tool_result)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             if cmd == "project":
                 if not args:
                     result = "[Нужно указать подкоманду: index|find]"
-                    self._log_chat_interaction(raw_input=command, response_text=result)
-                    return result
+                    response = _wrap(result)
+                    self._log_chat_interaction(raw_input=command, response_text=response)
+                    return response
                 req = ToolRequest(name="project", args={"cmd": args[0], "args": args[1:]})
                 tool_result = self._call_tool_logged(command, req)
                 result = self._format_tool_result(tool_result)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             if cmd in {"imggen", "img_generate"}:
                 prompt = " ".join(args) or "image"
                 req = ToolRequest(name="image_generate", args={"prompt": prompt})
                 tool_result = self._call_tool_logged(command, req)
                 result = self._format_tool_result(tool_result)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             if cmd in {"imganalyze", "img_analyze"}:
                 if not args:
                     result = "[Нужно указать base64 или путь]"
-                    self._log_chat_interaction(raw_input=command, response_text=result)
-                    return result
+                    response = _wrap(result)
+                    self._log_chat_interaction(raw_input=command, response_text=response)
+                    return response
                 raw_value = args[0].strip()
                 if raw_value.startswith("base64:"):
                     payload = raw_value.removeprefix("base64:").strip()
@@ -840,8 +851,9 @@ class Agent:
                     req = ToolRequest(name="image_analyze", args={"path": raw_value})
                 tool_result = self._call_tool_logged(command, req)
                 result = self._format_tool_result(tool_result)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             if cmd == "trace":
                 logs = self.tracer.read_recent(40)
@@ -852,8 +864,9 @@ class Agent:
                     message = log.get("message", "")
                     lines.append(f"[{timestamp}] {event}: {message}")
                 result = "\n".join(lines)
-                self._log_chat_interaction(raw_input=command, response_text=result)
-                return result
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
 
             unknown = f"[Инструмент '{cmd}' неактивен или неизвестен]"
             self._log_tool_interaction(
@@ -861,19 +874,22 @@ class Agent:
                 request=ToolRequest(name=cmd, args={"args": args}),
                 result=ToolResult.failure(f"Инструмент {cmd} не зарегистрирован"),
             )
-            self._log_chat_interaction(raw_input=command, response_text=unknown)
-            return unknown
+            response = _wrap(unknown)
+            self._log_chat_interaction(raw_input=command, response_text=response)
+            return response
         except ApprovalRequired as exc:
             return self._handle_approval_required(
                 exc.request,
                 raw_input=command,
                 record_in_history=False,
+                command_lane=True,
             )
         except Exception as exc:  # noqa: BLE001
             self.tracer.log("error", f"Ошибка при вызове инструмента: {exc}")
             error_text = f"[Ошибка при вызове инструмента: {exc}]"
-            self._log_chat_interaction(raw_input=command, response_text=error_text)
-            return error_text
+            response = _wrap(error_text)
+            self._log_chat_interaction(raw_input=command, response_text=response)
+            return response
 
     def _should_record_in_history(self, content: str) -> bool:
         if content.startswith("/"):
@@ -1375,15 +1391,24 @@ class Agent:
         error = result.error or "Неизвестная ошибка"
         return f"[Ошибка инструмента: {error}]"
 
+    def _format_command_lane_response(self, response: str) -> str:
+        prefix = "Командный режим (без MWV)"
+        if not response:
+            return prefix
+        return f"{prefix}\n{response}".strip()
+
     def _handle_approval_required(
         self,
         request: ApprovalRequest,
         *,
         raw_input: str,
         record_in_history: bool = False,
+        command_lane: bool = False,
     ) -> str:
         self.last_approval_request = request
         error_text = "[Требуется подтверждение действия]"
+        if command_lane:
+            error_text = self._format_command_lane_response(error_text)
         self._log_chat_interaction(raw_input=raw_input, response_text=error_text)
         if record_in_history:
             self._append_short_term([LLMMessage(role="assistant", content=error_text)])
