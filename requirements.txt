@@ -34,6 +34,8 @@ pydantic>=2.7.0
 mypy>=1.11.0
 types-requests>=2.32.0.20240907
 types-Pillow>=10.2.0.20240520
+types-PyYAML>=6.0.12.20240917
+types-jsonschema>=4.23.0.20240813
 PySide6-stubs>=6.7.0
 
 pytest>=8.3.0

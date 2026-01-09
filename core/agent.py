@@ -38,6 +38,14 @@ from core.mwv.verifier_runtime import VerifierRuntime
 from core.mwv.worker import WorkerRuntime
 from core.planner import Planner
 from core.rule_engine import PolicyApplication, RuleEngine
+from core.skills.candidates import (
+    CandidateDraft,
+    SkillCandidateWriter,
+    sanitize_text,
+    suggest_patterns,
+)
+from core.skills.index import SkillIndex, SkillMatch
+from core.skills.models import SkillRisk
 from core.tool_gateway import ToolGateway
 from core.tracer import Tracer
 from llm.brain_base import Brain
@@ -125,6 +133,7 @@ SAFE_MODE_TOOLS_OFF = {
     "workspace_run",
 }
 MAX_MWV_ATTEMPTS = 3
+SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
 _DEFAULT_POLICY_DECAY_HALF_LIFE_DAYS = 30
 MAX_SHORT_TERM_MESSAGES = 20
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
@@ -190,6 +199,8 @@ class Agent:
             self._apply_safe_mode(True)
         self.memory = MemoryManager("memory/memory.db")
         self.vectors = VectorIndex("memory/vectors.db")
+        self.skill_index = SkillIndex.load_default()
+        self._skill_candidate_writer = SkillCandidateWriter()
         self.short_term: list[LLMMessage] = []
         self.conversation_id = str(uuid.uuid4())
         self.session_id: str | None = None
@@ -199,6 +210,9 @@ class Agent:
         self.last_hints_used: list[str] = []
         self.last_hints_meta: list[dict[str, str]] = []
         self.last_context_text: str | None = None
+        self._last_skill_match: SkillMatch | None = None
+        self._last_user_input: str | None = None
+        self._tool_error_counts: dict[str, int] = {}
         self.last_approval_request: ApprovalRequest | None = None
         self.last_reasoning: str | None = None
         self.workspace_file_path: str | None = None
@@ -212,6 +226,7 @@ class Agent:
             return "[Пустое сообщение]"
 
         last_content = messages[-1].content.strip()
+        self._last_user_input = last_content
         record_in_history = self._should_record_in_history(last_content)
         try:
             if record_in_history:
@@ -237,12 +252,24 @@ class Agent:
                 last_content,
                 context={"safe_mode": bool(self.tools_enabled.get("safe_mode", False))},
             )
+            skill_match = self.skill_index.match(last_content)
+            self._last_skill_match = skill_match
+            if skill_match is None:
+                self.tracer.log("skill_match", "none")
+            else:
+                self.tracer.log(
+                    "skill_match",
+                    skill_match.entry.id,
+                    {"pattern": skill_match.pattern},
+                )
             self.tracer.log(
                 "routing_decision",
                 decision.route,
                 {"reason": decision.reason, "flags": decision.risk_flags},
             )
             if decision.route == "mwv":
+                if skill_match is None:
+                    self._record_unknown_skill_candidate(last_content, decision)
                 return self._run_mwv_flow(messages, last_content, decision, record_in_history)
             return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
@@ -372,6 +399,12 @@ class Agent:
     ) -> Callable[[Sequence[MWVMessage], RunContext], TaskPacket]:
         def _build(messages: Sequence[MWVMessage], context: RunContext) -> TaskPacket:
             goal = messages[-1].content if messages else ""
+            skill_context: dict[str, JSONValue] = {}
+            if self._last_skill_match is not None:
+                skill_context = {
+                    "skill_id": self._last_skill_match.entry.id,
+                    "skill_pattern": self._last_skill_match.pattern,
+                }
             return TaskPacket(
                 task_id=str(uuid.uuid4()),
                 session_id=context.session_id,
@@ -382,6 +415,7 @@ class Agent:
                 context={
                     "route_reason": decision.reason,
                     "risk_flags": decision.risk_flags,
+                    **skill_context,
                 },
             )
 
@@ -781,13 +815,114 @@ class Agent:
         pre_call: Callable[[ToolRequest], object | None] | None = None,
         post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
     ) -> ToolGateway:
+        def _post_call(request: ToolRequest, result: ToolResult, context: object | None) -> None:
+            if post_call:
+                post_call(request, result, context)
+            self._track_tool_error(request, result)
+
         return ToolGateway(
             self.tool_registry,
             pre_call=pre_call,
-            post_call=post_call,
+            post_call=_post_call,
             approval_context=self._approval_context(),
             log_event=self.tracer.log,
         )
+
+    def _track_tool_error(self, request: ToolRequest, result: ToolResult) -> None:
+        if result.ok:
+            self._tool_error_counts.pop(request.name, None)
+            return
+        if not self._should_track_tool_error(result):
+            return
+        count = self._tool_error_counts.get(request.name, 0) + 1
+        self._tool_error_counts[request.name] = count
+        if count < SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD:
+            return
+        self._tool_error_counts[request.name] = 0
+        self._record_tool_error_candidate(request, result, count)
+
+    def _should_track_tool_error(self, result: ToolResult) -> bool:
+        error_text = (result.error or "").lower()
+        if not error_text:
+            return True
+        ignore_markers = (
+            "safe mode",
+            "отключ",
+            "не зарегистрирован",
+            "требуется подтверждение",
+            "approval",
+        )
+        return not any(marker in error_text for marker in ignore_markers)
+
+    def _record_unknown_skill_candidate(self, user_input: str, decision: RouteDecision) -> None:
+        patterns = suggest_patterns(user_input)
+        if not patterns:
+            patterns = ["unknown"]
+        draft = CandidateDraft(
+            title=f"Unknown request: {patterns[0]}",
+            reason="unknown_request",
+            requests=[sanitize_text(user_input)],
+            patterns=patterns,
+            entrypoints=["unknown"],
+            expected_behavior=[
+                "Handle the request safely using tools and code changes.",
+            ],
+            risk=self._risk_from_flags(decision.risk_flags),
+            notes=[f"route_reason={decision.reason}"],
+        )
+        key = f"unknown:{patterns[0]}"
+        try:
+            path = self._skill_candidate_writer.write_once(key, draft)
+        except Exception as exc:  # noqa: BLE001
+            self.tracer.log("skill_candidate_error", str(exc))
+            return
+        if path is not None:
+            self.tracer.log(
+                "skill_candidate_created",
+                path.name,
+                {"reason": draft.reason, "key": key},
+            )
+
+    def _record_tool_error_candidate(
+        self,
+        request: ToolRequest,
+        result: ToolResult,
+        count: int,
+    ) -> None:
+        error_text = sanitize_text(result.error or "unknown error")
+        request_text = sanitize_text(self._last_user_input or "")
+        draft = CandidateDraft(
+            title=f"Tool error: {request.name}",
+            reason="tool_error",
+            requests=[request_text] if request_text else ["unknown"],
+            patterns=[request.name],
+            entrypoints=[request.name],
+            expected_behavior=[
+                "Provide a stable tool workflow and recover from failures.",
+            ],
+            risk="medium",
+            notes=[f"error={error_text}", f"count={count}"],
+        )
+        key = f"tool_error:{request.name}"
+        try:
+            path = self._skill_candidate_writer.write_once(key, draft)
+        except Exception as exc:  # noqa: BLE001
+            self.tracer.log("skill_candidate_error", str(exc))
+            return
+        if path is not None:
+            self.tracer.log(
+                "skill_candidate_created",
+                path.name,
+                {"reason": draft.reason, "tool": request.name},
+            )
+
+    def _risk_from_flags(self, flags: list[str]) -> SkillRisk:
+        high = {"sudo", "system", "install", "git"}
+        if any(flag in high for flag in flags):
+            return "high"
+        if "tools" in flags or "filesystem" in flags:
+            return "medium"
+        return "low"
 
     def consume_workspace_diffs(self) -> list[WorkspaceDiffEntry]:
         diffs = list(self._workspace_diffs.values())

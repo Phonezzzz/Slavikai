@@ -32,15 +32,22 @@ run_step "Ruff lint" \
 run_step "Ruff format check" \
     ruff format --check .
 
-# 3. MyPy strict typing
+# 3. Skills lint
+run_step "Skills lint" \
+    python skills/tools/lint_skills.py
+
+# 4. Skills manifest check
+run_step "Skills manifest check" \
+    python skills/tools/build_manifest.py --check
+
+# 5. MyPy strict typing
 run_step "MyPy strict" \
     mypy .
 
-# 4. Pytest with coverage threshold
+# 6. Pytest with coverage threshold
 run_step "Pytest + Coverage >= 80%" \
     pytest --cov --cov-fail-under=80
 
 echo "================================================="
 echo "   🎉 All checks passed successfully!"
 echo "================================================="
-
