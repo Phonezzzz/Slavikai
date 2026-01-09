@@ -74,6 +74,14 @@ class VerificationResult:
     duration_seconds: float
     error: str | None = None
 
+    @property
+    def ok(self) -> bool:
+        return self.status == VerificationStatus.PASSED
+
+    @property
+    def duration_ms(self) -> int:
+        return int(self.duration_seconds * 1000)
+
 
 @dataclass(frozen=True)
 class RunContext:

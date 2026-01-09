@@ -9,6 +9,8 @@ from core.mwv.models import VerificationResult, VerificationStatus
 
 DEFAULT_TIMEOUT_SECONDS = 60 * 30
 DEFAULT_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check.sh"
+MAX_OUTPUT_CHARS = 8000
+TRUNCATION_SUFFIX = "\n[truncated]"
 
 
 @dataclass(frozen=True)
@@ -45,8 +47,8 @@ class VerifierRunner:
                 status=VerificationStatus.ERROR,
                 command=command,
                 exit_code=None,
-                stdout=_coerce_output(exc.stdout),
-                stderr=_coerce_output(exc.stderr),
+                stdout=_truncate_output(_coerce_output(exc.stdout)),
+                stderr=_truncate_output(_coerce_output(exc.stderr)),
                 duration_seconds=duration,
                 error="verifier_timeout",
             )
@@ -70,8 +72,8 @@ class VerifierRunner:
             status=status,
             command=command,
             exit_code=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
+            stdout=_truncate_output(completed.stdout or ""),
+            stderr=_truncate_output(completed.stderr or ""),
             duration_seconds=duration,
             error=None,
         )
@@ -86,3 +88,12 @@ def _coerce_output(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
+
+
+def _truncate_output(text: str) -> str:
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    limit = MAX_OUTPUT_CHARS - len(TRUNCATION_SUFFIX)
+    if limit <= 0:
+        return TRUNCATION_SUFFIX[:MAX_OUTPUT_CHARS]
+    return f"{text[:limit]}{TRUNCATION_SUFFIX}"

@@ -9,46 +9,34 @@ from core.mwv.models import VerificationStatus
 from core.mwv.verifier import VerifierRunner, _coerce_output
 
 
-def test_verifier_runner_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    def _fake_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=["bash", "/tmp/check.sh"],
-            returncode=0,
-            stdout="ok",
-            stderr="",
-        )
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+def test_verifier_runner_pass(tmp_path: Path) -> None:
     script_path = tmp_path / "check.sh"
-    script_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    script_path.write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
     runner = VerifierRunner(script_path=script_path)
     result = runner.run()
 
     assert result.status == VerificationStatus.PASSED
+    assert result.ok is True
     assert result.exit_code == 0
-    assert result.stdout == "ok"
+    assert "ok" in result.stdout
     assert result.stderr == ""
     assert result.command[:1] == ["bash"]
+    assert result.duration_ms >= 0
 
 
-def test_verifier_runner_fail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    def _fake_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=["bash", "/tmp/check.sh"],
-            returncode=1,
-            stdout="",
-            stderr="lint error",
-        )
-
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+def test_verifier_runner_fail(tmp_path: Path) -> None:
     script_path = tmp_path / "check.sh"
-    script_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    script_path.write_text(
+        '#!/usr/bin/env bash\necho "lint error" 1>&2\nexit 1\n', encoding="utf-8"
+    )
     runner = VerifierRunner(script_path=script_path)
     result = runner.run()
 
     assert result.status == VerificationStatus.FAILED
+    assert result.ok is False
     assert result.exit_code == 1
-    assert result.stderr == "lint error"
+    assert "lint error" in result.stderr
+    assert result.duration_ms >= 0
 
 
 def test_verifier_runner_missing_script(tmp_path: Path) -> None:
