@@ -65,5 +65,5 @@ def test_agent_plan_execution_path(tmp_path: Path) -> None:
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     result = agent.respond([LLMMessage(role="user", content="планируй задачу")])
-    assert "step1" in result or "ok" in result
-    assert agent.executor.run_called  # type: ignore[attr-defined]
+    assert "ok" in result
+    assert not agent.executor.run_called  # type: ignore[attr-defined]

@@ -3,14 +3,12 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal
 
-from shared.models import JSONValue
+from core.mwv.models import MWVMessage
+from shared.models import JSONValue, LLMMessage
 
-
-class MessageLike(Protocol):
-    role: str
-    content: str
+type MessageLike = MWVMessage | LLMMessage
 
 
 @dataclass(frozen=True)
@@ -21,7 +19,14 @@ class RouteDecision:
 
 
 _CODE_CHANGE_PATTERNS: Sequence[re.Pattern[str]] = (
-    re.compile(r"\b(исправ\w*|почин\w*|fix)\b.*\b(тест\w*|tests)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(исправ\w*|почин\w*|поправ\w*|fix)\b.*\b(тест\w*|tests)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(исправ\w*|почин\w*|поправ\w*|fix)\b.*\b(баг\w*|bug|код\w*|code)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\b(рефактор\w*|refactor)\b", re.IGNORECASE),
     re.compile(r"\b(добав\w*|add)\b.*\b(фич\w*|feature)\b", re.IGNORECASE),
     re.compile(r"\b(напис\w*|write)\b.*\b(код\w*|code)\b", re.IGNORECASE),

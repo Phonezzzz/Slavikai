@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from core.mwv.manager import ManagerRuntime
+from core.mwv.manager import ManagerRuntime, decide_retry
 from core.mwv.models import (
     MWVMessage,
     RetryDecision,
@@ -16,7 +16,8 @@ from core.mwv.models import (
     WorkStatus,
 )
 from core.mwv.routing import RouteDecision
-from core.mwv.verifier_runtime import VerifierRuntime
+from core.mwv.verifier import VerifierRunner
+from core.mwv.verifier_runtime import VerifierRuntime, _default_runner
 from core.mwv.worker import WorkerRuntime
 from shared.models import JSONValue
 
@@ -97,6 +98,11 @@ def test_verifier_runtime_returns_runner_result() -> None:
     assert result == expected
 
 
+def test_default_verifier_runner_factory() -> None:
+    runner = _default_runner()
+    assert isinstance(runner, VerifierRunner)
+
+
 def test_retry_decision_contract() -> None:
     decision = RetryDecision(
         policy=RetryPolicy.LIMITED,
@@ -107,3 +113,22 @@ def test_retry_decision_contract() -> None:
     )
     assert decision.policy == RetryPolicy.LIMITED
     assert decision.allow_retry is True
+
+
+def test_retry_decision_stops_on_limit() -> None:
+    decision = decide_retry(
+        work_result=WorkResult(task_id="t", status=WorkStatus.SUCCESS, summary="ok"),
+        verification_result=VerificationResult(
+            status=VerificationStatus.FAILED,
+            command=["check"],
+            exit_code=1,
+            stdout="",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        ),
+        attempt=2,
+        max_attempts=2,
+    )
+    assert decision.allow_retry is False
+    assert decision.reason == "retry_limit_reached"

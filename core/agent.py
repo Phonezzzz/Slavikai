@@ -5,7 +5,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from config.memory_config import MemoryConfig, load_memory_config
@@ -27,9 +27,23 @@ from core.critic_policy import (
     CriticFailure,
     CriticMode,
     classify_critic_status,
-    decide_critic,
 )
 from core.executor import Executor
+from core.mwv.manager import ManagerRuntime, MWVRunResult, summarize_verifier_failure
+from core.mwv.models import (
+    ChangeType,
+    MWVMessage,
+    RunContext,
+    TaskPacket,
+    VerificationResult,
+    VerificationStatus,
+    WorkChange,
+    WorkResult,
+    WorkStatus,
+)
+from core.mwv.routing import RouteDecision, classify_request
+from core.mwv.verifier_runtime import VerifierRuntime
+from core.mwv.worker import WorkerRuntime
 from core.planner import Planner
 from core.rule_engine import PolicyApplication, RuleEngine
 from core.tool_gateway import ToolGateway
@@ -65,7 +79,6 @@ from shared.models import (
     MemoryKind,
     MemoryRecord,
     PlanStep,
-    TaskComplexity,
     TaskPlan,
     ToolCallRecord,
     ToolRequest,
@@ -121,6 +134,7 @@ SAFE_MODE_TOOLS_OFF = {
     "image_generate",
     "workspace_run",
 }
+MAX_MWV_ATTEMPTS = 3
 _DEFAULT_POLICY_DECAY_HALF_LIFE_DAYS = 30
 MAX_SHORT_TERM_MESSAGES = 20
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
@@ -221,7 +235,6 @@ class Agent:
 
         last_content = messages[-1].content.strip()
         record_in_history = self._should_record_in_history(last_content)
-        critic_decision: CriticDecision | None = None
         try:
             if record_in_history:
                 self._append_short_term(messages)
@@ -232,235 +245,30 @@ class Agent:
             self.last_reasoning = None
             self._reset_workspace_diffs()
 
-            if last_content.lower().startswith("авто") or last_content.startswith(
-                "/auto"
-            ):
+            if last_content.lower().startswith("авто") or last_content.startswith("/auto"):
                 auto_goal = last_content.replace("/auto", "").strip()
                 result = self.handle_auto_command(auto_goal)
                 self._log_chat_interaction(raw_input=last_content, response_text=result)
                 if record_in_history:
-                    self._append_short_term(
-                        [LLMMessage(role="assistant", content=result)]
-                    )
+                    self._append_short_term([LLMMessage(role="assistant", content=result)])
                 return result
 
             if last_content.startswith("/"):
                 return self.handle_tool_command(last_content)
 
-            complexity = self.planner.classify_complexity(last_content)
-
-            if (
-                last_content.lower().startswith(("план", "plan"))
-                or complexity == TaskComplexity.COMPLEX
-            ):
-                plan_brain, plan_config = self._get_plan_brain_config()
-                plan = self.planner.build_plan(
-                    last_content,
-                    brain=plan_brain,
-                    model_config=plan_config,
-                )
-                self.last_plan_original = plan
-                dual_mode = self._current_mode()
-                critic_decision = decide_critic(
-                    mode=dual_mode, messages=messages, plan=plan
-                )
-                self._record_critic_decision(critic_decision, dual_mode)
-                if critic_decision.should_run_critic and dual_mode != "single":
-                    try:
-                        plan = self._critic_plan(plan, enforce_critic=True)
-                    except CriticFailure as exc:
-                        return self._handle_critic_failure(
-                            exc,
-                            critic_decision,
-                            raw_input=last_content,
-                            record_in_history=record_in_history,
-                        )
-                self.last_plan = plan
-                if dual_mode == "critic-only":
-                    try:
-                        _, critic_text = self._review_plan(
-                            plan, store_critic=True, enforce_critic=True
-                        )
-                    except CriticFailure as exc:
-                        return self._handle_critic_failure(
-                            exc,
-                            critic_decision,
-                            raw_input=last_content,
-                            record_in_history=record_in_history,
-                        )
-                    if not critic_text:
-                        return self._handle_critic_failure(
-                            CriticFailure("Критик не вернул ответ."),
-                            critic_decision,
-                            raw_input=last_content,
-                            record_in_history=record_in_history,
-                        )
-                    reviewed_plan = critic_text
-                    self._finalize_critic_status(critic_decision, critic_text)
-                    if record_in_history:
-                        self._append_short_term(
-                            [LLMMessage(role="assistant", content=reviewed_plan)],
-                        )
-                        self._append_short_term(
-                            [LLMMessage(role="assistant", content=reviewed_plan)],
-                            history=self.critic_short_term,
-                        )
-                    return reviewed_plan
-                try:
-                    executed = self.executor.run(
-                        plan,
-                        tool_gateway=self._build_tool_gateway(
-                            pre_call=self._workspace_diff_pre_call,
-                            post_call=self._workspace_diff_post_call,
-                        ),
-                        critic_callback=(
-                            (lambda step: self._critic_step(step, enforce_critic=True))
-                            if critic_decision.should_run_critic and dual_mode == "dual"
-                            else None
-                        ),
-                    )
-                except CriticFailure as exc:
-                    return self._handle_critic_failure(
-                        exc,
-                        critic_decision,
-                        raw_input=last_content,
-                        record_in_history=record_in_history,
-                    )
-                self.last_plan = executed
-                if critic_decision.should_run_critic and dual_mode == "dual":
-                    try:
-                        reviewed, critic_text = self._review_plan(
-                            executed, store_critic=True, enforce_critic=True
-                        )
-                    except CriticFailure as exc:
-                        return self._handle_critic_failure(
-                            exc,
-                            critic_decision,
-                            raw_input=last_content,
-                            record_in_history=record_in_history,
-                        )
-                    self._finalize_critic_status(critic_decision, critic_text)
-                    if critic_text and record_in_history:
-                        self._append_short_term(
-                            [
-                                LLMMessage(
-                                    role="assistant",
-                                    content=critic_text,
-                                )
-                            ],
-                            history=self.critic_short_term,
-                        )
-                else:
-                    reviewed = self._format_plan(executed)
-                self._log_chat_interaction(
-                    raw_input=last_content, response_text=reviewed
-                )
-                if record_in_history:
-                    self._append_short_term(
-                        [LLMMessage(role="assistant", content=reviewed)]
-                    )
-                return reviewed
-
-            try:
-                self.tracer.log("reasoning_start", "Генерация ответа моделью")
-                policy_application = self._apply_policies(last_content)
-                messages_with_context = self._build_context_messages(
-                    self.short_term, last_content
-                )
-                messages_with_context = self._append_policy_instructions(
-                    messages_with_context,
-                    policy_application,
-                )
-                dual_mode = self._current_mode()
-                critic_decision = decide_critic(
-                    mode=dual_mode, messages=messages, plan=None
-                )
-                self._record_critic_decision(critic_decision, dual_mode)
-
-                if dual_mode == "critic-only":
-                    try:
-                        critic_text = self._run_critic_only(user_message=last_content)
-                    except CriticFailure as exc:
-                        return self._handle_critic_failure(
-                            exc,
-                            critic_decision,
-                            raw_input=last_content,
-                            record_in_history=record_in_history,
-                        )
-                    self._finalize_critic_status(critic_decision, critic_text)
-                    self.tracer.log(
-                        "reasoning_end",
-                        "Ответ критика получен",
-                        {"reply_preview": critic_text[:120]},
-                    )
-                    if self.memory_config.auto_save_dialogue:
-                        self.save_to_memory(last_content, critic_text)
-                    self._log_chat_interaction(
-                        raw_input=last_content,
-                        response_text=critic_text,
-                        applied_policy_ids=policy_application.applied_policy_ids,
-                    )
-                    if record_in_history:
-                        self._append_short_term(
-                            [LLMMessage(role="assistant", content=critic_text)]
-                        )
-                        self._append_short_term(
-                            [LLMMessage(role="assistant", content=critic_text)],
-                            history=self.critic_short_term,
-                        )
-                    return critic_text
-
-                reply = self.get_primary_brain().generate(messages_with_context)
-                reply_text = reply.text
-                reviewed = self._review_answer(reply_text)
-                if self.main_config and self.main_config.thinking_enabled:
-                    self.last_reasoning = reply.reasoning
-                if critic_decision.should_run_critic and dual_mode == "dual":
-                    try:
-                        critic_text = self._run_answer_critic(
-                            user_message=last_content,
-                            main_reply=reviewed,
-                        )
-                    except CriticFailure as exc:
-                        return self._handle_critic_failure(
-                            exc,
-                            critic_decision,
-                            raw_input=last_content,
-                            record_in_history=record_in_history,
-                        )
-                    self._finalize_critic_status(critic_decision, critic_text)
-                    if record_in_history:
-                        self._append_short_term(
-                            [LLMMessage(role="assistant", content=critic_text)],
-                            history=self.critic_short_term,
-                        )
-                self.tracer.log(
-                    "reasoning_end", "Ответ получен", {"reply_preview": reviewed[:120]}
-                )
-                if self.memory_config.auto_save_dialogue:
-                    self.save_to_memory(last_content, reviewed)
-                self._log_chat_interaction(
-                    raw_input=last_content,
-                    response_text=reviewed,
-                    applied_policy_ids=policy_application.applied_policy_ids,
-                )
-                if record_in_history:
-                    self._append_short_term(
-                        [LLMMessage(role="assistant", content=reviewed)]
-                    )
-                return reviewed
-            except Exception as exc:  # noqa: BLE001
-                self.logger.error("LLM error: %s", exc)
-                self.tracer.log("error", f"Ошибка модели: {exc}")
-                error_text = f"[Ошибка модели: {exc}]"
-                self._log_chat_interaction(
-                    raw_input=last_content, response_text=error_text
-                )
-                if record_in_history:
-                    self._append_short_term(
-                        [LLMMessage(role="assistant", content=error_text)]
-                    )
-                return error_text
+            decision = classify_request(
+                messages,
+                last_content,
+                context={"safe_mode": bool(self.tools_enabled.get("safe_mode", False))},
+            )
+            self.tracer.log(
+                "routing_decision",
+                decision.route,
+                {"reason": decision.reason, "flags": decision.risk_flags},
+            )
+            if decision.route == "mwv":
+                return self._run_mwv_flow(messages, last_content, decision, record_in_history)
+            return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
             return self._handle_approval_required(
                 exc.request,
@@ -472,16 +280,248 @@ class Agent:
             self.tracer.log("error", f"Ошибка Agent.respond: {exc}")
             error_text = f"[Ошибка ответа: {exc}]"
             try:
-                self._log_chat_interaction(
-                    raw_input=last_content, response_text=error_text
-                )
+                self._log_chat_interaction(raw_input=last_content, response_text=error_text)
             except Exception as log_exc:  # noqa: BLE001
                 self.logger.error("Ошибка записи InteractionLog: %s", log_exc)
             if record_in_history:
-                self._append_short_term(
-                    [LLMMessage(role="assistant", content=error_text)]
-                )
+                self._append_short_term([LLMMessage(role="assistant", content=error_text)])
             return error_text
+
+    def _run_chat_response(
+        self,
+        messages: list[LLMMessage],
+        last_content: str,
+        record_in_history: bool,
+    ) -> str:
+        try:
+            self.tracer.log("reasoning_start", "Генерация ответа моделью")
+            policy_application = self._apply_policies(last_content)
+            messages_with_context = self._build_context_messages(self.short_term, last_content)
+            messages_with_context = self._append_policy_instructions(
+                messages_with_context,
+                policy_application,
+            )
+            reply = self._get_main_brain().generate(messages_with_context)
+            reviewed = self._review_answer(reply.text)
+            if self.main_config and self.main_config.thinking_enabled:
+                self.last_reasoning = reply.reasoning
+            self.tracer.log("reasoning_end", "Ответ получен", {"reply_preview": reviewed[:120]})
+            if self.memory_config.auto_save_dialogue:
+                self.save_to_memory(last_content, reviewed)
+            self._log_chat_interaction(
+                raw_input=last_content,
+                response_text=reviewed,
+                applied_policy_ids=policy_application.applied_policy_ids,
+            )
+            if record_in_history:
+                self._append_short_term([LLMMessage(role="assistant", content=reviewed)])
+            return reviewed
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error("LLM error: %s", exc)
+            self.tracer.log("error", f"Ошибка модели: {exc}")
+            error_text = f"[Ошибка модели: {exc}]"
+            self._log_chat_interaction(raw_input=last_content, response_text=error_text)
+            if record_in_history:
+                self._append_short_term([LLMMessage(role="assistant", content=error_text)])
+            return error_text
+
+    def _run_mwv_flow(
+        self,
+        messages: list[LLMMessage],
+        raw_input: str,
+        decision: RouteDecision,
+        record_in_history: bool,
+    ) -> str:
+        mwv_messages = self._to_mwv_messages(messages)
+        context = self._build_mwv_context()
+        manager = ManagerRuntime(task_builder=self._mwv_task_builder(decision))
+        worker = WorkerRuntime(runner=self._mwv_worker_runner)
+        verifier_runtime = VerifierRuntime()
+
+        def _worker(task: TaskPacket, run_context: RunContext) -> WorkResult:
+            self.tracer.log(
+                "mwv_worker_start",
+                f"Attempt {run_context.attempt}",
+                {"goal": task.goal},
+            )
+            result = worker.run(task, run_context)
+            self.tracer.log(
+                "mwv_worker_done",
+                f"Attempt {run_context.attempt}",
+                {"status": result.status.value},
+            )
+            return result
+
+        def _verifier(run_context: RunContext) -> VerificationResult:
+            result = verifier_runtime.run(run_context)
+            self.tracer.log(
+                "mwv_verifier_done",
+                result.status.value,
+                {
+                    "exit_code": result.exit_code,
+                    "attempt": run_context.attempt,
+                },
+            )
+            return result
+
+        run_result = manager.run_flow(
+            mwv_messages,
+            context,
+            worker=_worker,
+            verifier=_verifier,
+        )
+        response = self._format_mwv_response(run_result)
+        if self.memory_config.auto_save_dialogue:
+            self.save_to_memory(raw_input, response)
+        self._log_chat_interaction(raw_input=raw_input, response_text=response)
+        if record_in_history:
+            self._append_short_term([LLMMessage(role="assistant", content=response)])
+        return response
+
+    def _build_mwv_context(self) -> RunContext:
+        session_id = self.session_id or "local"
+        approved = sorted(self.approved_categories)
+        return RunContext(
+            session_id=session_id,
+            trace_id=str(uuid.uuid4()),
+            workspace_root=str(WORKSPACE_ROOT),
+            safe_mode=bool(self.tools_enabled.get("safe_mode", False)),
+            approved_categories=[str(item) for item in approved],
+            max_retries=max(0, MAX_MWV_ATTEMPTS - 1),
+            attempt=1,
+        )
+
+    def _mwv_task_builder(
+        self, decision: RouteDecision
+    ) -> Callable[[Sequence[MWVMessage], RunContext], TaskPacket]:
+        def _build(messages: Sequence[MWVMessage], context: RunContext) -> TaskPacket:
+            goal = messages[-1].content if messages else ""
+            return TaskPacket(
+                task_id=str(uuid.uuid4()),
+                session_id=context.session_id,
+                trace_id=context.trace_id,
+                goal=goal,
+                messages=list(messages),
+                constraints=[],
+                context={
+                    "route_reason": decision.reason,
+                    "risk_flags": decision.risk_flags,
+                },
+            )
+
+        return _build
+
+    def _mwv_worker_runner(self, task: TaskPacket, context: RunContext) -> WorkResult:
+        self._reset_workspace_diffs()
+        plan_goal = self._build_mwv_goal(task)
+        plan_brain = self._get_main_brain()
+        plan = self.planner.build_plan(plan_goal, brain=plan_brain, model_config=self.main_config)
+        self.last_plan_original = plan
+        executed = self.executor.run(
+            plan,
+            tool_gateway=self._build_tool_gateway(
+                pre_call=self._workspace_diff_pre_call,
+                post_call=self._workspace_diff_post_call,
+            ),
+        )
+        self.last_plan = executed
+        status = (
+            WorkStatus.FAILURE
+            if any(step.status.value == "error" for step in executed.steps)
+            else WorkStatus.SUCCESS
+        )
+        changes = self._mwv_changes_from_diffs(self.consume_workspace_diffs())
+        diagnostics = self._build_mwv_diagnostics(executed)
+        summary = self._format_plan(executed)
+        return WorkResult(
+            task_id=task.task_id,
+            status=status,
+            summary=summary,
+            changes=changes,
+            tool_summaries=[],
+            diagnostics=diagnostics,
+        )
+
+    def _to_mwv_messages(self, messages: list[LLMMessage]) -> list[MWVMessage]:
+        mwv_messages: list[MWVMessage] = []
+        for message in messages:
+            if message.role not in {"system", "user", "assistant", "tool"}:
+                continue
+            mwv_messages.append(MWVMessage(role=message.role, content=message.content))
+        return mwv_messages
+
+    def _build_mwv_goal(self, task: TaskPacket) -> str:
+        if not task.constraints:
+            return task.goal
+        constraints = "\n".join(f"- {item}" for item in task.constraints)
+        return f"{task.goal}\nОграничения:\n{constraints}"
+
+    def _mwv_changes_from_diffs(self, diffs: list[WorkspaceDiffEntry]) -> list[WorkChange]:
+        changes: list[WorkChange] = []
+        for diff in diffs:
+            if diff.added > 0 and diff.removed == 0:
+                change_type = ChangeType.CREATE
+            elif diff.removed > 0 and diff.added == 0:
+                change_type = ChangeType.DELETE
+            else:
+                change_type = ChangeType.UPDATE
+            summary = f"+{diff.added}/-{diff.removed}"
+            changes.append(WorkChange(path=diff.path, change_type=change_type, summary=summary))
+        return changes
+
+    def _build_mwv_diagnostics(self, plan: TaskPlan) -> dict[str, JSONValue]:
+        errors: list[dict[str, JSONValue]] = []
+        for step in plan.steps:
+            status_value = step.status.value if hasattr(step.status, "value") else str(step.status)
+            if status_value == "error":
+                errors.append(
+                    {
+                        "description": step.description,
+                        "result": step.result or "",
+                    }
+                )
+        return {
+            "steps_total": len(plan.steps),
+            "step_errors": errors,
+        }
+
+    def _format_mwv_response(self, result: MWVRunResult) -> str:
+        if (
+            result.work_result.status == WorkStatus.SUCCESS
+            and result.verification_result.status == VerificationStatus.PASSED
+        ):
+            return f"Готово. Проверки пройдены.\n{result.work_result.summary}".strip()
+        if result.work_result.status == WorkStatus.FAILURE:
+            detail = self._summarize_work_failure(result.work_result)
+            return f"Ошибка выполнения: {detail}".strip()
+        if result.verification_result.status == VerificationStatus.ERROR:
+            detail = summarize_verifier_failure(result.verification_result)
+            return f"Ошибка проверки: {detail}".strip()
+        detail = summarize_verifier_failure(result.verification_result)
+        extra = ""
+        if result.retry_decision and result.retry_decision.reason == "retry_limit_reached":
+            extra = "Лимит попыток исчерпан."
+        return "\n".join(part for part in [f"Проверки не прошли. {detail}", extra] if part).strip()
+
+    def _summarize_work_failure(self, work_result: WorkResult) -> str:
+        errors = work_result.diagnostics.get("step_errors")
+        if isinstance(errors, list) and errors:
+            first = errors[0]
+            if isinstance(first, dict):
+                description = str(first.get("description", "")).strip()
+                result = str(first.get("result", "")).strip()
+                if description and result:
+                    return f"{description}: {result[:200]}"
+                if description:
+                    return description
+        return "Не удалось выполнить шаги."
+
+    def _get_main_brain(self) -> Brain:
+        if isinstance(self.brain, DualBrain):
+            if self.brain.mode == "critic-only":
+                self.tracer.log("critic_mode_ignored", "Critic-only mode ignored in MWV routing")
+            return self.brain.main
+        return self.brain
 
     def handle_tool_command(self, command: str) -> str:
         parts = command.split()
@@ -535,8 +575,7 @@ class Agent:
                     name="shell",
                     args={
                         "command": " ".join(args),
-                        "config_path": str(getattr(self, "shell_config_path", ""))
-                        or None,
+                        "config_path": str(getattr(self, "shell_config_path", "")) or None,
                     },
                 )
                 tool_result = self._call_tool_logged(command, req)
@@ -549,9 +588,7 @@ class Agent:
                     result = "[Нужно указать подкоманду: index|find]"
                     self._log_chat_interaction(raw_input=command, response_text=result)
                     return result
-                req = ToolRequest(
-                    name="project", args={"cmd": args[0], "args": args[1:]}
-                )
+                req = ToolRequest(name="project", args={"cmd": args[0], "args": args[1:]})
                 tool_result = self._call_tool_logged(command, req)
                 result = self._format_tool_result(tool_result)
                 self._log_chat_interaction(raw_input=command, response_text=result)
@@ -686,9 +723,7 @@ class Agent:
         self,
         *,
         pre_call: Callable[[ToolRequest], object | None] | None = None,
-        post_call: (
-            Callable[[ToolRequest, ToolResult, object | None], None] | None
-        ) = None,
+        post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
     ) -> ToolGateway:
         return ToolGateway(
             self.tool_registry,
@@ -725,9 +760,7 @@ class Agent:
     def _workspace_diff_pre_call(self, request: ToolRequest) -> str | None:
         if request.name not in {"workspace_write", "workspace_patch"}:
             return None
-        if request.name == "workspace_patch" and bool(
-            request.args.get("dry_run", False)
-        ):
+        if request.name == "workspace_patch" and bool(request.args.get("dry_run", False)):
             return None
         raw_path = request.args.get("path")
         if not isinstance(raw_path, str):
@@ -752,9 +785,7 @@ class Agent:
             return
         if not result.ok:
             return
-        if request.name == "workspace_patch" and bool(
-            result.data.get("dry_run", False)
-        ):
+        if request.name == "workspace_patch" and bool(result.data.get("dry_run", False)):
             return
         raw_path = request.args.get("path")
         if not isinstance(raw_path, str):
@@ -822,9 +853,7 @@ class Agent:
             result = gateway.call(request)
         except ApprovalRequired:
             result = ToolResult.failure("Требуется подтверждение")
-            self._log_tool_interaction(
-                raw_input=raw_input, request=request, result=result
-            )
+            self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
             raise
         self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
         return result
@@ -888,9 +917,7 @@ class Agent:
         )
         self._interaction_store.log_interaction(log)
 
-    def _classify_tool_result(
-        self, result: ToolResult
-    ) -> tuple[ToolStatus, BlockedReason | None]:
+    def _classify_tool_result(self, result: ToolResult) -> tuple[ToolStatus, BlockedReason | None]:
         if result.ok:
             return ToolStatus.OK, None
         error = (result.error or "").strip()
@@ -1032,9 +1059,7 @@ class Agent:
     def _format_plan(self, plan: TaskPlan) -> str:
         lines: list[str] = []
         for index, step in enumerate(plan.steps, start=1):
-            status_key = (
-                step.status.value if hasattr(step.status, "value") else str(step.status)
-            )
+            status_key = step.status.value if hasattr(step.status, "value") else str(step.status)
             status_icon = {
                 "pending": "⏳",
                 "in_progress": "🔄",
@@ -1065,9 +1090,7 @@ class Agent:
             },
         )
 
-    def _finalize_critic_status(
-        self, decision: CriticDecision, critic_text: str | None
-    ) -> None:
+    def _finalize_critic_status(self, decision: CriticDecision, critic_text: str | None) -> None:
         if self._critic_step_rejected:
             self.last_critic_status = "risky"
         else:
@@ -1100,9 +1123,7 @@ class Agent:
         if raw_input is not None:
             self._log_chat_interaction(raw_input=raw_input, response_text=error_text)
             if record_in_history:
-                self._append_short_term(
-                    [LLMMessage(role="assistant", content=error_text)]
-                )
+                self._append_short_term([LLMMessage(role="assistant", content=error_text)])
         return error_text
 
     def _handle_approval_required(
@@ -1313,9 +1334,7 @@ class Agent:
             return self.brain.main, self.main_config
         return self.brain, self.main_config
 
-    def _history_without_latest_user(
-        self, history: list[LLMMessage]
-    ) -> list[LLMMessage]:
+    def _history_without_latest_user(self, history: list[LLMMessage]) -> list[LLMMessage]:
         if history and history[-1].role == "user":
             return history[:-1]
         return history
@@ -1368,9 +1387,7 @@ class Agent:
             )
         else:
             critic_prompt = (
-                "Пользователь:\n"
-                f"{user_message}\n\n"
-                "Дай краткую критику и возможные риски."
+                f"Пользователь:\n{user_message}\n\nДай краткую критику и возможные риски."
             )
         return [
             *messages,
@@ -1463,9 +1480,7 @@ class Agent:
             args["format"] = fmt
         return self.call_tool("tts", args=args, raw_input="api:tts")
 
-    def transcribe_audio(
-        self, file_path: str, language: str | None = None
-    ) -> ToolResult:
+    def transcribe_audio(self, file_path: str, language: str | None = None) -> ToolResult:
         args: dict[str, JSONValue] = {"file_path": file_path}
         if language:
             args["language"] = language
@@ -1506,9 +1521,7 @@ class Agent:
     def update_tools_enabled(self, state: dict[str, bool]) -> None:
         self.tools_enabled.update(state)
         save_tools_config(ToolsConfig(**self.tools_enabled))
-        self.tracer.log(
-            "tools_updated", "Инструменты обновлены", {"tools": self.tools_enabled}
-        )
+        self.tracer.log("tools_updated", "Инструменты обновлены", {"tools": self.tools_enabled})
         for name, enabled in state.items():
             if name in self.tool_registry.list_tools():
                 self.tool_registry.set_enabled(name, enabled)
@@ -1526,9 +1539,7 @@ class Agent:
         return self.tool_registry.read_recent_calls(limit)
 
     def get_recent_feedback_events(self, limit: int = 50) -> list[FeedbackEvent]:
-        return self._interaction_store.get_recent_feedback(
-            user_id=self.user_id, limit=limit
-        )
+        return self._interaction_store.get_recent_feedback(user_id=self.user_id, limit=limit)
 
     def get_feedback_stats(self) -> dict[FeedbackRating, int]:
         return self._interaction_store.get_feedback_stats(user_id=self.user_id)
@@ -1577,17 +1588,13 @@ class Agent:
         override_priority: int | None = None,
         override_confidence: float | None = None,
     ) -> PolicyRule:
-        candidate = self._interaction_store.get_policy_rule_candidate(
-            candidate_id=candidate_id
-        )
+        candidate = self._interaction_store.get_policy_rule_candidate(candidate_id=candidate_id)
         if candidate is None:
             raise ValueError(f"Candidate not found: {candidate_id!r}")
         if candidate.user_id != self.user_id:
             raise ValueError("Candidate принадлежит другому user_id.")
         if candidate.status is not CandidateStatus.PROPOSED:
-            raise ValueError(
-                f"Candidate status must be proposed, got: {candidate.status.value!r}"
-            )
+            raise ValueError(f"Candidate status must be proposed, got: {candidate.status.value!r}")
         if decay_half_life_days <= 0:
             raise ValueError("decay_half_life_days должен быть > 0.")
 
@@ -1602,9 +1609,7 @@ class Agent:
             else candidate.proposed_action
         )
         priority = (
-            override_priority
-            if override_priority is not None
-            else candidate.priority_suggestion
+            override_priority if override_priority is not None else candidate.priority_suggestion
         )
         confidence = (
             float(override_confidence)
@@ -1614,9 +1619,7 @@ class Agent:
         if not (0.0 <= confidence <= 1.0):
             raise ValueError("confidence должен быть в диапазоне 0..1.")
 
-        feedback_ids = sorted(
-            {e.feedback_id for e in candidate.evidence if e.feedback_id}
-        )
+        feedback_ids = sorted({e.feedback_id for e in candidate.evidence if e.feedback_id})
         provenance = (
             f"batch_review_run_id:{candidate.batch_review_run_id};"
             f"candidate_id:{candidate.candidate_id}"
@@ -1667,17 +1670,13 @@ class Agent:
         priority_suggestion: int,
         confidence_suggestion: float,
     ) -> PolicyRuleCandidate:
-        candidate = self._interaction_store.get_policy_rule_candidate(
-            candidate_id=candidate_id
-        )
+        candidate = self._interaction_store.get_policy_rule_candidate(candidate_id=candidate_id)
         if candidate is None:
             raise ValueError(f"Candidate not found: {candidate_id!r}")
         if candidate.user_id != self.user_id:
             raise ValueError("Candidate принадлежит другому user_id.")
         if candidate.status is not CandidateStatus.PROPOSED:
-            raise ValueError(
-                f"Candidate status must be proposed, got: {candidate.status.value!r}"
-            )
+            raise ValueError(f"Candidate status must be proposed, got: {candidate.status.value!r}")
 
         trigger = policy_trigger_from_json(proposed_trigger_json)
         action = policy_action_from_json(proposed_action_json)
@@ -1692,25 +1691,19 @@ class Agent:
             updated_at=now,
         )
         self.tracer.log("policy_candidate_updated", candidate_id)
-        updated = self._interaction_store.get_policy_rule_candidate(
-            candidate_id=candidate_id
-        )
+        updated = self._interaction_store.get_policy_rule_candidate(candidate_id=candidate_id)
         if updated is None:
             raise RuntimeError("Candidate missing after update (unexpected).")
         return updated
 
     def reject_policy_rule_candidate(self, *, candidate_id: str) -> None:
-        candidate = self._interaction_store.get_policy_rule_candidate(
-            candidate_id=candidate_id
-        )
+        candidate = self._interaction_store.get_policy_rule_candidate(candidate_id=candidate_id)
         if candidate is None:
             raise ValueError(f"Candidate not found: {candidate_id!r}")
         if candidate.user_id != self.user_id:
             raise ValueError("Candidate принадлежит другому user_id.")
         if candidate.status is not CandidateStatus.PROPOSED:
-            raise ValueError(
-                f"Candidate status must be proposed, got: {candidate.status.value!r}"
-            )
+            raise ValueError(f"Candidate status must be proposed, got: {candidate.status.value!r}")
 
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         self._interaction_store.reject_policy_rule_candidate(
@@ -1720,9 +1713,7 @@ class Agent:
         )
         self.tracer.log("policy_candidate_rejected", candidate_id)
 
-    def _build_context_messages(
-        self, messages: list[LLMMessage], query: str
-    ) -> list[LLMMessage]:
+    def _build_context_messages(self, messages: list[LLMMessage], query: str) -> list[LLMMessage]:
         context_parts: list[str] = []
 
         recent_notes = self.memory.get_recent(3, kind=MemoryKind.NOTE)
@@ -1735,14 +1726,10 @@ class Agent:
         if hints_meta:
             context_parts.append("Подсказки от пользователя:")
             for hint_meta in hints_meta:
-                context_parts.append(
-                    f"- ({hint_meta.get('severity')}) {hint_meta.get('hint')}"
-                )
+                context_parts.append(f"- ({hint_meta.get('severity')}) {hint_meta.get('hint')}")
             self.last_hints_used = [h["hint"] for h in hints_meta]
             self.last_hints_meta = hints_meta
-            self.tracer.log(
-                "auto_hint_applied", "Использованы подсказки", {"hints": hints_meta}
-            )
+            self.tracer.log("auto_hint_applied", "Использованы подсказки", {"hints": hints_meta})
         else:
             self.last_hints_used = []
             self.last_hints_meta = []
@@ -1792,9 +1779,7 @@ class Agent:
         if limit <= 0:
             return []
         scan_limit = max(limit * 5, limit)
-        events = self._interaction_store.get_recent_feedback(
-            user_id=self.user_id, limit=scan_limit
-        )
+        events = self._interaction_store.get_recent_feedback(user_id=self.user_id, limit=scan_limit)
         hints: list[dict[str, str]] = []
         for event in events:
             meta = self._feedback_event_to_hint(event)
@@ -1836,9 +1821,7 @@ class Agent:
         best: tuple[str, str] | None = None
         best_rank = -1
         for label in labels:
-            severity, hint = _FEEDBACK_LABEL_HINTS.get(
-                label, ("minor", "Улучшай качество ответа.")
-            )
+            severity, hint = _FEEDBACK_LABEL_HINTS.get(label, ("minor", "Улучшай качество ответа."))
             rank = self._severity_rank(severity)
             if rank > best_rank:
                 best = (severity, hint)

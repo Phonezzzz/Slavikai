@@ -14,6 +14,7 @@ from core.mwv.routing import RouteDecision, classify_request
         ("объясни как работает docker", "chat", []),
         ("исправь тесты", "mwv", ["code_change"]),
         ("почини тесты", "mwv", ["code_change"]),
+        ("поправь баг в коде", "mwv", ["code_change"]),
         ("написать код для парсера", "mwv", ["code_change"]),
         ("рефактор модуля оплаты", "mwv", ["code_change"]),
         ("добавь фичу логирования", "mwv", ["code_change"]),
@@ -56,3 +57,10 @@ def test_classify_request_tool_role_forces_mwv() -> None:
     decision = classify_request(messages=messages, user_input="привет", context=None)
     assert decision.route == "mwv"
     assert "tools" in decision.risk_flags
+
+
+def test_classify_request_empty_input_without_triggers() -> None:
+    decision = classify_request(messages=[], user_input="", context=None)
+    assert decision.route == "chat"
+    assert decision.reason == "fallback_messages:no_triggers"
+    assert decision.risk_flags == []
