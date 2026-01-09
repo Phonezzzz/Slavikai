@@ -32,6 +32,7 @@ help:
 	@echo "  make type            mypy . (strict, tests excluded by config)"
 	@echo "  make test            pytest (coverage configured in pyproject.toml)"
 	@echo "  make check           lint + format-check + type + test"
+	@echo "  make ci              skills lint/manifest + pytest -q (temp candidates)"
 	@echo
 	@echo "Run:"
 	@echo "  make run             Run UI in foreground"
@@ -87,6 +88,16 @@ test: venv
 
 .PHONY: check
 check: lint format-check type test
+
+.PHONY: ci
+ci: venv
+	@tmp_dir="$$(mktemp -d)"; \
+		export SKILLS_CANDIDATES_DIR="$$tmp_dir/skills/_candidates"; \
+		mkdir -p "$$SKILLS_CANDIDATES_DIR"; \
+		"$(VENV_PY)" skills/tools/lint_skills.py; \
+		"$(VENV_PY)" skills/tools/build_manifest.py --check; \
+		"$(VENV_PY)" -m pytest -q; \
+		rm -rf "$$tmp_dir"
 
 .PHONY: run
 run: venv

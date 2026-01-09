@@ -1,4 +1,66 @@
 {
   "manifest_version": 1,
-  "skills": []
+  "skills": [
+    {
+      "content_hash": "a832d351b17613329503ecf0e4464f4229965f3fc22063de82d22838a267a815",
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_write",
+        "workspace_patch"
+      ],
+      "id": "doc-generator",
+      "path": "skills/doc-generator/skill.md",
+      "patterns": [
+        "\u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u0439 \u043e\u0442\u0447\u0435\u0442",
+        "\u0441\u043e\u0437\u0434\u0430\u0439 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442",
+        "\u0441\u0434\u0435\u043b\u0430\u0439 \u0442\u0430\u0431\u043b\u0438\u0446\u0443"
+      ],
+      "requires": [],
+      "risk": "medium",
+      "tests": [],
+      "title": "Document generation",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "3dad3d1f9ad37bb17889c4e49d9c8259394ce958b61364e33fd92f6e25e18b01",
+      "deprecated": false,
+      "entrypoints": [
+        "web"
+      ],
+      "id": "web-search",
+      "path": "skills/web-search/skill.md",
+      "patterns": [
+        "\u043f\u043e\u0438\u0441\u043a \u0432 \u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442\u0435",
+        "\u043d\u0430\u0439\u0434\u0438 \u0432 \u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442\u0435",
+        "web search"
+      ],
+      "requires": [],
+      "risk": "medium",
+      "tests": [],
+      "title": "Web search",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "617efde5d518270de6a2fe1c536213f3f6da08f8f94858aaabd9b5a801aca815",
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "workspace_write",
+        "workspace_patch"
+      ],
+      "id": "workspace-files",
+      "path": "skills/workspace-files/skill.md",
+      "patterns": [
+        "\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u0439 \u0444\u0430\u0439\u043b",
+        "\u0437\u0430\u043f\u0438\u0448\u0438 \u0444\u0430\u0439\u043b",
+        "\u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u043f\u0430\u0442\u0447"
+      ],
+      "requires": [],
+      "risk": "medium",
+      "tests": [],
+      "title": "Workspace file operations",
+      "version": "1.0.0"
+    }
+  ]
 }

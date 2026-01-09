@@ -56,6 +56,11 @@ When the agent sees an unknown tool/code request or repeated tool errors, it cre
 candidate drafts under `_candidates/`. Candidates are not active until manually
 promoted into `skills/<id>/skill.md` and the manifest is rebuilt.
 
+Operational rules:
+- Candidates have a TTL and are archived when expired.
+- The directory is capped (older drafts are archived).
+- A cooldown by fingerprint prevents write storms.
+
 ## Lifecycle (minimal)
 
 1. Request arrives → routing checks triggers + `SkillIndex`.

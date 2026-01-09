@@ -213,6 +213,14 @@ class Agent:
         self._last_skill_match: SkillMatch | None = None
         self._last_user_input: str | None = None
         self._tool_error_counts: dict[str, int] = {}
+        self._skill_metrics: dict[str, int] = {
+            "skill_match_hit": 0,
+            "skill_match_miss": 0,
+            "ambiguous_count": 0,
+            "deprecated_count": 0,
+            "verifier_fail_count": 0,
+            "candidate_written_count": 0,
+        }
         self.last_approval_request: ApprovalRequest | None = None
         self.last_reasoning: str | None = None
         self.workspace_file_path: str | None = None
@@ -376,6 +384,8 @@ class Agent:
             worker=_worker,
             verifier=_verifier,
         )
+        if run_result.verification_result.status != VerificationStatus.PASSED:
+            self._inc_metric("verifier_fail_count")
         response = self._format_mwv_response(run_result)
         if self.memory_config.auto_save_dialogue:
             self.save_to_memory(raw_input, response)
@@ -641,6 +651,7 @@ class Agent:
             return
         if decision.status == "matched" and decision.match is not None:
             self._last_skill_match = decision.match
+            self._inc_metric("skill_match_hit")
             self.tracer.log(
                 "skill_match",
                 decision.match.entry.id,
@@ -648,6 +659,7 @@ class Agent:
             )
             return
         if decision.status == "deprecated" and decision.match is not None:
+            self._inc_metric("deprecated_count")
             self.tracer.log(
                 "skill_match",
                 "deprecated",
@@ -658,12 +670,15 @@ class Agent:
             )
             return
         if decision.status == "ambiguous":
+            self._inc_metric("ambiguous_count")
             self.tracer.log(
                 "skill_match",
                 "ambiguous",
                 {"candidates": [match.entry.id for match in decision.alternatives]},
             )
             return
+        if decision.status == "no_match":
+            self._inc_metric("skill_match_miss")
         self.tracer.log("skill_match", "none")
 
     def _format_skill_block(self, decision: SkillMatchDecision) -> str:
@@ -692,6 +707,11 @@ class Agent:
         if not isinstance(raw_skill, str) or not raw_skill:
             return None
         return f"- Навык {raw_skill} не прошел проверку. Нужна доработка skill."
+
+    def _inc_metric(self, name: str) -> None:
+        current = self._skill_metrics.get(name, 0) + 1
+        self._skill_metrics[name] = current
+        self.tracer.log(name, str(current))
 
     def _get_main_brain(self) -> Brain:
         return self.brain
@@ -943,6 +963,7 @@ class Agent:
             self.tracer.log("skill_candidate_error", str(exc))
             return
         if path is not None:
+            self._inc_metric("candidate_written_count")
             self.tracer.log(
                 "skill_candidate_created",
                 path.name,
@@ -976,6 +997,7 @@ class Agent:
             self.tracer.log("skill_candidate_error", str(exc))
             return
         if path is not None:
+            self._inc_metric("candidate_written_count")
             self.tracer.log(
                 "skill_candidate_created",
                 path.name,
