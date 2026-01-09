@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from core.mwv.models import MWVMessage
+from core.skills.index import SkillIndex, SkillMatchDecision
 from shared.models import JSONValue, LLMMessage
 
 type MessageLike = MWVMessage | LLMMessage
@@ -16,6 +17,7 @@ class RouteDecision:
     route: Literal["chat", "mwv"]
     reason: str
     risk_flags: list[str]
+    skill_decision: SkillMatchDecision | None = None
 
 
 _CODE_CHANGE_PATTERNS: Sequence[re.Pattern[str]] = (
@@ -80,10 +82,29 @@ def classify_request(
     messages: Sequence[MessageLike],
     user_input: str,
     context: dict[str, JSONValue] | None = None,
+    *,
+    skill_index: SkillIndex | None = None,
 ) -> RouteDecision:
     _ = context
     text, used_fallback = _collect_text(messages, user_input)
     flags: list[str] = []
+    skill_decision: SkillMatchDecision | None = None
+
+    if skill_index is not None:
+        skill_decision = skill_index.match_decision(text)
+        if skill_decision.status == "matched":
+            _add_flag(flags, "skill")
+        elif skill_decision.status in {"deprecated", "ambiguous"}:
+            _add_flag(flags, "skill")
+            reason = _skill_reason(skill_decision)
+            if used_fallback:
+                reason = f"fallback_messages:{reason}"
+            return RouteDecision(
+                route="mwv",
+                reason=reason,
+                risk_flags=flags,
+                skill_decision=skill_decision,
+            )
 
     if _matches_any(text, _CODE_CHANGE_PATTERNS):
         _add_flag(flags, "code_change")
@@ -114,12 +135,26 @@ def classify_request(
         reason = f"trigger:{','.join(flags)}"
         if used_fallback:
             reason = f"fallback_messages:{reason}"
-        return RouteDecision(route="mwv", reason=reason, risk_flags=flags)
+        if skill_decision is not None:
+            reason = _merge_reason(reason, skill_decision)
+        return RouteDecision(
+            route="mwv",
+            reason=reason,
+            risk_flags=flags,
+            skill_decision=skill_decision,
+        )
 
     reason = "no_triggers"
     if used_fallback:
         reason = "fallback_messages:no_triggers"
-    return RouteDecision(route="chat", reason=reason, risk_flags=flags)
+    if skill_decision is not None:
+        reason = _merge_reason(reason, skill_decision)
+    return RouteDecision(
+        route="chat",
+        reason=reason,
+        risk_flags=flags,
+        skill_decision=skill_decision,
+    )
 
 
 def _collect_text(messages: Sequence[MessageLike], user_input: str) -> tuple[str, bool]:
@@ -139,3 +174,24 @@ def _matches_any(text: str, patterns: Sequence[re.Pattern[str]]) -> bool:
 def _add_flag(flags: list[str], flag: str) -> None:
     if flag not in flags:
         flags.append(flag)
+
+
+def _skill_reason(decision: SkillMatchDecision) -> str:
+    if decision.status == "matched" and decision.match is not None:
+        return f"skill_match:{decision.match.entry.id}"
+    if decision.status == "deprecated" and decision.match is not None:
+        base = f"skill_deprecated:{decision.match.entry.id}"
+        if decision.replaced_by:
+            return f"{base}->{decision.replaced_by}"
+        return base
+    if decision.status == "ambiguous":
+        ids = ",".join(match.entry.id for match in decision.alternatives)
+        return f"skill_ambiguous:{ids or 'unknown'}"
+    return "skill_no_match"
+
+
+def _merge_reason(base: str, decision: SkillMatchDecision) -> str:
+    skill_reason = _skill_reason(decision)
+    if base.startswith("trigger:"):
+        return f"{skill_reason};{base}"
+    return f"{skill_reason};{base}"

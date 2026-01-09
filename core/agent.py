@@ -44,7 +44,7 @@ from core.skills.candidates import (
     sanitize_text,
     suggest_patterns,
 )
-from core.skills.index import SkillIndex, SkillMatch
+from core.skills.index import SkillIndex, SkillMatch, SkillMatchDecision
 from core.skills.models import SkillRisk
 from core.tool_gateway import ToolGateway
 from core.tracer import Tracer
@@ -251,24 +251,27 @@ class Agent:
                 messages,
                 last_content,
                 context={"safe_mode": bool(self.tools_enabled.get("safe_mode", False))},
+                skill_index=self.skill_index,
             )
-            skill_match = self.skill_index.match(last_content)
-            self._last_skill_match = skill_match
-            if skill_match is None:
-                self.tracer.log("skill_match", "none")
-            else:
-                self.tracer.log(
-                    "skill_match",
-                    skill_match.entry.id,
-                    {"pattern": skill_match.pattern},
-                )
+            self._apply_skill_decision(decision.skill_decision)
             self.tracer.log(
                 "routing_decision",
                 decision.route,
                 {"reason": decision.reason, "flags": decision.risk_flags},
             )
+            if decision.skill_decision and decision.skill_decision.status in {
+                "deprecated",
+                "ambiguous",
+            }:
+                response = self._format_skill_block(decision.skill_decision)
+                if self.memory_config.auto_save_dialogue:
+                    self.save_to_memory(last_content, response)
+                self._log_chat_interaction(raw_input=last_content, response_text=response)
+                if record_in_history:
+                    self._append_short_term([LLMMessage(role="assistant", content=response)])
+                return response
             if decision.route == "mwv":
-                if skill_match is None:
+                if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_skill_candidate(last_content, decision)
                 return self._run_mwv_flow(messages, last_content, decision, record_in_history)
             return self._run_chat_response(messages, last_content, record_in_history)
@@ -590,10 +593,14 @@ class Agent:
                 "- Запусти scripts/check.sh вручную, чтобы понять, что падает.",
                 "- Разреши дополнительную попытку, если нужно.",
             ]
-        return [
+        steps = [
             "- Посмотри краткие детали ниже и уточни требования.",
             "- Разреши дополнительную попытку, если нужно.",
         ]
+        skill_note = self._mwv_skill_failure_note(result)
+        if skill_note:
+            steps.append(skill_note)
+        return steps
 
     def _mwv_details(self, result: MWVRunResult) -> list[str]:
         details: list[str] = []
@@ -626,6 +633,65 @@ class Agent:
         if len(lines) > max_lines:
             trimmed.append("...")
         return trimmed
+
+    def _apply_skill_decision(self, decision: SkillMatchDecision | None) -> None:
+        self._last_skill_match = None
+        if decision is None:
+            self.tracer.log("skill_match", "none")
+            return
+        if decision.status == "matched" and decision.match is not None:
+            self._last_skill_match = decision.match
+            self.tracer.log(
+                "skill_match",
+                decision.match.entry.id,
+                {"pattern": decision.match.pattern},
+            )
+            return
+        if decision.status == "deprecated" and decision.match is not None:
+            self.tracer.log(
+                "skill_match",
+                "deprecated",
+                {
+                    "skill_id": decision.match.entry.id,
+                    "replaced_by": decision.replaced_by or "",
+                },
+            )
+            return
+        if decision.status == "ambiguous":
+            self.tracer.log(
+                "skill_match",
+                "ambiguous",
+                {"candidates": [match.entry.id for match in decision.alternatives]},
+            )
+            return
+        self.tracer.log("skill_match", "none")
+
+    def _format_skill_block(self, decision: SkillMatchDecision) -> str:
+        if decision.status == "deprecated" and decision.match is not None:
+            replaced = decision.replaced_by or "нет замены"
+            return (
+                "Навык помечен как deprecated и не будет запускаться.\n"
+                f"- skill_id: {decision.match.entry.id}\n"
+                f"- replaced_by: {replaced}\n"
+                "Уточни запрос или укажи новый skill."
+            )
+        if decision.status == "ambiguous":
+            ids = [match.entry.id for match in decision.alternatives]
+            listed = ", ".join(ids) if ids else "unknown"
+            return (
+                "Найдено несколько подходящих навыков, нужен выбор.\n"
+                f"- candidates: {listed}\n"
+                "Уточни запрос или укажи нужный skill."
+            )
+        return "Навык не может быть применен."
+
+    def _mwv_skill_failure_note(self, result: MWVRunResult) -> str | None:
+        if result.verification_result.status == VerificationStatus.PASSED:
+            return None
+        raw_skill = result.task.context.get("skill_id")
+        if not isinstance(raw_skill, str) or not raw_skill:
+            return None
+        return f"- Навык {raw_skill} не прошел проверку. Нужна доработка skill."
 
     def _get_main_brain(self) -> Brain:
         return self.brain

@@ -32,6 +32,15 @@ def test_unknown_request_creates_candidate(tmp_path: Path) -> None:
     assert files
 
 
+def test_unknown_request_deduped(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    decision = RouteDecision(route="mwv", reason="trigger:tools", risk_flags=["tools"])
+    agent._record_unknown_skill_candidate("fix tests", decision)  # noqa: SLF001
+    agent._record_unknown_skill_candidate("fix tests", decision)  # noqa: SLF001
+    files = list((tmp_path / "skills" / "_candidates").glob("*.md"))
+    assert len(files) == 1
+
+
 def test_tool_error_candidate_after_threshold(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
     request = ToolRequest(name="shell", args={})
@@ -40,3 +49,15 @@ def test_tool_error_candidate_after_threshold(tmp_path: Path) -> None:
         agent._track_tool_error(request, result)  # noqa: SLF001
     files = list((tmp_path / "skills" / "_candidates").glob("*.md"))
     assert files
+
+
+def test_tool_error_candidate_deduped(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    request = ToolRequest(name="shell", args={})
+    result = ToolResult.failure("boom")
+    for _ in range(SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD):
+        agent._track_tool_error(request, result)  # noqa: SLF001
+    for _ in range(SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD):
+        agent._track_tool_error(request, result)  # noqa: SLF001
+    files = list((tmp_path / "skills" / "_candidates").glob("*.md"))
+    assert len(files) == 1

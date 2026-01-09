@@ -55,3 +55,21 @@ Dev mode (optional): set `SKILLS_DEV_MODE=1` to rebuild the manifest before load
 When the agent sees an unknown tool/code request or repeated tool errors, it creates
 candidate drafts under `_candidates/`. Candidates are not active until manually
 promoted into `skills/<id>/skill.md` and the manifest is rebuilt.
+
+## Lifecycle (minimal)
+
+1. Request arrives → routing checks triggers + `SkillIndex`.
+2. If a skill matches → MWV flow executes the request.
+   - Deprecated or ambiguous skill → request is blocked with an explicit message.
+3. Verifier (`scripts/check.sh`) is the only success gate.
+4. If no skill matches for MWV‑type request → candidate draft is created.
+5. `_candidates` never participate in routing until promoted.
+
+## Add a new skill (minimal)
+
+1. Create `skills/<id>/skill.md` with valid front matter.
+2. Run:
+   - `python skills/tools/lint_skills.py`
+   - `python skills/tools/build_manifest.py`
+3. Ensure `_generated/skills.manifest.json` is updated and committed.
+4. (Optional) add tests under `skills/<id>/tests/`.

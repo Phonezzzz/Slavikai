@@ -4,6 +4,8 @@ import pytest
 
 from core.mwv.models import MWVMessage
 from core.mwv.routing import RouteDecision, classify_request
+from core.skills.index import SkillIndex
+from core.skills.models import SkillEntry, SkillManifest
 
 
 @pytest.mark.parametrize(
@@ -75,3 +77,110 @@ def test_classify_request_empty_input_without_triggers() -> None:
     assert decision.route == "chat"
     assert decision.reason == "fallback_messages:no_triggers"
     assert decision.risk_flags == []
+
+
+def _make_skill_index(skills: list[SkillEntry]) -> SkillIndex:
+    return SkillIndex(SkillManifest(manifest_version=1, skills=skills))
+
+
+def test_classify_request_uses_skill_index_match() -> None:
+    index = _make_skill_index(
+        [
+            SkillEntry(
+                id="alpha",
+                version="1.0.0",
+                title="Alpha",
+                entrypoints=["tool_a"],
+                patterns=["alpha"],
+                requires=[],
+                risk="low",
+                tests=[],
+                path="skills/alpha/skill.md",
+                content_hash="hash",
+            )
+        ]
+    )
+    decision = classify_request(
+        messages=[],
+        user_input="use ALPHA skill",
+        context=None,
+        skill_index=index,
+    )
+    assert decision.route == "mwv"
+    assert decision.skill_decision is not None
+    assert decision.skill_decision.status == "matched"
+    assert decision.skill_decision.match is not None
+    assert decision.skill_decision.match.entry.id == "alpha"
+    assert "skill_match:alpha" in decision.reason
+
+
+def test_classify_request_skill_deprecated() -> None:
+    index = _make_skill_index(
+        [
+            SkillEntry(
+                id="legacy",
+                version="1.0.0",
+                title="Legacy",
+                entrypoints=["tool_a"],
+                patterns=["legacy"],
+                requires=[],
+                risk="low",
+                tests=[],
+                path="skills/legacy/skill.md",
+                content_hash="hash",
+                deprecated=True,
+                replaced_by="modern",
+            )
+        ]
+    )
+    decision = classify_request(
+        messages=[],
+        user_input="legacy task",
+        context=None,
+        skill_index=index,
+    )
+    assert decision.route == "mwv"
+    assert decision.skill_decision is not None
+    assert decision.skill_decision.status == "deprecated"
+    assert "skill_deprecated:legacy" in decision.reason
+
+
+def test_classify_request_skill_ambiguous() -> None:
+    index = _make_skill_index(
+        [
+            SkillEntry(
+                id="alpha",
+                version="1.0.0",
+                title="Alpha",
+                entrypoints=["tool_a"],
+                patterns=["build"],
+                requires=[],
+                risk="low",
+                tests=[],
+                path="skills/alpha/skill.md",
+                content_hash="hash",
+            ),
+            SkillEntry(
+                id="beta",
+                version="1.0.0",
+                title="Beta",
+                entrypoints=["tool_b"],
+                patterns=["build"],
+                requires=[],
+                risk="low",
+                tests=[],
+                path="skills/beta/skill.md",
+                content_hash="hash",
+            ),
+        ]
+    )
+    decision = classify_request(
+        messages=[],
+        user_input="build pipeline",
+        context=None,
+        skill_index=index,
+    )
+    assert decision.route == "mwv"
+    assert decision.skill_decision is not None
+    assert decision.skill_decision.status == "ambiguous"
+    assert "skill_ambiguous" in decision.reason
