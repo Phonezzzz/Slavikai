@@ -138,7 +138,14 @@ def build_retry_task(
     decision: RetryDecision,
 ) -> TaskPacket:
     summary = summarize_verifier_failure(verification_result)
-    constraint = f"Исправь только минимальные изменения. Причина: {summary}"
+    if decision.attempt <= 1:
+        prefix = "Исправь минимально по логам проверки. Не меняй ничего лишнего."
+    else:
+        prefix = (
+            "Сделай максимально минимальный diff. Меняй только строки, "
+            "из-за которых падают проверки."
+        )
+    constraint = f"{prefix} Причина: {summary}"
     constraints = list(task.constraints)
     if decision.attempt > 0:
         constraints.append(constraint)

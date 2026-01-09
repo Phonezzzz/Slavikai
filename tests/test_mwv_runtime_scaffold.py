@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from core.mwv.manager import ManagerRuntime, decide_retry
+from core.mwv.manager import (
+    ManagerRuntime,
+    build_retry_task,
+    decide_retry,
+    summarize_verifier_failure,
+)
 from core.mwv.models import (
     MWVMessage,
     RetryDecision,
@@ -132,3 +137,143 @@ def test_retry_decision_stops_on_limit() -> None:
     )
     assert decision.allow_retry is False
     assert decision.reason == "retry_limit_reached"
+
+
+def test_retry_decision_blocks_on_worker_failure() -> None:
+    decision = decide_retry(
+        work_result=WorkResult(task_id="t", status=WorkStatus.FAILURE, summary="fail"),
+        verification_result=VerificationResult(
+            status=VerificationStatus.PASSED,
+            command=["check"],
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        ),
+        attempt=1,
+        max_attempts=3,
+    )
+    assert decision.allow_retry is False
+    assert decision.reason == "worker_failed"
+
+
+def test_retry_decision_blocks_on_verifier_error() -> None:
+    decision = decide_retry(
+        work_result=WorkResult(task_id="t", status=WorkStatus.SUCCESS, summary="ok"),
+        verification_result=VerificationResult(
+            status=VerificationStatus.ERROR,
+            command=["check"],
+            exit_code=None,
+            stdout="",
+            stderr="",
+            duration_seconds=0.1,
+            error="boom",
+        ),
+        attempt=1,
+        max_attempts=3,
+    )
+    assert decision.allow_retry is False
+    assert decision.reason == "verifier_error"
+
+
+def test_build_retry_task_uses_stricter_constraint_on_second_retry() -> None:
+    task = TaskPacket(task_id="t", session_id="s", trace_id="trace", goal="g")
+    decision = RetryDecision(
+        policy=RetryPolicy.LIMITED,
+        allow_retry=True,
+        reason="verifier_failed",
+        attempt=2,
+        max_retries=2,
+    )
+    failure = VerificationResult(
+        status=VerificationStatus.FAILED,
+        command=["check"],
+        exit_code=1,
+        stdout="",
+        stderr="tests failed",
+        duration_seconds=0.1,
+        error=None,
+    )
+    updated = build_retry_task(task, failure, decision)
+    assert any("максимально минимальный diff" in item for item in updated.constraints)
+
+
+def test_summarize_verifier_failure_handles_empty_output() -> None:
+    result = summarize_verifier_failure(
+        VerificationResult(
+            status=VerificationStatus.FAILED,
+            command=["check"],
+            exit_code=None,
+            stdout="",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        )
+    )
+    assert result == "Неизвестная ошибка проверки"
+
+
+def test_summarize_verifier_failure_uses_error_message() -> None:
+    result = summarize_verifier_failure(
+        VerificationResult(
+            status=VerificationStatus.ERROR,
+            command=["check"],
+            exit_code=None,
+            stdout="",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        )
+    )
+    assert result == "Ошибка верификации"
+
+
+def test_summarize_verifier_failure_uses_exit_code() -> None:
+    result = summarize_verifier_failure(
+        VerificationResult(
+            status=VerificationStatus.FAILED,
+            command=["check"],
+            exit_code=2,
+            stdout="",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        )
+    )
+    assert result == "Код возврата: 2"
+
+
+def test_run_flow_stops_on_worker_failure() -> None:
+    def _build(messages: Sequence[MWVMessage], context: RunContext) -> TaskPacket:
+        return TaskPacket(task_id="t", session_id="s", trace_id="trace", goal="g")
+
+    manager = ManagerRuntime(task_builder=_build)
+    context = RunContext(
+        session_id="s",
+        trace_id="t",
+        workspace_root="/tmp",
+        safe_mode=True,
+        max_retries=2,
+        attempt=1,
+    )
+    messages = [MWVMessage(role="user", content="go")]
+
+    def _worker(_task: TaskPacket, _context: RunContext) -> WorkResult:
+        return WorkResult(task_id="t", status=WorkStatus.FAILURE, summary="fail")
+
+    def _verifier(_context: RunContext) -> VerificationResult:
+        return VerificationResult(
+            status=VerificationStatus.PASSED,
+            command=["check"],
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        )
+
+    result = manager.run_flow(messages, context, worker=_worker, verifier=_verifier)
+    assert result.work_result.status == WorkStatus.FAILURE
+    assert result.retry_decision is not None
+    assert result.retry_decision.allow_retry is False

@@ -115,7 +115,11 @@ def test_mwv_diagnostics_and_formatting(tmp_path: Path) -> None:
         max_attempts=3,
         retry_decision=None,
     )
-    assert "Проверки пройдены" in agent._format_mwv_response(ok_result)
+    ok_response = agent._format_mwv_response(ok_result)
+    assert "Итог: проверки пройдены" in ok_response
+    assert "Попытка: 1/3" in ok_response
+    assert "Verifier: PASS" in ok_response
+    assert "Изменения:" in ok_response
 
     work_fail = WorkResult(
         task_id="t",
@@ -131,7 +135,9 @@ def test_mwv_diagnostics_and_formatting(tmp_path: Path) -> None:
         max_attempts=3,
         retry_decision=None,
     )
-    assert "Ошибка выполнения" in agent._format_mwv_response(fail_result)
+    fail_response = agent._format_mwv_response(fail_result)
+    assert "Итог: ошибка выполнения" in fail_response
+    assert "Что дальше:" in fail_response
 
     verify_error = VerificationResult(
         status=VerificationStatus.ERROR,
@@ -150,7 +156,9 @@ def test_mwv_diagnostics_and_formatting(tmp_path: Path) -> None:
         max_attempts=3,
         retry_decision=None,
     )
-    assert "Ошибка проверки" in agent._format_mwv_response(error_result)
+    error_response = agent._format_mwv_response(error_result)
+    assert "Итог: ошибка проверки" in error_response
+    assert "Что дальше:" in error_response
 
     retry_decision = RetryDecision(
         policy=RetryPolicy.LIMITED,
@@ -177,8 +185,8 @@ def test_mwv_diagnostics_and_formatting(tmp_path: Path) -> None:
         retry_decision=retry_decision,
     )
     response = agent._format_mwv_response(retry_result)
-    assert "Проверки не прошли" in response
-    assert "Лимит попыток исчерпан" in response
+    assert "Итог: проверки не прошли" in response
+    assert "лимит попыток исчерпан" in response
 
 
 def test_mwv_flow_runs_through_worker_and_verifier(
@@ -211,4 +219,46 @@ def test_mwv_flow_runs_through_worker_and_verifier(
         decision=decision,
         record_in_history=False,
     )
-    assert "Проверки пройдены" in response
+    assert "Итог: проверки пройдены" in response
+
+
+def test_mwv_default_next_steps_on_verifier_fail(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    task = TaskPacket(task_id="t", session_id="s", trace_id="trace", goal="g")
+    work_ok = WorkResult(task_id="t", status=WorkStatus.SUCCESS, summary="summary")
+    verify_failed = VerificationResult(
+        status=VerificationStatus.FAILED,
+        command=["check"],
+        exit_code=1,
+        stdout="",
+        stderr="tests failed",
+        duration_seconds=0.1,
+        error=None,
+    )
+    result = MWVRunResult(
+        task=task,
+        work_result=work_ok,
+        verification_result=verify_failed,
+        attempt=1,
+        max_attempts=3,
+        retry_decision=None,
+    )
+    response = agent._format_mwv_response(result)
+    assert "Что дальше:" in response
+    assert "Посмотри краткие детали ниже" in response
+
+
+def test_mwv_verifier_note_uses_exit_code(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    note = agent._mwv_verifier_note(
+        VerificationResult(
+            status=VerificationStatus.FAILED,
+            command=["check"],
+            exit_code=2,
+            stdout="",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        )
+    )
+    assert note == "exit_code=2"

@@ -34,6 +34,22 @@ def test_routing_chat_path_uses_llm(tmp_path: Path, monkeypatch) -> None:
     assert brain.calls == 1
 
 
+def test_routing_chat_path_for_explanation(tmp_path: Path, monkeypatch) -> None:
+    brain = DummyBrain("chat")
+    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent.memory.get_recent = lambda *a, **k: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
+
+    def _mwv_stub(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("MWV path should not be used for chat input.")
+
+    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
+    response = agent.respond([LLMMessage(role="user", content="объясни термин git")])
+    assert response == "chat"
+    assert brain.calls == 1
+
+
 def test_routing_mwv_path_bypasses_llm(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain("chat")
     agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))

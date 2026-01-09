@@ -29,7 +29,7 @@ from core.critic_policy import (
     classify_critic_status,
 )
 from core.executor import Executor
-from core.mwv.manager import ManagerRuntime, MWVRunResult, summarize_verifier_failure
+from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
     ChangeType,
     MWVMessage,
@@ -486,22 +486,25 @@ class Agent:
         }
 
     def _format_mwv_response(self, result: MWVRunResult) -> str:
-        if (
-            result.work_result.status == WorkStatus.SUCCESS
-            and result.verification_result.status == VerificationStatus.PASSED
-        ):
-            return f"Готово. Проверки пройдены.\n{result.work_result.summary}".strip()
-        if result.work_result.status == WorkStatus.FAILURE:
-            detail = self._summarize_work_failure(result.work_result)
-            return f"Ошибка выполнения: {detail}".strip()
-        if result.verification_result.status == VerificationStatus.ERROR:
-            detail = summarize_verifier_failure(result.verification_result)
-            return f"Ошибка проверки: {detail}".strip()
-        detail = summarize_verifier_failure(result.verification_result)
-        extra = ""
-        if result.retry_decision and result.retry_decision.reason == "retry_limit_reached":
-            extra = "Лимит попыток исчерпан."
-        return "\n".join(part for part in [f"Проверки не прошли. {detail}", extra] if part).strip()
+        outcome = self._mwv_outcome_label(result)
+        lines = [
+            f"Итог: {outcome}",
+            f"Попытка: {result.attempt}/{result.max_attempts}",
+            f"Verifier: {self._mwv_verifier_label(result.verification_result)}",
+            "Изменения:",
+            *self._format_mwv_changes(result.work_result.changes),
+        ]
+
+        if self._mwv_needs_next_steps(result):
+            lines.append("Что дальше:")
+            lines.extend(self._mwv_next_steps(result))
+
+        details = self._mwv_details(result)
+        if details:
+            lines.append("Детали:")
+            lines.extend(details)
+
+        return "\n".join(lines).strip()
 
     def _summarize_work_failure(self, work_result: WorkResult) -> str:
         errors = work_result.diagnostics.get("step_errors")
@@ -515,6 +518,104 @@ class Agent:
                 if description:
                     return description
         return "Не удалось выполнить шаги."
+
+    def _mwv_outcome_label(self, result: MWVRunResult) -> str:
+        if result.work_result.status == WorkStatus.FAILURE:
+            return "ошибка выполнения"
+        if result.verification_result.status == VerificationStatus.ERROR:
+            return "ошибка проверки"
+        if result.verification_result.status == VerificationStatus.FAILED:
+            if result.retry_decision and result.retry_decision.reason == "retry_limit_reached":
+                return "проверки не прошли (лимит попыток исчерпан)"
+            return "проверки не прошли"
+        return "проверки пройдены"
+
+    def _mwv_verifier_label(self, verification: VerificationResult) -> str:
+        if verification.status == VerificationStatus.PASSED:
+            base = "PASS"
+        elif verification.status == VerificationStatus.FAILED:
+            base = "FAIL"
+        else:
+            base = "ERROR"
+        if verification.exit_code is None:
+            return base
+        return f"{base} (exit_code={verification.exit_code})"
+
+    def _format_mwv_changes(self, changes: list[WorkChange]) -> list[str]:
+        if not changes:
+            return ["- нет изменений"]
+        labels = {
+            ChangeType.CREATE: "создан",
+            ChangeType.UPDATE: "изменен",
+            ChangeType.DELETE: "удален",
+            ChangeType.RENAME: "переименован",
+        }
+        lines: list[str] = []
+        for change in changes:
+            label = labels.get(change.change_type, change.change_type.value)
+            suffix = f", {change.summary}" if change.summary else ""
+            lines.append(f"- {change.path} ({label}{suffix})")
+        return lines
+
+    def _mwv_needs_next_steps(self, result: MWVRunResult) -> bool:
+        return (
+            result.work_result.status == WorkStatus.FAILURE
+            or result.verification_result.status != VerificationStatus.PASSED
+        )
+
+    def _mwv_next_steps(self, result: MWVRunResult) -> list[str]:
+        if result.work_result.status == WorkStatus.FAILURE:
+            return [
+                "- Уточни, какой шаг/файл важен.",
+                "- Разреши повтор с более узким фокусом.",
+            ]
+        if result.verification_result.status == VerificationStatus.ERROR:
+            return [
+                "- Проверь окружение проверки и доступность скрипта.",
+                "- Запусти scripts/check.sh вручную для деталей.",
+            ]
+        if result.retry_decision and result.retry_decision.reason == "retry_limit_reached":
+            return [
+                "- Сузь задачу или уточни требования.",
+                "- Запусти scripts/check.sh вручную, чтобы понять, что падает.",
+                "- Разреши дополнительную попытку, если нужно.",
+            ]
+        return [
+            "- Посмотри краткие детали ниже и уточни требования.",
+            "- Разреши дополнительную попытку, если нужно.",
+        ]
+
+    def _mwv_details(self, result: MWVRunResult) -> list[str]:
+        details: list[str] = []
+        plan_summary = result.work_result.summary.strip()
+        if plan_summary:
+            details.append("План:")
+            details.extend(self._truncate_lines(plan_summary, max_lines=6, max_chars=160))
+        verifier_note = self._mwv_verifier_note(result.verification_result)
+        if verifier_note:
+            details.append(f"Проверка: {verifier_note}")
+        return details
+
+    def _mwv_verifier_note(self, verification: VerificationResult) -> str:
+        if verification.status == VerificationStatus.PASSED:
+            return "ok"
+        if verification.error:
+            return verification.error
+        text = (verification.stderr or verification.stdout or "").strip()
+        if not text:
+            if verification.exit_code is None:
+                return "нет деталей"
+            return f"exit_code={verification.exit_code}"
+        return text.splitlines()[0][:160]
+
+    def _truncate_lines(self, text: str, max_lines: int, max_chars: int) -> list[str]:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return []
+        trimmed = [line[:max_chars] for line in lines[:max_lines]]
+        if len(lines) > max_lines:
+            trimmed.append("...")
+        return trimmed
 
     def _get_main_brain(self) -> Brain:
         if isinstance(self.brain, DualBrain):

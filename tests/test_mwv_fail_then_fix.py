@@ -68,4 +68,4 @@ def test_mwv_fail_then_fix() -> None:
     assert result.verification_result.status == VerificationStatus.PASSED
     assert result.attempt == 2
     assert len(seen_tasks) == 2
-    assert any("минимальные изменения" in item for item in seen_tasks[1].constraints)
+    assert any("минимально по логам" in item for item in seen_tasks[1].constraints)
