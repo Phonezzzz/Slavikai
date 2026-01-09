@@ -60,6 +60,8 @@ Operational rules:
 - Candidates have a TTL and are archived when expired.
 - The directory is capped (older drafts are archived).
 - A cooldown by fingerprint prevents write storms.
+Defaults can be overridden via env:
+`SKILLS_CANDIDATE_MAX`, `SKILLS_CANDIDATE_TTL_DAYS`, `SKILLS_CANDIDATE_COOLDOWN_SECONDS`.
 
 ## Lifecycle (minimal)
 

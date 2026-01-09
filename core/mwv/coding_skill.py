@@ -43,7 +43,7 @@ class CodingSkillResult:
 class CodingSkill:
     workspace_root: Path
     verifier: VerifierRunner | None = None
-    max_retries: int = 1
+    max_retries: int = 2
     change_text: str = "mwv change"
     retry_text: str = "mwv min-diff change"
 
@@ -111,9 +111,10 @@ class CodingSkill:
             retry_text=self.retry_text,
         )
         if updated == original:
+            status = WorkStatus.SUCCESS if context.attempt > 1 else WorkStatus.FAILURE
             return WorkResult(
                 task_id=task.task_id,
-                status=WorkStatus.FAILURE,
+                status=status,
                 summary=f"no changes for {path.name}",
             )
 

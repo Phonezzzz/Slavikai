@@ -90,13 +90,16 @@ test: venv
 check: lint format-check type test
 
 .PHONY: ci
+CI_ARTIFACT_DIR ?= .run/ci-artifacts
 ci: venv
 	@tmp_dir="$$(mktemp -d)"; \
+		artifact_dir="$(CI_ARTIFACT_DIR)"; \
+		mkdir -p "$$artifact_dir"; \
 		export SKILLS_CANDIDATES_DIR="$$tmp_dir/skills/_candidates"; \
 		mkdir -p "$$SKILLS_CANDIDATES_DIR"; \
-		"$(VENV_PY)" skills/tools/lint_skills.py; \
-		"$(VENV_PY)" skills/tools/build_manifest.py --check; \
-		"$(VENV_PY)" -m pytest -q; \
+		"$(VENV_PY)" skills/tools/lint_skills.py >"$$artifact_dir/skills_lint.log" 2>&1; \
+		"$(VENV_PY)" skills/tools/build_manifest.py --check >"$$artifact_dir/build_manifest.log" 2>&1; \
+		"$(VENV_PY)" -m pytest -q >"$$artifact_dir/pytest.txt" 2>&1; \
 		rm -rf "$$tmp_dir"
 
 .PHONY: run

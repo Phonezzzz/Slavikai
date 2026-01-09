@@ -2,7 +2,11 @@ name: check
 
 on:
   push:
+    branches:
+      - arch-manager-worker-verifier
   pull_request:
+    branches:
+      - arch-manager-worker-verifier
 
 jobs:
   quality:
@@ -20,6 +24,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scripts/check.sh
-        run: bash scripts/check.sh
+      - name: Run make ci
+        env:
+          CI_ARTIFACT_DIR: ci-artifacts
+        run: make ci
 
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts
+          path: ci-artifacts

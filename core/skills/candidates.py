@@ -12,14 +12,12 @@ from pathlib import Path
 
 import yaml
 
+from config.skills_config import SkillCandidateConfig, load_skill_candidate_config
 from core.skills.models import SkillRisk
 
 DEFAULT_CANDIDATES_DIR = Path(__file__).resolve().parents[2] / "skills" / "_candidates"
 ENV_CANDIDATES_DIR = "SKILLS_CANDIDATES_DIR"
 _MAX_TEXT_LENGTH = 200
-_DEFAULT_MAX_CANDIDATES = 200
-_DEFAULT_TTL_DAYS = 30
-_DEFAULT_COOLDOWN_SECONDS = 60 * 60
 _ARCHIVE_DIR_NAME = "_archive"
 _FRONT_MATTER_DELIM = "---"
 
@@ -47,9 +45,10 @@ class SkillCandidateWriter:
         candidates_dir: Path | None = None,
         *,
         now: Callable[[], datetime] | None = None,
-        max_candidates: int = _DEFAULT_MAX_CANDIDATES,
-        ttl_days: int = _DEFAULT_TTL_DAYS,
-        cooldown_seconds: int = _DEFAULT_COOLDOWN_SECONDS,
+        config: SkillCandidateConfig | None = None,
+        max_candidates: int | None = None,
+        ttl_days: int | None = None,
+        cooldown_seconds: int | None = None,
     ) -> None:
         if candidates_dir is None:
             override = os.getenv(ENV_CANDIDATES_DIR, "")
@@ -58,9 +57,15 @@ class SkillCandidateWriter:
         self._created_keys: set[str] = set()
         self._recent_fingerprints: dict[str, datetime] = {}
         self._now = now or _utc_now
-        self._max_candidates = max(1, max_candidates)
-        self._ttl = timedelta(days=max(1, ttl_days))
-        self._cooldown_seconds = max(1, cooldown_seconds)
+        resolved = config or load_skill_candidate_config()
+        resolved_max = max_candidates if max_candidates is not None else resolved.max_candidates
+        resolved_ttl = ttl_days if ttl_days is not None else resolved.ttl_days
+        resolved_cooldown = (
+            cooldown_seconds if cooldown_seconds is not None else resolved.cooldown_seconds
+        )
+        self._max_candidates = max(1, resolved_max)
+        self._ttl = timedelta(days=max(1, resolved_ttl))
+        self._cooldown_seconds = max(1, resolved_cooldown)
 
     def write_once(self, key: str, draft: CandidateDraft) -> Path | None:
         if key in self._created_keys:

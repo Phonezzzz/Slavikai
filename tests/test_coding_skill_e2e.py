@@ -22,7 +22,7 @@ def test_coding_skill_happy_path(tmp_path: Path) -> None:
     target.write_text("print('hi')\n", encoding="utf-8")
 
     runner = VerifierRunner(script_path=script_path)
-    skill = CodingSkill(workspace_root=repo, verifier=runner, max_retries=1)
+    skill = CodingSkill(workspace_root=repo, verifier=runner)
     result = skill.run("внеси маленькое изменение в файл sample.py")
 
     assert result.run_result.work_result.status == WorkStatus.SUCCESS
@@ -46,7 +46,6 @@ def test_coding_skill_fail_then_fix(tmp_path: Path) -> None:
     skill = CodingSkill(
         workspace_root=repo,
         verifier=runner,
-        max_retries=1,
         change_text="BAD",
         retry_text="GOOD",
     )
@@ -67,9 +66,10 @@ def test_coding_skill_hard_fail(tmp_path: Path) -> None:
     target.write_text("print('hi')\n", encoding="utf-8")
 
     runner = VerifierRunner(script_path=script_path)
-    skill = CodingSkill(workspace_root=repo, verifier=runner, max_retries=1)
+    skill = CodingSkill(workspace_root=repo, verifier=runner)
     result = skill.run("внеси маленькое изменение в файл sample.py")
 
+    assert result.run_result.attempt == 3
     assert result.run_result.verification_result.status == VerificationStatus.FAILED
     assert result.run_result.retry_decision is not None
     assert result.run_result.retry_decision.allow_retry is False
