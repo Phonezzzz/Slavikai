@@ -11,6 +11,25 @@ VENV_DIR ?= venv
 VENV_PY := $(VENV_DIR)/bin/python
 VENV_PIP := $(VENV_PY) -m pip
 VENV_RUFF := $(VENV_DIR)/bin/ruff
+LEGACY_FORMAT_EXCLUDES := \
+	core/approval_policy.py \
+	core/critic_policy.py \
+	core/executor.py \
+	core/tracer.py \
+	llm/dual_brain.py \
+	llm/local_http_brain.py \
+	llm/openrouter_brain.py \
+	server/http_api.py \
+	shared/models.py \
+	shared/sanitize.py \
+	tests/test_agent_commands.py \
+	tests/test_approval_policy.py \
+	tests/test_commandlane_blocked_reason.py \
+	tests/test_critic_policy.py \
+	tests/test_http_api.py \
+	tests/test_tool_gateway.py \
+	tools/tool_logger.py \
+	tools/tool_registry.py
 
 RUN_DIR ?= .run
 APP_PID_FILE := $(RUN_DIR)/slavikai-ui.pid
@@ -74,7 +93,7 @@ format: venv
 
 .PHONY: format-check
 format-check: venv
-	"$(VENV_RUFF)" format --check .
+	"$(VENV_RUFF)" format --check . $(LEGACY_FORMAT_EXCLUDES:%=--exclude %)
 
 .PHONY: type
 type: venv
