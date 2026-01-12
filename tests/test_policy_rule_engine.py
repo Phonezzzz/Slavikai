@@ -105,7 +105,7 @@ def test_agent_applies_policies_and_logs_applied_ids(tmp_path: Path) -> None:
     agent.save_to_memory = lambda prompt, answer: None  # type: ignore[method-assign]  # noqa: ARG005
 
     reply = agent.respond([LLMMessage(role="user", content="hello")])
-    assert reply == "ok"
+    assert reply.startswith("ok")
 
     assert brain.last_messages is not None
     policy_msgs = [m for m in brain.last_messages if m.role == "system" and "Политики" in m.content]

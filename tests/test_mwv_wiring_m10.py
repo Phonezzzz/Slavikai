@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import core.agent as agent_module
 from core.agent import Agent
-from core.mwv.models import ChangeType, VerificationResult, VerificationStatus, WorkChange, WorkResult, WorkStatus
+from core.mwv.models import (
+    ChangeType,
+    VerificationResult,
+    VerificationStatus,
+    WorkChange,
+    WorkResult,
+    WorkStatus,
+)
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage
+from tests.report_utils import extract_report_block
 
 
 class DummyBrain(Brain):
@@ -37,8 +46,10 @@ def test_m10_chat_route_does_not_call_mwv(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="что такое переменная")])
-    assert response == "chat"
+    assert response.startswith("chat")
     assert brain.calls == 1
+    report = extract_report_block(response)
+    assert report["route"] == "chat"
 
 
 def test_m10_code_route_returns_mwv_report(tmp_path: Path, monkeypatch) -> None:
@@ -74,6 +85,13 @@ def test_m10_code_route_returns_mwv_report(tmp_path: Path, monkeypatch) -> None:
     assert "Изменения:" in response
     assert "foo.py" in response
     assert brain.calls == 0
+    report = extract_report_block(response)
+    assert report["route"] == "mwv"
+    verifier = cast(dict[str, object], report["verifier"])
+    assert verifier["status"] == "ok"
+    assert isinstance(verifier["duration_ms"], int)
+    attempts = cast(dict[str, object], report["attempts"])
+    assert attempts["current"] == 1
 
 
 def test_m10_verifier_failure_returns_diagnostics(tmp_path: Path, monkeypatch) -> None:
@@ -111,3 +129,9 @@ def test_m10_verifier_failure_returns_diagnostics(tmp_path: Path, monkeypatch) -
     assert "что делать дальше" in lowered
     assert "trace_id=" in response
     assert brain.calls == 0
+    report = extract_report_block(response)
+    assert report["route"] == "mwv"
+    assert report["stop_reason_code"] == "VERIFIER_FAILED"
+    verifier = cast(dict[str, object], report["verifier"])
+    assert verifier["status"] == "fail"
+    assert isinstance(verifier["duration_ms"], int)

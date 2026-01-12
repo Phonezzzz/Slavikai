@@ -24,6 +24,7 @@ from core.mwv.routing import RouteDecision
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage, PlanStep, PlanStepStatus, TaskPlan, WorkspaceDiffEntry
+from tests.report_utils import extract_report_block
 from tools.workspace_tools import WORKSPACE_ROOT
 
 
@@ -139,6 +140,9 @@ def test_mwv_diagnostics_and_formatting(tmp_path: Path) -> None:
     assert "Что случилось" in fail_response
     assert "ошибка выполнения" in fail_response.lower()
     assert "trace_id=trace" in fail_response
+    report = extract_report_block(fail_response)
+    assert report["route"] == "mwv"
+    assert report["stop_reason_code"] == "WORKER_FAILED"
 
     verify_error = VerificationResult(
         status=VerificationStatus.ERROR,
@@ -161,6 +165,9 @@ def test_mwv_diagnostics_and_formatting(tmp_path: Path) -> None:
     assert "Что случилось" in error_response
     assert "Ошибка проверки" in error_response
     assert "trace_id=trace" in error_response
+    report = extract_report_block(error_response)
+    assert report["route"] == "mwv"
+    assert report["stop_reason_code"] == "VERIFIER_FAILED"
 
     retry_decision = RetryDecision(
         policy=RetryPolicy.LIMITED,
@@ -190,6 +197,9 @@ def test_mwv_diagnostics_and_formatting(tmp_path: Path) -> None:
     assert "Что случилось" in response
     assert "Проверки не прошли" in response
     assert "trace_id=trace" in response
+    report = extract_report_block(response)
+    assert report["route"] == "mwv"
+    assert report["stop_reason_code"] == "VERIFIER_FAILED"
 
 
 def test_mwv_flow_runs_through_worker_and_verifier(

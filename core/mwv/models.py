@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal
+from typing import Final, Literal
 
 from shared.models import JSONValue
 
@@ -28,6 +28,19 @@ class ChangeType(str, Enum):
 class RetryPolicy(str, Enum):
     NONE = "none"
     LIMITED = "limited"
+
+
+class StopReasonCode(str, Enum):
+    BLOCKED_SKILL_AMBIGUOUS = "BLOCKED_SKILL_AMBIGUOUS"
+    BLOCKED_SKILL_DEPRECATED = "BLOCKED_SKILL_DEPRECATED"
+    APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
+    VERIFIER_FAILED = "VERIFIER_FAILED"
+    MWV_INTERNAL_ERROR = "MWV_INTERNAL_ERROR"
+    COMMAND_LANE_NOTICE = "COMMAND_LANE_NOTICE"
+    WORKER_FAILED = "WORKER_FAILED"
+
+
+MWV_REPORT_PREFIX: Final[str] = "MWV_REPORT_JSON="
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,7 @@ from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage
+from tests.report_utils import extract_report_block
 
 
 class DummyBrain(Brain):
@@ -31,3 +32,6 @@ def test_mwv_internal_error_returns_stop_response(tmp_path: Path, monkeypatch) -
     assert "mwv internal error" in lowered
     assert "что делать дальше" in lowered
     assert "trace_id=" in response
+    report = extract_report_block(response)
+    assert report["route"] == "mwv"
+    assert report["stop_reason_code"] == "MWV_INTERNAL_ERROR"

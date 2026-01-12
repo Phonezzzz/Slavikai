@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 import logging
 import re
 import time
@@ -23,9 +24,11 @@ from core.batch_review import BatchReviewer
 from core.executor import Executor
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
+    MWV_REPORT_PREFIX,
     ChangeType,
     MWVMessage,
     RunContext,
+    StopReasonCode,
     TaskPacket,
     VerificationResult,
     VerificationStatus,
@@ -320,16 +323,25 @@ class Agent:
             if self.main_config and self.main_config.thinking_enabled:
                 self.last_reasoning = reply.reasoning
             self.tracer.log("reasoning_end", "Ответ получен", {"reply_preview": reviewed[:120]})
+            response_text = self._append_report_block(
+                reviewed,
+                route="chat",
+                trace_id=None,
+                attempts=None,
+                verifier=None,
+                next_steps=None,
+                stop_reason_code=None,
+            )
             if self.memory_config.auto_save_dialogue:
-                self.save_to_memory(last_content, reviewed)
+                self.save_to_memory(last_content, response_text)
             self._log_chat_interaction(
                 raw_input=last_content,
-                response_text=reviewed,
+                response_text=response_text,
                 applied_policy_ids=policy_application.applied_policy_ids,
             )
             if record_in_history:
-                self._append_short_term([LLMMessage(role="assistant", content=reviewed)])
-            return reviewed
+                self._append_short_term([LLMMessage(role="assistant", content=response_text)])
+            return response_text
         except Exception as exc:  # noqa: BLE001
             self.logger.error("LLM error: %s", exc)
             self.tracer.log("error", f"Ошибка модели: {exc}")
@@ -531,7 +543,11 @@ class Agent:
                     "Проверь шаги выполнения и уточни запрос.",
                     "Запусти задачу снова с более узким фокусом.",
                 ],
+                stop_reason_code=StopReasonCode.WORKER_FAILED,
+                route="mwv",
                 trace_id=trace_id,
+                attempts=(result.attempt, result.max_attempts),
+                verifier=result.verification_result,
             )
         if result.verification_result.status != VerificationStatus.PASSED:
             note = self._mwv_verifier_note(result.verification_result)
@@ -548,7 +564,11 @@ class Agent:
                     "Запусти scripts/check.sh вручную для диагностики.",
                     "Исправь проблему и повтори запрос.",
                 ],
+                stop_reason_code=StopReasonCode.VERIFIER_FAILED,
+                route="mwv",
                 trace_id=trace_id,
+                attempts=(result.attempt, result.max_attempts),
+                verifier=result.verification_result,
             )
         outcome = self._mwv_outcome_label(result)
         lines = [
@@ -568,7 +588,16 @@ class Agent:
             lines.append("Детали:")
             lines.extend(details)
 
-        return "\n".join(lines).strip()
+        next_steps = self._mwv_next_steps(result) if self._mwv_needs_next_steps(result) else []
+        return self._append_report_block(
+            "\n".join(lines).strip(),
+            route="mwv",
+            trace_id=trace_id,
+            attempts=(result.attempt, result.max_attempts),
+            verifier=result.verification_result,
+            next_steps=next_steps,
+            stop_reason_code=None,
+        )
 
     def _summarize_work_failure(self, work_result: WorkResult) -> str:
         errors = work_result.diagnostics.get("step_errors")
@@ -693,6 +722,8 @@ class Agent:
                 "Проверь логи и trace по trace_id.",
                 "Повтори запрос или уточни входные данные.",
             ],
+            stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
+            route="mwv",
             trace_id=trace_id,
         )
         if self.memory_config.auto_save_dialogue:
@@ -758,6 +789,8 @@ class Agent:
                     "Укажи новый skill_id или замену.",
                     "Переформулируй запрос.",
                 ],
+                stop_reason_code=StopReasonCode.BLOCKED_SKILL_DEPRECATED,
+                route="blocked",
             )
         if decision.status == "ambiguous":
             ids = [match.entry.id for match in decision.alternatives]
@@ -769,6 +802,8 @@ class Agent:
                     "Укажи нужный skill_id.",
                     "Уточни запрос, чтобы матч был однозначным.",
                 ],
+                stop_reason_code=StopReasonCode.BLOCKED_SKILL_AMBIGUOUS,
+                route="blocked",
             )
         return "Навык не может быть применен."
 
@@ -793,6 +828,7 @@ class Agent:
         cmd = parts[0][1:].lower()
         args = parts[1:]
         self.tracer.log("tool_invoked", cmd, {"args": args})
+
         def _wrap(response: str) -> str:
             return self._format_command_lane_response(response)
 
@@ -1448,9 +1484,73 @@ class Agent:
 
     def _format_command_lane_response(self, response: str) -> str:
         prefix = "Командный режим (без MWV)"
-        if not response:
-            return prefix
-        return f"{prefix}\n{response}".strip()
+        base = prefix if not response else f"{prefix}\n{response}".strip()
+        return self._append_report_block(
+            base,
+            route="command",
+            trace_id=None,
+            attempts=None,
+            verifier=None,
+            next_steps=[],
+            stop_reason_code=StopReasonCode.COMMAND_LANE_NOTICE,
+        )
+
+    def _format_report_block(
+        self,
+        *,
+        route: str,
+        trace_id: str | None,
+        attempts: tuple[int, int] | None,
+        verifier: VerificationResult | None,
+        next_steps: list[str] | None,
+        stop_reason_code: StopReasonCode | None,
+    ) -> str:
+        payload: dict[str, JSONValue] = {"route": route, "trace_id": trace_id}
+        if attempts is not None:
+            payload["attempts"] = {"current": attempts[0], "max": attempts[1]}
+        if verifier is not None:
+            payload["verifier"] = {
+                "status": "ok" if verifier.status == VerificationStatus.PASSED else "fail",
+                "duration_ms": verifier.duration_ms,
+            }
+        if next_steps is not None:
+            payload["next_steps"] = self._normalize_report_steps(next_steps)
+        if stop_reason_code is not None:
+            payload["stop_reason_code"] = stop_reason_code.value
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return f"{MWV_REPORT_PREFIX}{encoded}"
+
+    def _normalize_report_steps(self, steps: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for step in steps:
+            cleaned = step.strip()
+            if cleaned.startswith("- "):
+                cleaned = cleaned[2:].strip()
+            normalized.append(cleaned)
+        return normalized[:3]
+
+    def _append_report_block(
+        self,
+        text: str,
+        *,
+        route: str,
+        trace_id: str | None,
+        attempts: tuple[int, int] | None,
+        verifier: VerificationResult | None,
+        next_steps: list[str] | None,
+        stop_reason_code: StopReasonCode | None,
+    ) -> str:
+        report = self._format_report_block(
+            route=route,
+            trace_id=trace_id,
+            attempts=attempts,
+            verifier=verifier,
+            next_steps=next_steps,
+            stop_reason_code=stop_reason_code,
+        )
+        if not text:
+            return report
+        return f"{text}\n{report}"
 
     def _format_stop_response(
         self,
@@ -1458,7 +1558,11 @@ class Agent:
         what: str,
         why: str,
         next_steps: list[str],
+        stop_reason_code: StopReasonCode,
+        route: str,
         trace_id: str | None = None,
+        attempts: tuple[int, int] | None = None,
+        verifier: VerificationResult | None = None,
     ) -> str:
         steps = next_steps or ["Уточни запрос или попробуй снова."]
         lines = [
@@ -1469,7 +1573,24 @@ class Agent:
         ]
         if trace_id:
             lines.append(f"trace_id={trace_id}")
-        return "\n".join(lines).strip()
+        self.tracer.log(
+            "stop_response",
+            what,
+            {
+                "stop_reason_code": stop_reason_code.value,
+                "route": route,
+                "trace_id": trace_id or "",
+            },
+        )
+        return self._append_report_block(
+            "\n".join(lines).strip(),
+            route=route,
+            trace_id=trace_id,
+            attempts=attempts,
+            verifier=verifier,
+            next_steps=steps,
+            stop_reason_code=stop_reason_code,
+        )
 
     def _handle_approval_required(
         self,
@@ -1484,6 +1605,7 @@ class Agent:
         why_parts = [f"category={request.category}", f"required={required}"]
         if command_lane:
             why_parts.append("mode=command_lane (без MWV)")
+        route = "command" if command_lane else "mwv"
         error_text = self._format_stop_response(
             what="Требуется подтверждение действия",
             why="; ".join(why_parts),
@@ -1491,6 +1613,8 @@ class Agent:
                 "Подтверди действие или отмени его.",
                 "При необходимости уточни команду.",
             ],
+            stop_reason_code=StopReasonCode.APPROVAL_REQUIRED,
+            route=route,
         )
         self._log_chat_interaction(raw_input=raw_input, response_text=error_text)
         if record_in_history:

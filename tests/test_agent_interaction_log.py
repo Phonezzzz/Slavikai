@@ -25,7 +25,7 @@ def test_agent_logs_chat_and_tool(tmp_path: Path) -> None:
     )
 
     reply = agent.respond([LLMMessage(role="user", content="hello")])
-    assert reply == "ok"
+    assert reply.startswith("ok")
 
     _ = agent.handle_tool_command("/fs list")
 

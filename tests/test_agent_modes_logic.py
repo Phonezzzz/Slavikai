@@ -6,6 +6,7 @@ from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage
+from tests.report_utils import extract_report_block
 
 
 class CountingBrain(Brain):
@@ -30,8 +31,10 @@ def _prepare_agent(tmp_path: Path) -> tuple[Agent, CountingBrain]:
 def test_agent_chat_uses_main_brain(tmp_path: Path) -> None:
     agent, main = _prepare_agent(tmp_path)
     response = agent.respond([LLMMessage(role="user", content="привет")])
-    assert response == "main"
+    assert response.startswith("main")
     assert main.calls == 1
+    report = extract_report_block(response)
+    assert report["route"] == "chat"
 
 
 def test_agent_mwv_route_bypasses_brain(tmp_path: Path, monkeypatch) -> None:

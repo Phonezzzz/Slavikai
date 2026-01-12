@@ -8,6 +8,7 @@ from core.skills.models import SkillEntry, SkillManifest
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage, PlanStep, TaskPlan
+from tests.report_utils import extract_report_block
 
 
 class DummyBrain(Brain):
@@ -120,6 +121,9 @@ def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) ->
     assert "несколько" in lowered
     assert "что делать дальше" in lowered
     assert brain.calls == 0
+    report = extract_report_block(response)
+    assert report["route"] == "blocked"
+    assert report["stop_reason_code"] == "BLOCKED_SKILL_AMBIGUOUS"
 
 
 def test_skill_deprecated_blocks_with_instruction(tmp_path: Path, monkeypatch) -> None:
@@ -142,3 +146,6 @@ def test_skill_deprecated_blocks_with_instruction(tmp_path: Path, monkeypatch) -
     assert "deprecated" in lowered
     assert "что делать дальше" in lowered
     assert brain.calls == 0
+    report = extract_report_block(response)
+    assert report["route"] == "blocked"
+    assert report["stop_reason_code"] == "BLOCKED_SKILL_DEPRECATED"

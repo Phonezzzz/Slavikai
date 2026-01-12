@@ -6,6 +6,7 @@ from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage
+from tests.report_utils import extract_report_block
 
 
 class DummyBrain(Brain):
@@ -30,8 +31,10 @@ def test_routing_chat_path_uses_llm(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="какая погода")])
-    assert response == "chat"
+    assert response.startswith("chat")
     assert brain.calls == 1
+    report = extract_report_block(response)
+    assert report["route"] == "chat"
 
 
 def test_routing_chat_path_for_explanation(tmp_path: Path, monkeypatch) -> None:
@@ -46,8 +49,10 @@ def test_routing_chat_path_for_explanation(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="объясни термин git")])
-    assert response == "chat"
+    assert response.startswith("chat")
     assert brain.calls == 1
+    report = extract_report_block(response)
+    assert report["route"] == "chat"
 
 
 def test_routing_mwv_path_bypasses_llm(tmp_path: Path, monkeypatch) -> None:
