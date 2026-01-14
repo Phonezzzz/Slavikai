@@ -21,6 +21,7 @@ from core.approval_policy import (
 )
 from core.auto_agent import AutoAgent
 from core.batch_review import BatchReviewer
+from core.decision.models import DecisionPacket
 from core.executor import Executor
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
@@ -225,6 +226,7 @@ class Agent:
             "candidate_written_count": 0,
         }
         self.last_approval_request: ApprovalRequest | None = None
+        self.last_decision_packet: DecisionPacket | None = None
         self.last_reasoning: str | None = None
         self.workspace_file_path: str | None = None
         self.workspace_file_content: str | None = None
@@ -1001,6 +1003,9 @@ class Agent:
 
     def _reset_approval_state(self) -> None:
         self.last_approval_request = None
+
+    def _record_decision_packet(self, packet: DecisionPacket) -> None:
+        self.last_decision_packet = packet
 
     def set_session_context(
         self,
