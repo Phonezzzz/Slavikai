@@ -21,6 +21,7 @@ from core.approval_policy import (
 )
 from core.auto_agent import AutoAgent
 from core.batch_review import BatchReviewer
+from core.decision.handler import DecisionContext, DecisionHandler
 from core.decision.models import DecisionPacket
 from core.executor import Executor
 from core.mwv.manager import ManagerRuntime, MWVRunResult
@@ -225,6 +226,7 @@ class Agent:
             "verifier_fail_count": 0,
             "candidate_written_count": 0,
         }
+        self.decision_handler = DecisionHandler()
         self.last_approval_request: ApprovalRequest | None = None
         self.last_decision_packet: DecisionPacket | None = None
         self.last_reasoning: str | None = None
@@ -283,6 +285,22 @@ class Agent:
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
                 return response
+            skill_status = decision.skill_decision.status if decision.skill_decision else None
+            decision_packet = self.decision_handler.evaluate(
+                DecisionContext(
+                    user_input=last_content,
+                    route=decision.route,
+                    reason=decision.reason,
+                    risk_flags=list(decision.risk_flags),
+                    skill_status=skill_status,
+                ),
+            )
+            if decision_packet is not None:
+                return self._handle_decision_packet(
+                    decision_packet,
+                    raw_input=last_content,
+                    record_in_history=record_in_history,
+                )
             if decision.route == "mwv":
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_skill_candidate(last_content, decision)
@@ -1006,6 +1024,27 @@ class Agent:
 
     def _record_decision_packet(self, packet: DecisionPacket) -> None:
         self.last_decision_packet = packet
+
+    def _handle_decision_packet(
+        self,
+        packet: DecisionPacket,
+        *,
+        raw_input: str,
+        record_in_history: bool,
+    ) -> str:
+        self._record_decision_packet(packet)
+        response = packet.to_json()
+        self.tracer.log(
+            "decision_packet",
+            packet.summary,
+            {"id": packet.id, "reason": packet.reason.value},
+        )
+        if self.memory_config.auto_save_dialogue:
+            self.save_to_memory(raw_input, response)
+        self._log_chat_interaction(raw_input=raw_input, response_text=response)
+        if record_in_history:
+            self._append_short_term([LLMMessage(role="assistant", content=response)])
+        return response
 
     def set_session_context(
         self,
