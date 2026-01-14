@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 # Candidate retention defaults: keep recent drafts while limiting disk usage and noise.
 DEFAULT_MAX_CANDIDATES = 200
