@@ -274,10 +274,7 @@ class Agent:
                 decision.route,
                 {"reason": decision.reason, "flags": decision.risk_flags},
             )
-            if decision.skill_decision and decision.skill_decision.status in {
-                "deprecated",
-                "ambiguous",
-            }:
+            if decision.skill_decision and decision.skill_decision.status == "deprecated":
                 response = self._format_skill_block(decision.skill_decision)
                 if self.memory_config.auto_save_dialogue:
                     self.save_to_memory(last_content, response)
@@ -285,14 +282,13 @@ class Agent:
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
                 return response
-            skill_status = decision.skill_decision.status if decision.skill_decision else None
             decision_packet = self.decision_handler.evaluate(
                 DecisionContext(
                     user_input=last_content,
                     route=decision.route,
                     reason=decision.reason,
                     risk_flags=list(decision.risk_flags),
-                    skill_status=skill_status,
+                    skill_decision=decision.skill_decision,
                 ),
             )
             if decision_packet is not None:

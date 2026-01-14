@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from core.agent import Agent
@@ -116,14 +117,11 @@ def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="alpha request")])
 
-    lowered = response.lower()
-    assert "что случилось" in lowered
-    assert "несколько" in lowered
-    assert "что делать дальше" in lowered
+    payload = json.loads(response)
+    assert payload["reason"] == "ambiguous_skill"
+    assert 3 <= len(payload["options"]) <= 5
+    assert any(option["action"] == "select_skill" for option in payload["options"])
     assert brain.calls == 0
-    report = extract_report_block(response)
-    assert report["route"] == "blocked"
-    assert report["stop_reason_code"] == "BLOCKED_SKILL_AMBIGUOUS"
 
 
 def test_skill_deprecated_blocks_with_instruction(tmp_path: Path, monkeypatch) -> None:
