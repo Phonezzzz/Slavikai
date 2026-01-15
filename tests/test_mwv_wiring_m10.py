@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import cast
 
@@ -122,16 +123,8 @@ def test_m10_verifier_failure_returns_diagnostics(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(agent_module, "VerifierRuntime", DummyVerifierRuntime)
     response = agent.respond([LLMMessage(role="user", content="почини тесты")])
 
-    lowered = response.lower()
-    assert "что случилось" in lowered
-    assert "проверки" in lowered
-    assert "tests failed" in response
-    assert "что делать дальше" in lowered
-    assert "trace_id=" in response
+    payload = json.loads(response)
+    assert payload["reason"] == "verifier_fail"
+    assert 3 <= len(payload["options"]) <= 5
+    assert any(option["action"] == "retry" for option in payload["options"])
     assert brain.calls == 0
-    report = extract_report_block(response)
-    assert report["route"] == "mwv"
-    assert report["stop_reason_code"] == "VERIFIER_FAILED"
-    verifier = cast(dict[str, object], report["verifier"])
-    assert verifier["status"] == "fail"
-    assert isinstance(verifier["duration_ms"], int)

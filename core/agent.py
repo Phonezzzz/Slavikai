@@ -23,6 +23,7 @@ from core.auto_agent import AutoAgent
 from core.batch_review import BatchReviewer
 from core.decision.handler import DecisionContext, DecisionHandler
 from core.decision.models import DecisionPacket
+from core.decision.verifier_fail import build_verifier_fail_packet
 from core.executor import Executor
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
@@ -425,6 +426,21 @@ class Agent:
             )
         if run_result.verification_result.status != VerificationStatus.PASSED:
             self._inc_metric("verifier_fail_count")
+            decision_packet = build_verifier_fail_packet(
+                run_result.verification_result,
+                task_id=run_result.task.task_id,
+                trace_id=run_result.task.trace_id,
+                attempt=run_result.attempt,
+                max_attempts=run_result.max_attempts,
+                retry_allowed=bool(
+                    run_result.retry_decision and run_result.retry_decision.allow_retry
+                ),
+            )
+            return self._handle_decision_packet(
+                decision_packet,
+                raw_input=raw_input,
+                record_in_history=record_in_history,
+            )
         response = self._format_mwv_response(run_result)
         if self.memory_config.auto_save_dialogue:
             self.save_to_memory(raw_input, response)
