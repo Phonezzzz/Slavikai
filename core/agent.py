@@ -21,8 +21,9 @@ from core.approval_policy import (
 )
 from core.auto_agent import AutoAgent
 from core.batch_review import BatchReviewer
-from core.decision.handler import DecisionContext, DecisionHandler
+from core.decision.handler import DecisionContext, DecisionHandler, DecisionRequired
 from core.decision.models import DecisionPacket
+from core.decision.tool_fail import build_tool_fail_packet
 from core.decision.verifier_fail import build_verifier_fail_packet
 from core.executor import Executor
 from core.mwv.manager import ManagerRuntime, MWVRunResult
@@ -231,6 +232,7 @@ class Agent:
         self.last_approval_request: ApprovalRequest | None = None
         self.last_decision_packet: DecisionPacket | None = None
         self.last_reasoning: str | None = None
+        self._pending_decision_packet: DecisionPacket | None = None
         self.workspace_file_path: str | None = None
         self.workspace_file_content: str | None = None
         self.workspace_selection: str | None = None
@@ -306,6 +308,12 @@ class Agent:
         except ApprovalRequired as exc:
             return self._handle_approval_required(
                 exc.request,
+                raw_input=last_content,
+                record_in_history=record_in_history,
+            )
+        except DecisionRequired as exc:
+            return self._handle_decision_packet(
+                exc.packet,
                 raw_input=last_content,
                 record_in_history=record_in_history,
             )
@@ -994,6 +1002,12 @@ class Agent:
                 record_in_history=False,
                 command_lane=True,
             )
+        except DecisionRequired as exc:
+            return self._handle_decision_packet(
+                exc.packet,
+                raw_input=command,
+                record_in_history=False,
+            )
         except Exception as exc:  # noqa: BLE001
             self.tracer.log("error", f"Ошибка при вызове инструмента: {exc}")
             error_text = f"[Ошибка при вызове инструмента: {exc}]"
@@ -1108,6 +1122,14 @@ class Agent:
         if count < SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD:
             return
         self._tool_error_counts[request.name] = 0
+        error_text = sanitize_text(result.error or "unknown error")
+        self._pending_decision_packet = build_tool_fail_packet(
+            tool_name=request.name,
+            error_text=error_text,
+            count=count,
+            threshold=SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD,
+            user_input=self._last_user_input,
+        )
         self._record_tool_error_candidate(request, result, count)
 
     def _should_track_tool_error(self, result: ToolResult) -> bool:
@@ -1328,6 +1350,10 @@ class Agent:
             self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
             raise
         self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
+        if self._pending_decision_packet is not None:
+            packet = self._pending_decision_packet
+            self._pending_decision_packet = None
+            raise DecisionRequired(packet)
         return result
 
     def _log_chat_interaction(

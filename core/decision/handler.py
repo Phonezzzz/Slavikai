@@ -34,3 +34,9 @@ class DecisionHandler:
         packet = self._forced_packet
         self._forced_packet = None
         return packet
+
+
+class DecisionRequired(Exception):
+    def __init__(self, packet: DecisionPacket) -> None:
+        super().__init__("Decision required")
+        self.packet = packet
