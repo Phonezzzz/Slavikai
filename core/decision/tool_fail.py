@@ -62,7 +62,7 @@ def build_tool_fail_packet(
         summary=summary,
         context=_build_context(tool_name, error_text, count, threshold, user_input),
         options=options,
-        default_option_id="retry",
+        default_option_id=None,
         policy={"require_user_choice": True},
     )
 

@@ -10,7 +10,11 @@ from shared.models import LLMMessage, ToolRequest, ToolResult
 
 
 class DummyBrain(Brain):
+    def __init__(self) -> None:
+        self.calls = 0
+
     def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+        self.calls += 1
         return LLMResult(text="chat")
 
 
@@ -39,3 +43,4 @@ def test_decision_packet_tool_fail_threshold(tmp_path: Path, monkeypatch) -> Non
     assert payload["reason"] == "tool_fail"
     assert 3 <= len(payload["options"]) <= 5
     assert any(option["action"] == "retry" for option in payload["options"])
+    assert agent.brain.calls == 0
