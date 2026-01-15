@@ -47,7 +47,11 @@ class FakeExecutor:
 
 def test_agent_simple_response(tmp_path: Path) -> None:
     brain = SimpleBrain("hello")
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
@@ -58,7 +62,11 @@ def test_agent_simple_response(tmp_path: Path) -> None:
 
 def test_agent_plan_execution_path(tmp_path: Path) -> None:
     brain = SimpleBrain("ok")
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.planner = FakePlanner()  # type: ignore[assignment]
     agent.executor = FakeExecutor()  # type: ignore[assignment]
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]

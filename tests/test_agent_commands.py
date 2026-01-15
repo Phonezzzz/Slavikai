@@ -14,7 +14,11 @@ class SimpleBrain(Brain):
 
 
 def test_agent_unknown_tool_command(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     resp = agent.handle_tool_command("/unknown")
     assert "неизвестен" in resp.lower() or "неактивен" in resp.lower()
 
@@ -24,6 +28,7 @@ def test_agent_shell_disabled_in_safe_mode(tmp_path: Path) -> None:
         brain=SimpleBrain(),
         enable_tools={"safe_mode": True},
         memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
     resp = agent.handle_tool_command("/sh ls")
     lowered = resp.lower()

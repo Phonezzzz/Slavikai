@@ -31,7 +31,12 @@ def _get_tool_log(store: MemoryCompanionStore, tool_name: str) -> ToolInteractio
 
 def test_commandlane_logs_tool_not_registered(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(db_path))
+    inbox_db_path = db_path.with_name("memory_inbox.db")
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
+    )
 
     _ = agent.handle_tool_command("/unknown")
 
@@ -43,9 +48,11 @@ def test_commandlane_logs_tool_not_registered(tmp_path: Path) -> None:
 
 def test_commandlane_logs_sandbox_violation(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
+    inbox_db_path = db_path.with_name("memory_inbox.db")
     agent = Agent(
         brain=SimpleBrain(),
         memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
         enable_tools={
             "fs": True,
             "shell": False,
@@ -70,9 +77,11 @@ def test_commandlane_logs_sandbox_violation(tmp_path: Path) -> None:
 
 def test_commandlane_logs_validation_error(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
+    inbox_db_path = db_path.with_name("memory_inbox.db")
     agent = Agent(
         brain=SimpleBrain(),
         memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
         enable_tools={
             "fs": True,
             "shell": True,
@@ -97,9 +106,11 @@ def test_commandlane_logs_validation_error(tmp_path: Path) -> None:
 
 def test_commandlane_logs_safe_mode_blocked(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
+    inbox_db_path = db_path.with_name("memory_inbox.db")
     agent = Agent(
         brain=SimpleBrain(),
         memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
         enable_tools={
             "fs": True,
             "shell": True,
@@ -124,9 +135,11 @@ def test_commandlane_logs_safe_mode_blocked(tmp_path: Path) -> None:
 
 def test_commandlane_logs_tool_disabled(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
+    inbox_db_path = db_path.with_name("memory_inbox.db")
     agent = Agent(
         brain=SimpleBrain(),
         memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
         enable_tools={
             "fs": True,
             "shell": False,

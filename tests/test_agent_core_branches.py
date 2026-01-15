@@ -21,7 +21,11 @@ def _dummy_tool(ok: bool, output: str = "done") -> ToolResult:
 
 
 def test_image_commands_success_and_error(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
     agent.tool_registry.register(
         "image_generate", lambda req: _dummy_tool(True, "img-ok"), enabled=True
@@ -36,7 +40,11 @@ def test_image_commands_success_and_error(tmp_path: Path) -> None:
 
 
 def test_tts_stt_error_paths(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
     agent.tool_registry.register("tts", lambda req: _dummy_tool(False), enabled=True)
     agent.tool_registry.register("stt", lambda req: _dummy_tool(False), enabled=True)
@@ -51,7 +59,11 @@ def test_tts_stt_error_paths(tmp_path: Path) -> None:
 
 
 def test_safe_mode_blocks_web_not_workspace(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     # заменить registry, чтобы web включить и проверить safe mode
     agent.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
     agent.tool_registry.register("web", lambda req: _dummy_tool(True, "ok"), enabled=True)

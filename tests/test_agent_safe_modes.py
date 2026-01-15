@@ -24,7 +24,11 @@ class DummyTool:
 
 
 def test_safe_mode_off_allows_tools(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     registry = ToolRegistry(safe_block={"web", "shell"})
     dummy = DummyTool()
     registry.register("web", dummy, enabled=True)
@@ -37,7 +41,11 @@ def test_safe_mode_off_allows_tools(tmp_path: Path) -> None:
 
 
 def test_safe_mode_on_blocks_web_shell(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     registry = ToolRegistry(safe_block={"web", "shell"})
     dummy = DummyTool()
     registry.register("web", dummy, enabled=True)

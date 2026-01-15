@@ -59,7 +59,9 @@ from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.brain_manager import BrainManager
 from llm.types import ModelConfig
+from memory.categorized_memory_store import CategorizedMemoryStore
 from memory.memory_companion_store import MemoryCompanionStore
+from memory.memory_inbox_writer import MemoryInboxWriter
 from memory.memory_manager import MemoryManager
 from memory.vector_index import VectorIndex
 from shared.batch_review_models import (
@@ -175,6 +177,7 @@ class Agent:
         brain_manager: BrainManager | None = None,
         user_id: str = "local",
         memory_companion_db_path: str | None = None,
+        memory_inbox_db_path: str | None = None,
     ) -> None:
         saved_main = load_model_configs()
         self.main_config = main_config or saved_main
@@ -205,6 +208,12 @@ class Agent:
         if self.tools_enabled.get("safe_mode", False):
             self._apply_safe_mode(True)
         self.memory = MemoryManager("memory/memory.db")
+        self._memory_inbox_store = (
+            CategorizedMemoryStore(memory_inbox_db_path)
+            if memory_inbox_db_path
+            else CategorizedMemoryStore()
+        )
+        self._memory_inbox_writer = MemoryInboxWriter(self._memory_inbox_store, self.memory_config)
         self.vectors = VectorIndex("memory/vectors.db")
         self.skill_index = SkillIndex.load_default()
         self._skill_candidate_writer = SkillCandidateWriter()
@@ -302,6 +311,7 @@ class Agent:
                 )
             if decision.route == "mwv":
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
+                    self._record_unknown_inbox(last_content, decision)
                     self._record_unknown_skill_candidate(last_content, decision)
                 return self._run_mwv_flow(messages, last_content, decision, record_in_history)
             return self._run_chat_response(messages, last_content, record_in_history)
@@ -1130,6 +1140,7 @@ class Agent:
             threshold=SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD,
             user_input=self._last_user_input,
         )
+        self._record_tool_error_inbox(request, result, count)
         self._record_tool_error_candidate(request, result, count)
 
     def _should_track_tool_error(self, result: ToolResult) -> bool:
@@ -1175,6 +1186,28 @@ class Agent:
                 {"reason": draft.reason, "key": key},
             )
 
+    def _record_unknown_inbox(self, user_input: str, decision: RouteDecision) -> None:
+        summary = f"Неизвестный запрос: {sanitize_text(user_input)}"
+        meta: dict[str, JSONValue] = {
+            "reason": "unknown_request",
+            "route": decision.route,
+            "risk_flags": list(decision.risk_flags),
+            "skill_status": decision.skill_decision.status if decision.skill_decision else "none",
+        }
+        try:
+            item = self._memory_inbox_writer.write_once(
+                summary,
+                source="agent",
+                meta=meta,
+                title="Unknown request",
+                tags=["unknown_request"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.tracer.log("memory_inbox_error", str(exc), {"reason": "unknown_request"})
+            return
+        if item is not None:
+            self.tracer.log("memory_inbox_written", item.id, {"reason": "unknown_request"})
+
     def _record_tool_error_candidate(
         self,
         request: ToolRequest,
@@ -1208,6 +1241,34 @@ class Agent:
                 path.name,
                 {"reason": draft.reason, "tool": request.name},
             )
+
+    def _record_tool_error_inbox(
+        self,
+        request: ToolRequest,
+        result: ToolResult,
+        count: int,
+    ) -> None:
+        summary = f"Tool error threshold reached: {request.name}"
+        meta: dict[str, JSONValue] = {
+            "reason": "tool_error",
+            "tool": request.name,
+            "error": sanitize_text(result.error or "unknown error"),
+            "count": count,
+            "threshold": SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD,
+        }
+        try:
+            item = self._memory_inbox_writer.write_once(
+                summary,
+                source="agent",
+                meta=meta,
+                title="Tool error threshold",
+                tags=["tool_error"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.tracer.log("memory_inbox_error", str(exc), {"reason": "tool_error"})
+            return
+        if item is not None:
+            self.tracer.log("memory_inbox_written", item.id, {"reason": "tool_error"})
 
     def _risk_from_flags(self, flags: list[str]) -> SkillRisk:
         high = {"sudo", "system", "install", "git"}

@@ -18,7 +18,11 @@ class DummyBrain(Brain):
 
 
 def _make_agent(tmp_path: Path) -> Agent:
-    agent = Agent(brain=DummyBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=DummyBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     candidates_dir = tmp_path / "skills" / "_candidates"
     agent._skill_candidate_writer = SkillCandidateWriter(candidates_dir=candidates_dir)  # noqa: SLF001
     return agent

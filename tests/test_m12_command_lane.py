@@ -15,7 +15,11 @@ class SimpleBrain(Brain):
 
 
 def _make_agent(tmp_path: Path) -> Agent:
-    return Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    return Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
 
 
 def test_command_lane_safe_command_passes(tmp_path: Path) -> None:

@@ -71,7 +71,11 @@ def _log_interaction(agent: Agent, interaction_id: str) -> None:
 
 
 def test_agent_llm_error_path(tmp_path: Path) -> None:
-    agent = Agent(brain=ErrorBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=ErrorBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.memory = MemoryManager(str(tmp_path / "mem.db"))
     agent.memory.save(
         MemoryRecord(id="1", content="c", tags=[], timestamp="t", kind=MemoryKind.NOTE)
@@ -81,7 +85,11 @@ def test_agent_llm_error_path(tmp_path: Path) -> None:
 
 
 def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     stub = StubPlanner()
     executor = StubExecutor()
     agent.planner = stub  # type: ignore[assignment]
@@ -92,7 +100,11 @@ def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
 
 
 def test_save_feedback_major_hint(tmp_path: Path) -> None:
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     _log_interaction(agent, "1")
     agent.record_feedback_event(
         interaction_id="1",

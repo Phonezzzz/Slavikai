@@ -17,7 +17,11 @@ class DummyBrain(Brain):
 
 
 def _make_agent(tmp_path: Path) -> Agent:
-    return Agent(brain=DummyBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    return Agent(
+        brain=DummyBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
 
 
 def test_workspace_diff_pre_post_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -21,7 +21,11 @@ class DummyBrain(Brain):
 
 def test_routing_chat_path_uses_llm(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain("chat")
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.memory.get_recent = lambda *a, **k: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
@@ -39,7 +43,11 @@ def test_routing_chat_path_uses_llm(tmp_path: Path, monkeypatch) -> None:
 
 def test_routing_chat_path_for_explanation(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain("chat")
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.memory.get_recent = lambda *a, **k: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
@@ -57,7 +65,11 @@ def test_routing_chat_path_for_explanation(tmp_path: Path, monkeypatch) -> None:
 
 def test_routing_mwv_path_bypasses_llm(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain("chat")
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.memory.get_recent = lambda *a, **k: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]

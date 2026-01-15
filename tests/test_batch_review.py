@@ -19,7 +19,12 @@ class SimpleBrain(Brain):
 
 def test_batch_review_is_manual_and_generates_candidates(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(db_path))
+    inbox_db_path = db_path.with_name("memory_inbox.db")
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
+    )
     agent._build_context_messages = (  # type: ignore[method-assign]
         lambda messages, query: messages  # noqa: ARG005
     )

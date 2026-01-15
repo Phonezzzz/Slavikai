@@ -21,7 +21,11 @@ class CountingBrain(Brain):
 
 def _prepare_agent(tmp_path: Path) -> tuple[Agent, CountingBrain]:
     main = CountingBrain("main")
-    agent = Agent(brain=main, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=main,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.memory.get_recent = lambda *a, **k: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]

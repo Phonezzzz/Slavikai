@@ -44,7 +44,11 @@ def _skill_entry(skill_id: str, patterns: list[str]) -> SkillEntry:
 
 def test_decision_packet_ambiguous_skill(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain()
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.skill_index = _make_skill_index(
         [
             _skill_entry("alpha", ["alpha"]),

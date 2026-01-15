@@ -34,7 +34,11 @@ class DummyBrain(Brain):
 
 
 def _make_agent(tmp_path: Path) -> Agent:
-    return Agent(brain=DummyBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    return Agent(
+        brain=DummyBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
 
 
 def test_mwv_context_and_task_builder(tmp_path: Path) -> None:

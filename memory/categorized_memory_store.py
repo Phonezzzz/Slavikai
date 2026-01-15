@@ -66,6 +66,9 @@ class CategorizedMemoryStore:
         self._insert(record)
         return record
 
+    def get_by_fingerprint(self, category: MemoryCategory, fingerprint: str) -> MemoryItem | None:
+        return self._get_by_fingerprint(category, fingerprint)
+
     def list_items(
         self,
         category: MemoryCategory,

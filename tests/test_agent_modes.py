@@ -40,7 +40,11 @@ class FakeMemory:
 
 def test_context_uses_hints_meta(tmp_path: Path) -> None:
     main = CounterBrain()
-    agent = Agent(brain=main, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=main,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.vectors = FakeVectors()
     agent.memory = FakeMemory()
     agent._interaction_store.log_interaction(  # noqa: SLF001

@@ -26,7 +26,11 @@ class DummyBrain(Brain):
 
 
 def test_skill_failure_note_when_verifier_fails(tmp_path: Path) -> None:
-    agent = Agent(brain=DummyBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=DummyBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     run_result = MWVRunResult(
         task=TaskPacket(
             task_id="t",

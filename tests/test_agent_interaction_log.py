@@ -17,7 +17,12 @@ class SimpleBrain(Brain):
 
 def test_agent_logs_chat_and_tool(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
-    agent = Agent(brain=SimpleBrain(), memory_companion_db_path=str(db_path))
+    inbox_db_path = db_path.with_name("memory_inbox.db")
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
+    )
 
     # Изолируем тест от тяжёлых зависимостей (VectorIndex / память).
     agent._build_context_messages = (  # type: ignore[method-assign]

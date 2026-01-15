@@ -37,6 +37,7 @@ def _get_last_chat_log(store: MemoryCompanionStore) -> ChatInteractionLog:
 
 def test_agent_applies_policies_and_logs_applied_ids(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
+    inbox_db_path = db_path.with_name("memory_inbox.db")
     store = MemoryCompanionStore(db_path)
 
     r1 = PolicyRule(
@@ -98,7 +99,11 @@ def test_agent_applies_policies_and_logs_applied_ids(tmp_path: Path) -> None:
     store.add_policy_rule(r4_ignored_style)
 
     brain = CapturingBrain()
-    agent = Agent(brain=brain, memory_companion_db_path=str(db_path))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
+    )
     agent._build_context_messages = (  # type: ignore[method-assign]
         lambda messages, query: messages  # noqa: ARG005
     )
@@ -123,6 +128,7 @@ def test_agent_applies_policies_and_logs_applied_ids(tmp_path: Path) -> None:
 
 def test_policies_not_applied_when_trigger_not_matched(tmp_path: Path) -> None:
     db_path = tmp_path / "memory_companion.db"
+    inbox_db_path = db_path.with_name("memory_inbox.db")
     store = MemoryCompanionStore(db_path)
     store.add_policy_rule(
         PolicyRule(
@@ -141,7 +147,11 @@ def test_policies_not_applied_when_trigger_not_matched(tmp_path: Path) -> None:
     )
 
     brain = CapturingBrain()
-    agent = Agent(brain=brain, memory_companion_db_path=str(db_path))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(db_path),
+        memory_inbox_db_path=str(inbox_db_path),
+    )
     agent._build_context_messages = (  # type: ignore[method-assign]
         lambda messages, query: messages  # noqa: ARG005
     )

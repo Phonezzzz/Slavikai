@@ -18,7 +18,11 @@ def test_save_feedback_variants(tmp_path) -> None:
         def generate(self, messages, config: ModelConfig | None = None):  # type: ignore[override]
             return LLMResult(text="ok")
 
-    agent = Agent(brain=BrainStub(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=BrainStub(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
 
     for interaction_id in ("1", "2", "3"):
         agent._interaction_store.log_interaction(  # noqa: SLF001

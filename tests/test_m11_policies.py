@@ -68,7 +68,11 @@ def _skill_entry(
 
 def test_command_lane_manual_mode_without_mwv(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain()
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.planner = StubPlanner()  # type: ignore[assignment]
     agent.executor = StubExecutor()  # type: ignore[assignment]
 
@@ -85,7 +89,11 @@ def test_command_lane_manual_mode_without_mwv(tmp_path: Path, monkeypatch) -> No
 
 def test_skill_match_routes_to_mwv(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain()
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.memory.get_recent = lambda *a, **k: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *a, **k: []  # type: ignore[attr-defined]
@@ -103,7 +111,11 @@ def test_skill_match_routes_to_mwv(tmp_path: Path, monkeypatch) -> None:
 
 def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain()
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.skill_index = _make_skill_index(
         [
             _skill_entry("alpha", ["alpha"]),
@@ -126,7 +138,11 @@ def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) ->
 
 def test_skill_deprecated_blocks_with_instruction(tmp_path: Path, monkeypatch) -> None:
     brain = DummyBrain()
-    agent = Agent(brain=brain, memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     agent.skill_index = _make_skill_index(
         [
             _skill_entry("legacy", ["legacy"], deprecated=True, replaced_by="alpha"),

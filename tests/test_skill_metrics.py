@@ -34,7 +34,11 @@ def _entry(skill_id: str, *, deprecated: bool = False) -> SkillEntry:
 
 
 def test_skill_metrics_increment(tmp_path: Path) -> None:
-    agent = Agent(brain=DummyBrain(), memory_companion_db_path=str(tmp_path / "mc.db"))
+    agent = Agent(
+        brain=DummyBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
     match = SkillMatch(entry=_entry("alpha"), pattern="alpha")
     decision = SkillMatchDecision(
         status="matched",
