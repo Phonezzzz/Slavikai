@@ -80,10 +80,10 @@ def triage_preview(
     plan_id = plan_id or uuid.uuid4().hex
 
     suggestions: list[TriageSuggestion] = []
-    counts = {category.value: 0 for category in MemoryCategory}
+    counts: dict[str, int] = {category.value: 0 for category in MemoryCategory}
 
     for item in inbox_items:
-        suggestion = _suggest_for_item(item, resolved_policy)
+        suggestion: TriageSuggestion = _suggest_for_item(item, resolved_policy)
         suggestions.append(suggestion)
         counts[suggestion.proposed_category.value] += 1
 
