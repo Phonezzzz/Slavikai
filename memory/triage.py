@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Literal
 
+if TYPE_CHECKING:
+    from memory.categorized_memory_store import CategorizedMemoryStore
 from shared.memory_category_models import MemoryCategory, MemoryItem
 from shared.models import JSONValue
 
@@ -68,6 +70,28 @@ class TriagePolicy:
     notes_markers: tuple[str, ...] = ("note:", "заметка:", "наблюдение:")
 
 
+@dataclass(frozen=True)
+class TriageApplyPolicy:
+    allow_dangerous: bool = False
+    keep_inbox: bool = True
+
+
+@dataclass(frozen=True)
+class TriageApplyResult:
+    plan_id: str
+    applied_at: datetime
+    created_item_ids: list[str] = field(default_factory=list)
+    marked_inbox_ids: list[str] = field(default_factory=list)
+    deleted_inbox_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TriageUndoResult:
+    triaged_at: datetime | None
+    restored_inbox_ids: list[str] = field(default_factory=list)
+    removed_item_ids: list[str] = field(default_factory=list)
+
+
 def triage_preview(
     inbox_items: list[MemoryItem],
     policy: TriagePolicy | None = None,
@@ -93,6 +117,104 @@ def triage_preview(
         source_category=MemoryCategory.INBOX,
         suggestions=suggestions,
         counts=counts,
+    )
+
+
+def apply_triage(
+    store: CategorizedMemoryStore,
+    plan: TriagePlan,
+    overrides: dict[str, MemoryCategory | str] | None = None,
+    policy: TriageApplyPolicy | None = None,
+    *,
+    now: datetime | None = None,
+) -> TriageApplyResult:
+    if plan.source_category != MemoryCategory.INBOX:
+        raise ValueError("apply_triage ожидает план из inbox")
+    resolved_policy = policy or TriageApplyPolicy()
+    overrides = overrides or {}
+    applied_at = _ensure_utc(now) if now else datetime.now(UTC)
+    created_item_ids: list[str] = []
+    marked_inbox_ids: list[str] = []
+    deleted_inbox_ids: list[str] = []
+
+    targets: list[tuple[TriageSuggestion, MemoryCategory]] = []
+    for suggestion in plan.suggestions:
+        target = overrides.get(suggestion.item_id, suggestion.proposed_category)
+        target_category = _resolve_category(target)
+        targets.append((suggestion, target_category))
+    if not resolved_policy.allow_dangerous:
+        for _, target_category in targets:
+            if target_category in (MemoryCategory.RULES, MemoryCategory.PREFERENCES):
+                raise ValueError("Перенос в rules/preferences требует allow_dangerous=True")
+
+    seq = 0
+    for suggestion, target_category in targets:
+        if target_category == MemoryCategory.INBOX:
+            continue
+        original = store.get_item(suggestion.item_id)
+        if original is None:
+            raise ValueError(f"MemoryItem {suggestion.item_id} не найден")
+        if original.triaged_at is not None:
+            continue
+        created_at = applied_at + timedelta(microseconds=seq)
+        seq += 1
+        new_item = store.add_item(
+            target_category,
+            original.content,
+            "triage",
+            meta=dict(original.meta),
+            title=original.title,
+            tags=list(original.tags),
+            created_at=created_at,
+        )
+        store.update_item(
+            new_item.id,
+            triaged_from=original.id,
+            triaged_at=applied_at,
+        )
+        created_item_ids.append(new_item.id)
+        if resolved_policy.keep_inbox:
+            store.update_item(
+                original.id,
+                triaged_from=None,
+                triaged_at=applied_at,
+            )
+            marked_inbox_ids.append(original.id)
+        else:
+            if store.delete_item(original.id):
+                deleted_inbox_ids.append(original.id)
+
+    return TriageApplyResult(
+        plan_id=plan.plan_id,
+        applied_at=applied_at,
+        created_item_ids=created_item_ids,
+        marked_inbox_ids=marked_inbox_ids,
+        deleted_inbox_ids=deleted_inbox_ids,
+    )
+
+
+def undo_last_triage(store: CategorizedMemoryStore) -> TriageUndoResult:
+    all_items: list[MemoryItem] = []
+    for category in MemoryCategory:
+        all_items.extend(store.list_items(category, limit=10_000).items)
+    latest = max(
+        (item.triaged_at for item in all_items if item.triaged_at is not None),
+        default=None,
+    )
+    if latest is None:
+        return TriageUndoResult(triaged_at=None)
+    restored_inbox_ids: list[str] = []
+    removed_item_ids: list[str] = []
+    for item in all_items:
+        if item.triaged_at != latest:
+            continue
+        if item.source == "triage":
+            if store.delete_item(item.id):
+                removed_item_ids.append(item.id)
+    return TriageUndoResult(
+        triaged_at=latest,
+        restored_inbox_ids=restored_inbox_ids,
+        removed_item_ids=removed_item_ids,
     )
 
 
@@ -157,3 +279,12 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _resolve_category(value: MemoryCategory | str) -> MemoryCategory:
+    if isinstance(value, MemoryCategory):
+        return value
+    try:
+        return MemoryCategory(value)
+    except ValueError as exc:
+        raise ValueError(f"Неизвестная категория памяти: {value}") from exc
