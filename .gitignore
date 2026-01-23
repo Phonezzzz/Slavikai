@@ -11,6 +11,7 @@ venv/
 
 # Local run artifacts
 .run/
+docs/status/status-*.md
 
 # Coverage / test output
 .coverage
