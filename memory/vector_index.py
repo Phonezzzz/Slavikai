@@ -194,3 +194,6 @@ class VectorIndex:
             raise RuntimeError(
                 f"VectorIndex не смог загрузить модель {self.model_name}: {exc}"
             ) from exc
+
+    def close(self) -> None:
+        self.conn.close()

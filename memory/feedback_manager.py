@@ -172,3 +172,6 @@ class FeedbackManager:
             }
             for row in rows
         ]
+
+    def close(self) -> None:
+        self.conn.close()

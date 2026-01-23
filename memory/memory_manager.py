@@ -150,6 +150,9 @@ class MemoryManager:
         )
         self.save(record)
 
+    def close(self) -> None:
+        self.conn.close()
+
     def _validate_record(self, record: MemoryRecord) -> MemoryRecord:
         if not record.id or not record.content or not record.timestamp:
             raise ValueError("Невалидная запись памяти: пустые обязательные поля")
