@@ -71,7 +71,17 @@
 
 - В проекте есть runtime-артефакты (`logs/*`, `sandbox/*`, `memory/*.db`) и виртуальная среда. Новые артефакты такого рода **не добавлять** в git; вынос/очистка — отдельная задача (см. `updated_roadmap.md`).
 
-## 10) Memory Companion: инварианты (policies-first, без auto-changes)
+## 10) Git workflow (режим A)
+
+- Работа начинается с `main`: `git checkout main`.
+- На PR создаётся ветка: `git checkout -b pr-<номер>-<название>`.
+- Перед любой работой в PR-ветке запускай `make git-check`.
+- После завершения PR: `git rebase origin/main`, `git merge --ff-only <pr-branch>`, `git push origin main`.
+- Перед финализацией изменений запускай `make check`.
+- Нельзя продолжать новую фичу в старой ветке.
+- После PR — всегда обратно на `main`.
+
+## 11) Memory Companion: инварианты (policies-first, без auto-changes)
 
 - **Запрещены** авто‑апдейты `Memory` в runtime (никаких “сам сохранил важное” без явного approve).
 - **Запрещены** авто‑создание/изменение `PolicyRule` в runtime: правила появляются только как **Approved** после ручного review.

@@ -34,6 +34,10 @@ help:
 	@echo "  make check           lint + format-check + type + test"
 	@echo "  make ci              skills lint/manifest + pytest -q (temp candidates)"
 	@echo
+	@echo "Git:"
+	@echo "  make guard-main      Fail if current branch is main"
+	@echo "  make git-check       Verify PR branch is pushed and make check passes"
+	@echo
 	@echo "Run:"
 	@echo "  make run             Run UI in foreground"
 	@echo "  make up              Run UI in background (pid/log in .run/)"
@@ -88,6 +92,62 @@ test: venv
 
 .PHONY: check
 check: lint format-check type test
+
+.PHONY: guard-main
+guard-main:
+	@if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		echo "Not a git repository."; \
+		exit 1; \
+	fi; \
+	branch="$$(git rev-parse --abbrev-ref HEAD)"; \
+	if [[ "$$branch" == "HEAD" ]]; then \
+		echo "Detached HEAD: switch to a branch."; \
+		exit 1; \
+	fi; \
+	if [[ "$$branch" == "main" ]]; then \
+		echo "На main нельзя работать, создайте PR-ветку"; \
+		exit 1; \
+	fi
+
+.PHONY: git-check
+git-check:
+	@if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		echo "Not a git repository."; \
+		exit 1; \
+	fi; \
+	branch="$$(git rev-parse --abbrev-ref HEAD)"; \
+	if [[ "$$branch" == "HEAD" ]]; then \
+		echo "Detached HEAD: switch to a PR branch."; \
+		exit 1; \
+	fi; \
+	if [[ "$$branch" == "main" ]]; then \
+		echo "git-check must run on a PR branch (not main)."; \
+		exit 1; \
+	fi; \
+	status_line="$$(git status -sb)"; \
+	status_line="$${status_line%%$$'\n'*}"; \
+	if [[ "$$status_line" != "## "* ]]; then \
+		echo "Could not determine git status."; \
+		exit 1; \
+	fi; \
+	if [[ "$$status_line" != *"..."* ]]; then \
+		echo "No upstream for $$branch (branch not pushed)."; \
+		git branch -vv; \
+		exit 1; \
+	fi; \
+	if [[ "$$status_line" == *"ahead "* ]]; then \
+		echo "Unpushed commits in $$branch."; \
+		echo "$$status_line"; \
+		git branch -vv; \
+		exit 1; \
+	fi; \
+	$(MAKE) check; \
+	echo "OK: PR branch is ready to merge."; \
+	echo "Next:"; \
+	echo "  git checkout main"; \
+	echo "  git rebase origin/main"; \
+	echo "  git merge --ff-only $$branch"; \
+	echo "  git push origin main"
 
 .PHONY: ci
 CI_ARTIFACT_DIR ?= .run/ci-artifacts
