@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 import time
 import uuid
@@ -19,6 +20,7 @@ from config.http_server_config import (
 )
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
+from server.pilot_hub import PilotHub
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
@@ -54,6 +56,8 @@ TOOL_PIPELINE_ENABLED: Final[bool] = False
 _CATEGORY_MAP: Final[dict[str, ApprovalCategory]] = {item: item for item in ALL_CATEGORIES}
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
+
+PILOT_SESSION_HEADER: Final[str] = "X-Slavik-Session"
 
 
 @dataclass(frozen=True)
@@ -171,6 +175,16 @@ def _extract_session_id(request: web.Request, payload: dict[str, object]) -> str
     session_raw = meta_raw.get("session_id")
     if isinstance(session_raw, str) and session_raw.strip():
         return session_raw.strip()
+    return None
+
+
+def _extract_pilot_session_id(request: web.Request) -> str | None:
+    header_value = request.headers.get(PILOT_SESSION_HEADER, "").strip()
+    if header_value:
+        return header_value
+    query_value = request.query.get("session_id", "").strip()
+    if query_value:
+        return query_value
     return None
 
 
@@ -448,6 +462,138 @@ async def handle_models(request: web.Request) -> web.Response:
         {"id": "slavik", "object": "model", "owned_by": "slavik"},
     ]
     return _json_response({"object": "list", "data": models})
+
+
+def _pilot_messages_to_llm(messages: list[dict[str, str]]) -> list[LLMMessage]:
+    parsed: list[LLMMessage] = []
+    for item in messages:
+        role = item.get("role")
+        content = item.get("content", "")
+        if role == "user":
+            parsed.append(LLMMessage(role="user", content=content))
+        elif role == "assistant":
+            parsed.append(LLMMessage(role="assistant", content=content))
+        elif role == "system":
+            parsed.append(LLMMessage(role="system", content=content))
+    return parsed
+
+
+async def handle_pilot_redirect(request: web.Request) -> web.StreamResponse:
+    raise web.HTTPFound("/pilot/")
+
+
+async def handle_pilot_index(request: web.Request) -> web.FileResponse:
+    dist_path: Path = request.app["pilot_dist_path"]
+    index_path = dist_path / "index.html"
+    return web.FileResponse(path=index_path)
+
+
+async def handle_pilot_status(request: web.Request) -> web.Response:
+    hub: PilotHub = request.app["pilot_hub"]
+    session_id = await hub.get_or_create_session(_extract_pilot_session_id(request))
+    response = _json_response({"ok": True, "session_id": session_id})
+    response.headers[PILOT_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_pilot_chat_send(request: web.Request) -> web.Response:
+    agent = request.app["agent"]
+    agent_lock = request.app["agent_lock"]
+    session_store = request.app["session_store"]
+    hub: PilotHub = request.app["pilot_hub"]
+
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+
+    content_raw = payload.get("content")
+    if not isinstance(content_raw, str) or not content_raw.strip():
+        return _error_response(
+            status=400,
+            message="content должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    session_id = await hub.get_or_create_session(_extract_pilot_session_id(request))
+    approved_categories = await session_store.get_categories(session_id)
+    try:
+        agent.set_session_context(session_id, approved_categories)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to set session context for pilot",
+            exc_info=True,
+            extra={
+                "session_id": session_id,
+                "approved_categories": sorted(approved_categories),
+                "error": str(exc),
+            },
+        )
+
+    await hub.append_message(session_id, "user", content_raw.strip())
+    llm_messages = _pilot_messages_to_llm(await hub.get_messages(session_id))
+
+    try:
+        async with agent_lock:
+            loop = asyncio.get_running_loop()
+            response_text = await loop.run_in_executor(None, agent.respond, llm_messages)
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=500,
+            message=f"Agent error: {exc}",
+            error_type="internal_error",
+            code="agent_error",
+        )
+
+    await hub.append_message(session_id, "assistant", response_text)
+    messages = await hub.get_messages(session_id)
+    response = _json_response({"session_id": session_id, "messages": messages})
+    response.headers[PILOT_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_pilot_events_stream(request: web.Request) -> web.StreamResponse:
+    hub: PilotHub = request.app["pilot_hub"]
+    session_id = await hub.get_or_create_session(_extract_pilot_session_id(request))
+    queue = await hub.subscribe(session_id)
+
+    response = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            PILOT_SESSION_HEADER: session_id,
+        },
+    )
+    await response.prepare(request)
+
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=20)
+                payload = json.dumps(event, ensure_ascii=False)
+                await response.write(f"data: {payload}\n\n".encode())
+            except TimeoutError:
+                await response.write(b": keep-alive\n\n")
+    except (asyncio.CancelledError, ConnectionResetError):
+        pass
+    finally:
+        await hub.unsubscribe(session_id, queue)
+    return response
 
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
@@ -864,12 +1010,21 @@ def create_app(
     app["agent"] = resolved_agent
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
+    app["pilot_hub"] = PilotHub()
+    dist_path = Path(__file__).resolve().parent.parent / "ui_pilot" / "dist"
+    app["pilot_dist_path"] = dist_path
     app.router.add_get("/v1/models", handle_models)
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/slavik/trace/{trace_id}", handle_trace)
     app.router.add_get("/slavik/tool-calls/{trace_id}", handle_tool_calls)
     app.router.add_post("/slavik/feedback", handle_feedback)
     app.router.add_post("/slavik/approve-session", handle_approve_session)
+    app.router.add_get("/pilot", handle_pilot_redirect)
+    app.router.add_get("/pilot/", handle_pilot_index)
+    app.router.add_get("/pilot/api/status", handle_pilot_status)
+    app.router.add_post("/pilot/api/chat/send", handle_pilot_chat_send)
+    app.router.add_get("/pilot/api/events/stream", handle_pilot_events_stream)
+    app.router.add_static("/pilot/assets/", dist_path / "assets")
     return app
 
 
