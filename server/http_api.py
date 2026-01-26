@@ -587,7 +587,7 @@ async def handle_pilot_events_stream(request: web.Request) -> web.StreamResponse
                 event = await asyncio.wait_for(queue.get(), timeout=20)
                 payload = json.dumps(event, ensure_ascii=False)
                 await response.write(f"data: {payload}\n\n".encode())
-            except TimeoutError:
+            except asyncio.TimeoutError:  # noqa: UP041
                 await response.write(b": keep-alive\n\n")
     except (asyncio.CancelledError, ConnectionResetError):
         pass

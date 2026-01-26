@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from shared.models import JSONValue
 
@@ -15,7 +15,7 @@ class _SessionState:
 
 
 def _utc_iso_now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 class PilotHub:
