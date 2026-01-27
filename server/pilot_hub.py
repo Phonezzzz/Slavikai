@@ -13,6 +13,7 @@ class _SessionState:
     messages: list[dict[str, str]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, JSONValue]]] = field(default_factory=set)
     last_decision_id: str | None = None
+    current_decision: dict[str, JSONValue] | None = None
 
 
 def _utc_iso_now() -> str:
@@ -43,6 +44,13 @@ class PilotHub:
             if state is None:
                 return []
             return [dict(item) for item in state.messages]
+
+    async def get_decision(self, session_id: str) -> dict[str, JSONValue] | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or state.current_decision is None:
+                return None
+            return dict(state.current_decision)
 
     async def append_message(self, session_id: str, role: str, content: str) -> dict[str, str]:
         message = {"role": role, "content": content}
@@ -101,6 +109,7 @@ class PilotHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
+            state.current_decision = dict(decision)
             if isinstance(decision_id, str):
                 if decision_id == state.last_decision_id:
                     return

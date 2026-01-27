@@ -506,13 +506,10 @@ async def handle_pilot_index(request: web.Request) -> web.FileResponse:
 
 
 async def handle_pilot_status(request: web.Request) -> web.Response:
-    agent = request.app["agent"]
     hub: PilotHub = request.app["pilot_hub"]
     session_id = await hub.get_or_create_session(_extract_pilot_session_id(request))
-    decision = _extract_decision_payload(agent)
-    response = _json_response(
-        {"ok": True, "session_id": session_id, "decision": decision},
-    )
+    decision = await hub.get_decision(session_id)
+    response = _json_response({"ok": True, "session_id": session_id, "decision": decision})
     response.headers[PILOT_SESSION_HEADER] = session_id
     return response
 
@@ -567,6 +564,9 @@ async def handle_pilot_chat_send(request: web.Request) -> web.Response:
     await hub.append_message(session_id, "user", content_raw.strip())
     llm_messages = _pilot_messages_to_llm(await hub.get_messages(session_id))
 
+    prev_packet = getattr(agent, "last_decision_packet", None)
+    prev_decision_id = getattr(prev_packet, "id", None)
+
     try:
         async with agent_lock:
             loop = asyncio.get_running_loop()
@@ -581,7 +581,8 @@ async def handle_pilot_chat_send(request: web.Request) -> web.Response:
 
     await hub.append_message(session_id, "assistant", response_text)
     decision = _extract_decision_payload(agent)
-    if decision is not None:
+    decision_id = decision.get("id") if decision else None
+    if decision is not None and decision_id != prev_decision_id:
         await hub.maybe_publish_decision(session_id, decision)
     messages = await hub.get_messages(session_id)
     response = _json_response(
