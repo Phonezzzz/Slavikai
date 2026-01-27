@@ -42,3 +42,6 @@ sandbox/**/*.mp3
 # Skills candidates (runtime artifacts)
 skills/_candidates/*.md
 skills/_candidates/**
+
+# UI pilot
+ui_pilot/node_modules/
