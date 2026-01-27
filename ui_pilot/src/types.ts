@@ -3,6 +3,21 @@ export type Message = {
   content: string;
 };
 
+export type DecisionOptionView = {
+  id: string;
+  title: string;
+  action: string;
+  risk: string;
+};
+
+export type DecisionPacketView = {
+  id: string;
+  reason: string;
+  summary: string;
+  options: DecisionOptionView[];
+  default_option_id?: string | null;
+};
+
 export type PilotEvent = {
   id: string;
   type: string;

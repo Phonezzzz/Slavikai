@@ -478,6 +478,23 @@ def _pilot_messages_to_llm(messages: list[dict[str, str]]) -> list[LLMMessage]:
     return parsed
 
 
+def _extract_decision_payload(agent: object) -> dict[str, JSONValue] | None:
+    packet = getattr(agent, "last_decision_packet", None)
+    if packet is None:
+        return None
+    to_dict = getattr(packet, "to_dict", None)
+    if not callable(to_dict):
+        return None
+    try:
+        decision = to_dict()
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to serialize decision packet for pilot", exc_info=True)
+        return None
+    if isinstance(decision, dict):
+        return decision
+    return None
+
+
 async def handle_pilot_redirect(request: web.Request) -> web.StreamResponse:
     raise web.HTTPFound("/pilot/")
 
@@ -489,9 +506,13 @@ async def handle_pilot_index(request: web.Request) -> web.FileResponse:
 
 
 async def handle_pilot_status(request: web.Request) -> web.Response:
+    agent = request.app["agent"]
     hub: PilotHub = request.app["pilot_hub"]
     session_id = await hub.get_or_create_session(_extract_pilot_session_id(request))
-    response = _json_response({"ok": True, "session_id": session_id})
+    decision = _extract_decision_payload(agent)
+    response = _json_response(
+        {"ok": True, "session_id": session_id, "decision": decision},
+    )
     response.headers[PILOT_SESSION_HEADER] = session_id
     return response
 
@@ -559,8 +580,13 @@ async def handle_pilot_chat_send(request: web.Request) -> web.Response:
         )
 
     await hub.append_message(session_id, "assistant", response_text)
+    decision = _extract_decision_payload(agent)
+    if decision is not None:
+        await hub.maybe_publish_decision(session_id, decision)
     messages = await hub.get_messages(session_id)
-    response = _json_response({"session_id": session_id, "messages": messages})
+    response = _json_response(
+        {"session_id": session_id, "messages": messages, "decision": decision},
+    )
     response.headers[PILOT_SESSION_HEADER] = session_id
     return response
 

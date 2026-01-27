@@ -12,6 +12,7 @@ from shared.models import JSONValue
 class _SessionState:
     messages: list[dict[str, str]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, JSONValue]]] = field(default_factory=set)
+    last_decision_id: str | None = None
 
 
 def _utc_iso_now() -> str:
@@ -88,6 +89,30 @@ class PilotHub:
             subscribers = list(state.subscribers)
         hydrated = self._ensure_event_fields(event)
         self._publish_to_subscribers(subscribers, hydrated)
+
+    async def maybe_publish_decision(
+        self,
+        session_id: str,
+        decision: dict[str, JSONValue],
+    ) -> None:
+        decision_id = decision.get("id")
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            if isinstance(decision_id, str):
+                if decision_id == state.last_decision_id:
+                    return
+                state.last_decision_id = decision_id
+            else:
+                state.last_decision_id = None
+            subscribers = list(state.subscribers)
+        event = self._build_event(
+            "decision.packet",
+            {"session_id": session_id, "decision": decision},
+        )
+        self._publish_to_subscribers(subscribers, event)
 
     def _ensure_event_fields(self, event: dict[str, JSONValue]) -> dict[str, JSONValue]:
         if "id" not in event:

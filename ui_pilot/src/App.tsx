@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 
 import ChatView from "./components/ChatView";
-import type { Message, PilotEvent } from "./types";
+import DecisionPanel from "./components/DecisionPanel";
+import type {
+  DecisionOptionView,
+  DecisionPacketView,
+  Message,
+  PilotEvent,
+} from "./types";
 
 const MAX_EVENTS = 120;
 
@@ -17,6 +23,59 @@ const isMessage = (value: unknown): value is Message => {
       candidate.role === "system") &&
     typeof candidate.content === "string"
   );
+};
+
+const isDecisionOption = (value: unknown): value is DecisionOptionView => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as {
+    id?: string;
+    title?: string;
+    action?: string;
+    risk?: string;
+  };
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.title === "string" &&
+    typeof candidate.action === "string" &&
+    typeof candidate.risk === "string"
+  );
+};
+
+const parseDecision = (value: unknown): DecisionPacketView | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as {
+    id?: unknown;
+    reason?: unknown;
+    summary?: unknown;
+    options?: unknown;
+    default_option_id?: unknown;
+  };
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.reason !== "string" ||
+    typeof candidate.summary !== "string"
+  ) {
+    return null;
+  }
+  const options = Array.isArray(candidate.options)
+    ? candidate.options.filter(isDecisionOption)
+    : [];
+  if (options.length === 0) {
+    return null;
+  }
+  const defaultOption =
+    typeof candidate.default_option_id === "string" ? candidate.default_option_id : null;
+  return {
+    id: candidate.id,
+    reason: candidate.reason,
+    summary: candidate.summary,
+    options,
+    default_option_id: defaultOption,
+  };
 };
 
 const parseMessages = (value: unknown): Message[] => {
@@ -53,6 +112,7 @@ export default function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [events, setEvents] = useState<PilotEvent[]>([]);
+  const [decision, setDecision] = useState<DecisionPacketView | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
 
@@ -77,6 +137,7 @@ export default function App() {
         const payload = (await resp.json()) as {
           ok?: boolean;
           session_id?: string;
+          decision?: unknown;
         };
         const headerSession = resp.headers.get("X-Slavik-Session");
         const nextSession = headerSession || payload.session_id || null;
@@ -85,6 +146,7 @@ export default function App() {
           if (nextSession) {
             setSessionId(nextSession);
           }
+          setDecision(parseDecision(payload.decision));
         }
       } catch {
         if (active) {
@@ -131,6 +193,13 @@ export default function App() {
             });
           }
         }
+        if (parsed.type === "decision.packet" && parsed.payload) {
+          const payload = parsed.payload as { decision?: unknown };
+          const nextDecision = parseDecision(payload.decision);
+          if (nextDecision) {
+            setDecision(nextDecision);
+          }
+        }
         if (parsed.type === "status" && parsed.payload) {
           const payload = parsed.payload as { ok?: boolean };
           setStatusOk(Boolean(payload.ok));
@@ -173,6 +242,7 @@ export default function App() {
       const payload = (await resp.json()) as {
         session_id?: string;
         messages?: unknown;
+        decision?: unknown;
       };
       const headerSession = resp.headers.get("X-Slavik-Session");
       const nextSession = headerSession || payload.session_id || null;
@@ -182,6 +252,10 @@ export default function App() {
       const parsedMessages = parseMessages(payload.messages);
       if (parsedMessages.length > 0) {
         setMessages(parsedMessages);
+      }
+      const nextDecision = parseDecision(payload.decision);
+      if (nextDecision) {
+        setDecision(nextDecision);
       }
       setInput("");
       setStatusOk(true);
@@ -220,32 +294,36 @@ export default function App() {
             onSend={handleSend}
           />
 
-          <aside className="flex flex-col gap-4 rounded-3xl border border-slate-800/80 bg-slate-900/60 p-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-slate-100">Event log</h2>
-              <span className="text-xs text-slate-500">{events.length} items</span>
-            </div>
-            <div className="flex h-[55vh] flex-col gap-3 overflow-y-auto rounded-3xl border border-slate-800/80 bg-slate-950/40 p-3 font-mono text-xs">
-              {events.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-slate-800/70 bg-slate-900/60 px-4 py-6 text-slate-400">
-                  Awaiting SSE events.
-                </div>
-              ) : (
-                events.map((evt) => (
-                  <div
-                    key={evt.id}
-                    className="rounded-2xl border border-slate-800/80 bg-slate-900/80 px-3 py-2"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-indigo-300">{evt.type}</span>
-                      <span className="text-[10px] text-slate-500">{evt.ts}</span>
-                    </div>
-                    <div className="mt-1 text-slate-400">{toEventPreview(evt.payload)}</div>
+          <div className="flex flex-col gap-4">
+            <DecisionPanel decision={decision} />
+
+            <aside className="flex flex-1 flex-col gap-4 rounded-3xl border border-slate-800/80 bg-slate-900/60 p-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-slate-100">Event log</h2>
+                <span className="text-xs text-slate-500">{events.length} items</span>
+              </div>
+              <div className="flex min-h-[30vh] flex-1 flex-col gap-3 overflow-y-auto rounded-3xl border border-slate-800/80 bg-slate-950/40 p-3 font-mono text-xs">
+                {events.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-slate-800/70 bg-slate-900/60 px-4 py-6 text-slate-400">
+                    Awaiting SSE events.
                   </div>
-                ))
-              )}
-            </div>
-          </aside>
+                ) : (
+                  events.map((evt) => (
+                    <div
+                      key={evt.id}
+                      className="rounded-2xl border border-slate-800/80 bg-slate-900/80 px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-indigo-300">{evt.type}</span>
+                        <span className="text-[10px] text-slate-500">{evt.ts}</span>
+                      </div>
+                      <div className="mt-1 text-slate-400">{toEventPreview(evt.payload)}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </aside>
+          </div>
         </div>
       </div>
     </div>
