@@ -40,6 +40,15 @@ def test_pilot_status_endpoint() -> None:
             assert isinstance(session_id, str)
             assert session_id
             assert resp.headers.get("X-Slavik-Session") == session_id
+
+            resp = await client.get("/ui/api/status")
+            assert resp.status == 200
+            payload = await resp.json()
+            assert payload.get("ok") is True
+            session_id = payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            assert resp.headers.get("X-Slavik-Session") == session_id
         finally:
             await client.close()
 
@@ -51,6 +60,17 @@ def test_pilot_chat_send_endpoint() -> None:
         client = await _create_client(DummyAgent())
         try:
             resp = await client.post("/pilot/api/chat/send", json={"content": "Ping"})
+            assert resp.status == 200
+            payload = await resp.json()
+            session_id = payload.get("session_id")
+            messages = payload.get("messages", [])
+            assert isinstance(session_id, str)
+            assert session_id
+            assert isinstance(messages, list)
+            assert messages
+            assert resp.headers.get("X-Slavik-Session") == session_id
+
+            resp = await client.post("/ui/api/chat/send", json={"content": "Ping"})
             assert resp.status == 200
             payload = await resp.json()
             session_id = payload.get("session_id")

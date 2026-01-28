@@ -43,5 +43,5 @@ sandbox/**/*.mp3
 skills/_candidates/*.md
 skills/_candidates/**
 
-# UI pilot
-ui_pilot/node_modules/
+# UI
+ui/node_modules/

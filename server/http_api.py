@@ -20,7 +20,7 @@ from config.http_server_config import (
 )
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
-from server.pilot_hub import PilotHub
+from server.ui_hub import UIHub
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
@@ -57,7 +57,7 @@ _CATEGORY_MAP: Final[dict[str, ApprovalCategory]] = {item: item for item in ALL_
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
-PILOT_SESSION_HEADER: Final[str] = "X-Slavik-Session"
+UI_SESSION_HEADER: Final[str] = "X-Slavik-Session"
 
 
 @dataclass(frozen=True)
@@ -178,8 +178,8 @@ def _extract_session_id(request: web.Request, payload: dict[str, object]) -> str
     return None
 
 
-def _extract_pilot_session_id(request: web.Request) -> str | None:
-    header_value = request.headers.get(PILOT_SESSION_HEADER, "").strip()
+def _extract_ui_session_id(request: web.Request) -> str | None:
+    header_value = request.headers.get(UI_SESSION_HEADER, "").strip()
     if header_value:
         return header_value
     query_value = request.query.get("session_id", "").strip()
@@ -464,7 +464,7 @@ async def handle_models(request: web.Request) -> web.Response:
     return _json_response({"object": "list", "data": models})
 
 
-def _pilot_messages_to_llm(messages: list[dict[str, str]]) -> list[LLMMessage]:
+def _ui_messages_to_llm(messages: list[dict[str, str]]) -> list[LLMMessage]:
     parsed: list[LLMMessage] = []
     for item in messages:
         role = item.get("role")
@@ -488,7 +488,7 @@ def _extract_decision_payload(agent: object) -> dict[str, JSONValue] | None:
     try:
         decision = to_dict()
     except Exception:  # noqa: BLE001
-        logger.warning("Failed to serialize decision packet for pilot", exc_info=True)
+        logger.warning("Failed to serialize decision packet for ui", exc_info=True)
         return None
     if isinstance(decision, dict):
         return decision
@@ -496,29 +496,33 @@ def _extract_decision_payload(agent: object) -> dict[str, JSONValue] | None:
 
 
 async def handle_pilot_redirect(request: web.Request) -> web.StreamResponse:
-    raise web.HTTPFound("/pilot/")
+    raise web.HTTPFound("/ui/")
 
 
-async def handle_pilot_index(request: web.Request) -> web.FileResponse:
-    dist_path: Path = request.app["pilot_dist_path"]
+async def handle_pilot_index(request: web.Request) -> web.StreamResponse:
+    raise web.HTTPFound("/ui/")
+
+
+async def handle_ui_index(request: web.Request) -> web.FileResponse:
+    dist_path: Path = request.app["ui_dist_path"]
     index_path = dist_path / "index.html"
     return web.FileResponse(path=index_path)
 
 
-async def handle_pilot_status(request: web.Request) -> web.Response:
-    hub: PilotHub = request.app["pilot_hub"]
-    session_id = await hub.get_or_create_session(_extract_pilot_session_id(request))
+async def handle_ui_status(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
     decision = await hub.get_decision(session_id)
     response = _json_response({"ok": True, "session_id": session_id, "decision": decision})
-    response.headers[PILOT_SESSION_HEADER] = session_id
+    response.headers[UI_SESSION_HEADER] = session_id
     return response
 
 
-async def handle_pilot_chat_send(request: web.Request) -> web.Response:
+async def handle_ui_chat_send(request: web.Request) -> web.Response:
     agent = request.app["agent"]
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
-    hub: PilotHub = request.app["pilot_hub"]
+    hub: UIHub = request.app["ui_hub"]
 
     try:
         payload = await request.json()
@@ -546,13 +550,13 @@ async def handle_pilot_chat_send(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
 
-    session_id = await hub.get_or_create_session(_extract_pilot_session_id(request))
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
     approved_categories = await session_store.get_categories(session_id)
     try:
         agent.set_session_context(session_id, approved_categories)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "Failed to set session context for pilot",
+            "Failed to set session context for ui",
             exc_info=True,
             extra={
                 "session_id": session_id,
@@ -562,7 +566,7 @@ async def handle_pilot_chat_send(request: web.Request) -> web.Response:
         )
 
     await hub.append_message(session_id, "user", content_raw.strip())
-    llm_messages = _pilot_messages_to_llm(await hub.get_messages(session_id))
+    llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
 
     prev_packet = getattr(agent, "last_decision_packet", None)
     prev_decision_id = getattr(prev_packet, "id", None)
@@ -588,13 +592,13 @@ async def handle_pilot_chat_send(request: web.Request) -> web.Response:
     response = _json_response(
         {"session_id": session_id, "messages": messages, "decision": decision},
     )
-    response.headers[PILOT_SESSION_HEADER] = session_id
+    response.headers[UI_SESSION_HEADER] = session_id
     return response
 
 
-async def handle_pilot_events_stream(request: web.Request) -> web.StreamResponse:
-    hub: PilotHub = request.app["pilot_hub"]
-    session_id = await hub.get_or_create_session(_extract_pilot_session_id(request))
+async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
     queue = await hub.subscribe(session_id)
 
     response = web.StreamResponse(
@@ -603,7 +607,7 @@ async def handle_pilot_events_stream(request: web.Request) -> web.StreamResponse
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            PILOT_SESSION_HEADER: session_id,
+            UI_SESSION_HEADER: session_id,
         },
     )
     await response.prepare(request)
@@ -1037,20 +1041,27 @@ def create_app(
     app["agent"] = resolved_agent
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
-    app["pilot_hub"] = PilotHub()
-    dist_path = Path(__file__).resolve().parent.parent / "ui_pilot" / "dist"
-    app["pilot_dist_path"] = dist_path
+    app["ui_hub"] = UIHub()
+    dist_path = Path(__file__).resolve().parent.parent / "ui" / "dist"
+    app["ui_dist_path"] = dist_path
     app.router.add_get("/v1/models", handle_models)
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/slavik/trace/{trace_id}", handle_trace)
     app.router.add_get("/slavik/tool-calls/{trace_id}", handle_tool_calls)
     app.router.add_post("/slavik/feedback", handle_feedback)
     app.router.add_post("/slavik/approve-session", handle_approve_session)
+    app.router.add_get("/ui", handle_pilot_redirect)
+    app.router.add_get("/ui/", handle_ui_index)
+    app.router.add_get("/ui/api/status", handle_ui_status)
+    app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
+    app.router.add_get("/ui/api/events/stream", handle_ui_events_stream)
+    app.router.add_static("/ui/assets/", dist_path / "assets")
+
     app.router.add_get("/pilot", handle_pilot_redirect)
     app.router.add_get("/pilot/", handle_pilot_index)
-    app.router.add_get("/pilot/api/status", handle_pilot_status)
-    app.router.add_post("/pilot/api/chat/send", handle_pilot_chat_send)
-    app.router.add_get("/pilot/api/events/stream", handle_pilot_events_stream)
+    app.router.add_get("/pilot/api/status", handle_ui_status)
+    app.router.add_post("/pilot/api/chat/send", handle_ui_chat_send)
+    app.router.add_get("/pilot/api/events/stream", handle_ui_events_stream)
     app.router.add_static("/pilot/assets/", dist_path / "assets")
     return app
 

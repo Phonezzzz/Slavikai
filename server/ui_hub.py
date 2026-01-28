@@ -20,7 +20,7 @@ def _utc_iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
-class PilotHub:
+class UIHub:
     def __init__(self) -> None:
         self._sessions: dict[str, _SessionState] = {}
         self._lock = asyncio.Lock()
