@@ -96,6 +96,15 @@ async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> Te
     return client
 
 
+async def _create_client_without_agent(trace_path: Path, monkeypatch) -> TestClient:
+    monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
+    app = create_app(agent=None, max_request_bytes=1_000_000)
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    return client
+
+
 def test_models_endpoint(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
@@ -217,6 +226,44 @@ def test_unknown_structural_field_rejected(monkeypatch, tmp_path) -> None:
             payload = await resp.json()
             error = payload.get("error", {})
             assert error.get("type") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_create_app_without_agent_does_not_raise(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+
+    async def run() -> None:
+        client = await _create_client_without_agent(trace_path, monkeypatch)
+        try:
+            resp = await client.get("/v1/models")
+            assert resp.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+
+    async def run() -> None:
+        client = await _create_client_without_agent(trace_path, monkeypatch)
+        try:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                },
+            )
+            assert resp.status == 409
+            payload = await resp.json()
+            error = payload.get("error", {})
+            assert error.get("code") == "model_not_selected"
         finally:
             await client.close()
 

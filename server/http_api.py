@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 
 from aiohttp import web
 
@@ -20,6 +20,7 @@ from config.http_server_config import (
 )
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
+from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage
@@ -117,20 +118,21 @@ class AgentProtocol(Protocol):
     last_chat_interaction_id: str | None
     tracer: TracerProtocol
 
-    def respond(self, messages: list[LLMMessage]) -> str: ...
     def set_session_context(
         self,
         session_id: str | None,
         approved_categories: set[ApprovalCategory],
     ) -> None: ...
 
+    def respond(self, messages: list[LLMMessage]) -> str: ...
+
     def record_feedback_event(
         self,
         *,
         interaction_id: str,
         rating: FeedbackRating,
-        labels: list[FeedbackLabel] | None = None,
-        free_text: str | None = None,
+        labels: list[FeedbackLabel],
+        free_text: str | None,
     ) -> None: ...
 
 
@@ -155,6 +157,25 @@ def _error_response(
         "details": details or {},
     }
     return _json_response({"error": error_payload}, status=status)
+
+
+def _model_not_selected_response() -> web.Response:
+    return _error_response(
+        status=409,
+        message="Не выбрана модель. Выберите модель в UI и повторите.",
+        error_type="configuration_error",
+        code="model_not_selected",
+    )
+
+
+async def _resolve_agent(request: web.Request) -> AgentProtocol | None:
+    provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
+    try:
+        return await provider.get()
+    except RuntimeError as exc:
+        if "Не выбрана модель" in str(exc):
+            return None
+        raise
 
 
 def _is_sampling_key(key: str) -> bool:
@@ -515,7 +536,9 @@ async def handle_ui_status(request: web.Request) -> web.Response:
 
 
 async def handle_ui_chat_send(request: web.Request) -> web.Response:
-    agent = request.app["agent"]
+    agent = await _resolve_agent(request)
+    if agent is None:
+        return _model_not_selected_response()
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
@@ -624,7 +647,9 @@ async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
-    agent = request.app["agent"]
+    agent = await _resolve_agent(request)
+    if agent is None:
+        return _model_not_selected_response()
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
 
@@ -830,7 +855,9 @@ async def handle_tool_calls(request: web.Request) -> web.Response:
 
 
 async def handle_feedback(request: web.Request) -> web.Response:
-    agent = request.app["agent"]
+    agent = await _resolve_agent(request)
+    if agent is None:
+        return _model_not_selected_response()
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1023,18 +1050,22 @@ def create_app(
     agent: AgentProtocol | None = None,
     max_request_bytes: int | None = None,
 ) -> web.Application:
-    if agent is None:
-        # Lazy import keeps heavy deps out of gateway-only tests.
-        module = importlib.import_module("core.agent")
-        agent_factory = getattr(module, "Agent", None)
-        if not callable(agent_factory):
-            raise RuntimeError("Agent class not found in core.agent")
-        resolved_agent = agent_factory()
-    else:
-        resolved_agent = agent
     config_max_bytes = max_request_bytes or DEFAULT_MAX_REQUEST_BYTES
     app = web.Application(client_max_size=config_max_bytes)
-    app["agent"] = resolved_agent
+    if agent is None:
+
+        def _factory() -> AgentProtocol:
+            module = importlib.import_module("core.agent")
+            agent_factory = getattr(module, "Agent", None)
+            if not callable(agent_factory):
+                raise RuntimeError("Agent class not found in core.agent")
+            return cast(AgentProtocol, agent_factory())
+
+        app["agent"] = None
+        app["agent_provider"] = LazyAgentProvider(factory=_factory)
+    else:
+        app["agent"] = agent
+        app["agent_provider"] = LazyAgentProvider.from_instance(agent)
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
     app["ui_hub"] = UIHub()
