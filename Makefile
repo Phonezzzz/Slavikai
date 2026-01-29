@@ -15,8 +15,8 @@ VENV_RUFF := $(VENV_DIR)/bin/ruff
 RUN_DIR ?= .run
 APP_PID_FILE := $(RUN_DIR)/slavikai-ui.pid
 APP_LOG_FILE := $(RUN_DIR)/slavikai-ui.log
-PILOT_PID_FILE := $(RUN_DIR)/pilot-server.pid
-PILOT_LOG_FILE := $(RUN_DIR)/pilot-server.log
+UI_PID_FILE := $(RUN_DIR)/ui-server.pid
+UI_LOG_FILE := $(RUN_DIR)/ui-server.log
 
 .PHONY: help
 help:
@@ -47,18 +47,18 @@ help:
 	@echo "  make status          Show background UI status"
 	@echo "  make logs            Tail background UI log"
 	@echo
-	@echo "Pilot:"
-	@echo "  make pilot-ui-install Install UI-pilot dependencies"
-	@echo "  make pilot-ui-build   Build UI-pilot dist"
-	@echo "  make pilot-ui-dev     Run UI-pilot dev server"
-	@echo "  make pilot-ui-clean   Remove UI-pilot dist"
-	@echo "  make pilot-server     Run pilot server in foreground"
-	@echo "  make pilot-run        Build UI-pilot + run pilot server"
-	@echo "  make pilot-up         Run pilot server in background"
-	@echo "  make pilot-down       Stop background pilot server"
-	@echo "  make pilot-status     Show pilot server status"
-	@echo "  make pilot-logs       Tail pilot server log"
-	@echo "  make pilot-clean      Remove UI-pilot dist and pilot pid/log"
+	@echo "UI:"
+	@echo "  make ui-install       Install UI dependencies"
+	@echo "  make ui-build         Build UI dist"
+	@echo "  make ui-dev           Run UI dev server"
+	@echo "  make ui-dist-clean    Remove UI dist"
+	@echo "  make ui-server        Run UI server in foreground"
+	@echo "  make ui-run           Build UI + run UI server"
+	@echo "  make ui-up            Run UI server in background"
+	@echo "  make ui-down          Stop background UI server"
+	@echo "  make ui-status        Show UI server status"
+	@echo "  make ui-logs          Tail UI server log"
+	@echo "  make ui-clean         Remove UI dist and UI pid/log"
 	@echo
 	@echo "Cleanup:"
 	@echo "  make clean           Remove caches and .run/"
@@ -181,53 +181,53 @@ ci: venv
 run: venv
 	"$(VENV_PY)" main.py
 
-.PHONY: pilot-ui-install
-pilot-ui-install:
-	cd ui_pilot && npm install
+.PHONY: ui-install
+ui-install:
+	cd ui && npm install
 
-.PHONY: pilot-ui-build
-pilot-ui-build:
-	cd ui_pilot && npm run build
+.PHONY: ui-build
+ui-build:
+	cd ui && npm run build
 
-.PHONY: pilot-ui-dev
-pilot-ui-dev:
-	cd ui_pilot && npm run dev
+.PHONY: ui-dev
+ui-dev:
+	cd ui && npm run dev
 
-.PHONY: pilot-ui-clean
-pilot-ui-clean:
-	rm -rf ui_pilot/dist
+.PHONY: ui-dist-clean
+ui-dist-clean:
+	rm -rf ui/dist
 
-.PHONY: pilot-server
-pilot-server: venv
+.PHONY: ui-server
+ui-server: venv
 	"$(VENV_PY)" -m server
 
-.PHONY: pilot-run
-pilot-run: pilot-ui-build pilot-server
+.PHONY: ui-run
+ui-run: ui-build ui-server
 
-.PHONY: pilot-up
-pilot-up: venv
+.PHONY: ui-up
+ui-up: venv
 	@mkdir -p "$(RUN_DIR)"
-	@if [[ -f "$(PILOT_PID_FILE)" ]]; then \
-		pid="$$(cat "$(PILOT_PID_FILE)")"; \
+	@if [[ -f "$(UI_PID_FILE)" ]]; then \
+		pid="$$(cat "$(UI_PID_FILE)")"; \
 		if kill -0 "$$pid" 2>/dev/null; then \
-			echo "Already running: pid=$$pid (use: make pilot-down)"; \
+			echo "Already running: pid=$$pid (use: make ui-down)"; \
 			exit 1; \
 		fi; \
 	fi
-	@nohup "$(VENV_PY)" -m server >"$(PILOT_LOG_FILE)" 2>&1 & echo $$! >"$(PILOT_PID_FILE)"
-	@echo "Started: pid=$$(cat "$(PILOT_PID_FILE)")"
-	@echo "Logs: $(PILOT_LOG_FILE)"
+	@nohup "$(VENV_PY)" -m server >"$(UI_LOG_FILE)" 2>&1 & echo $$! >"$(UI_PID_FILE)"
+	@echo "Started: pid=$$(cat "$(UI_PID_FILE)")"
+	@echo "Logs: $(UI_LOG_FILE)"
 
-.PHONY: pilot-down
-pilot-down:
-	@if [[ ! -f "$(PILOT_PID_FILE)" ]]; then \
-		echo "Not running (no pid file: $(PILOT_PID_FILE))"; \
+.PHONY: ui-down
+ui-down:
+	@if [[ ! -f "$(UI_PID_FILE)" ]]; then \
+		echo "Not running (no pid file: $(UI_PID_FILE))"; \
 		exit 0; \
 	fi; \
-	pid="$$(cat "$(PILOT_PID_FILE)")"; \
+	pid="$$(cat "$(UI_PID_FILE)")"; \
 	if ! kill -0 "$$pid" 2>/dev/null; then \
-		echo "Stale pid file (pid=$$pid not running), removing $(PILOT_PID_FILE)"; \
-		rm -f "$(PILOT_PID_FILE)"; \
+		echo "Stale pid file (pid=$$pid not running), removing $(UI_PID_FILE)"; \
+		rm -f "$(UI_PID_FILE)"; \
 		exit 0; \
 	fi; \
 	cmd="$$(ps -p "$$pid" -o command= 2>/dev/null || true)"; \
@@ -243,30 +243,30 @@ pilot-down:
 		echo "Still running after SIGTERM: pid=$$pid"; \
 		exit 1; \
 	fi; \
-	rm -f "$(PILOT_PID_FILE)"; \
+	rm -f "$(UI_PID_FILE)"; \
 	echo "Stopped: pid=$$pid"
 
-.PHONY: pilot-status
-pilot-status:
-	@if [[ -f "$(PILOT_PID_FILE)" ]]; then \
-		pid="$$(cat "$(PILOT_PID_FILE)")"; \
+.PHONY: ui-status
+ui-status:
+	@if [[ -f "$(UI_PID_FILE)" ]]; then \
+		pid="$$(cat "$(UI_PID_FILE)")"; \
 		if kill -0 "$$pid" 2>/dev/null; then \
 			echo "Running: pid=$$pid"; \
 			exit 0; \
 		fi; \
-		echo "Not running (stale pid file: $(PILOT_PID_FILE))"; \
+		echo "Not running (stale pid file: $(UI_PID_FILE))"; \
 		exit 1; \
 	fi; \
 	echo "Not running"; \
 	exit 1
 
-.PHONY: pilot-logs
-pilot-logs:
-	@if [[ ! -f "$(PILOT_LOG_FILE)" ]]; then \
-		echo "No log file: $(PILOT_LOG_FILE)"; \
+.PHONY: ui-logs
+ui-logs:
+	@if [[ ! -f "$(UI_LOG_FILE)" ]]; then \
+		echo "No log file: $(UI_LOG_FILE)"; \
 		exit 1; \
 	fi
-	@tail -n 200 -f "$(PILOT_LOG_FILE)"
+	@tail -n 200 -f "$(UI_LOG_FILE)"
 
 .PHONY: up
 up: venv
@@ -332,10 +332,10 @@ logs:
 	fi
 	@tail -n 200 -f "$(APP_LOG_FILE)"
 
-.PHONY: pilot-clean
-pilot-clean:
-	rm -rf ui_pilot/dist
-	rm -f "$(PILOT_PID_FILE)" "$(PILOT_LOG_FILE)"
+.PHONY: ui-clean
+ui-clean:
+	rm -rf ui/dist
+	rm -f "$(UI_PID_FILE)" "$(UI_LOG_FILE)"
 
 .PHONY: clean
 clean:

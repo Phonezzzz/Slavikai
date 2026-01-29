@@ -6,7 +6,7 @@ import type {
   DecisionOptionView,
   DecisionPacketView,
   Message,
-  PilotEvent,
+  UIEvent,
 } from "./types";
 
 const MAX_EVENTS = 120;
@@ -111,7 +111,7 @@ export default function App() {
   const [statusOk, setStatusOk] = useState<boolean | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [events, setEvents] = useState<PilotEvent[]>([]);
+  const [events, setEvents] = useState<UIEvent[]>([]);
   const [decision, setDecision] = useState<DecisionPacketView | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -130,7 +130,7 @@ export default function App() {
     let active = true;
     const loadStatus = async () => {
       try {
-        const resp = await fetch("/pilot/api/status");
+        const resp = await fetch("/ui/api/status");
         if (!resp.ok) {
           throw new Error(`Status ${resp.status}`);
         }
@@ -164,12 +164,12 @@ export default function App() {
     if (!sessionId) {
       return;
     }
-    const url = `/pilot/api/events/stream?session_id=${encodeURIComponent(sessionId)}`;
+    const url = `/ui/api/events/stream?session_id=${encodeURIComponent(sessionId)}`;
     const source = new EventSource(url, { withCredentials: false });
 
     source.onmessage = (evt) => {
       try {
-        const parsed = JSON.parse(evt.data) as PilotEvent;
+        const parsed = JSON.parse(evt.data) as UIEvent;
         if (!parsed || typeof parsed !== "object") {
           return;
         }
@@ -231,7 +231,7 @@ export default function App() {
       if (sessionId) {
         headers["X-Slavik-Session"] = sessionId;
       }
-      const resp = await fetch("/pilot/api/chat/send", {
+      const resp = await fetch("/ui/api/chat/send", {
         method: "POST",
         headers,
         body: JSON.stringify({ content: trimmed }),
@@ -271,10 +271,8 @@ export default function App() {
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6">
         <header className="flex flex-col gap-3 rounded-3xl border border-slate-800/80 bg-slate-900/70 px-5 py-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">
-              Slavik Pilot Workbench
-            </p>
-            <h1 className="text-2xl font-semibold text-slate-100">UI-pilot /pilot</h1>
+            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Slavik UI Workbench</p>
+            <h1 className="text-2xl font-semibold text-slate-100">Slavik UI</h1>
           </div>
           <div className="flex flex-col gap-2 text-sm">
             <div className="flex items-center gap-2">

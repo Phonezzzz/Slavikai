@@ -28,11 +28,11 @@ async def _create_client(agent: DummyAgent) -> TestClient:
     return client
 
 
-def test_pilot_status_endpoint() -> None:
+def test_ui_status_endpoint() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
-            resp = await client.get("/pilot/api/status")
+            resp = await client.get("/ui/api/status")
             assert resp.status == 200
             payload = await resp.json()
             assert payload.get("ok") is True
@@ -46,11 +46,11 @@ def test_pilot_status_endpoint() -> None:
     asyncio.run(run())
 
 
-def test_pilot_chat_send_endpoint() -> None:
+def test_ui_chat_send_endpoint() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
-            resp = await client.post("/pilot/api/chat/send", json={"content": "Ping"})
+            resp = await client.post("/ui/api/chat/send", json={"content": "Ping"})
             assert resp.status == 200
             payload = await resp.json()
             session_id = payload.get("session_id")

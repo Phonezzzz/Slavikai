@@ -44,4 +44,4 @@ skills/_candidates/*.md
 skills/_candidates/**
 
 # UI pilot
-ui_pilot/node_modules/
+ui/node_modules/

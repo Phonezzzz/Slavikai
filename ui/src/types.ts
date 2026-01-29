@@ -18,7 +18,7 @@ export type DecisionPacketView = {
   default_option_id?: string | null;
 };
 
-export type PilotEvent = {
+export type UIEvent = {
   id: string;
   type: string;
   ts: string;
