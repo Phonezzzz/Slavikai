@@ -179,7 +179,7 @@ ci: venv
 
 .PHONY: run
 run: venv
-	"$(VENV_PY)" main.py
+	"$(VENV_PY)" -m server
 
 .PHONY: ui-install
 ui-install:
@@ -278,7 +278,7 @@ up: venv
 			exit 1; \
 		fi; \
 	fi
-	@nohup "$(VENV_PY)" main.py >"$(APP_LOG_FILE)" 2>&1 & echo $$! >"$(APP_PID_FILE)"
+	@nohup "$(VENV_PY)" -m server >"$(APP_LOG_FILE)" 2>&1 & echo $$! >"$(APP_PID_FILE)"
 	@echo "Started: pid=$$(cat "$(APP_PID_FILE)")"
 	@echo "Logs: $(APP_LOG_FILE)"
 
@@ -296,7 +296,7 @@ down:
 	fi; \
 	cmd="$$(ps -p "$$pid" -o command= 2>/dev/null || true)"; \
 	case "$$cmd" in \
-		*main.py*) ;; \
+		*-m\ server*) ;; \
 		*) echo "Refusing to stop pid=$$pid (unexpected cmd: $$cmd)"; exit 1;; \
 	esac; \
 	kill "$$pid"; \
