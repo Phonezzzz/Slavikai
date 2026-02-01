@@ -268,61 +268,105 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6">
-        <header className="flex flex-col gap-3 rounded-3xl border border-slate-800/80 bg-slate-900/70 px-5 py-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Slavik UI Workbench</p>
-            <h1 className="text-2xl font-semibold text-slate-100">Slavik UI</h1>
+      <div className="flex min-h-screen">
+        <aside className="hidden w-64 flex-col border-r border-slate-800/80 bg-slate-950/60 p-4 md:flex">
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            <span className="h-2 w-2 rounded-full bg-indigo-400" />
+            Slavik UI
           </div>
-          <div className="flex flex-col gap-2 text-sm">
-            <div className="flex items-center gap-2">
-              <span className={`h-2.5 w-2.5 rounded-full ${statusDotClass(statusLabel)}`} />
-              <span className="font-medium">Status: {statusLabel}</span>
+          <button
+            type="button"
+            className="mt-4 rounded-2xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30"
+          >
+            New chat
+          </button>
+          <div className="mt-6 text-xs uppercase tracking-[0.3em] text-slate-500">
+            Conversations
+          </div>
+          <div className="mt-3 space-y-2 text-sm text-slate-400">
+            <div className="rounded-xl border border-dashed border-slate-800/80 px-3 py-2">
+              No chats yet
             </div>
-            <div className="text-xs text-slate-400">Session: {sessionId ?? "pending"}</div>
+            <div className="rounded-xl border border-slate-800/60 bg-slate-900/50 px-3 py-2 opacity-60">
+              Placeholder thread
+            </div>
           </div>
-        </header>
+          <div className="mt-auto pt-6 text-xs text-slate-500">v0 skeleton</div>
+        </aside>
 
-        <div className="grid gap-6 lg:grid-cols-[2.2fr_1fr]">
-          <ChatView
-            messages={messages}
-            input={input}
-            sending={sending}
-            onInputChange={setInput}
-            onSend={handleSend}
-          />
-
-          <div className="flex flex-col gap-4">
-            <DecisionPanel decision={decision} />
-
-            <aside className="flex flex-1 flex-col gap-4 rounded-3xl border border-slate-800/80 bg-slate-900/60 p-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-slate-100">Event log</h2>
-                <span className="text-xs text-slate-500">{events.length} items</span>
+        <main className="flex min-w-0 flex-1 flex-col">
+          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 bg-slate-950/80 px-5 py-4">
+            <div>
+              <div className="text-xs uppercase tracking-[0.3em] text-slate-500">Workspace</div>
+              <div className="text-lg font-semibold text-slate-100">Conversation</div>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <div className="flex items-center gap-2 rounded-full border border-slate-800/80 bg-slate-900/60 px-3 py-1.5">
+                <span className={`h-2.5 w-2.5 rounded-full ${statusDotClass(statusLabel)}`} />
+                <span className="font-medium">Status: {statusLabel}</span>
               </div>
-              <div className="flex min-h-[30vh] flex-1 flex-col gap-3 overflow-y-auto rounded-3xl border border-slate-800/80 bg-slate-950/40 p-3 font-mono text-xs">
-                {events.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-slate-800/70 bg-slate-900/60 px-4 py-6 text-slate-400">
-                    Awaiting SSE events.
-                  </div>
-                ) : (
-                  events.map((evt) => (
-                    <div
-                      key={evt.id}
-                      className="rounded-2xl border border-slate-800/80 bg-slate-900/80 px-3 py-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-indigo-300">{evt.type}</span>
-                        <span className="text-[10px] text-slate-500">{evt.ts}</span>
-                      </div>
-                      <div className="mt-1 text-slate-400">{toEventPreview(evt.payload)}</div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-800/80 bg-slate-900/60 px-3 py-1.5 text-slate-300"
+              >
+                Model: Select
+              </button>
+              <button
+                type="button"
+                className="rounded-full border border-slate-800/80 bg-slate-900/60 px-3 py-1.5 text-slate-300"
+              >
+                Settings
+              </button>
+            </div>
+          </header>
+
+          <div className="flex min-h-0 flex-1 flex-col gap-6 p-5 lg:flex-row">
+            <section className="flex min-w-0 flex-1 flex-col gap-4">
+              <div className="flex items-center justify-between rounded-2xl border border-slate-800/80 bg-slate-900/60 px-4 py-3 text-sm">
+                <div className="text-slate-200">Current conversation</div>
+                <div className="text-xs text-slate-400">Session: {sessionId ?? "pending"}</div>
+              </div>
+              <ChatView
+                messages={messages}
+                input={input}
+                sending={sending}
+                onInputChange={setInput}
+                onSend={handleSend}
+              />
+            </section>
+
+            <aside className="flex w-full flex-col gap-4 lg:w-[360px]">
+              <DecisionPanel decision={decision} />
+
+              <div className="flex flex-1 flex-col gap-4 rounded-3xl border border-slate-800/80 bg-slate-900/60 p-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-slate-100">Event log</h2>
+                  <span className="text-xs text-slate-500">{events.length} items</span>
+                </div>
+                <div className="flex min-h-[30vh] flex-1 flex-col gap-3 overflow-y-auto rounded-3xl border border-slate-800/80 bg-slate-950/40 p-3 font-mono text-xs">
+                  {events.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-slate-800/70 bg-slate-900/60 px-4 py-6 text-slate-400">
+                      Awaiting SSE events.
                     </div>
-                  ))
-                )}
+                  ) : (
+                    events.map((evt) => (
+                      <div
+                        key={evt.id}
+                        className="rounded-2xl border border-slate-800/80 bg-slate-900/80 px-3 py-2"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-indigo-300">{evt.type}</span>
+                          <span className="text-[10px] text-slate-500">{evt.ts}</span>
+                        </div>
+                        <div className="mt-1 text-slate-400">{toEventPreview(evt.payload)}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             </aside>
           </div>
-        </div>
+        </main>
       </div>
     </div>
   );
