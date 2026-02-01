@@ -1,4 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useNavigate,
+  useParams,
+} from "react-router-dom";
 
 import ChatView from "./components/ChatView";
 import DecisionPanel from "./components/DecisionPanel";
@@ -10,6 +18,38 @@ import type {
 } from "./types";
 
 const MAX_EVENTS = 120;
+
+type ChatState = {
+  id: string;
+  title: string;
+  messages: Message[];
+  events: UIEvent[];
+  decision: DecisionPacketView | null;
+  sessionId: string | null;
+  statusOk: boolean | null;
+};
+
+const createChatId = (): string => {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).slice(2, 10);
+};
+
+const createChatState = (overrides: Partial<ChatState> = {}): ChatState => {
+  const id = overrides.id ?? createChatId();
+  const title = overrides.title ?? "New chat";
+  return {
+    id,
+    title,
+    messages: [],
+    events: [],
+    decision: null,
+    sessionId: null,
+    statusOk: null,
+    ...overrides,
+  };
+};
 
 const isMessage = (value: unknown): value is Message => {
   if (!value || typeof value !== "object") {
@@ -107,26 +147,67 @@ const statusDotClass = (status: string): string => {
   return "bg-emerald-500";
 };
 
-export default function App() {
-  const [statusOk, setStatusOk] = useState<boolean | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [events, setEvents] = useState<UIEvent[]>([]);
-  const [decision, setDecision] = useState<DecisionPacketView | null>(null);
+const updateChatById = (
+  chats: ChatState[],
+  chatId: string,
+  updater: (chat: ChatState) => ChatState,
+): ChatState[] =>
+  chats.map((chat) => (chat.id === chatId ? updater(chat) : chat));
+
+function AppShell() {
+  const navigate = useNavigate();
+  const { id } = useParams();
+  const routeChatId = id ?? null;
+  const [chats, setChats] = useState<ChatState[]>(() => [createChatState()]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    if (routeChatId) {
+      return;
+    }
+    if (chats.length === 0) {
+      const freshChat = createChatState();
+      setChats([freshChat]);
+      navigate(`/chat/${freshChat.id}`, { replace: true });
+      return;
+    }
+    navigate(`/chat/${chats[0].id}`, { replace: true });
+  }, [routeChatId, chats, navigate]);
+
+  useEffect(() => {
+    if (!routeChatId) {
+      return;
+    }
+    if (chats.some((chat) => chat.id === routeChatId)) {
+      return;
+    }
+    const nextTitle = `Chat ${chats.length + 1}`;
+    setChats((prev) => [...prev, createChatState({ id: routeChatId, title: nextTitle })]);
+  }, [routeChatId, chats]);
+
+  const selectedChatId = routeChatId ?? (chats[0]?.id ?? null);
+  const activeChat = selectedChatId
+    ? chats.find((chat) => chat.id === selectedChatId) ?? null
+    : null;
 
   const statusLabel = useMemo(() => {
     if (sending) {
       return "busy";
     }
-    if (statusOk === null) {
+    if (!activeChat || activeChat.statusOk === null) {
       return "loading";
     }
-    return statusOk ? "ok" : "error";
-  }, [sending, statusOk]);
+    return activeChat.statusOk ? "ok" : "error";
+  }, [sending, activeChat]);
 
   useEffect(() => {
+    if (!selectedChatId || !activeChat) {
+      return;
+    }
+    if (activeChat.sessionId) {
+      return;
+    }
     let active = true;
     const loadStatus = async () => {
       try {
@@ -142,15 +223,23 @@ export default function App() {
         const headerSession = resp.headers.get("X-Slavik-Session");
         const nextSession = headerSession || payload.session_id || null;
         if (active) {
-          setStatusOk(Boolean(payload.ok));
-          if (nextSession) {
-            setSessionId(nextSession);
-          }
-          setDecision(parseDecision(payload.decision));
+          setChats((prev) =>
+            updateChatById(prev, selectedChatId, (chat) => ({
+              ...chat,
+              statusOk: Boolean(payload.ok),
+              sessionId: nextSession,
+              decision: parseDecision(payload.decision),
+            })),
+          );
         }
       } catch {
         if (active) {
-          setStatusOk(false);
+          setChats((prev) =>
+            updateChatById(prev, selectedChatId, (chat) => ({
+              ...chat,
+              statusOk: false,
+            })),
+          );
         }
       }
     };
@@ -158,13 +247,13 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [activeChat, selectedChatId]);
 
   useEffect(() => {
-    if (!sessionId) {
+    if (!selectedChatId || !activeChat || !activeChat.sessionId) {
       return;
     }
-    const url = `/ui/api/events/stream?session_id=${encodeURIComponent(sessionId)}`;
+    const url = `/ui/api/events/stream?session_id=${encodeURIComponent(activeChat.sessionId)}`;
     const source = new EventSource(url, { withCredentials: false });
 
     source.onmessage = (evt) => {
@@ -173,52 +262,72 @@ export default function App() {
         if (!parsed || typeof parsed !== "object") {
           return;
         }
-        setEvents((prev) => {
-          const next = [...prev, parsed];
-          if (next.length > MAX_EVENTS) {
-            next.splice(0, next.length - MAX_EVENTS);
-          }
-          return next;
-        });
-        if (parsed.type === "message.append" && parsed.payload) {
-          const payload = parsed.payload as { message?: unknown };
-          if (payload.message && isMessage(payload.message)) {
-            const incoming = payload.message;
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (last && last.role === incoming.role && last.content === incoming.content) {
-                return prev;
+        setChats((prev) =>
+          updateChatById(prev, selectedChatId, (chat) => {
+            const nextEvents = [...chat.events, parsed];
+            if (nextEvents.length > MAX_EVENTS) {
+              nextEvents.splice(0, nextEvents.length - MAX_EVENTS);
+            }
+            let nextMessages = chat.messages;
+            let nextDecision = chat.decision;
+            let nextStatus = chat.statusOk;
+
+            if (parsed.type === "message.append" && parsed.payload) {
+              const payload = parsed.payload as { message?: unknown };
+              if (payload.message && isMessage(payload.message)) {
+                const incoming = payload.message;
+                const last = nextMessages[nextMessages.length - 1];
+                if (!last || last.role !== incoming.role || last.content !== incoming.content) {
+                  nextMessages = [...nextMessages, incoming];
+                }
               }
-              return [...prev, incoming];
-            });
-          }
-        }
-        if (parsed.type === "decision.packet" && parsed.payload) {
-          const payload = parsed.payload as { decision?: unknown };
-          const nextDecision = parseDecision(payload.decision);
-          if (nextDecision) {
-            setDecision(nextDecision);
-          }
-        }
-        if (parsed.type === "status" && parsed.payload) {
-          const payload = parsed.payload as { ok?: boolean };
-          setStatusOk(Boolean(payload.ok));
-        }
+            }
+            if (parsed.type === "decision.packet" && parsed.payload) {
+              const payload = parsed.payload as { decision?: unknown };
+              nextDecision = parseDecision(payload.decision);
+            }
+            if (parsed.type === "status" && parsed.payload) {
+              const payload = parsed.payload as { ok?: boolean };
+              nextStatus = Boolean(payload.ok);
+            }
+            return {
+              ...chat,
+              events: nextEvents,
+              messages: nextMessages,
+              decision: nextDecision,
+              statusOk: nextStatus,
+            };
+          }),
+        );
       } catch {
         return;
       }
     };
 
     source.onerror = () => {
-      setStatusOk(false);
+      setChats((prev) =>
+        updateChatById(prev, selectedChatId, (chat) => ({
+          ...chat,
+          statusOk: false,
+        })),
+      );
     };
 
     return () => {
       source.close();
     };
-  }, [sessionId]);
+  }, [activeChat, selectedChatId]);
+
+  const handleNewChat = () => {
+    const nextChat = createChatState({ title: `Chat ${chats.length + 1}` });
+    setChats((prev) => [nextChat, ...prev]);
+    navigate(`/chat/${nextChat.id}`);
+  };
 
   const handleSend = async () => {
+    if (!selectedChatId || !activeChat) {
+      return;
+    }
     const trimmed = input.trim();
     if (!trimmed || sending) {
       return;
@@ -228,8 +337,8 @@ export default function App() {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
-      if (sessionId) {
-        headers["X-Slavik-Session"] = sessionId;
+      if (activeChat.sessionId) {
+        headers["X-Slavik-Session"] = activeChat.sessionId;
       }
       const resp = await fetch("/ui/api/chat/send", {
         method: "POST",
@@ -246,25 +355,35 @@ export default function App() {
       };
       const headerSession = resp.headers.get("X-Slavik-Session");
       const nextSession = headerSession || payload.session_id || null;
-      if (nextSession) {
-        setSessionId(nextSession);
-      }
       const parsedMessages = parseMessages(payload.messages);
-      if (parsedMessages.length > 0) {
-        setMessages(parsedMessages);
-      }
       const nextDecision = parseDecision(payload.decision);
-      if (nextDecision) {
-        setDecision(nextDecision);
-      }
+
+      setChats((prev) =>
+        updateChatById(prev, selectedChatId, (chat) => ({
+          ...chat,
+          sessionId: nextSession,
+          messages: parsedMessages.length > 0 ? parsedMessages : chat.messages,
+          decision: nextDecision ?? chat.decision,
+          statusOk: true,
+          title: chat.title === "New chat" ? trimmed.slice(0, 40) : chat.title,
+        })),
+      );
       setInput("");
-      setStatusOk(true);
     } catch {
-      setStatusOk(false);
+      setChats((prev) =>
+        updateChatById(prev, selectedChatId, (chat) => ({
+          ...chat,
+          statusOk: false,
+        })),
+      );
     } finally {
       setSending(false);
     }
   };
+
+  const activeMessages = activeChat?.messages ?? [];
+  const activeEvents = activeChat?.events ?? [];
+  const activeDecision = activeChat?.decision ?? null;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -276,6 +395,7 @@ export default function App() {
           </div>
           <button
             type="button"
+            onClick={handleNewChat}
             className="mt-4 rounded-2xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30"
           >
             New chat
@@ -284,14 +404,29 @@ export default function App() {
             Conversations
           </div>
           <div className="mt-3 space-y-2 text-sm text-slate-400">
-            <div className="rounded-xl border border-dashed border-slate-800/80 px-3 py-2">
-              No chats yet
-            </div>
-            <div className="rounded-xl border border-slate-800/60 bg-slate-900/50 px-3 py-2 opacity-60">
-              Placeholder thread
-            </div>
+            {chats.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-800/80 px-3 py-2">
+                No chats yet
+              </div>
+            ) : (
+              chats.map((chat) => (
+                <button
+                  key={chat.id}
+                  type="button"
+                  onClick={() => navigate(`/chat/${chat.id}`)}
+                  className={`w-full rounded-xl border px-3 py-2 text-left transition ${
+                    chat.id === selectedChatId
+                      ? "border-indigo-400/60 bg-indigo-500/10 text-slate-100"
+                      : "border-slate-800/60 bg-slate-900/50 text-slate-400"
+                  }`}
+                >
+                  <div className="text-sm font-medium text-slate-100">{chat.title}</div>
+                  <div className="text-xs text-slate-500">{chat.messages.length} messages</div>
+                </button>
+              ))
+            )}
           </div>
-          <div className="mt-auto pt-6 text-xs text-slate-500">v0 skeleton</div>
+          <div className="mt-auto pt-6 text-xs text-slate-500">Local routing · v0</div>
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
@@ -324,10 +459,12 @@ export default function App() {
             <section className="flex min-w-0 flex-1 flex-col gap-4">
               <div className="flex items-center justify-between rounded-2xl border border-slate-800/80 bg-slate-900/60 px-4 py-3 text-sm">
                 <div className="text-slate-200">Current conversation</div>
-                <div className="text-xs text-slate-400">Session: {sessionId ?? "pending"}</div>
+                <div className="text-xs text-slate-400">
+                  Session: {activeChat?.sessionId ?? "pending"}
+                </div>
               </div>
               <ChatView
-                messages={messages}
+                messages={activeMessages}
                 input={input}
                 sending={sending}
                 onInputChange={setInput}
@@ -336,20 +473,20 @@ export default function App() {
             </section>
 
             <aside className="flex w-full flex-col gap-4 lg:w-[360px]">
-              <DecisionPanel decision={decision} />
+              <DecisionPanel decision={activeDecision} />
 
               <div className="flex flex-1 flex-col gap-4 rounded-3xl border border-slate-800/80 bg-slate-900/60 p-4">
                 <div className="flex items-center justify-between">
                   <h2 className="text-lg font-semibold text-slate-100">Event log</h2>
-                  <span className="text-xs text-slate-500">{events.length} items</span>
+                  <span className="text-xs text-slate-500">{activeEvents.length} items</span>
                 </div>
                 <div className="flex min-h-[30vh] flex-1 flex-col gap-3 overflow-y-auto rounded-3xl border border-slate-800/80 bg-slate-950/40 p-3 font-mono text-xs">
-                  {events.length === 0 ? (
+                  {activeEvents.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-slate-800/70 bg-slate-900/60 px-4 py-6 text-slate-400">
                       Awaiting SSE events.
                     </div>
                   ) : (
-                    events.map((evt) => (
+                    activeEvents.map((evt) => (
                       <div
                         key={evt.id}
                         className="rounded-2xl border border-slate-800/80 bg-slate-900/80 px-3 py-2"
@@ -369,5 +506,18 @@ export default function App() {
         </main>
       </div>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter basename="/ui">
+      <Routes>
+        <Route path="/" element={<Navigate to="/chat" replace />} />
+        <Route path="/chat" element={<AppShell />} />
+        <Route path="/chat/:id" element={<AppShell />} />
+        <Route path="*" element={<Navigate to="/chat" replace />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
