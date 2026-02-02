@@ -25,14 +25,14 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     : "justify-start";
 
   const bubbleClass = isSystem
-    ? "max-w-[80%] rounded-2xl border border-slate-700/60 bg-slate-800/60 px-4 py-3 text-xs text-slate-200"
+    ? "max-w-[80%] rounded-2xl border border-neutral-700/60 bg-neutral-800/60 px-4 py-3 text-xs text-neutral-200"
     : isUser
-    ? "max-w-[78%] rounded-3xl bg-gradient-to-br from-indigo-500 to-indigo-700 px-4 py-3 text-sm text-white shadow-lg shadow-indigo-500/20"
-    : "max-w-[78%] rounded-3xl border border-slate-700/70 bg-slate-900/70 px-4 py-3 text-sm text-slate-100 shadow-lg shadow-black/10";
+    ? "max-w-[78%] rounded-3xl bg-neutral-200 px-4 py-3 text-sm text-neutral-950 shadow-lg shadow-black/20"
+    : "max-w-[78%] rounded-3xl border border-neutral-700/70 bg-neutral-900/70 px-4 py-3 text-sm text-neutral-100 shadow-lg shadow-black/10";
 
   const labelClass = isSystem
-    ? "text-[10px] uppercase tracking-[0.2em] text-slate-400"
-    : "text-[10px] uppercase tracking-[0.2em] text-slate-400";
+    ? "text-[10px] uppercase tracking-[0.2em] text-neutral-400"
+    : "text-[10px] uppercase tracking-[0.2em] text-neutral-400";
 
   return (
     <div className={`flex ${wrapperClass}`}>

@@ -20,7 +20,7 @@ export default function ChatInput({ value, onChange, onSend, sending }: ChatInpu
   }, [value]);
 
   return (
-    <div className="rounded-3xl border border-slate-800/80 bg-slate-950/60 p-3">
+    <div className="rounded-3xl border border-neutral-800/80 bg-neutral-950/60 p-3">
       <div className="flex flex-col gap-3 md:flex-row md:items-end">
         <textarea
           ref={textareaRef}
@@ -34,18 +34,18 @@ export default function ChatInput({ value, onChange, onSend, sending }: ChatInpu
           }}
           rows={1}
           placeholder="Send a message"
-          className="min-h-[44px] flex-1 resize-none rounded-2xl border border-slate-800/80 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500/60"
+          className="min-h-[44px] flex-1 resize-none rounded-2xl border border-neutral-800/80 bg-neutral-900/60 px-4 py-3 text-sm text-neutral-100 outline-none focus:ring-2 focus:ring-neutral-500/60"
         />
         <button
           type="button"
           disabled={sending || value.trim().length === 0}
           onClick={onSend}
-          className="flex h-11 items-center justify-center rounded-2xl bg-indigo-600 px-6 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-11 items-center justify-center rounded-2xl bg-neutral-200 px-6 text-sm font-semibold text-neutral-950 shadow-lg shadow-black/30 transition hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {sending ? "Sending..." : "Send"}
         </button>
       </div>
-      <div className="mt-2 text-xs text-slate-500">
+      <div className="mt-2 text-xs text-neutral-500">
         Enter — отправить, Shift+Enter — новая строка.
       </div>
     </div>

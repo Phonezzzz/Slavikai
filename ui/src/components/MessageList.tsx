@@ -23,10 +23,10 @@ export default function MessageList({ messages }: MessageListProps) {
   return (
     <div
       ref={containerRef}
-      className="flex h-[55vh] flex-col gap-3 overflow-y-auto rounded-3xl border border-slate-800/80 bg-slate-950/40 px-4 py-4"
+      className="flex h-[55vh] flex-col gap-3 overflow-y-auto rounded-3xl border border-neutral-800/80 bg-neutral-950/40 px-4 py-4"
     >
       {messages.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-800/80 bg-slate-900/60 px-4 py-6 text-sm text-slate-400">
+        <div className="rounded-2xl border border-dashed border-neutral-800/80 bg-neutral-900/60 px-4 py-6 text-sm text-neutral-400">
           Нет сообщений. Отправьте первое сообщение, чтобы начать диалог.
         </div>
       ) : (
