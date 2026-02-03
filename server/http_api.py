@@ -18,7 +18,7 @@ from config.http_server_config import (
     HttpServerConfig,
     resolve_http_server_config,
 )
-from config.model_whitelist import MODEL_WHITELIST, ModelNotAllowedError
+from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
 from server.lazy_agent import LazyAgentProvider
@@ -280,9 +280,6 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
     if not isinstance(model_raw, str) or not model_raw.strip():
         return None, "model должен быть непустой строкой."
     model = model_raw.strip()
-    if model not in MODEL_WHITELIST:
-        return None, f"Неизвестная модель: {model}"
-
     messages, msg_error, tool_calling_present = _validate_messages(payload.get("messages"))
     if msg_error:
         return None, msg_error
@@ -491,8 +488,7 @@ def _serialize_trace_events(
 
 async def handle_models(request: web.Request) -> web.Response:
     models = [
-        {"id": model_id, "object": "model", "owned_by": "slavik"}
-        for model_id in sorted(MODEL_WHITELIST)
+        {"id": "slavik", "object": "model", "owned_by": "slavik"},
     ]
     return _json_response({"object": "list", "data": models})
 

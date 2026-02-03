@@ -25,6 +25,10 @@ class DummyBrain(Brain):
         return LLMResult(text=self._text)
 
 
+def _forbidden_model_config(provider: str) -> ModelConfig:
+    return ModelConfig(provider=provider, model="forbidden-model")
+
+
 class DummyAgent:
     def __init__(self, trace_path: Path) -> None:
         self.tracer = Tracer(path=trace_path)
@@ -281,11 +285,16 @@ def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_p
     asyncio.run(run())
 
 
-def test_chat_completions_returns_409_when_model_not_whitelisted(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("provider", ["openrouter", "local"])
+def test_chat_completions_returns_409_when_model_not_whitelisted(
+    monkeypatch,
+    tmp_path,
+    provider: str,
+) -> None:
     trace_path = tmp_path / "trace.log"
     monkeypatch.setattr(
         "core.agent.load_model_configs",
-        lambda: ModelConfig(provider="openrouter", model="forbidden-model"),
+        lambda: _forbidden_model_config(provider),
     )
 
     async def run() -> None:
@@ -313,10 +322,11 @@ def test_chat_completions_returns_409_when_model_not_whitelisted(monkeypatch, tm
     asyncio.run(run())
 
 
-def test_agent_init_fails_when_model_not_whitelisted(monkeypatch) -> None:
+@pytest.mark.parametrize("provider", ["openrouter", "local"])
+def test_agent_init_fails_when_model_not_whitelisted(monkeypatch, provider: str) -> None:
     monkeypatch.setattr(
         "core.agent.load_model_configs",
-        lambda: ModelConfig(provider="openrouter", model="forbidden-model"),
+        lambda: _forbidden_model_config(provider),
     )
 
     with pytest.raises(ModelNotAllowedError):
