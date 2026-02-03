@@ -70,6 +70,56 @@ class DecisionEchoAgent:
         )
 
 
+class DecisionOnlyForSessionAAgent:
+    def __init__(self) -> None:
+        self._session_id: str | None = None
+
+    def set_session_context(self, session_id: str | None, approved_categories: set[str]) -> None:
+        del approved_categories
+        self._session_id = session_id
+
+    def respond(self, messages) -> str:
+        del messages
+        session_id = self._session_id or "missing-session"
+        if session_id != "session-a":
+            return "plain text response"
+        return json.dumps(
+            {
+                "id": "decision-session-a",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "reason": "need_user_input",
+                "summary": "Decision for session-a",
+                "context": {"session_id": "session-a"},
+                "options": [
+                    {
+                        "id": "ask_user",
+                        "title": "Ask user",
+                        "action": "ask_user",
+                        "payload": {},
+                        "risk": "low",
+                    },
+                    {
+                        "id": "proceed_safe",
+                        "title": "Proceed safely",
+                        "action": "proceed_safe",
+                        "payload": {},
+                        "risk": "low",
+                    },
+                    {
+                        "id": "abort",
+                        "title": "Abort",
+                        "action": "abort",
+                        "payload": {},
+                        "risk": "low",
+                    },
+                ],
+                "default_option_id": "ask_user",
+                "ttl_seconds": 600,
+                "policy": {"require_user_choice": True},
+            },
+        )
+
+
 class DelayedFirstUserMessageHub(UIHub):
     def __init__(self, delayed_session_id: str) -> None:
         super().__init__()
@@ -166,6 +216,48 @@ def test_ui_chat_send_decision_isolated_between_sessions() -> None:
                 decision = payload.get("decision")
                 assert isinstance(decision, dict)
                 assert decision.get("id") == f"decision-{expected_session}"
+                context = decision.get("context")
+                assert isinstance(context, dict)
+                assert context.get("session_id") == expected_session
+
+            decision_a = result_a[1]["decision"]
+            decision_b = result_b[1]["decision"]
+            assert isinstance(decision_a, dict)
+            assert isinstance(decision_b, dict)
+            assert decision_a.get("id") != decision_b.get("id")
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_no_decision_leak_from_other_session() -> None:
+    async def run() -> None:
+        app = create_app(agent=DecisionOnlyForSessionAAgent(), max_request_bytes=1_000_000)
+        server = TestServer(app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            response_a = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Message A"},
+                headers={"X-Slavik-Session": "session-a"},
+            )
+            assert response_a.status == 200
+            payload_a = await response_a.json()
+            decision_a = payload_a.get("decision")
+            assert isinstance(decision_a, dict)
+            assert decision_a.get("id") == "decision-session-a"
+
+            response_b = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Message B"},
+                headers={"X-Slavik-Session": "session-b"},
+            )
+            assert response_b.status == 200
+            payload_b = await response_b.json()
+            assert payload_b.get("session_id") == "session-b"
+            assert payload_b.get("decision") is None
         finally:
             await client.close()
 

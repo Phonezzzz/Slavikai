@@ -531,7 +531,7 @@ async def handle_ui_index(request: web.Request) -> web.FileResponse:
 async def handle_ui_status(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
-    decision = await hub.get_decision(session_id)
+    decision = await hub.get_session_decision(session_id)
     response = _json_response({"ok": True, "session_id": session_id, "decision": decision})
     response.headers[UI_SESSION_HEADER] = session_id
     return response
@@ -602,10 +602,9 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         )
 
     await hub.append_message(session_id, "assistant", response_text)
-    if decision is not None:
-        await hub.maybe_publish_decision(session_id, decision)
+    await hub.set_session_decision(session_id, decision)
     messages = await hub.get_messages(session_id)
-    current_decision = await hub.get_decision(session_id)
+    current_decision = await hub.get_session_decision(session_id)
     response = _json_response(
         {"session_id": session_id, "messages": messages, "decision": current_decision},
     )

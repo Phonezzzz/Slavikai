@@ -13,7 +13,7 @@ class _SessionState:
     messages: list[dict[str, str]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, JSONValue]]] = field(default_factory=set)
     last_decision_id: str | None = None
-    current_decision: dict[str, JSONValue] | None = None
+    decision_packet: dict[str, JSONValue] | None = None
 
 
 def _utc_iso_now() -> str:
@@ -45,12 +45,12 @@ class UIHub:
                 return []
             return [dict(item) for item in state.messages]
 
-    async def get_decision(self, session_id: str) -> dict[str, JSONValue] | None:
+    async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
         async with self._lock:
             state = self._sessions.get(session_id)
-            if state is None or state.current_decision is None:
+            if state is None or state.decision_packet is None:
                 return None
-            return dict(state.current_decision)
+            return dict(state.decision_packet)
 
     async def append_message(self, session_id: str, role: str, content: str) -> dict[str, str]:
         message = {"role": role, "content": content}
@@ -98,18 +98,21 @@ class UIHub:
         hydrated = self._ensure_event_fields(event)
         self._publish_to_subscribers(subscribers, hydrated)
 
-    async def maybe_publish_decision(
+    async def set_session_decision(
         self,
         session_id: str,
-        decision: dict[str, JSONValue],
+        decision: dict[str, JSONValue] | None,
     ) -> None:
-        decision_id = decision.get("id")
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-            state.current_decision = dict(decision)
+            state.decision_packet = dict(decision) if decision is not None else None
+            if state.decision_packet is None:
+                state.last_decision_id = None
+                return
+            decision_id = state.decision_packet.get("id")
             if isinstance(decision_id, str):
                 if decision_id == state.last_decision_id:
                     return
@@ -117,9 +120,10 @@ class UIHub:
             else:
                 state.last_decision_id = None
             subscribers = list(state.subscribers)
+            decision_payload = dict(state.decision_packet)
         event = self._build_event(
             "decision.packet",
-            {"session_id": session_id, "decision": decision},
+            {"session_id": session_id, "decision": decision_payload},
         )
         self._publish_to_subscribers(subscribers, event)
 
