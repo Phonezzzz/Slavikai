@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from core.tracer import Tracer
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from server.http_api import create_app
-from server.model_state_store import ModelStateStore
+from server.model_state_store import FileBackedModelStateStore, ModelStateStore
 from server.ui_session_storage import InMemoryUISessionStorage
 from shared.models import LLMMessage
 
@@ -300,13 +301,11 @@ def test_chat_completions_returns_409_when_model_not_whitelisted(
     provider: Literal["openrouter", "local"],
 ) -> None:
     trace_path = tmp_path / "trace.log"
-    monkeypatch.setattr(
-        "core.agent.load_model_configs",
-        lambda: _forbidden_model_config(provider),
-    )
+    model_store = ModelStateStore()
 
     async def run() -> None:
-        client = await _create_client_without_agent(trace_path, monkeypatch)
+        await model_store.set_main(_forbidden_model_config(provider))
+        client = await _create_client_without_agent(trace_path, monkeypatch, model_store)
         try:
             resp = await client.post(
                 "/v1/chat/completions",
@@ -335,22 +334,19 @@ def test_agent_init_fails_when_model_not_whitelisted(
     monkeypatch,
     provider: Literal["openrouter", "local"],
 ) -> None:
-    monkeypatch.setattr(
-        "core.agent.load_model_configs",
-        lambda: _forbidden_model_config(provider),
-    )
+    del monkeypatch
 
     with pytest.raises(ModelNotAllowedError):
         from core.agent import Agent
 
-        Agent(brain=DummyBrain("ok"))
+        Agent(brain=DummyBrain("ok"), main_config=_forbidden_model_config(provider))
 
 
 def test_chat_completions_uses_model_state_store_main_config(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
     model_store = ModelStateStore()
     provider_value = cast(Literal["openrouter", "local"], "xai")
-    original_import_module = __import__("importlib").import_module
+    original_import_module = importlib.import_module
 
     class RuntimeTracer:
         def log(self, event_type: str, message: str, meta=None) -> None:
@@ -420,10 +416,23 @@ def test_chat_completions_uses_model_state_store_main_config(monkeypatch, tmp_pa
             assert len(captured_main_configs) == 1
             captured = captured_main_configs[0]
             assert captured is not None
-            assert captured.provider == "xai"
+            assert str(captured.provider) == "xai"
             assert captured.model == "slavik"
         finally:
             await client.close()
+
+    asyncio.run(run())
+
+
+def test_provider_is_forced_to_xai(tmp_path) -> None:
+    async def run() -> None:
+        store = FileBackedModelStateStore(tmp_path / "model_config.json")
+        await store.set_main(
+            ModelConfig(provider="local", model="slavik"),
+        )
+        current = await store.get_main()
+        assert current is not None
+        assert str(current.provider) == "xai"
 
     asyncio.run(run())
 
