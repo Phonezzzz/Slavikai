@@ -22,6 +22,7 @@ from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalReque
 from core.tracer import TRACE_LOG, TraceRecord
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
+from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
@@ -1116,6 +1117,7 @@ def create_app(
     *,
     agent: AgentProtocol | None = None,
     max_request_bytes: int | None = None,
+    ui_storage: UISessionStorage | None = None,
 ) -> web.Application:
     config_max_bytes = max_request_bytes or DEFAULT_MAX_REQUEST_BYTES
     app = web.Application(client_max_size=config_max_bytes)
@@ -1135,7 +1137,10 @@ def create_app(
         app["agent_provider"] = LazyAgentProvider.from_instance(agent)
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
-    app["ui_hub"] = UIHub()
+    resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
+        Path(__file__).resolve().parent.parent / ".run" / "ui_sessions.db",
+    )
+    app["ui_hub"] = UIHub(storage=resolved_ui_storage)
     dist_path = Path(__file__).resolve().parent.parent / "ui" / "dist"
     app["ui_dist_path"] = dist_path
     app.router.add_get("/v1/models", handle_models)

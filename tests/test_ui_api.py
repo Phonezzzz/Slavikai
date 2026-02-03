@@ -7,6 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from server.http_api import create_app
 from server.ui_hub import UIHub
+from server.ui_session_storage import InMemoryUISessionStorage, SQLiteUISessionStorage
 
 
 class DummyAgent:
@@ -134,7 +135,11 @@ class DelayedFirstUserMessageHub(UIHub):
 
 
 async def _create_client(agent: DummyAgent) -> TestClient:
-    app = create_app(agent=agent, max_request_bytes=1_000_000)
+    app = create_app(
+        agent=agent,
+        max_request_bytes=1_000_000,
+        ui_storage=InMemoryUISessionStorage(),
+    )
     server = TestServer(app)
     client = TestClient(server)
     await client.start_server()
@@ -194,7 +199,11 @@ def test_ui_chat_send_endpoint() -> None:
 
 def test_ui_chat_send_decision_isolated_between_sessions() -> None:
     async def run() -> None:
-        app = create_app(agent=DecisionEchoAgent(), max_request_bytes=1_000_000)
+        app = create_app(
+            agent=DecisionEchoAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+        )
         app["ui_hub"] = DelayedFirstUserMessageHub("session-a")
         server = TestServer(app)
         client = TestClient(server)
@@ -246,7 +255,11 @@ def test_ui_chat_send_decision_isolated_between_sessions() -> None:
 
 def test_ui_chat_send_no_decision_leak_from_other_session() -> None:
     async def run() -> None:
-        app = create_app(agent=DecisionOnlyForSessionAAgent(), max_request_bytes=1_000_000)
+        app = create_app(
+            agent=DecisionOnlyForSessionAAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+        )
         server = TestServer(app)
         client = TestClient(server)
         await client.start_server()
@@ -355,5 +368,89 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             assert selected.get("message_count") == len(messages)
         finally:
             await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_sessions_persist_after_restart(tmp_path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "ui_sessions.db"
+
+        storage_before = SQLiteUISessionStorage(db_path)
+        app_before = create_app(
+            agent=DecisionEchoAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=storage_before,
+        )
+        server_before = TestServer(app_before)
+        client_before = TestClient(server_before)
+        await client_before.start_server()
+
+        session_id: str | None = None
+        try:
+            create_resp = await client_before.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            created = create_payload.get("session")
+            assert isinstance(created, dict)
+            raw_session_id = created.get("session_id")
+            assert isinstance(raw_session_id, str)
+            assert raw_session_id
+            session_id = raw_session_id
+
+            send_resp = await client_before.post(
+                "/ui/api/chat/send",
+                json={"content": "Persist me"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            decision = send_payload.get("decision")
+            assert isinstance(decision, dict)
+            assert decision.get("id") == f"decision-{session_id}"
+        finally:
+            await client_before.close()
+
+        assert isinstance(session_id, str)
+        storage_after = SQLiteUISessionStorage(db_path)
+        app_after = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=storage_after,
+        )
+        server_after = TestServer(app_after)
+        client_after = TestClient(server_after)
+        await client_after.start_server()
+        try:
+            get_resp = await client_after.get(f"/ui/api/sessions/{session_id}")
+            assert get_resp.status == 200
+            get_payload = await get_resp.json()
+            session = get_payload.get("session")
+            assert isinstance(session, dict)
+            assert session.get("session_id") == session_id
+            messages = session.get("messages")
+            assert isinstance(messages, list)
+            assert len(messages) >= 2
+            first = messages[0]
+            second = messages[1]
+            assert isinstance(first, dict)
+            assert isinstance(second, dict)
+            assert first.get("role") == "user"
+            assert second.get("role") == "assistant"
+            restored_decision = session.get("decision")
+            assert isinstance(restored_decision, dict)
+            assert restored_decision.get("id") == f"decision-{session_id}"
+
+            status_resp = await client_after.get(
+                "/ui/api/status",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert status_resp.status == 200
+            status_payload = await status_resp.json()
+            decision_from_status = status_payload.get("decision")
+            assert isinstance(decision_from_status, dict)
+            assert decision_from_status.get("id") == f"decision-{session_id}"
+        finally:
+            await client_after.close()
 
     asyncio.run(run())

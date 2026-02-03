@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, TypedDict
 
+from server.ui_session_storage import (
+    InMemoryUISessionStorage,
+    PersistedSession,
+    UISessionStorage,
+)
 from shared.models import JSONValue
 
 
@@ -30,6 +36,11 @@ class _SessionListSortableItem(TypedDict):
     message_count: int
 
 
+DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+DEFAULT_MAX_SESSIONS = 200
+DEFAULT_MAX_MESSAGES_PER_SESSION = 500
+
+
 @dataclass
 class _SessionState:
     messages: list[dict[str, str]] = field(default_factory=list)
@@ -42,21 +53,37 @@ class _SessionState:
 
 
 class UIHub:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        storage: UISessionStorage | None = None,
+        session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
+        max_sessions: int = DEFAULT_MAX_SESSIONS,
+        max_messages_per_session: int = DEFAULT_MAX_MESSAGES_PER_SESSION,
+    ) -> None:
+        self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
         self._sessions: dict[str, _SessionState] = {}
+        self._session_ttl_seconds = session_ttl_seconds
+        self._max_sessions = max_sessions
+        self._max_messages_per_session = max_messages_per_session
         self._lock = asyncio.Lock()
+        self._restore_sessions()
 
     async def get_or_create_session(self, session_id: str | None) -> str:
         normalized = session_id.strip() if session_id else ""
         async with self._lock:
+            self._prune_sessions_locked(keep_session_id=normalized if normalized else None)
             if normalized:
                 if normalized not in self._sessions:
                     self._sessions[normalized] = _SessionState()
+                    self._persist_session_locked(normalized)
                 return normalized
             new_id = uuid.uuid4().hex
             while new_id in self._sessions:
                 new_id = uuid.uuid4().hex
             self._sessions[new_id] = _SessionState()
+            self._persist_session_locked(new_id)
+            self._prune_sessions_locked(keep_session_id=new_id)
             return new_id
 
     async def create_session(self) -> str:
@@ -71,6 +98,7 @@ class UIHub:
 
     async def list_sessions(self) -> list[SessionListItem]:
         async with self._lock:
+            self._prune_sessions_locked()
             items: list[_SessionListSortableItem] = []
             for session_id, state in self._sessions.items():
                 items.append(
@@ -126,6 +154,8 @@ class UIHub:
                 return
             state.status_state = normalized
             state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
             subscribers = list(state.subscribers)
             payload = self._status_payload(session_id, normalized)
         event = self._build_event("status", payload)
@@ -137,6 +167,7 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
+                self._persist_session_locked(session_id)
             payload = self._status_payload(session_id, state.status_state)
         return self._build_event("status", payload)
 
@@ -148,7 +179,14 @@ class UIHub:
                 state = _SessionState()
                 self._sessions[session_id] = state
             state.messages.append(message)
+            if (
+                self._max_messages_per_session > 0
+                and len(state.messages) > self._max_messages_per_session
+            ):
+                state.messages = state.messages[-self._max_messages_per_session :]
             state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
             subscribers = list(state.subscribers)
         event = self._build_event(
             "message.append",
@@ -164,6 +202,7 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
+                self._persist_session_locked(session_id)
             state.subscribers.add(queue)
         return queue
 
@@ -199,6 +238,8 @@ class UIHub:
                 self._sessions[session_id] = state
             state.decision_packet = dict(decision) if decision is not None else None
             state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
             if state.decision_packet is None:
                 state.last_decision_id = None
                 return
@@ -258,3 +299,79 @@ class UIHub:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
                 continue
+
+    def _restore_sessions(self) -> None:
+        for item in self._storage.load_sessions():
+            decision = dict(item.decision) if item.decision is not None else None
+            last_decision_id: str | None = None
+            if decision is not None:
+                decision_id = decision.get("id")
+                if isinstance(decision_id, str):
+                    last_decision_id = decision_id
+            self._sessions[item.session_id] = _SessionState(
+                messages=[dict(message) for message in item.messages],
+                last_decision_id=last_decision_id,
+                decision_packet=decision,
+                status_state=self._normalize_status(item.status),
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+
+    def _persist_session_locked(self, session_id: str) -> None:
+        state = self._sessions.get(session_id)
+        if state is None:
+            return
+        self._storage.save_session(
+            PersistedSession(
+                session_id=session_id,
+                created_at=state.created_at,
+                updated_at=state.updated_at,
+                status=state.status_state,
+                decision=(
+                    dict(state.decision_packet) if state.decision_packet is not None else None
+                ),
+                messages=[dict(message) for message in state.messages],
+            ),
+        )
+
+    def _prune_sessions_locked(self, *, keep_session_id: str | None = None) -> None:
+        to_remove: set[str] = set()
+        now = datetime.now(timezone.utc)  # noqa: UP017
+        if self._session_ttl_seconds > 0:
+            cutoff = now - timedelta(seconds=self._session_ttl_seconds)
+            for session_id, state in self._sessions.items():
+                if session_id == keep_session_id:
+                    continue
+                updated_at = self._parse_session_timestamp(state.updated_at)
+                if updated_at < cutoff:
+                    to_remove.add(session_id)
+        if self._max_sessions > 0:
+            sessions_sorted = sorted(
+                self._sessions.items(),
+                key=lambda item: self._parse_session_timestamp(item[1].updated_at),
+                reverse=True,
+            )
+            keep_ids = {session_id for session_id, _ in sessions_sorted[: self._max_sessions]}
+            if keep_session_id is not None:
+                keep_ids.add(keep_session_id)
+            for session_id in self._sessions:
+                if session_id not in keep_ids:
+                    to_remove.add(session_id)
+        self._drop_sessions_locked(to_remove)
+
+    def _drop_sessions_locked(self, session_ids: Iterable[str]) -> None:
+        to_remove = [session_id for session_id in session_ids if session_id in self._sessions]
+        if not to_remove:
+            return
+        for session_id in to_remove:
+            self._sessions.pop(session_id, None)
+        self._storage.delete_sessions(to_remove)
+
+    def _parse_session_timestamp(self, value: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)  # noqa: UP017
+            return parsed.astimezone(timezone.utc)  # noqa: UP017
+        except ValueError:
+            return datetime.fromtimestamp(0, tz=timezone.utc)  # noqa: UP017

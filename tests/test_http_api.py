@@ -11,6 +11,7 @@ from core.tracer import Tracer
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from server.http_api import create_app
+from server.ui_session_storage import InMemoryUISessionStorage
 from shared.models import LLMMessage
 
 
@@ -89,7 +90,11 @@ class DummyAgent:
 
 async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
-    app = create_app(agent=agent, max_request_bytes=1_000_000)
+    app = create_app(
+        agent=agent,
+        max_request_bytes=1_000_000,
+        ui_storage=InMemoryUISessionStorage(),
+    )
     server = TestServer(app)
     client = TestClient(server)
     await client.start_server()
@@ -98,7 +103,11 @@ async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> Te
 
 async def _create_client_without_agent(trace_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
-    app = create_app(agent=None, max_request_bytes=1_000_000)
+    app = create_app(
+        agent=None,
+        max_request_bytes=1_000_000,
+        ui_storage=InMemoryUISessionStorage(),
+    )
     server = TestServer(app)
     client = TestClient(server)
     await client.start_server()
