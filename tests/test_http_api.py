@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Literal, cast
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -13,6 +15,7 @@ from core.tracer import Tracer
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from server.http_api import create_app
+from server.model_state_store import ModelStateStore
 from server.ui_session_storage import InMemoryUISessionStorage
 from shared.models import LLMMessage
 
@@ -25,7 +28,7 @@ class DummyBrain(Brain):
         return LLMResult(text=self._text)
 
 
-def _forbidden_model_config(provider: str) -> ModelConfig:
+def _forbidden_model_config(provider: Literal["openrouter", "local"]) -> ModelConfig:
     return ModelConfig(provider=provider, model="forbidden-model")
 
 
@@ -107,12 +110,17 @@ async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> Te
     return client
 
 
-async def _create_client_without_agent(trace_path: Path, monkeypatch) -> TestClient:
+async def _create_client_without_agent(
+    trace_path: Path,
+    monkeypatch,
+    model_state_store: ModelStateStore | None = None,
+) -> TestClient:
     monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
     app = create_app(
         agent=None,
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
+        model_state_store=model_state_store,
     )
     server = TestServer(app)
     client = TestClient(server)
@@ -289,7 +297,7 @@ def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_p
 def test_chat_completions_returns_409_when_model_not_whitelisted(
     monkeypatch,
     tmp_path,
-    provider: str,
+    provider: Literal["openrouter", "local"],
 ) -> None:
     trace_path = tmp_path / "trace.log"
     monkeypatch.setattr(
@@ -323,7 +331,10 @@ def test_chat_completions_returns_409_when_model_not_whitelisted(
 
 
 @pytest.mark.parametrize("provider", ["openrouter", "local"])
-def test_agent_init_fails_when_model_not_whitelisted(monkeypatch, provider: str) -> None:
+def test_agent_init_fails_when_model_not_whitelisted(
+    monkeypatch,
+    provider: Literal["openrouter", "local"],
+) -> None:
     monkeypatch.setattr(
         "core.agent.load_model_configs",
         lambda: _forbidden_model_config(provider),
@@ -333,6 +344,88 @@ def test_agent_init_fails_when_model_not_whitelisted(monkeypatch, provider: str)
         from core.agent import Agent
 
         Agent(brain=DummyBrain("ok"))
+
+
+def test_chat_completions_uses_model_state_store_main_config(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    model_store = ModelStateStore()
+    provider_value = cast(Literal["openrouter", "local"], "xai")
+    original_import_module = __import__("importlib").import_module
+
+    class RuntimeTracer:
+        def log(self, event_type: str, message: str, meta=None) -> None:
+            del event_type, message, meta
+
+    captured_main_configs: list[ModelConfig | None] = []
+
+    class RuntimeAgent:
+        def __init__(self, main_config: ModelConfig | None = None) -> None:
+            self.main_config = main_config
+            captured_main_configs.append(main_config)
+            self.brain = object()
+            self.tools_enabled = {"safe_mode": True}
+            self.last_approval_request = None
+            self.last_chat_interaction_id: str | None = None
+            self.tracer = RuntimeTracer()
+
+        def set_session_context(
+            self,
+            session_id: str | None,
+            approved_categories: set[str],
+        ) -> None:
+            del session_id, approved_categories
+
+        def respond(self, messages) -> str:
+            del messages
+            self.last_chat_interaction_id = "trace-from-model-store"
+            return "ok"
+
+        def record_feedback_event(
+            self,
+            *,
+            interaction_id: str,
+            rating,
+            labels=None,
+            free_text=None,
+        ) -> None:
+            del interaction_id, rating, labels, free_text
+
+    monkeypatch.setattr(
+        "server.http_api.importlib.import_module",
+        lambda module_name: (
+            SimpleNamespace(Agent=RuntimeAgent)
+            if module_name == "core.agent"
+            else original_import_module(module_name)
+        ),
+    )
+
+    async def run() -> None:
+        await model_store.set_main(
+            ModelConfig(
+                provider=provider_value,
+                model="slavik",
+            ),
+        )
+        client = await _create_client_without_agent(trace_path, monkeypatch, model_store)
+        try:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                },
+            )
+            assert resp.status == 200
+            assert len(captured_main_configs) == 1
+            captured = captured_main_configs[0]
+            assert captured is not None
+            assert captured.provider == "xai"
+            assert captured.model == "slavik"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 def test_trace_endpoint_returns_events(monkeypatch, tmp_path) -> None:

@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
 from server.lazy_agent import LazyAgentProvider
+from server.model_state_store import FileBackedModelStateStore, ModelStateStore
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
@@ -179,9 +181,22 @@ def _model_not_allowed_response(model_id: str) -> web.Response:
     )
 
 
+def _load_agent_factory() -> Callable[..., AgentProtocol]:
+    module = importlib.import_module("core.agent")
+    agent_factory = getattr(module, "Agent", None)
+    if not callable(agent_factory):
+        raise RuntimeError("Agent class not found in core.agent")
+    return cast(Callable[..., AgentProtocol], agent_factory)
+
+
 async def _resolve_agent(request: web.Request) -> AgentProtocol | None:
     provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
+    model_state_store: ModelStateStore = request.app["model_state_store"]
+    main_config = await model_state_store.get_main()
     try:
+        if main_config is not None:
+            agent_factory = _load_agent_factory()
+            return await provider.ensure(lambda: agent_factory(main_config=main_config))
         return await provider.get()
     except RuntimeError as exc:
         if "Не выбрана модель" in str(exc):
@@ -1134,17 +1149,17 @@ def create_app(
     agent: AgentProtocol | None = None,
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
+    model_state_store: ModelStateStore | None = None,
 ) -> web.Application:
     config_max_bytes = max_request_bytes or DEFAULT_MAX_REQUEST_BYTES
     app = web.Application(client_max_size=config_max_bytes)
+    resolved_model_state_store = model_state_store or FileBackedModelStateStore()
+    app["model_state_store"] = resolved_model_state_store
     if agent is None:
 
         def _factory() -> AgentProtocol:
-            module = importlib.import_module("core.agent")
-            agent_factory = getattr(module, "Agent", None)
-            if not callable(agent_factory):
-                raise RuntimeError("Agent class not found in core.agent")
-            return cast(AgentProtocol, agent_factory())
+            agent_factory = _load_agent_factory()
+            return agent_factory()
 
         app["agent"] = None
         app["agent_provider"] = LazyAgentProvider(factory=_factory)
