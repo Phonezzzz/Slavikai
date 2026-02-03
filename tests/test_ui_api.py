@@ -141,6 +141,19 @@ async def _create_client(agent: DummyAgent) -> TestClient:
     return client
 
 
+async def _read_first_sse_event(response) -> dict[str, object]:
+    while True:
+        line = await response.content.readline()
+        if not line:
+            raise AssertionError("SSE stream closed before first event")
+        if line.startswith(b"data: "):
+            raw = line.removeprefix(b"data: ").decode("utf-8").strip()
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise AssertionError("SSE event payload is not an object")
+            return parsed
+
+
 def test_ui_status_endpoint() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -258,6 +271,36 @@ def test_ui_chat_send_no_decision_leak_from_other_session() -> None:
             payload_b = await response_b.json()
             assert payload_b.get("session_id") == "session-b"
             assert payload_b.get("decision") is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_events_stream_first_event_is_status() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            assert status_resp.status == 200
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            first_event = await _read_first_sse_event(stream_resp)
+            assert first_event.get("type") == "status"
+            payload = first_event.get("payload")
+            assert isinstance(payload, dict)
+            assert payload.get("session_id") == session_id
+            assert payload.get("ok") is True
+            assert payload.get("state") == "ok"
+            stream_resp.close()
         finally:
             await client.close()
 

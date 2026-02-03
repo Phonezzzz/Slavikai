@@ -14,6 +14,7 @@ class _SessionState:
     subscribers: set[asyncio.Queue[dict[str, JSONValue]]] = field(default_factory=set)
     last_decision_id: str | None = None
     decision_packet: dict[str, JSONValue] | None = None
+    status_state: str = "ok"
 
 
 def _utc_iso_now() -> str:
@@ -51,6 +52,30 @@ class UIHub:
             if state is None or state.decision_packet is None:
                 return None
             return dict(state.decision_packet)
+
+    async def set_session_status(self, session_id: str, status_state: str) -> None:
+        normalized = self._normalize_status(status_state)
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            if state.status_state == normalized:
+                return
+            state.status_state = normalized
+            subscribers = list(state.subscribers)
+            payload = self._status_payload(session_id, normalized)
+        event = self._build_event("status", payload)
+        self._publish_to_subscribers(subscribers, event)
+
+    async def get_session_status_event(self, session_id: str) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            payload = self._status_payload(session_id, state.status_state)
+        return self._build_event("status", payload)
 
     async def append_message(self, session_id: str, role: str, content: str) -> dict[str, str]:
         message = {"role": role, "content": content}
@@ -141,6 +166,18 @@ class UIHub:
             "ts": _utc_iso_now(),
             "payload": payload,
         }
+
+    def _status_payload(self, session_id: str, status_state: str) -> dict[str, JSONValue]:
+        return {
+            "session_id": session_id,
+            "state": status_state,
+            "ok": status_state != "error",
+        }
+
+    def _normalize_status(self, status_state: str) -> str:
+        if status_state in {"ok", "busy", "error"}:
+            return status_state
+        return "ok"
 
     def _publish_to_subscribers(
         self,

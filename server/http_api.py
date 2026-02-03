@@ -572,6 +572,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         )
 
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    await hub.set_session_status(session_id, "busy")
     approved_categories = await session_store.get_categories(session_id)
     await hub.append_message(session_id, "user", content_raw.strip())
     llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
@@ -594,6 +595,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             response_text = await loop.run_in_executor(None, agent.respond, llm_messages)
             decision = _extract_decision_payload(response_text)
     except Exception as exc:  # noqa: BLE001
+        await hub.set_session_status(session_id, "error")
         return _error_response(
             status=500,
             message=f"Agent error: {exc}",
@@ -603,6 +605,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
 
     await hub.append_message(session_id, "assistant", response_text)
     await hub.set_session_decision(session_id, decision)
+    await hub.set_session_status(session_id, "ok")
     messages = await hub.get_messages(session_id)
     current_decision = await hub.get_session_decision(session_id)
     response = _json_response(
@@ -627,6 +630,9 @@ async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
         },
     )
     await response.prepare(request)
+    initial_status_event = await hub.get_session_status_event(session_id)
+    initial_status_payload = json.dumps(initial_status_event, ensure_ascii=False)
+    await response.write(f"data: {initial_status_payload}\n\n".encode())
 
     try:
         while True:
