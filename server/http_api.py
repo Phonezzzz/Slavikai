@@ -537,6 +537,51 @@ async def handle_ui_status(request: web.Request) -> web.Response:
     return response
 
 
+async def handle_ui_sessions_list(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    sessions = await hub.list_sessions()
+    return _json_response({"sessions": sessions})
+
+
+async def handle_ui_sessions_create(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = await hub.create_session()
+    session = await hub.get_session(session_id)
+    if session is None:
+        return _error_response(
+            status=500,
+            message="Failed to create session.",
+            error_type="internal_error",
+            code="session_create_failed",
+        )
+    response = _json_response({"session": session})
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_session_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    session = await hub.get_session(session_id)
+    if session is None:
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    response = _json_response({"session": session})
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
 async def handle_ui_chat_send(request: web.Request) -> web.Response:
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
@@ -1093,6 +1138,9 @@ def create_app(
     app.router.add_get("/ui", handle_ui_redirect)
     app.router.add_get("/ui/", handle_ui_index)
     app.router.add_get("/ui/api/status", handle_ui_status)
+    app.router.add_get("/ui/api/sessions", handle_ui_sessions_list)
+    app.router.add_post("/ui/api/sessions", handle_ui_sessions_create)
+    app.router.add_get("/ui/api/sessions/{session_id}", handle_ui_session_get)
     app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
     app.router.add_get("/ui/api/events/stream", handle_ui_events_stream)
     app.router.add_static("/ui/assets/", dist_path / "assets")

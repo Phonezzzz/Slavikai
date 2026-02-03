@@ -305,3 +305,55 @@ def test_ui_events_stream_first_event_is_status() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_sessions_api_create_send_get_history() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            created = create_payload.get("session")
+            assert isinstance(created, dict)
+            session_id = created.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Ping"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+
+            get_resp = await client.get(f"/ui/api/sessions/{session_id}")
+            assert get_resp.status == 200
+            get_payload = await get_resp.json()
+            session = get_payload.get("session")
+            assert isinstance(session, dict)
+            messages = session.get("messages")
+            assert isinstance(messages, list)
+            assert len(messages) >= 2
+            first = messages[0]
+            second = messages[1]
+            assert isinstance(first, dict)
+            assert isinstance(second, dict)
+            assert first.get("role") == "user"
+            assert second.get("role") == "assistant"
+
+            list_resp = await client.get("/ui/api/sessions")
+            assert list_resp.status == 200
+            list_payload = await list_resp.json()
+            sessions = list_payload.get("sessions")
+            assert isinstance(sessions, list)
+            selected = next(
+                (item for item in sessions if item.get("session_id") == session_id),
+                None,
+            )
+            assert isinstance(selected, dict)
+            assert selected.get("message_count") == len(messages)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
