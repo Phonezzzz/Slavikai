@@ -540,7 +540,16 @@ async def handle_ui_status(request: web.Request) -> web.Response:
 async def handle_ui_sessions_list(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     sessions = await hub.list_sessions()
-    return _json_response({"sessions": sessions})
+    serialized_sessions: list[dict[str, JSONValue]] = [
+        {
+            "session_id": item["session_id"],
+            "created_at": item["created_at"],
+            "updated_at": item["updated_at"],
+            "message_count": item["message_count"],
+        }
+        for item in sessions
+    ]
+    return _json_response({"sessions": serialized_sessions})
 
 
 async def handle_ui_sessions_create(request: web.Request) -> web.Response:

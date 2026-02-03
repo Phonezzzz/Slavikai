@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Literal, TypedDict
 
 from shared.models import JSONValue
 
@@ -12,13 +13,30 @@ def _utc_iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
+SessionStatus = Literal["ok", "busy", "error"]
+
+
+class SessionListItem(TypedDict):
+    session_id: str
+    created_at: str
+    updated_at: str
+    message_count: int
+
+
+class _SessionListSortableItem(TypedDict):
+    session_id: str
+    created_at: str
+    updated_at: datetime
+    message_count: int
+
+
 @dataclass
 class _SessionState:
     messages: list[dict[str, str]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, JSONValue]]] = field(default_factory=set)
     last_decision_id: str | None = None
     decision_packet: dict[str, JSONValue] | None = None
-    status_state: str = "ok"
+    status_state: SessionStatus = "ok"
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
 
@@ -51,20 +69,28 @@ class UIHub:
                 return []
             return [dict(item) for item in state.messages]
 
-    async def list_sessions(self) -> list[dict[str, JSONValue]]:
+    async def list_sessions(self) -> list[SessionListItem]:
         async with self._lock:
-            items: list[dict[str, JSONValue]] = []
+            items: list[_SessionListSortableItem] = []
             for session_id, state in self._sessions.items():
                 items.append(
                     {
                         "session_id": session_id,
                         "created_at": state.created_at,
-                        "updated_at": state.updated_at,
+                        "updated_at": datetime.fromisoformat(state.updated_at),
                         "message_count": len(state.messages),
-                    }
+                    },
                 )
-            items.sort(key=lambda item: str(item["updated_at"]), reverse=True)
-            return items
+            items.sort(key=lambda item: item["updated_at"], reverse=True)
+            return [
+                {
+                    "session_id": item["session_id"],
+                    "created_at": item["created_at"],
+                    "updated_at": item["updated_at"].isoformat(),
+                    "message_count": item["message_count"],
+                }
+                for item in items
+            ]
 
     async def get_session(self, session_id: str) -> dict[str, JSONValue] | None:
         async with self._lock:
@@ -72,11 +98,12 @@ class UIHub:
             if state is None:
                 return None
             decision = dict(state.decision_packet) if state.decision_packet is not None else None
+            status_value = self._normalize_status(state.status_state)
             return {
                 "session_id": session_id,
                 "created_at": state.created_at,
                 "updated_at": state.updated_at,
-                "status": state.status_state,
+                "status": status_value,
                 "messages": [dict(item) for item in state.messages],
                 "decision": decision,
             }
@@ -212,9 +239,13 @@ class UIHub:
             "ok": status_state != "error",
         }
 
-    def _normalize_status(self, status_state: str) -> str:
-        if status_state in {"ok", "busy", "error"}:
-            return status_state
+    def _normalize_status(self, status_state: str) -> SessionStatus:
+        if status_state == "ok":
+            return "ok"
+        if status_state == "busy":
+            return "busy"
+        if status_state == "error":
+            return "error"
         return "ok"
 
     def _publish_to_subscribers(
