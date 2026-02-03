@@ -573,11 +573,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
 
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
     await hub.set_session_status(session_id, "busy")
-    approved_categories = await session_store.get_categories(session_id)
-    await hub.append_message(session_id, "user", content_raw.strip())
-    llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
-
+    error = False
     try:
+        approved_categories = await session_store.get_categories(session_id)
+        await hub.append_message(session_id, "user", content_raw.strip())
+        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+
         async with agent_lock:
             try:
                 agent.set_session_context(session_id, approved_categories)
@@ -594,7 +595,18 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             loop = asyncio.get_running_loop()
             response_text = await loop.run_in_executor(None, agent.respond, llm_messages)
             decision = _extract_decision_payload(response_text)
+
+        await hub.append_message(session_id, "assistant", response_text)
+        await hub.set_session_decision(session_id, decision)
+        messages = await hub.get_messages(session_id)
+        current_decision = await hub.get_session_decision(session_id)
+        response = _json_response(
+            {"session_id": session_id, "messages": messages, "decision": current_decision},
+        )
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
     except Exception as exc:  # noqa: BLE001
+        error = True
         await hub.set_session_status(session_id, "error")
         return _error_response(
             status=500,
@@ -602,17 +614,9 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             error_type="internal_error",
             code="agent_error",
         )
-
-    await hub.append_message(session_id, "assistant", response_text)
-    await hub.set_session_decision(session_id, decision)
-    await hub.set_session_status(session_id, "ok")
-    messages = await hub.get_messages(session_id)
-    current_decision = await hub.get_session_decision(session_id)
-    response = _json_response(
-        {"session_id": session_id, "messages": messages, "decision": current_decision},
-    )
-    response.headers[UI_SESSION_HEADER] = session_id
-    return response
+    finally:
+        if not error:
+            await hub.set_session_status(session_id, "ok")
 
 
 async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
