@@ -538,43 +538,48 @@ async def handle_ui_status(request: web.Request) -> web.Response:
 
 
 async def handle_ui_chat_send(request: web.Request) -> web.Response:
-    agent = await _resolve_agent(request)
-    if agent is None:
-        return _model_not_selected_response()
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
 
-    try:
-        payload = await request.json()
-    except Exception as exc:  # noqa: BLE001
-        return _error_response(
-            status=400,
-            message=f"Некорректный JSON: {exc}",
-            error_type="invalid_request_error",
-            code="invalid_json",
-        )
-    if not isinstance(payload, dict):
-        return _error_response(
-            status=400,
-            message="JSON должен быть объектом.",
-            error_type="invalid_request_error",
-            code="invalid_json",
-        )
-
-    content_raw = payload.get("content")
-    if not isinstance(content_raw, str) or not content_raw.strip():
-        return _error_response(
-            status=400,
-            message="content должен быть непустой строкой.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
-    await hub.set_session_status(session_id, "busy")
+    session_id: str | None = None
+    status_opened = False
     error = False
     try:
+        agent = await _resolve_agent(request)
+        if agent is None:
+            return _model_not_selected_response()
+
+        try:
+            payload = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            return _error_response(
+                status=400,
+                message=f"Некорректный JSON: {exc}",
+                error_type="invalid_request_error",
+                code="invalid_json",
+            )
+        if not isinstance(payload, dict):
+            return _error_response(
+                status=400,
+                message="JSON должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_json",
+            )
+
+        content_raw = payload.get("content")
+        if not isinstance(content_raw, str) or not content_raw.strip():
+            return _error_response(
+                status=400,
+                message="content должен быть непустой строкой.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+
+        session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+        await hub.set_session_status(session_id, "busy")
+        status_opened = True
+
         approved_categories = await session_store.get_categories(session_id)
         await hub.append_message(session_id, "user", content_raw.strip())
         llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
@@ -607,7 +612,8 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         return response
     except Exception as exc:  # noqa: BLE001
         error = True
-        await hub.set_session_status(session_id, "error")
+        if status_opened and session_id is not None:
+            await hub.set_session_status(session_id, "error")
         return _error_response(
             status=500,
             message=f"Agent error: {exc}",
@@ -615,7 +621,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             code="agent_error",
         )
     finally:
-        if not error:
+        if status_opened and session_id is not None and not error:
             await hub.set_session_status(session_id, "ok")
 
 
