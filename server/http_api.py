@@ -18,6 +18,7 @@ from config.http_server_config import (
     HttpServerConfig,
     resolve_http_server_config,
 )
+from config.model_whitelist import MODEL_WHITELIST, ModelNotAllowedError
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
 from server.lazy_agent import LazyAgentProvider
@@ -28,7 +29,6 @@ from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
 from tools.tool_logger import DEFAULT_LOG_PATH as TOOL_CALLS_LOG
 
-ALLOWED_MODELS: Final[set[str]] = {"slavik"}
 ALLOWED_ROLES: Final[set[str]] = {"system", "user", "assistant", "tool"}
 ALLOWED_MESSAGE_KEYS: Final[set[str]] = {"role", "content", "tool_calls"}
 ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = {
@@ -169,6 +169,16 @@ def _model_not_selected_response() -> web.Response:
     )
 
 
+def _model_not_allowed_response(model_id: str) -> web.Response:
+    return _error_response(
+        status=409,
+        message=f"Модель '{model_id}' не входит в whitelist.",
+        error_type="configuration_error",
+        code="model_not_allowed",
+        details={"model": model_id},
+    )
+
+
 async def _resolve_agent(request: web.Request) -> AgentProtocol | None:
     provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
     try:
@@ -270,7 +280,7 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
     if not isinstance(model_raw, str) or not model_raw.strip():
         return None, "model должен быть непустой строкой."
     model = model_raw.strip()
-    if model not in ALLOWED_MODELS:
+    if model not in MODEL_WHITELIST:
         return None, f"Неизвестная модель: {model}"
 
     messages, msg_error, tool_calling_present = _validate_messages(payload.get("messages"))
@@ -481,7 +491,8 @@ def _serialize_trace_events(
 
 async def handle_models(request: web.Request) -> web.Response:
     models = [
-        {"id": "slavik", "object": "model", "owned_by": "slavik"},
+        {"id": model_id, "object": "model", "owned_by": "slavik"}
+        for model_id in sorted(MODEL_WHITELIST)
     ]
     return _json_response({"object": "list", "data": models})
 
@@ -601,7 +612,10 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
     status_opened = False
     error = False
     try:
-        agent = await _resolve_agent(request)
+        try:
+            agent = await _resolve_agent(request)
+        except ModelNotAllowedError as exc:
+            return _model_not_allowed_response(exc.model_id)
         if agent is None:
             return _model_not_selected_response()
 
@@ -715,7 +729,10 @@ async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
-    agent = await _resolve_agent(request)
+    try:
+        agent = await _resolve_agent(request)
+    except ModelNotAllowedError as exc:
+        return _model_not_allowed_response(exc.model_id)
     if agent is None:
         return _model_not_selected_response()
     agent_lock = request.app["agent_lock"]
@@ -923,7 +940,10 @@ async def handle_tool_calls(request: web.Request) -> web.Response:
 
 
 async def handle_feedback(request: web.Request) -> web.Response:
-    agent = await _resolve_agent(request)
+    try:
+        agent = await _resolve_agent(request)
+    except ModelNotAllowedError as exc:
+        return _model_not_allowed_response(exc.model_id)
     if agent is None:
         return _model_not_selected_response()
     try:

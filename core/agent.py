@@ -11,6 +11,7 @@ from pathlib import Path
 
 from config.memory_config import MemoryConfig, load_memory_config
 from config.model_store import load_model_configs, save_model_configs
+from config.model_whitelist import ensure_model_allowed
 from config.shell_config import DEFAULT_SHELL_CONFIG_PATH
 from config.tools_config import ToolsConfig, load_tools_config, save_tools_config
 from core.approval_policy import (
@@ -181,6 +182,8 @@ class Agent:
     ) -> None:
         saved_main = load_model_configs()
         self.main_config = main_config or saved_main
+        if self.main_config is not None:
+            ensure_model_allowed(self.main_config.model)
         self.main_api_key = main_api_key
         self.shell_config_path = str(DEFAULT_SHELL_CONFIG_PATH)
         self._external_brain = brain

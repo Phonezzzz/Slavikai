@@ -4,8 +4,10 @@ import asyncio
 import uuid
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from core.tracer import Tracer
 from llm.brain_base import Brain
@@ -277,6 +279,50 @@ def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_p
             await client.close()
 
     asyncio.run(run())
+
+
+def test_chat_completions_returns_409_when_model_not_whitelisted(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    monkeypatch.setattr(
+        "core.agent.load_model_configs",
+        lambda: ModelConfig(provider="openrouter", model="forbidden-model"),
+    )
+
+    async def run() -> None:
+        client = await _create_client_without_agent(trace_path, monkeypatch)
+        try:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                },
+            )
+            assert resp.status == 409
+            payload = await resp.json()
+            error = payload.get("error", {})
+            assert error.get("type") == "configuration_error"
+            assert error.get("code") == "model_not_allowed"
+            details = error.get("details")
+            assert isinstance(details, dict)
+            assert details.get("model") == "forbidden-model"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_agent_init_fails_when_model_not_whitelisted(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "core.agent.load_model_configs",
+        lambda: ModelConfig(provider="openrouter", model="forbidden-model"),
+    )
+
+    with pytest.raises(ModelNotAllowedError):
+        from core.agent import Agent
+
+        Agent(brain=DummyBrain("ok"))
 
 
 def test_trace_endpoint_returns_events(monkeypatch, tmp_path) -> None:
