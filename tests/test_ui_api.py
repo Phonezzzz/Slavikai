@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from aiohttp.test_utils import TestClient, TestServer
 
 from server.http_api import create_app
+from server.ui_hub import UIHub
 
 
 class DummyAgent:
@@ -18,6 +20,67 @@ class DummyAgent:
 
     def respond(self, messages) -> str:
         return "ok"
+
+
+class DecisionEchoAgent:
+    def __init__(self) -> None:
+        self._session_id: str | None = None
+
+    def set_session_context(self, session_id: str | None, approved_categories: set[str]) -> None:
+        del approved_categories
+        self._session_id = session_id
+
+    def respond(self, messages) -> str:
+        del messages
+        session_id = self._session_id or "missing-session"
+        return json.dumps(
+            {
+                "id": f"decision-{session_id}",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "reason": "need_user_input",
+                "summary": f"Decision for {session_id}",
+                "context": {"session_id": session_id},
+                "options": [
+                    {
+                        "id": "ask_user",
+                        "title": "Ask user",
+                        "action": "ask_user",
+                        "payload": {},
+                        "risk": "low",
+                    },
+                    {
+                        "id": "proceed_safe",
+                        "title": "Proceed safely",
+                        "action": "proceed_safe",
+                        "payload": {},
+                        "risk": "low",
+                    },
+                    {
+                        "id": "abort",
+                        "title": "Abort",
+                        "action": "abort",
+                        "payload": {},
+                        "risk": "low",
+                    },
+                ],
+                "default_option_id": "ask_user",
+                "ttl_seconds": 600,
+                "policy": {"require_user_choice": True},
+            },
+        )
+
+
+class DelayedFirstUserMessageHub(UIHub):
+    def __init__(self, delayed_session_id: str) -> None:
+        super().__init__()
+        self._delayed_session_id = delayed_session_id
+        self._delay_done = False
+
+    async def append_message(self, session_id: str, role: str, content: str) -> dict[str, str]:
+        if not self._delay_done and session_id == self._delayed_session_id and role == "user":
+            self._delay_done = True
+            await asyncio.sleep(0.05)
+        return await super().append_message(session_id, role, content)
 
 
 async def _create_client(agent: DummyAgent) -> TestClient:
@@ -60,6 +123,49 @@ def test_ui_chat_send_endpoint() -> None:
             assert isinstance(messages, list)
             assert messages
             assert resp.headers.get("X-Slavik-Session") == session_id
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_decision_isolated_between_sessions() -> None:
+    async def run() -> None:
+        app = create_app(agent=DecisionEchoAgent(), max_request_bytes=1_000_000)
+        app["ui_hub"] = DelayedFirstUserMessageHub("session-a")
+        server = TestServer(app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+
+            async def send(
+                session_id: str,
+                content: str,
+            ) -> tuple[int, dict[str, object], str | None]:
+                response = await client.post(
+                    "/ui/api/chat/send",
+                    json={"content": content},
+                    headers={"X-Slavik-Session": session_id},
+                )
+                payload = await response.json()
+                return response.status, payload, response.headers.get("X-Slavik-Session")
+
+            result_a, result_b = await asyncio.gather(
+                send("session-a", "Message A"),
+                send("session-b", "Message B"),
+            )
+
+            for expected_session, result in (
+                ("session-a", result_a),
+                ("session-b", result_b),
+            ):
+                status, payload, header_session = result
+                assert status == 200
+                assert payload.get("session_id") == expected_session
+                assert header_session == expected_session
+                decision = payload.get("decision")
+                assert isinstance(decision, dict)
+                assert decision.get("id") == f"decision-{expected_session}"
         finally:
             await client.close()
 

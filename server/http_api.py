@@ -499,21 +499,23 @@ def _ui_messages_to_llm(messages: list[dict[str, str]]) -> list[LLMMessage]:
     return parsed
 
 
-def _extract_decision_payload(agent: object) -> dict[str, JSONValue] | None:
-    packet = getattr(agent, "last_decision_packet", None)
-    if packet is None:
+def _extract_decision_payload(response_text: str) -> dict[str, JSONValue] | None:
+    decision = safe_json_loads(response_text)
+    if not isinstance(decision, dict):
         return None
-    to_dict = getattr(packet, "to_dict", None)
-    if not callable(to_dict):
+    decision_id = decision.get("id")
+    reason = decision.get("reason")
+    summary = decision.get("summary")
+    options = decision.get("options")
+    if not isinstance(decision_id, str):
         return None
-    try:
-        decision = to_dict()
-    except Exception:  # noqa: BLE001
-        logger.warning("Failed to serialize decision packet for ui", exc_info=True)
+    if not isinstance(reason, str):
         return None
-    if isinstance(decision, dict):
-        return decision
-    return None
+    if not isinstance(summary, str):
+        return None
+    if not isinstance(options, list):
+        return None
+    return decision
 
 
 async def handle_ui_redirect(request: web.Request) -> web.StreamResponse:
@@ -571,29 +573,26 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
 
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
     approved_categories = await session_store.get_categories(session_id)
-    try:
-        agent.set_session_context(session_id, approved_categories)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to set session context for ui",
-            exc_info=True,
-            extra={
-                "session_id": session_id,
-                "approved_categories": sorted(approved_categories),
-                "error": str(exc),
-            },
-        )
-
     await hub.append_message(session_id, "user", content_raw.strip())
     llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
 
-    prev_packet = getattr(agent, "last_decision_packet", None)
-    prev_decision_id = getattr(prev_packet, "id", None)
-
     try:
         async with agent_lock:
+            try:
+                agent.set_session_context(session_id, approved_categories)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to set session context for ui",
+                    exc_info=True,
+                    extra={
+                        "session_id": session_id,
+                        "approved_categories": sorted(approved_categories),
+                        "error": str(exc),
+                    },
+                )
             loop = asyncio.get_running_loop()
             response_text = await loop.run_in_executor(None, agent.respond, llm_messages)
+            decision = _extract_decision_payload(response_text)
     except Exception as exc:  # noqa: BLE001
         return _error_response(
             status=500,
@@ -603,13 +602,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         )
 
     await hub.append_message(session_id, "assistant", response_text)
-    decision = _extract_decision_payload(agent)
-    decision_id = decision.get("id") if decision else None
-    if decision is not None and decision_id != prev_decision_id:
+    if decision is not None:
         await hub.maybe_publish_decision(session_id, decision)
     messages = await hub.get_messages(session_id)
+    current_decision = await hub.get_decision(session_id)
     response = _json_response(
-        {"session_id": session_id, "messages": messages, "decision": decision},
+        {"session_id": session_id, "messages": messages, "decision": current_decision},
     )
     response.headers[UI_SESSION_HEADER] = session_id
     return response
