@@ -1,16 +1,68 @@
 import type { DecisionPacketView } from "../types";
 
+type ProjectCommand = "find" | "index";
+
 type DecisionPanelProps = {
   decision: DecisionPacketView | null;
+  projectCommand: ProjectCommand;
+  projectArgs: string;
+  projectBusy: boolean;
+  onProjectCommandChange: (value: ProjectCommand) => void;
+  onProjectArgsChange: (value: string) => void;
+  onProjectRun: () => void;
 };
 
-export default function DecisionPanel({ decision }: DecisionPanelProps) {
+export default function DecisionPanel({
+  decision,
+  projectCommand,
+  projectArgs,
+  projectBusy,
+  onProjectCommandChange,
+  onProjectArgsChange,
+  onProjectRun,
+}: DecisionPanelProps) {
+  const projectHint =
+    projectCommand === "find"
+      ? "Поиск по индексу (пример: payment timeout)"
+      : "Путь внутри sandbox/project (пусто = весь workspace)";
   if (!decision) {
     return (
       <section className="flex flex-col gap-4 rounded-3xl border border-neutral-800/80 bg-neutral-900/60 p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-neutral-100">Decision</h2>
           <span className="text-xs text-neutral-500">none</span>
+        </div>
+        <div className="rounded-2xl border border-neutral-800/80 bg-neutral-950/40 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="text-xs uppercase tracking-[0.3em] text-neutral-500">Tool</div>
+            <span className="rounded-full bg-neutral-800/80 px-2 py-0.5 text-[10px] uppercase tracking-wide text-neutral-300">
+              project
+            </span>
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <select
+              value={projectCommand}
+              onChange={(event) => onProjectCommandChange(event.target.value as ProjectCommand)}
+              className="rounded-full border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200"
+            >
+              <option value="find">find</option>
+              <option value="index">index</option>
+            </select>
+            <button
+              type="button"
+              onClick={onProjectRun}
+              disabled={projectBusy}
+              className="rounded-full border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs text-neutral-200 disabled:opacity-50"
+            >
+              {projectBusy ? "..." : "Run"}
+            </button>
+          </div>
+          <input
+            value={projectArgs}
+            onChange={(event) => onProjectArgsChange(event.target.value)}
+            placeholder={projectHint}
+            className="mt-2 w-full rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs text-neutral-200 placeholder:text-neutral-500"
+          />
         </div>
         <div className="rounded-2xl border border-dashed border-neutral-800/70 bg-neutral-900/60 px-4 py-6 text-sm text-neutral-400">
           Нет активного DecisionPacket.
@@ -29,6 +81,39 @@ export default function DecisionPanel({ decision }: DecisionPanelProps) {
           <h2 className="text-lg font-semibold text-neutral-100">Packet</h2>
         </div>
         <span className="text-xs text-neutral-500">{decision.id}</span>
+      </div>
+
+      <div className="rounded-2xl border border-neutral-800/80 bg-neutral-950/40 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <div className="text-xs uppercase tracking-[0.3em] text-neutral-500">Tool</div>
+          <span className="rounded-full bg-neutral-800/80 px-2 py-0.5 text-[10px] uppercase tracking-wide text-neutral-300">
+            project
+          </span>
+        </div>
+        <div className="mt-3 flex items-center gap-2">
+          <select
+            value={projectCommand}
+            onChange={(event) => onProjectCommandChange(event.target.value as ProjectCommand)}
+            className="rounded-full border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200"
+          >
+            <option value="find">find</option>
+            <option value="index">index</option>
+          </select>
+          <button
+            type="button"
+            onClick={onProjectRun}
+            disabled={projectBusy}
+            className="rounded-full border border-neutral-700 bg-neutral-900 px-3 py-1 text-xs text-neutral-200 disabled:opacity-50"
+          >
+            {projectBusy ? "..." : "Run"}
+          </button>
+        </div>
+        <input
+          value={projectArgs}
+          onChange={(event) => onProjectArgsChange(event.target.value)}
+          placeholder={projectHint}
+          className="mt-2 w-full rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs text-neutral-200 placeholder:text-neutral-500"
+        />
       </div>
 
       <div className="rounded-2xl border border-neutral-800/80 bg-neutral-950/40 px-4 py-3">

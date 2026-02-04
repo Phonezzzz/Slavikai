@@ -69,6 +69,7 @@ SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local"}
 XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
 OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
 MODEL_FETCH_TIMEOUT: Final[int] = 20
+UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index"}
 
 
 @dataclass(frozen=True)
@@ -943,6 +944,121 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             await hub.set_session_status(session_id, "ok")
 
 
+async def handle_ui_project_command(request: web.Request) -> web.Response:
+    agent_lock = request.app["agent_lock"]
+    session_store = request.app["session_store"]
+    hub: UIHub = request.app["ui_hub"]
+
+    session_id: str | None = None
+    status_opened = False
+    error = False
+    try:
+        try:
+            agent = await _resolve_agent(request)
+        except ModelNotAllowedError as exc:
+            return _model_not_allowed_response(exc.model_id)
+        if agent is None:
+            return _model_not_selected_response()
+
+        try:
+            payload = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            return _error_response(
+                status=400,
+                message=f"Некорректный JSON: {exc}",
+                error_type="invalid_request_error",
+                code="invalid_json",
+            )
+        if not isinstance(payload, dict):
+            return _error_response(
+                status=400,
+                message="JSON должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_json",
+            )
+
+        command = str(payload.get("command") or "").strip().lower()
+        args_raw = str(payload.get("args") or "").strip()
+        if command not in UI_PROJECT_COMMANDS:
+            return _error_response(
+                status=400,
+                message="Поддерживаются только project команды: find, index.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        user_command = f"/project {command}"
+        if args_raw:
+            user_command = f"{user_command} {args_raw}"
+
+        session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+        selected_model = await hub.get_session_model(session_id)
+        if selected_model is None:
+            return _model_not_selected_response()
+        await hub.set_session_status(session_id, "busy")
+        status_opened = True
+
+        approved_categories = await session_store.get_categories(session_id)
+        await hub.append_message(session_id, "user", user_command)
+        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+
+        async with agent_lock:
+            try:
+                model_config = _build_model_config(
+                    selected_model["provider"],
+                    selected_model["model"],
+                )
+                agent.reconfigure_models(model_config, persist=False)
+            except Exception as exc:  # noqa: BLE001
+                return _error_response(
+                    status=400,
+                    message=f"Не удалось применить модель сессии: {exc}",
+                    error_type="configuration_error",
+                    code="model_config_invalid",
+                )
+            try:
+                agent.set_session_context(session_id, approved_categories)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to set session context for ui project command",
+                    exc_info=True,
+                    extra={
+                        "session_id": session_id,
+                        "approved_categories": sorted(approved_categories),
+                        "error": str(exc),
+                    },
+                )
+            loop = asyncio.get_running_loop()
+            response_text = await loop.run_in_executor(None, agent.respond, llm_messages)
+
+        await hub.append_message(session_id, "assistant", response_text)
+        messages = await hub.get_messages(session_id)
+        current_decision = await hub.get_session_decision(session_id)
+        current_model = await hub.get_session_model(session_id)
+        response = _json_response(
+            {
+                "session_id": session_id,
+                "messages": messages,
+                "decision": current_decision,
+                "selected_model": current_model,
+            },
+        )
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
+    except Exception as exc:  # noqa: BLE001
+        error = True
+        if status_opened and session_id is not None:
+            await hub.set_session_status(session_id, "error")
+        return _error_response(
+            status=500,
+            message=f"Project command error: {exc}",
+            error_type="internal_error",
+            code="agent_error",
+        )
+    finally:
+        if status_opened and session_id is not None and not error:
+            await hub.set_session_status(session_id, "ok")
+
+
 async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
     hub: UIHub = request.app["ui_hub"]
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
@@ -1427,6 +1543,7 @@ def create_app(
     app.router.add_get("/ui/api/sessions/{session_id}", handle_ui_session_get)
     app.router.add_post("/ui/api/session-model", handle_ui_session_model)
     app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
+    app.router.add_post("/ui/api/tools/project", handle_ui_project_command)
     app.router.add_get("/ui/api/events/stream", handle_ui_events_stream)
     app.router.add_static("/ui/assets/", dist_path / "assets")
     return app

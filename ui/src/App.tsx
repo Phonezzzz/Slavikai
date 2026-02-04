@@ -12,6 +12,7 @@ import type {
 } from "./types";
 
 const MAX_EVENTS = 120;
+type ProjectCommand = "find" | "index";
 
 const isMessage = (value: unknown): value is Message => {
   if (!value || typeof value !== "object") {
@@ -154,6 +155,9 @@ export default function App() {
   const [selectedProvider, setSelectedProvider] = useState<string>("");
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [savingModel, setSavingModel] = useState(false);
+  const [projectCommand, setProjectCommand] = useState<ProjectCommand>("find");
+  const [projectArgs, setProjectArgs] = useState("");
+  const [projectBusy, setProjectBusy] = useState(false);
 
   const appendSystemMessage = (content: string) => {
     const normalized = content.trim();
@@ -445,6 +449,65 @@ export default function App() {
     }
   };
 
+  const handleProjectRun = async () => {
+    if (!sessionId || projectBusy) {
+      appendSystemMessage("Сначала создай/выбери сессию и модель.");
+      return;
+    }
+    setProjectBusy(true);
+    try {
+      const resp = await fetch("/ui/api/tools/project", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Slavik-Session": sessionId,
+        },
+        body: JSON.stringify({ command: projectCommand, args: projectArgs }),
+      });
+      if (!resp.ok) {
+        try {
+          const payload = (await resp.json()) as {
+            error?: { message?: string };
+          };
+          const message = payload.error?.message;
+          appendSystemMessage(message || "Ошибка вызова project инструмента.");
+        } catch {
+          appendSystemMessage("Ошибка вызова project инструмента.");
+        }
+        return;
+      }
+      const payload = (await resp.json()) as {
+        session_id?: string;
+        messages?: unknown;
+        decision?: unknown;
+        selected_model?: unknown;
+      };
+      const headerSession = resp.headers.get("X-Slavik-Session");
+      const nextSession = headerSession || payload.session_id || null;
+      if (nextSession) {
+        setSessionId(nextSession);
+      }
+      const parsedMessages = parseMessages(payload.messages);
+      if (parsedMessages.length > 0) {
+        setMessages(parsedMessages);
+      }
+      const nextDecision = parseDecision(payload.decision);
+      if (nextDecision) {
+        setDecision(nextDecision);
+      }
+      const nextModel = parseSelectedModel(payload.selected_model);
+      if (nextModel) {
+        setSelectedModel(nextModel);
+      }
+      setStatusOk(true);
+    } catch {
+      setStatusOk(false);
+      appendSystemMessage("Ошибка project запроса.");
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
   const modelsForSelectedProvider = useMemo(() => {
     const found = providerModels.find((item) => item.provider === selectedProvider);
     return found?.models ?? [];
@@ -558,7 +621,15 @@ export default function App() {
             </section>
 
             <aside className="flex w-full flex-col gap-4 lg:w-[360px]">
-              <DecisionPanel decision={decision} />
+              <DecisionPanel
+                decision={decision}
+                projectCommand={projectCommand}
+                projectArgs={projectArgs}
+                projectBusy={projectBusy}
+                onProjectCommandChange={setProjectCommand}
+                onProjectArgsChange={setProjectArgs}
+                onProjectRun={handleProjectRun}
+              />
 
               <div className="flex flex-1 flex-col gap-4 rounded-3xl border border-neutral-800/80 bg-neutral-900/60 p-4">
                 <div className="flex items-center justify-between">

@@ -26,6 +26,17 @@ class DummyAgent:
         del main_config, main_api_key, persist
 
 
+class ProjectCommandAgent(DummyAgent):
+    def respond(self, messages) -> str:
+        if not messages:
+            return "empty"
+        last = messages[-1]
+        content = getattr(last, "content", "")
+        if isinstance(content, str) and content.startswith("/project "):
+            return f"Командный режим (без MWV)\n{content}"
+        return "ok"
+
+
 class DecisionEchoAgent:
     def __init__(self) -> None:
         self._session_id: str | None = None
@@ -280,6 +291,67 @@ def test_ui_models_endpoint(monkeypatch) -> None:
                 models = item.get("models")
                 assert isinstance(models, list)
                 assert len(models) == 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_project_tool_endpoint() -> None:
+    async def run() -> None:
+        client = await _create_client(ProjectCommandAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            response = await client.post(
+                "/ui/api/tools/project",
+                headers={"X-Slavik-Session": session_id},
+                json={"command": "find", "args": "README"},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("session_id") == session_id
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert len(messages) >= 2
+            last_message = messages[-1]
+            assert isinstance(last_message, dict)
+            content = last_message.get("content")
+            assert isinstance(content, str)
+            assert "Командный режим (без MWV)" in content
+            assert "/project find README" in content
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_project_tool_endpoint_rejects_unknown_command() -> None:
+    async def run() -> None:
+        client = await _create_client(ProjectCommandAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            response = await client.post(
+                "/ui/api/tools/project",
+                headers={"X-Slavik-Session": session_id},
+                json={"command": "drop_db", "args": ""},
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
         finally:
             await client.close()
 
