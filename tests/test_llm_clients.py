@@ -7,6 +7,7 @@ import pytest
 from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
 from llm.types import ModelConfig
+from llm.xai_brain import XAiBrain
 from shared.models import LLMMessage
 
 
@@ -75,5 +76,38 @@ def test_openrouter_without_key_raises(monkeypatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "")
     config = ModelConfig(provider="openrouter", model="test-model")
     brain = OpenRouterBrain(api_key=None, default_config=config)
+    with pytest.raises(RuntimeError):
+        brain.generate([LLMMessage(role="user", content="ping")])
+
+
+def test_xai_generate(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_post(url, json, headers, timeout):
+        calls["url"] = url
+        calls["json"] = json
+        calls["headers"] = headers
+        return _mock_response(
+            {
+                "choices": [{"message": {"content": "xai-ok"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            }
+        )
+
+    monkeypatch.setattr("llm.xai_brain.requests.post", fake_post)
+    config = ModelConfig(provider="xai", model="xai-model", temperature=0.3)
+    brain = XAiBrain(api_key="xai-key", default_config=config)
+
+    result = brain.generate([LLMMessage(role="user", content="ping")])
+    assert result.text == "xai-ok"
+    assert calls["url"] == "https://api.x.ai/v1/chat/completions"
+    assert calls["headers"]["Authorization"] == "Bearer xai-key"
+    assert calls["json"]["model"] == "xai-model"
+
+
+def test_xai_without_key_raises(monkeypatch) -> None:
+    monkeypatch.setenv("XAI_API_KEY", "")
+    config = ModelConfig(provider="xai", model="xai-model")
+    brain = XAiBrain(api_key=None, default_config=config)
     with pytest.raises(RuntimeError):
         brain.generate([LLMMessage(role="user", content="ping")])

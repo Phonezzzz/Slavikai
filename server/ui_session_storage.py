@@ -19,6 +19,8 @@ class PersistedSession:
     status: str
     decision: dict[str, JSONValue] | None
     messages: list[dict[str, str]]
+    model_provider: str | None = None
+    model_id: str | None = None
 
 
 class UISessionStorage(Protocol):
@@ -53,6 +55,8 @@ class InMemoryUISessionStorage:
             status=session.status,
             decision=decision,
             messages=messages,
+            model_provider=session.model_provider,
+            model_id=session.model_id,
         )
 
 
@@ -67,6 +71,7 @@ class SQLiteUISessionStorage:
             rows = conn.execute(
                 """
                 SELECT session_id, created_at, updated_at, status, decision_json
+                    , model_provider, model_id
                 FROM ui_sessions
                 """,
             ).fetchall()
@@ -81,6 +86,8 @@ class SQLiteUISessionStorage:
                         status=str(row["status"]),
                         decision=self._decode_decision(row["decision_json"]),
                         messages=messages,
+                        model_provider=_optional_str(row["model_provider"]),
+                        model_id=_optional_str(row["model_id"]),
                     ),
                 )
         return sessions
@@ -89,14 +96,24 @@ class SQLiteUISessionStorage:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO ui_sessions (session_id, created_at, updated_at, status, decision_json)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO ui_sessions (
+                    session_id,
+                    created_at,
+                    updated_at,
+                    status,
+                    decision_json,
+                    model_provider,
+                    model_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     created_at=excluded.created_at,
                     updated_at=excluded.updated_at,
                     status=excluded.status,
-                    decision_json=excluded.decision_json
+                    decision_json=excluded.decision_json,
+                    model_provider=excluded.model_provider,
+                    model_id=excluded.model_id
                 """,
                 (
                     session.session_id,
@@ -104,6 +121,8 @@ class SQLiteUISessionStorage:
                     session.updated_at,
                     session.status,
                     self._encode_decision(session.decision),
+                    session.model_provider,
+                    session.model_id,
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
@@ -154,10 +173,13 @@ class SQLiteUISessionStorage:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    decision_json TEXT
+                    decision_json TEXT,
+                    model_provider TEXT,
+                    model_id TEXT
                 )
                 """,
             )
+            self._ensure_columns(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ui_messages (
@@ -207,3 +229,23 @@ class SQLiteUISessionStorage:
         if value is None:
             return None
         return json.dumps(value, ensure_ascii=False)
+
+    def _ensure_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(ui_sessions)").fetchall()
+            if isinstance(row, sqlite3.Row)
+        }
+        if "model_provider" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN model_provider TEXT")
+        if "model_id" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN model_id TEXT")
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None

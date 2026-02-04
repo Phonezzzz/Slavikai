@@ -22,6 +22,9 @@ class DummyAgent:
     def respond(self, messages) -> str:
         return "ok"
 
+    def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
+        del main_config, main_api_key, persist
+
 
 class DecisionEchoAgent:
     def __init__(self) -> None:
@@ -69,6 +72,9 @@ class DecisionEchoAgent:
                 "policy": {"require_user_choice": True},
             },
         )
+
+    def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
+        del main_config, main_api_key, persist
 
 
 class DecisionOnlyForSessionAAgent:
@@ -120,6 +126,9 @@ class DecisionOnlyForSessionAAgent:
             },
         )
 
+    def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
+        del main_config, main_api_key, persist
+
 
 class DelayedFirstUserMessageHub(UIHub):
     def __init__(self, delayed_session_id: str) -> None:
@@ -159,6 +168,29 @@ async def _read_first_sse_event(response) -> dict[str, object]:
             return parsed
 
 
+async def _select_local_model(client: TestClient, session_id: str) -> str:
+    models_response = await client.get("/ui/api/models?provider=local")
+    assert models_response.status == 200
+    models_payload = await models_response.json()
+    providers_raw = models_payload.get("providers")
+    assert isinstance(providers_raw, list)
+    assert providers_raw
+    first_provider = providers_raw[0]
+    assert isinstance(first_provider, dict)
+    models_raw = first_provider.get("models")
+    assert isinstance(models_raw, list)
+    model_id = next((item for item in models_raw if isinstance(item, str) and item.strip()), None)
+    assert isinstance(model_id, str)
+
+    response = await client.post(
+        "/ui/api/session-model",
+        headers={"X-Slavik-Session": session_id},
+        json={"provider": "local", "model": model_id},
+    )
+    assert response.status == 200
+    return model_id
+
+
 def test_ui_status_endpoint() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -177,20 +209,110 @@ def test_ui_status_endpoint() -> None:
     asyncio.run(run())
 
 
+def test_ui_chat_send_requires_model_selection() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post("/ui/api/chat/send", json={"content": "Ping"})
+            assert response.status == 409
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "model_not_selected"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_endpoint() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
-            resp = await client.post("/ui/api/chat/send", json={"content": "Ping"})
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            selected_model = await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Ping"},
+                headers={"X-Slavik-Session": session_id},
+            )
             assert resp.status == 200
             payload = await resp.json()
-            session_id = payload.get("session_id")
+            response_session_id = payload.get("session_id")
             messages = payload.get("messages", [])
-            assert isinstance(session_id, str)
-            assert session_id
+            assert isinstance(response_session_id, str)
+            assert response_session_id
             assert isinstance(messages, list)
             assert messages
-            assert resp.headers.get("X-Slavik-Session") == session_id
+            assert resp.headers.get("X-Slavik-Session") == response_session_id
+            selected = payload.get("selected_model")
+            assert isinstance(selected, dict)
+            assert selected.get("provider") == "local"
+            assert selected.get("model") == selected_model
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_models_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: ([f"{provider}-1", f"{provider}-2"], None),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.get("/ui/api/models")
+            assert response.status == 200
+            payload = await response.json()
+            providers = payload.get("providers")
+            assert isinstance(providers, list)
+            names = {item.get("provider") for item in providers if isinstance(item, dict)}
+            assert names == {"local", "openrouter", "xai"}
+            for item in providers:
+                assert isinstance(item, dict)
+                models = item.get("models")
+                assert isinstance(models, list)
+                assert len(models) == 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_model_not_found_suggests_closest(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["grok-4", "grok-3-mini"], None)
+        if provider == "xai"
+        else (["local-default"], None),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post(
+                "/ui/api/session-model",
+                headers={"X-Slavik-Session": "session-1"},
+                json={"provider": "xai", "model": "grok-4x"},
+            )
+            assert response.status == 404
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "model_not_found"
+            message = error.get("message")
+            assert isinstance(message, str)
+            assert "сам придумал, сам и страдай" in message
+            details = error.get("details")
+            assert isinstance(details, dict)
+            assert details.get("suggestion") == "grok-4"
         finally:
             await client.close()
 
@@ -209,6 +331,8 @@ def test_ui_chat_send_decision_isolated_between_sessions() -> None:
         client = TestClient(server)
         await client.start_server()
         try:
+            await _select_local_model(client, "session-a")
+            await _select_local_model(client, "session-b")
 
             async def send(
                 session_id: str,
@@ -264,6 +388,8 @@ def test_ui_chat_send_no_decision_leak_from_other_session() -> None:
         client = TestClient(server)
         await client.start_server()
         try:
+            await _select_local_model(client, "session-a")
+            await _select_local_model(client, "session-b")
             response_a = await client.post(
                 "/ui/api/chat/send",
                 json={"content": "Message A"},
@@ -332,6 +458,7 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             session_id = created.get("session_id")
             assert isinstance(session_id, str)
             assert session_id
+            await _select_local_model(client, session_id)
 
             send_resp = await client.post(
                 "/ui/api/chat/send",
@@ -397,6 +524,7 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             assert isinstance(raw_session_id, str)
             assert raw_session_id
             session_id = raw_session_id
+            selected_model = await _select_local_model(client_before, session_id)
 
             send_resp = await client_before.post(
                 "/ui/api/chat/send",
@@ -440,6 +568,10 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             restored_decision = session.get("decision")
             assert isinstance(restored_decision, dict)
             assert restored_decision.get("id") == f"decision-{session_id}"
+            restored_model = session.get("selected_model")
+            assert isinstance(restored_model, dict)
+            assert restored_model.get("provider") == "local"
+            assert restored_model.get("model") == selected_model
 
             status_resp = await client_after.get(
                 "/ui/api/status",
@@ -450,6 +582,10 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             decision_from_status = status_payload.get("decision")
             assert isinstance(decision_from_status, dict)
             assert decision_from_status.get("id") == f"decision-{session_id}"
+            selected_from_status = status_payload.get("selected_model")
+            assert isinstance(selected_from_status, dict)
+            assert selected_from_status.get("provider") == "local"
+            assert selected_from_status.get("model") == selected_model
         finally:
             await client_after.close()
 

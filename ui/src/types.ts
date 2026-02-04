@@ -18,6 +18,17 @@ export type DecisionPacketView = {
   default_option_id?: string | null;
 };
 
+export type SelectedModel = {
+  provider: string;
+  model: string;
+};
+
+export type ProviderModels = {
+  provider: string;
+  models: string[];
+  error?: string | null;
+};
+
 export type UIEvent = {
   id: string;
   type: string;

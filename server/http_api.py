@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import importlib
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -11,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final, Protocol, cast
 
+import requests
 from aiohttp import web
 
 from config.http_server_config import (
@@ -21,6 +24,8 @@ from config.http_server_config import (
 from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
+from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
+from llm.types import ModelConfig
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
@@ -60,6 +65,10 @@ _CATEGORY_MAP: Final[dict[str, ApprovalCategory]] = {item: item for item in ALL_
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
 UI_SESSION_HEADER: Final[str] = "X-Slavik-Session"
+SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local"}
+XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
+OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
+MODEL_FETCH_TIMEOUT: Final[int] = 20
 
 
 @dataclass(frozen=True)
@@ -123,6 +132,14 @@ class AgentProtocol(Protocol):
         self,
         session_id: str | None,
         approved_categories: set[ApprovalCategory],
+    ) -> None: ...
+
+    def reconfigure_models(
+        self,
+        main_config: ModelConfig,
+        main_api_key: str | None = None,
+        *,
+        persist: bool = True,
     ) -> None: ...
 
     def respond(self, messages: list[LLMMessage]) -> str: ...
@@ -218,6 +235,116 @@ def _extract_ui_session_id(request: web.Request) -> str | None:
     if query_value:
         return query_value
     return None
+
+
+def _normalize_provider(raw_provider: str) -> str | None:
+    normalized = raw_provider.strip().lower()
+    if normalized in SUPPORTED_MODEL_PROVIDERS:
+        return normalized
+    return None
+
+
+def _build_model_config(provider: str, model_id: str) -> ModelConfig:
+    if provider == "xai":
+        return ModelConfig(provider="xai", model=model_id)
+    if provider == "openrouter":
+        return ModelConfig(provider="openrouter", model=model_id)
+    if provider == "local":
+        return ModelConfig(provider="local", model=model_id)
+    raise ValueError(f"Неизвестный провайдер: {provider}")
+
+
+def _closest_model_suggestion(model_id: str, candidates: list[str]) -> str | None:
+    if not candidates:
+        return None
+    matches = difflib.get_close_matches(model_id, candidates, n=1, cutoff=0.4)
+    if not matches:
+        return None
+    return matches[0]
+
+
+def _local_models_endpoint() -> str:
+    base_url = os.getenv("LOCAL_LLM_URL", DEFAULT_LOCAL_ENDPOINT).strip()
+    if not base_url:
+        base_url = DEFAULT_LOCAL_ENDPOINT
+    if base_url.endswith("/chat/completions"):
+        return f"{base_url.removesuffix('/chat/completions')}/models"
+    return f"{base_url.rstrip('/')}/models"
+
+
+def _provider_models_endpoint(provider: str) -> str:
+    if provider == "xai":
+        return XAI_MODELS_ENDPOINT
+    if provider == "openrouter":
+        return OPENROUTER_MODELS_ENDPOINT
+    if provider == "local":
+        return _local_models_endpoint()
+    raise ValueError(f"Неизвестный провайдер: {provider}")
+
+
+def _provider_auth_headers(provider: str) -> tuple[dict[str, str], str | None]:
+    if provider == "xai":
+        api_key = os.getenv("XAI_API_KEY", "").strip()
+        if not api_key:
+            return {}, "Не задан XAI_API_KEY."
+        return {"Authorization": f"Bearer {api_key}"}, None
+    if provider == "openrouter":
+        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if not api_key:
+            return {}, "Не задан OPENROUTER_API_KEY."
+        return {"Authorization": f"Bearer {api_key}"}, None
+    if provider == "local":
+        api_key = os.getenv("LOCAL_LLM_API_KEY", "").strip()
+        if not api_key:
+            return {}, None
+        return {"Authorization": f"Bearer {api_key}"}, None
+    return {}, f"Неизвестный провайдер: {provider}"
+
+
+def _parse_models_payload(payload: object) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+    models: list[str] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if isinstance(model_id, str) and model_id.strip():
+            models.append(model_id.strip())
+    # dedupe, preserve order
+    unique: list[str] = []
+    for model_id in models:
+        if model_id not in unique:
+            unique.append(model_id)
+    return unique
+
+
+def _fetch_provider_models(provider: str) -> tuple[list[str], str | None]:
+    try:
+        url = _provider_models_endpoint(provider)
+    except ValueError as exc:
+        return [], str(exc)
+    headers, auth_error = _provider_auth_headers(provider)
+    if auth_error:
+        return [], auth_error
+    try:
+        response = requests.get(url, headers=headers, timeout=MODEL_FETCH_TIMEOUT)
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        if provider == "local":
+            fallback = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default").strip()
+            if fallback:
+                return [fallback], None
+        return [], f"Не удалось получить список моделей провайдера {provider}: {exc}"
+    models = _parse_models_payload(response.json())
+    if not models and provider == "local":
+        fallback = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default").strip()
+        if fallback:
+            models = [fallback]
+    return models, None
 
 
 def _validate_messages(
@@ -540,7 +667,110 @@ async def handle_ui_status(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
     decision = await hub.get_session_decision(session_id)
-    response = _json_response({"ok": True, "session_id": session_id, "decision": decision})
+    selected_model = await hub.get_session_model(session_id)
+    response = _json_response(
+        {
+            "ok": True,
+            "session_id": session_id,
+            "decision": decision,
+            "selected_model": selected_model,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_models(request: web.Request) -> web.Response:
+    provider_query = request.query.get("provider", "").strip().lower()
+    providers: list[str]
+    if provider_query:
+        normalized = _normalize_provider(provider_query)
+        if normalized is None:
+            return _error_response(
+                status=400,
+                message=f"Неизвестный провайдер: {provider_query}",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        providers = [normalized]
+    else:
+        providers = sorted(SUPPORTED_MODEL_PROVIDERS)
+    payload_items: list[dict[str, JSONValue]] = []
+    for provider in providers:
+        models, error_text = _fetch_provider_models(provider)
+        payload_items.append({"provider": provider, "models": models, "error": error_text})
+    return _json_response({"providers": payload_items})
+
+
+async def handle_ui_session_model(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    provider_raw = str(payload.get("provider") or "").strip()
+    model_raw = str(payload.get("model") or "").strip()
+    if not provider_raw or not model_raw:
+        return _error_response(
+            status=400,
+            message="Нужны provider и model.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    provider = _normalize_provider(provider_raw)
+    if provider is None:
+        return _error_response(
+            status=400,
+            message=f"Неизвестный провайдер: {provider_raw}",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    models, fetch_error = _fetch_provider_models(provider)
+    if fetch_error:
+        return _error_response(
+            status=502,
+            message=fetch_error,
+            error_type="provider_error",
+            code="provider_models_unavailable",
+        )
+    if model_raw not in models:
+        suggestion = _closest_model_suggestion(model_raw, models)
+        details: dict[str, JSONValue] = {
+            "provider": provider,
+            "model": model_raw,
+            "suggestion": suggestion,
+            "available_count": len(models),
+        }
+        message = (
+            f"сам придумал, сам и страдай. "
+            f"Модель '{model_raw}' не найдена у провайдера '{provider}'."
+        )
+        if suggestion:
+            message = f"{message} Возможно, вы имели в виду '{suggestion}'."
+        return _error_response(
+            status=404,
+            message=message,
+            error_type="invalid_request_error",
+            code="model_not_found",
+            details=details,
+        )
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    await hub.set_session_model(session_id, provider, model_raw)
+    response = _json_response(
+        {"session_id": session_id, "selected_model": {"provider": provider, "model": model_raw}}
+    )
     response.headers[UI_SESSION_HEADER] = session_id
     return response
 
@@ -642,6 +872,10 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             )
 
         session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+        selected_model = await hub.get_session_model(session_id)
+        if selected_model is None:
+            return _model_not_selected_response()
+
         await hub.set_session_status(session_id, "busy")
         status_opened = True
 
@@ -650,6 +884,19 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
 
         async with agent_lock:
+            try:
+                model_config = _build_model_config(
+                    selected_model["provider"],
+                    selected_model["model"],
+                )
+                agent.reconfigure_models(model_config, persist=False)
+            except Exception as exc:  # noqa: BLE001
+                return _error_response(
+                    status=400,
+                    message=f"Не удалось применить модель сессии: {exc}",
+                    error_type="configuration_error",
+                    code="model_config_invalid",
+                )
             try:
                 agent.set_session_context(session_id, approved_categories)
             except Exception as exc:  # noqa: BLE001
@@ -670,8 +917,14 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         await hub.set_session_decision(session_id, decision)
         messages = await hub.get_messages(session_id)
         current_decision = await hub.get_session_decision(session_id)
+        current_model = await hub.get_session_model(session_id)
         response = _json_response(
-            {"session_id": session_id, "messages": messages, "decision": current_decision},
+            {
+                "session_id": session_id,
+                "messages": messages,
+                "decision": current_decision,
+                "selected_model": current_model,
+            },
         )
         response.headers[UI_SESSION_HEADER] = session_id
         return response
@@ -1168,9 +1421,11 @@ def create_app(
     app.router.add_get("/ui", handle_ui_redirect)
     app.router.add_get("/ui/", handle_ui_index)
     app.router.add_get("/ui/api/status", handle_ui_status)
+    app.router.add_get("/ui/api/models", handle_ui_models)
     app.router.add_get("/ui/api/sessions", handle_ui_sessions_list)
     app.router.add_post("/ui/api/sessions", handle_ui_sessions_create)
     app.router.add_get("/ui/api/sessions/{session_id}", handle_ui_session_get)
+    app.router.add_post("/ui/api/session-model", handle_ui_session_model)
     app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
     app.router.add_get("/ui/api/events/stream", handle_ui_events_stream)
     app.router.add_static("/ui/assets/", dist_path / "assets")

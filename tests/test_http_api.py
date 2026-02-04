@@ -285,7 +285,7 @@ def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_p
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("provider", ["openrouter", "local"])
+@pytest.mark.parametrize("provider", ["openrouter", "local", "xai"])
 def test_chat_completions_returns_409_when_model_not_whitelisted(
     monkeypatch,
     tmp_path,
@@ -322,7 +322,7 @@ def test_chat_completions_returns_409_when_model_not_whitelisted(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("provider", ["openrouter", "local"])
+@pytest.mark.parametrize("provider", ["openrouter", "local", "xai"])
 def test_agent_init_fails_when_model_not_whitelisted(monkeypatch, provider: str) -> None:
     monkeypatch.setattr(
         "core.agent.load_model_configs",

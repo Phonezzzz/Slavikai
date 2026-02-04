@@ -48,6 +48,8 @@ class _SessionState:
     last_decision_id: str | None = None
     decision_packet: dict[str, JSONValue] | None = None
     status_state: SessionStatus = "ok"
+    model_provider: str | None = None
+    model_id: str | None = None
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
 
@@ -127,6 +129,7 @@ class UIHub:
                 return None
             decision = dict(state.decision_packet) if state.decision_packet is not None else None
             status_value = self._normalize_status(state.status_state)
+            selected_model = self._selected_model_payload(state)
             return {
                 "session_id": session_id,
                 "created_at": state.created_at,
@@ -134,6 +137,7 @@ class UIHub:
                 "status": status_value,
                 "messages": [dict(item) for item in state.messages],
                 "decision": decision,
+                "selected_model": selected_model,
             }
 
     async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
@@ -142,6 +146,43 @@ class UIHub:
             if state is None or state.decision_packet is None:
                 return None
             return dict(state.decision_packet)
+
+    async def set_session_model(self, session_id: str, provider: str, model_id: str) -> None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            changed = state.model_provider != provider or state.model_id != model_id
+            state.model_provider = provider
+            state.model_id = model_id
+            if not changed:
+                return
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            subscribers = list(state.subscribers)
+            selected_model: dict[str, JSONValue] = {"provider": provider, "model": model_id}
+            payload: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "selected_model": selected_model,
+            }
+        event = self._build_event("session.model", payload)
+        self._publish_to_subscribers(subscribers, event)
+
+    async def get_session_model(self, session_id: str) -> dict[str, str] | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            payload = self._selected_model_payload(state)
+            if payload is None:
+                return None
+            provider = payload.get("provider")
+            model_id = payload.get("model")
+            if not isinstance(provider, str) or not isinstance(model_id, str):
+                return None
+            return {"provider": provider, "model": model_id}
 
     async def set_session_status(self, session_id: str, status_state: str) -> None:
         normalized = self._normalize_status(status_state)
@@ -273,6 +314,13 @@ class UIHub:
             "payload": payload,
         }
 
+    def _selected_model_payload(self, state: _SessionState) -> dict[str, JSONValue] | None:
+        provider = state.model_provider
+        model_id = state.model_id
+        if not provider or not model_id:
+            return None
+        return {"provider": provider, "model": model_id}
+
     def _status_payload(self, session_id: str, status_state: str) -> dict[str, JSONValue]:
         return {
             "session_id": session_id,
@@ -313,6 +361,8 @@ class UIHub:
                 last_decision_id=last_decision_id,
                 decision_packet=decision,
                 status_state=self._normalize_status(item.status),
+                model_provider=item.model_provider,
+                model_id=item.model_id,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
@@ -331,6 +381,8 @@ class UIHub:
                     dict(state.decision_packet) if state.decision_packet is not None else None
                 ),
                 messages=[dict(message) for message in state.messages],
+                model_provider=state.model_provider,
+                model_id=state.model_id,
             ),
         )
 

@@ -6,6 +6,8 @@ import type {
   DecisionOptionView,
   DecisionPacketView,
   Message,
+  ProviderModels,
+  SelectedModel,
   UIEvent,
 } from "./types";
 
@@ -85,6 +87,38 @@ const parseMessages = (value: unknown): Message[] => {
   return value.filter(isMessage);
 };
 
+const parseSelectedModel = (value: unknown): SelectedModel | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as { provider?: unknown; model?: unknown };
+  if (typeof candidate.provider !== "string" || typeof candidate.model !== "string") {
+    return null;
+  }
+  return { provider: candidate.provider, model: candidate.model };
+};
+
+const parseProviderModels = (value: unknown): ProviderModels[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const items: ProviderModels[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const candidate = item as { provider?: unknown; models?: unknown; error?: unknown };
+    if (typeof candidate.provider !== "string" || !Array.isArray(candidate.models)) {
+      continue;
+    }
+    const models = candidate.models.filter((entry): entry is string => typeof entry === "string");
+    const error =
+      typeof candidate.error === "string" || candidate.error === null ? candidate.error : null;
+    items.push({ provider: candidate.provider, models, error });
+  }
+  return items;
+};
+
 const toEventPreview = (payload: unknown): string => {
   try {
     const raw = JSON.stringify(payload ?? {}, null, 0);
@@ -115,6 +149,25 @@ export default function App() {
   const [decision, setDecision] = useState<DecisionPacketView | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
+  const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
+  const [selectedModelId, setSelectedModelId] = useState<string>("");
+  const [savingModel, setSavingModel] = useState(false);
+
+  const appendSystemMessage = (content: string) => {
+    const normalized = content.trim();
+    if (!normalized) {
+      return;
+    }
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === "system" && last.content === normalized) {
+        return prev;
+      }
+      return [...prev, { role: "system", content: normalized }];
+    });
+  };
 
   const statusLabel = useMemo(() => {
     if (sending) {
@@ -138,6 +191,7 @@ export default function App() {
           ok?: boolean;
           session_id?: string;
           decision?: unknown;
+          selected_model?: unknown;
         };
         const headerSession = resp.headers.get("X-Slavik-Session");
         const nextSession = headerSession || payload.session_id || null;
@@ -147,6 +201,12 @@ export default function App() {
             setSessionId(nextSession);
           }
           setDecision(parseDecision(payload.decision));
+          const parsedModel = parseSelectedModel(payload.selected_model);
+          setSelectedModel(parsedModel);
+          if (parsedModel) {
+            setSelectedProvider(parsedModel.provider);
+            setSelectedModelId(parsedModel.model);
+          }
         }
       } catch {
         if (active) {
@@ -155,6 +215,42 @@ export default function App() {
       }
     };
     loadStatus();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadModels = async () => {
+      try {
+        const resp = await fetch("/ui/api/models");
+        if (!resp.ok) {
+          throw new Error(`Status ${resp.status}`);
+        }
+        const payload = (await resp.json()) as { providers?: unknown };
+        if (!active) {
+          return;
+        }
+        const parsed = parseProviderModels(payload.providers);
+        setProviderModels(parsed);
+        if (parsed.length === 0) {
+          return;
+        }
+        if (!selectedProvider || !parsed.some((item) => item.provider === selectedProvider)) {
+          const first = parsed[0];
+          setSelectedProvider(first.provider);
+          if (!selectedModelId && first.models.length > 0) {
+            setSelectedModelId(first.models[0]);
+          }
+        }
+      } catch {
+        if (active) {
+          appendSystemMessage("Не удалось загрузить список моделей.");
+        }
+      }
+    };
+    loadModels();
     return () => {
       active = false;
     };
@@ -200,6 +296,15 @@ export default function App() {
             setDecision(nextDecision);
           }
         }
+        if (parsed.type === "session.model" && parsed.payload) {
+          const payload = parsed.payload as { selected_model?: unknown };
+          const nextModel = parseSelectedModel(payload.selected_model);
+          if (nextModel) {
+            setSelectedModel(nextModel);
+            setSelectedProvider(nextModel.provider);
+            setSelectedModelId(nextModel.model);
+          }
+        }
         if (parsed.type === "status" && parsed.payload) {
           const payload = parsed.payload as { ok?: boolean };
           setStatusOk(Boolean(payload.ok));
@@ -237,12 +342,27 @@ export default function App() {
         body: JSON.stringify({ content: trimmed }),
       });
       if (!resp.ok) {
+        try {
+          const errorPayload = (await resp.json()) as {
+            error?: { code?: string; message?: string };
+          };
+          const errorCode = errorPayload.error?.code;
+          const errorMessage = errorPayload.error?.message;
+          if (errorCode === "model_not_selected") {
+            appendSystemMessage(errorMessage || "Сначала выбери модель.");
+          } else if (typeof errorMessage === "string" && errorMessage.trim()) {
+            appendSystemMessage(errorMessage);
+          }
+        } catch {
+          appendSystemMessage("Ошибка запроса. Проверь выбор модели и повтори.");
+        }
         throw new Error(`Status ${resp.status}`);
       }
       const payload = (await resp.json()) as {
         session_id?: string;
         messages?: unknown;
         decision?: unknown;
+        selected_model?: unknown;
       };
       const headerSession = resp.headers.get("X-Slavik-Session");
       const nextSession = headerSession || payload.session_id || null;
@@ -257,6 +377,10 @@ export default function App() {
       if (nextDecision) {
         setDecision(nextDecision);
       }
+      const nextModel = parseSelectedModel(payload.selected_model);
+      if (nextModel) {
+        setSelectedModel(nextModel);
+      }
       setInput("");
       setStatusOk(true);
     } catch {
@@ -265,6 +389,66 @@ export default function App() {
       setSending(false);
     }
   };
+
+  const handleSetModel = async () => {
+    if (!sessionId || !selectedProvider || !selectedModelId || savingModel) {
+      return;
+    }
+    setSavingModel(true);
+    try {
+      const resp = await fetch("/ui/api/session-model", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Slavik-Session": sessionId,
+        },
+        body: JSON.stringify({ provider: selectedProvider, model: selectedModelId }),
+      });
+      if (!resp.ok) {
+        const payload = (await resp.json()) as {
+          error?: { message?: string; details?: { suggestion?: string } };
+        };
+        const message = payload.error?.message || "Не удалось выбрать модель.";
+        const suggestion = payload.error?.details?.suggestion;
+        appendSystemMessage(suggestion ? `${message} Подсказка: ${suggestion}` : message);
+        return;
+      }
+      const payload = (await resp.json()) as { selected_model?: unknown };
+      const nextModel = parseSelectedModel(payload.selected_model);
+      if (nextModel) {
+        setSelectedModel(nextModel);
+      }
+    } catch {
+      appendSystemMessage("Ошибка установки модели.");
+    } finally {
+      setSavingModel(false);
+    }
+  };
+
+  const handleNewChat = async () => {
+    try {
+      const resp = await fetch("/ui/api/sessions", { method: "POST" });
+      if (!resp.ok) {
+        throw new Error(`Status ${resp.status}`);
+      }
+      const payload = (await resp.json()) as { session?: { session_id?: string } };
+      const nextSession = payload.session?.session_id ?? null;
+      if (nextSession) {
+        setSessionId(nextSession);
+      }
+      setMessages([]);
+      setEvents([]);
+      setDecision(null);
+      setStatusOk(true);
+    } catch {
+      appendSystemMessage("Не удалось создать новую сессию.");
+    }
+  };
+
+  const modelsForSelectedProvider = useMemo(() => {
+    const found = providerModels.find((item) => item.provider === selectedProvider);
+    return found?.models ?? [];
+  }, [providerModels, selectedProvider]);
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
@@ -276,6 +460,7 @@ export default function App() {
           </div>
           <button
             type="button"
+            onClick={handleNewChat}
             className="mt-4 rounded-2xl bg-neutral-200 px-4 py-2 text-sm font-semibold text-neutral-950 shadow-lg shadow-black/30 hover:bg-neutral-100"
           >
             New chat
@@ -305,12 +490,46 @@ export default function App() {
                 <span className={`h-2.5 w-2.5 rounded-full ${statusDotClass(statusLabel)}`} />
                 <span className="font-medium">Status: {statusLabel}</span>
               </div>
-              <button
-                type="button"
-                className="rounded-full border border-neutral-800/80 bg-neutral-900/60 px-3 py-1.5 text-neutral-300"
-              >
-                Model: Select
-              </button>
+              <div className="flex items-center gap-2 rounded-full border border-neutral-800/80 bg-neutral-900/60 px-2 py-1">
+                <select
+                  value={selectedProvider}
+                  onChange={(event) => {
+                    const nextProvider = event.target.value;
+                    setSelectedProvider(nextProvider);
+                    const nextModels =
+                      providerModels.find((item) => item.provider === nextProvider)?.models ?? [];
+                    setSelectedModelId(nextModels[0] ?? "");
+                  }}
+                  className="rounded-full border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200"
+                >
+                  <option value="">provider</option>
+                  {providerModels.map((item) => (
+                    <option key={item.provider} value={item.provider}>
+                      {item.provider}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={selectedModelId}
+                  onChange={(event) => setSelectedModelId(event.target.value)}
+                  className="max-w-[220px] rounded-full border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200"
+                >
+                  <option value="">model</option>
+                  {modelsForSelectedProvider.map((modelId) => (
+                    <option key={modelId} value={modelId}>
+                      {modelId}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleSetModel}
+                  disabled={!sessionId || !selectedProvider || !selectedModelId || savingModel}
+                  className="rounded-full border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 disabled:opacity-50"
+                >
+                  {savingModel ? "..." : "Set"}
+                </button>
+              </div>
               <button
                 type="button"
                 className="rounded-full border border-neutral-800/80 bg-neutral-900/60 px-3 py-1.5 text-neutral-300"
@@ -324,7 +543,10 @@ export default function App() {
             <section className="flex min-w-0 flex-1 flex-col gap-4">
               <div className="flex items-center justify-between rounded-2xl border border-neutral-800/80 bg-neutral-900/60 px-4 py-3 text-sm">
                 <div className="text-neutral-200">Current conversation</div>
-                <div className="text-xs text-neutral-400">Session: {sessionId ?? "pending"}</div>
+                <div className="text-xs text-neutral-400">
+                  Session: {sessionId ?? "pending"}
+                  {selectedModel ? ` · ${selectedModel.provider}/${selectedModel.model}` : ""}
+                </div>
               </div>
               <ChatView
                 messages={messages}

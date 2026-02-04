@@ -1598,12 +1598,15 @@ class Agent:
         self,
         main_config: ModelConfig,
         main_api_key: str | None = None,
+        *,
+        persist: bool = True,
     ) -> None:
         """Переинициализирует мозг с новыми настройками."""
         self.main_config = main_config
         self.main_api_key = main_api_key
         self.brain = self._build_brain()
-        save_model_configs(self.main_config)
+        if persist:
+            save_model_configs(self.main_config)
         self.tracer.log("brain_reconfigured", "Мозг переинициализирован")
 
     def _format_plan(self, plan: TaskPlan) -> str:
