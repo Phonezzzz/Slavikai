@@ -118,6 +118,7 @@ def test_retry_decision_contract() -> None:
     )
     assert decision.policy == RetryPolicy.LIMITED
     assert decision.allow_retry is True
+    assert decision.llm_hint is None
 
 
 def test_retry_decision_stops_on_limit() -> None:
@@ -199,6 +200,29 @@ def test_build_retry_task_uses_stricter_constraint_on_second_retry() -> None:
     assert any("максимально минимальный diff" in item for item in updated.constraints)
 
 
+def test_build_retry_task_appends_llm_hint() -> None:
+    task = TaskPacket(task_id="t", session_id="s", trace_id="trace", goal="g")
+    decision = RetryDecision(
+        policy=RetryPolicy.LIMITED,
+        allow_retry=True,
+        reason="verifier_failed",
+        attempt=1,
+        max_retries=2,
+        llm_hint="Проверь импорт pathlib.",
+    )
+    failure = VerificationResult(
+        status=VerificationStatus.FAILED,
+        command=["check"],
+        exit_code=1,
+        stdout="",
+        stderr="tests failed",
+        duration_seconds=0.1,
+        error=None,
+    )
+    updated = build_retry_task(task, failure, decision)
+    assert any("LLM-уточнение: Проверь импорт pathlib." == item for item in updated.constraints)
+
+
 def test_summarize_verifier_failure_handles_empty_output() -> None:
     result = summarize_verifier_failure(
         VerificationResult(
@@ -277,3 +301,57 @@ def test_run_flow_stops_on_worker_failure() -> None:
     assert result.work_result.status == WorkStatus.FAILURE
     assert result.retry_decision is not None
     assert result.retry_decision.allow_retry is False
+
+
+def test_run_flow_retry_uses_retry_hint_generator() -> None:
+    def _build(messages: Sequence[MWVMessage], context: RunContext) -> TaskPacket:
+        return TaskPacket(task_id="t", session_id="s", trace_id="trace", goal="g")
+
+    manager = ManagerRuntime(
+        task_builder=_build,
+        retry_hint_generator=lambda task, result, decision: "Исправь импорт json",
+    )
+    context = RunContext(
+        session_id="s",
+        trace_id="t",
+        workspace_root="/tmp",
+        safe_mode=True,
+        max_retries=2,
+        attempt=1,
+    )
+    messages = [MWVMessage(role="user", content="go")]
+    seen_constraints: list[list[str]] = []
+
+    def _worker(task: TaskPacket, _context: RunContext) -> WorkResult:
+        seen_constraints.append(list(task.constraints))
+        return WorkResult(task_id="t", status=WorkStatus.SUCCESS, summary="ok")
+
+    verifier_results = [
+        VerificationResult(
+            status=VerificationStatus.FAILED,
+            command=["check"],
+            exit_code=1,
+            stdout="",
+            stderr="tests failed",
+            duration_seconds=0.1,
+            error=None,
+        ),
+        VerificationResult(
+            status=VerificationStatus.PASSED,
+            command=["check"],
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        ),
+    ]
+
+    def _verifier(_context: RunContext) -> VerificationResult:
+        return verifier_results.pop(0)
+
+    result = manager.run_flow(messages, context, worker=_worker, verifier=_verifier)
+    assert result.verification_result.status == VerificationStatus.PASSED
+    assert result.attempt == 2
+    assert len(seen_constraints) == 2
+    assert any("LLM-уточнение: Исправь импорт json" in item for item in seen_constraints[1])

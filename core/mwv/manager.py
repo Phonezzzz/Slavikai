@@ -21,6 +21,7 @@ RouteClassifier = Callable[[Sequence[MessageLike], str, dict[str, JSONValue] | N
 TaskBuilder = Callable[[Sequence[MWVMessage], RunContext], TaskPacket]
 WorkRunner = Callable[[TaskPacket, RunContext], WorkResult]
 VerifierRunner = Callable[[RunContext], VerificationResult]
+RetryHintGenerator = Callable[[TaskPacket, VerificationResult, RetryDecision], str | None]
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class MWVRunResult:
 class ManagerRuntime:
     task_builder: TaskBuilder
     route_classifier: RouteClassifier = classify_request
+    retry_hint_generator: RetryHintGenerator | None = None
 
     def decide_route(
         self,
@@ -88,8 +90,26 @@ class ManagerRuntime:
                     max_attempts=max_attempts,
                     retry_decision=retry_decision,
                 )
+            retry_decision = self._apply_retry_hint(task, verification_result, retry_decision)
             task = build_retry_task(task, verification_result, retry_decision)
             attempt += 1
+
+    def _apply_retry_hint(
+        self,
+        task: TaskPacket,
+        verification_result: VerificationResult,
+        decision: RetryDecision,
+    ) -> RetryDecision:
+        generator = self.retry_hint_generator
+        if generator is None:
+            return decision
+        hint = generator(task, verification_result, decision)
+        if hint is None:
+            return decision
+        normalized = hint.strip()
+        if not normalized:
+            return decision
+        return replace(decision, llm_hint=normalized)
 
 
 def decide_retry(
@@ -149,6 +169,8 @@ def build_retry_task(
     constraints = list(task.constraints)
     if decision.attempt > 0:
         constraints.append(constraint)
+    if decision.llm_hint:
+        constraints.append(f"LLM-уточнение: {decision.llm_hint}")
     return TaskPacket(
         task_id=task.task_id,
         session_id=task.session_id,

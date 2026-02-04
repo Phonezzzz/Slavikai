@@ -114,3 +114,4 @@ class RetryDecision:
     reason: str
     attempt: int
     max_retries: int
+    llm_hint: str | None = None
