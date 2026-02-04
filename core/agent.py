@@ -134,8 +134,10 @@ DEFAULT_TOOLS = {
 }
 SAFE_MODE_TOOLS_OFF = {
     "web",
+    "web_search",
     "shell",
     "project",
+    "http_client",
     "tts",
     "stt",
     "image_analyze",
