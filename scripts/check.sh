@@ -26,11 +26,11 @@ run_step() {
 
 # 1. Ruff lint
 run_step "Ruff lint" \
-    ruff check .
+    python -m ruff check .
 
 # 2. Ruff formatting
 run_step "Ruff format check" \
-    ruff format --check .
+    python -m ruff format --check .
 
 # 3. Skills lint
 run_step "Skills lint" \
@@ -42,11 +42,11 @@ run_step "Skills manifest check" \
 
 # 5. MyPy strict typing
 run_step "MyPy strict" \
-    mypy .
+    python -m mypy .
 
 # 6. Pytest with coverage threshold
 run_step "Pytest + Coverage >= 80%" \
-    pytest --cov --cov-fail-under=80
+    python -m pytest --cov --cov-fail-under=80
 
 echo "================================================="
 echo "   🎉 All checks passed successfully!"
