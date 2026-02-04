@@ -8,6 +8,7 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 _UNC_RE = re.compile(r"^\\\\")
 
 SANDBOX_ROOT: Final[Path] = Path("sandbox").resolve()
+WORKSPACE_ROOT: Final[Path] = (SANDBOX_ROOT / "project").resolve()
 
 
 class SandboxViolationError(ValueError):
@@ -93,3 +94,8 @@ def normalize_shell_sandbox_root(
         relative = normalized_raw
 
     return normalize_sandbox_path(relative, root)
+
+
+def normalize_workspace_path(raw_path: str) -> Path:
+    """Нормализует путь относительно sandbox/project."""
+    return normalize_sandbox_path(raw_path, WORKSPACE_ROOT)

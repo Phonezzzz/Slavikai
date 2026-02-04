@@ -6,21 +6,13 @@ from typing import Final
 
 from memory.vector_index import VectorIndex
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.sandbox import WORKSPACE_ROOT, SandboxViolationError, normalize_workspace_path
 
 ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".py", ".md", ".txt")
 IGNORED_DIRS: Final[set[str]] = {".git", "__pycache__", "venv", ".venv"}
 MAX_FILE_BYTES: Final[int] = 1_000_000  # 1 MB
 MAX_DEPTH: Final[int] = 5
-SANDBOX_ROOT: Final[Path] = Path("sandbox/project").resolve()
-
-SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
-
-
-def _normalize_path(raw: str) -> Path:
-    base_candidate = (SANDBOX_ROOT / (raw or ".")).resolve()
-    if not str(base_candidate).startswith(str(SANDBOX_ROOT)):
-        raise ValueError("Путь вне sandbox/project запрещён")
-    return base_candidate
+WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def handle_project_request(request: ToolRequest) -> ToolResult:
@@ -30,11 +22,13 @@ def handle_project_request(request: ToolRequest) -> ToolResult:
     index = VectorIndex("memory/vectors.db")
     if cmd == "index":
         path_str = args[0] if args else "."
-        base_path = Path(path_str)
         try:
-            base = base_path.resolve() if base_path.is_absolute() else _normalize_path(path_str)
-        except ValueError as exc:
-            return ToolResult.failure(str(exc))
+            base = normalize_workspace_path(path_str)
+        except SandboxViolationError as exc:
+            return ToolResult.failure(
+                "Путь вне sandbox/project запрещён",
+                meta={"raw": exc.raw_path, "normalized": str(exc.normalized_path)},
+            )
         if not base.exists() or not base.is_dir():
             return ToolResult.failure(f"Каталог не найден в sandbox/project: {path_str}")
 
@@ -42,11 +36,9 @@ def handle_project_request(request: ToolRequest) -> ToolResult:
         indexed_docs = 0
         skipped: list[str] = []
 
-        base_root = SANDBOX_ROOT if str(base).startswith(str(SANDBOX_ROOT)) else base
-
         for root, dirs, files in os.walk(base):
             try:
-                rel_depth = len(Path(root).resolve().relative_to(base_root).parts)
+                rel_depth = len(Path(root).resolve().relative_to(WORKSPACE_ROOT).parts)
             except Exception:
                 skipped.append(f"{root}: вне sandbox/project")
                 continue

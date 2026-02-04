@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import uuid
+
 from shared.models import ToolRequest
+from shared.sandbox import WORKSPACE_ROOT
 from tools.project_tool import handle_project_request
 
 
@@ -16,15 +20,22 @@ class DummyVectorIndex:
 
 
 def test_project_index_uses_vector_index(tmp_path, monkeypatch) -> None:
-    base = tmp_path / "proj"
-    base.mkdir()
-    (base / "a.py").write_text("print('hi')", encoding="utf-8")
-    (base / "readme.md").write_text("# doc", encoding="utf-8")
+    del tmp_path
+    base = WORKSPACE_ROOT / f"test_project_index_{uuid.uuid4().hex}"
+    try:
+        base.mkdir()
+        (base / "a.py").write_text("print('hi')\n", encoding="utf-8")
+        (base / "readme.md").write_text("# doc\n", encoding="utf-8")
 
-    monkeypatch.setattr("tools.project_tool.VectorIndex", DummyVectorIndex)
+        monkeypatch.setattr("tools.project_tool.VectorIndex", DummyVectorIndex)
 
-    req = ToolRequest(name="project", args={"cmd": "index", "args": [str(base)]})
-    result = handle_project_request(req)
-    assert result.ok
-    assert result.data.get("indexed_code") == 1
-    assert result.data.get("indexed_docs") == 1
+        req = ToolRequest(
+            name="project",
+            args={"cmd": "index", "args": [str(base.relative_to(WORKSPACE_ROOT))]},
+        )
+        result = handle_project_request(req)
+        assert result.ok
+        assert result.data.get("indexed_code") == 1
+        assert result.data.get("indexed_docs") == 1
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
