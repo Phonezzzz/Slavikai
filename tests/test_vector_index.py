@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 
@@ -56,3 +58,52 @@ def test_vector_index_rejects_bad_meta(tmp_path, monkeypatch) -> None:
     index = VectorIndex(str(db_path))
     with pytest.raises(ValueError):
         index.index_text("p", "content", namespace="code", meta="not a dict")
+
+
+def test_vector_index_does_not_load_model_on_startup(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "vec.db"
+    calls = 0
+
+    def _get_model(_self: object, _name: str) -> DummyModel:
+        nonlocal calls
+        calls += 1
+        return DummyModel()
+
+    monkeypatch.setattr("memory.vector_index.VectorIndex._get_model", _get_model)
+    _ = VectorIndex(str(db_path))
+    assert calls == 0
+
+
+def test_vector_index_first_search_loads_then_reuses_model(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "vec.db"
+    calls = 0
+
+    def _slow_get_model(_self: object, _name: str) -> DummyModel:
+        nonlocal calls
+        calls += 1
+        time.sleep(0.05)
+        return DummyModel()
+
+    monkeypatch.setattr("memory.vector_index.VectorIndex._get_model", _slow_get_model)
+    index = VectorIndex(str(db_path))
+    embedding = np.array([1.0, 0.0, 0.0], dtype=np.float32).tobytes()
+    with index.conn:
+        index.conn.execute(
+            "INSERT INTO vectors (namespace, path, content, embedding, meta) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("default", "file", "content", embedding, "{}"),
+        )
+
+    started = time.perf_counter()
+    first = index.search("query", namespace="default", top_k=1)
+    first_duration = time.perf_counter() - started
+
+    started = time.perf_counter()
+    second = index.search("query", namespace="default", top_k=1)
+    second_duration = time.perf_counter() - started
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert calls == 1
+    assert first_duration >= 0.045
+    assert second_duration < first_duration
