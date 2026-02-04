@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from config.shell_config import load_shell_config, save_shell_config
+import pytest
+
+from config.shell_config import ShellConfig, load_shell_config, save_shell_config
 
 
 def test_shell_config_defaults(tmp_path) -> None:
@@ -15,3 +17,9 @@ def test_shell_config_defaults(tmp_path) -> None:
     assert loaded.timeout_seconds == 5
     assert loaded.max_output_chars == 100
     assert loaded.sandbox_root == "tmp_sandbox"
+
+
+def test_shell_config_rejects_escape_sandbox_root(tmp_path) -> None:
+    cfg = ShellConfig(sandbox_root="../outside")
+    with pytest.raises(RuntimeError):
+        save_shell_config(cfg, tmp_path / "invalid.json")

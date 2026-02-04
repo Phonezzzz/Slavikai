@@ -112,6 +112,27 @@ def test_shell_rejects_absolute_sandbox_root(tmp_path, monkeypatch) -> None:
     assert not outside_dir.exists()
 
 
+def test_shell_rejects_parent_reference_sandbox_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
+    config_path = tmp_path / "shell_config.json"
+    outside_dir = tmp_path / "outside_dir"
+    assert not outside_dir.exists()
+
+    cfg = ShellConfig(
+        allowed_commands=["echo"],
+        timeout_seconds=2,
+        max_output_chars=100,
+        sandbox_root="../outside_dir",
+    )
+    req = ToolRequest(
+        name="shell",
+        args={"command": "echo hi", "shell_config": cfg.__dict__, "config_path": str(config_path)},
+    )
+    res = handle_shell_request(req)
+    assert not res.ok
+    assert not outside_dir.exists()
+
+
 def test_shell_uses_defaults_when_config_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
     config_path = tmp_path / "missing_shell_config.json"
