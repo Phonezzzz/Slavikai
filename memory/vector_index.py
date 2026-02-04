@@ -12,7 +12,7 @@ from shared.models import JSONValue, VectorSearchResult
 
 
 class VectorIndex:
-    _model_cache: ClassVar[SentenceTransformer | None] = None
+    _model_cache: ClassVar[dict[str, SentenceTransformer]] = {}
 
     def __init__(
         self,
@@ -35,9 +35,11 @@ class VectorIndex:
 
     @classmethod
     def _get_model(cls, model_name: str) -> SentenceTransformer:
-        if cls._model_cache is None:
-            cls._model_cache = SentenceTransformer(model_name)
-        return cls._model_cache
+        model = cls._model_cache.get(model_name)
+        if model is None:
+            model = SentenceTransformer(model_name)
+            cls._model_cache[model_name] = model
+        return model
 
     def _init_db(self) -> None:
         cur = self.conn.cursor()
