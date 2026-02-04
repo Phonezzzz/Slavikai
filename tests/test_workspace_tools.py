@@ -81,6 +81,35 @@ def test_apply_patch_rejects_escape() -> None:
     assert "рабочей" in (result.error or "").lower()
 
 
+def test_apply_patch_rejects_multifile_contract() -> None:
+    file_path = "single_file.txt"
+    WriteFileTool().handle(
+        _make_request("workspace_write", {"path": file_path, "content": "one\ntwo\n"})
+    )
+    multi_file_patch = (
+        "diff --git a/a.txt b/a.txt\n"
+        "--- a/a.txt\n"
+        "+++ b/a.txt\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-a\n"
+        "+A\n"
+        "diff --git a/b.txt b/b.txt\n"
+        "--- a/b.txt\n"
+        "+++ b/b.txt\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-b\n"
+        "+B\n"
+    )
+    result = ApplyPatchTool().handle(
+        _make_request(
+            "workspace_patch",
+            {"path": file_path, "patch": multi_file_patch},
+        )
+    )
+    assert not result.ok
+    assert "single-file" in (result.error or "").lower()
+
+
 def test_run_code_success_and_timeout(tmp_path: Path) -> None:
     scripts_dir = WORKSPACE_ROOT / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)

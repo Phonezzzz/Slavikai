@@ -30,6 +30,18 @@ def _read_file(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _validate_patch_contract(diff_text: str) -> str | None:
+    lines = diff_text.splitlines()
+    if any(line.startswith(prefix) for line in lines for prefix in ("diff --git ", "--- ", "+++ ")):
+        return (
+            "workspace_patch поддерживает только single-file hunk patch "
+            "(без diff --git/---/+++ заголовков)."
+        )
+    if not any(line.startswith("@@") for line in lines):
+        return "Patch должен содержать хотя бы один hunk (@@ ... @@)."
+    return None
+
+
 def _apply_unified_patch(original: str, diff_text: str) -> str:
     """
     Простейшее применение unified diff к одному файлу.
@@ -167,6 +179,9 @@ class ApplyPatchTool:
         dry_run = bool(request.args.get("dry_run", False))
         if not raw_path or not diff_text.strip():
             return ToolResult.failure("Нужны path и patch.")
+        contract_error = _validate_patch_contract(diff_text)
+        if contract_error is not None:
+            return ToolResult.failure(contract_error)
         try:
             path = _ensure_in_workspace(raw_path)
             original = _read_file(path)

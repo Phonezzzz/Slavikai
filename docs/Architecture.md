@@ -22,6 +22,7 @@
 
 ## Workspace слой
 - Инструменты `workspace_list/read/write/patch/run` работают в `sandbox/project`, ограниченные расширения (.py/.md/.txt/.json/.toml/.yaml/.yml), лимит размера (2 MB), run только .py с таймаутом.
+- Контракт `workspace_patch`: только **single-file** unified hunk patch для одного `path` (обязателен `@@ ... @@`), multi-file diff и заголовки `diff --git` / `---` / `+++` блокируются.
 
 ## Наблюдаемость
 - Trace: `logs/trace.log` — reasoning, шаги плана, ошибки.
