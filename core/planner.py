@@ -37,6 +37,44 @@ COMPLEX_KEYWORDS: Final[list[str]] = [
     "модель",
     "pipeline",
 ]
+FILE_HINTS: Final[tuple[str, ...]] = (
+    "файл",
+    "file",
+    "workspace",
+    ".py",
+    ".md",
+    ".txt",
+    ".json",
+    ".toml",
+    ".yaml",
+    ".yml",
+)
+READ_HINTS: Final[tuple[str, ...]] = (
+    "прочита",
+    "read",
+    "содержим",
+    "open",
+    "посмотр",
+    "покаж",
+)
+WRITE_HINTS: Final[tuple[str, ...]] = (
+    "запиш",
+    "записа",
+    "write",
+    "save",
+    "созда",
+    "перезапиш",
+    "сохра",
+)
+PATCH_HINTS: Final[tuple[str, ...]] = (
+    "patch",
+    "патч",
+    "измен",
+    "обнов",
+    "исправ",
+    "редакт",
+    "замен",
+)
 
 
 class Planner:
@@ -110,6 +148,27 @@ class Planner:
         return TaskComplexity.SIMPLE
 
     def _heuristic_plan(self, goal: str) -> list[str]:
+        normalized = goal.lower()
+        if self._is_workspace_patch_goal(normalized):
+            return [
+                "Определить целевой путь в workspace",
+                "Прочитать текущую версию файла",
+                "Применить patch к файлу",
+                "Проверить итоговое содержимое",
+            ]
+        if self._is_workspace_write_goal(normalized):
+            return [
+                "Определить целевой путь в workspace",
+                "Подготовить содержимое",
+                "Записать файл в workspace",
+                "Проверить результат записи",
+            ]
+        if self._is_workspace_read_goal(normalized):
+            return [
+                "Определить целевой путь в workspace",
+                "Прочитать содержимое файла",
+                "Сформировать вывод по содержимому",
+            ]
         if "analyze" in goal or "анализ" in goal:
             return [
                 "Понять контекст задачи",
@@ -218,6 +277,14 @@ class Planner:
 
     def _map_operation(self, description: str) -> str | None:
         text = description.lower()
+        if any(keyword in text for keyword in PATCH_HINTS):
+            return "workspace_patch"
+        if any(keyword in text for keyword in WRITE_HINTS):
+            return "workspace_write"
+        if any(keyword in text for keyword in READ_HINTS) and any(
+            hint in text for hint in FILE_HINTS
+        ):
+            return "workspace_read"
         if any(keyword in text for keyword in ("web", "search", "поиск")):
             return "web"
         if "файл" in text or "file" in text or "прочитать" in text:
@@ -231,3 +298,15 @@ class Planner:
         if "stt" in text or "распозна" in text:
             return "stt"
         return None
+
+    def _is_workspace_read_goal(self, goal: str) -> bool:
+        return self._has_any(goal, FILE_HINTS) and self._has_any(goal, READ_HINTS)
+
+    def _is_workspace_write_goal(self, goal: str) -> bool:
+        return self._has_any(goal, FILE_HINTS) and self._has_any(goal, WRITE_HINTS)
+
+    def _is_workspace_patch_goal(self, goal: str) -> bool:
+        return self._has_any(goal, FILE_HINTS) and self._has_any(goal, PATCH_HINTS)
+
+    def _has_any(self, text: str, keywords: tuple[str, ...]) -> bool:
+        return any(keyword in text for keyword in keywords)

@@ -35,6 +35,24 @@ def _extract_path(text: str, allowed_exts: set[str] | None = None) -> str | None
     return None
 
 
+def _extract_labeled_value(text: str, key: str) -> str | None:
+    if not text:
+        return None
+    normalized = text.lower()
+    for marker in (f"{key.lower()}=", f"{key.lower()}:"):
+        idx = normalized.find(marker)
+        if idx < 0:
+            continue
+        value = text[idx + len(marker) :].strip()
+        if not value:
+            return None
+        quote = value[:1]
+        if quote in {'"', "'", "`"} and value.endswith(quote) and len(value) > 1:
+            value = value[1:-1]
+        return value.replace("\\n", "\n")
+    return None
+
+
 class Executor:
     """Выполняет шаги плана с трассировкой."""
 
@@ -117,6 +135,45 @@ class Executor:
             request = ToolRequest(name="image_analyze", args={"path": image_path})
         elif step.operation == "image_generate":
             request = ToolRequest(name="image_generate", args={"prompt": plan.goal})
+        elif step.operation == "workspace_read":
+            file_path = _extract_path(step.description, _TEXT_EXTENSIONS) or _extract_path(
+                plan.goal,
+                _TEXT_EXTENSIONS,
+            )
+            if not file_path:
+                raise RuntimeError("Не указан путь к файлу workspace для чтения.")
+            request = ToolRequest(name="workspace_read", args={"path": file_path})
+        elif step.operation == "workspace_write":
+            file_path = _extract_path(step.description, _TEXT_EXTENSIONS) or _extract_path(
+                plan.goal,
+                _TEXT_EXTENSIONS,
+            )
+            if not file_path:
+                raise RuntimeError("Не указан путь к файлу workspace для записи.")
+            content = _extract_labeled_value(step.description, "content") or _extract_labeled_value(
+                plan.goal,
+                "content",
+            )
+            request = ToolRequest(
+                name="workspace_write",
+                args={"path": file_path, "content": content or ""},
+            )
+        elif step.operation == "workspace_patch":
+            file_path = _extract_path(step.description, _TEXT_EXTENSIONS) or _extract_path(
+                plan.goal,
+                _TEXT_EXTENSIONS,
+            )
+            if not file_path:
+                raise RuntimeError("Не указан путь к файлу workspace для патча.")
+            patch_text = _extract_labeled_value(step.description, "patch")
+            if not patch_text:
+                patch_text = _extract_labeled_value(plan.goal, "patch")
+            if not patch_text:
+                raise RuntimeError("Не указан patch для workspace_patch.")
+            request = ToolRequest(
+                name="workspace_patch",
+                args={"path": file_path, "patch": patch_text},
+            )
         elif step.operation == "workspace_run":
             script_path = _extract_path(step.description, {".py"}) or _extract_path(
                 plan.goal,

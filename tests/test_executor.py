@@ -65,11 +65,60 @@ def test_executor_executes_tool_operations() -> None:
     assert gateway.requests[0].args.get("op") == "read"
 
 
+def test_executor_maps_workspace_operations_to_requests() -> None:
+    executor = Executor()
+    gateway = DummyGateway()
+    patch_text = "@@ -1,1 +1,1 @@\\n-old\\n+new\\n"
+    plan = TaskPlan(
+        goal="workspace/docs/readme.txt",
+        steps=[
+            PlanStep(description="Прочитать workspace/docs/readme.txt", operation="workspace_read"),
+            PlanStep(
+                description="Записать workspace/docs/new.txt content=hello",
+                operation="workspace_write",
+            ),
+            PlanStep(
+                description=f"Применить patch workspace/docs/new.txt patch={patch_text}",
+                operation="workspace_patch",
+            ),
+        ],
+    )
+
+    result = executor.run(plan, tool_gateway=gateway)
+    assert all(step.status == PlanStepStatus.DONE for step in result.steps)
+    assert [req.name for req in gateway.requests] == [
+        "workspace_read",
+        "workspace_write",
+        "workspace_patch",
+    ]
+    assert gateway.requests[0].args["path"] == "workspace/docs/readme.txt"
+    assert gateway.requests[1].args["content"] == "hello"
+    assert gateway.requests[2].args["patch"] == "@@ -1,1 +1,1 @@\n-old\n+new\n"
+
+
 def test_executor_requires_media_paths() -> None:
     executor = Executor()
     gateway = DummyGateway()
     plan = TaskPlan(goal="test", steps=[])
 
+    with pytest.raises(RuntimeError):
+        executor._execute_with_tools(
+            PlanStep(description="workspace read", operation="workspace_read"),
+            plan,
+            gateway,
+        )
+    with pytest.raises(RuntimeError):
+        executor._execute_with_tools(
+            PlanStep(description="workspace write", operation="workspace_write"),
+            plan,
+            gateway,
+        )
+    with pytest.raises(RuntimeError):
+        executor._execute_with_tools(
+            PlanStep(description="workspace patch file.txt", operation="workspace_patch"),
+            plan,
+            gateway,
+        )
     with pytest.raises(RuntimeError):
         executor._execute_with_tools(PlanStep(description="stt", operation="stt"), plan, gateway)
     with pytest.raises(RuntimeError):

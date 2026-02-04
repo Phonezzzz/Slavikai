@@ -13,6 +13,10 @@ ALLOWED_OPERATIONS: Sequence[str] = (
     "stt",
     "image_analyze",
     "image_generate",
+    "workspace_read",
+    "workspace_write",
+    "workspace_patch",
+    "workspace_run",
 )
 
 
