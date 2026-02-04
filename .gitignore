@@ -14,18 +14,28 @@ venv/
 
 # Coverage / test output
 .coverage
+.coverage.*
 htmlcov/
+coverage.xml
+pytest-report.xml
 
 # Logs
+logs/
 logs/*.log
 
 # SQLite DB
-memory/memory.db
-memory/memory_companion.db
+memory/*.db
+memory/*.db-*
+memory/*.sqlite*
+*.db
+*.db-*
+*.sqlite*
 
 # Sandbox generated files
-sandbox/**/*.txt
-sandbox/**/*.mp3
+sandbox/**
+!sandbox/.gitkeep
+!sandbox/audio/.gitkeep
+!sandbox/project/.gitkeep
 
 # Vector model cache
 *.bin
