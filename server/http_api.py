@@ -654,6 +654,26 @@ def _extract_decision_payload(response_text: str) -> dict[str, JSONValue] | None
     return decision
 
 
+def _serialize_approval_request(
+    approval_request: ApprovalRequest | None,
+) -> dict[str, JSONValue] | None:
+    if approval_request is None:
+        return None
+    return {
+        "category": approval_request.category,
+        "required_categories": list(approval_request.required_categories),
+        "tool": approval_request.tool,
+        "details": dict(approval_request.details),
+        "session_id": approval_request.session_id,
+        "prompt": {
+            "what": approval_request.prompt.what,
+            "why": approval_request.prompt.why,
+            "risk": approval_request.prompt.risk,
+            "changes": list(approval_request.prompt.changes),
+        },
+    }
+
+
 async def handle_ui_redirect(request: web.Request) -> web.StreamResponse:
     raise web.HTTPFound("/ui/")
 
@@ -912,6 +932,9 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 )
             response_text = agent.respond(llm_messages)
             decision = _extract_decision_payload(response_text)
+            approval_request = _serialize_approval_request(
+                getattr(agent, "last_approval_request", None),
+            )
 
         await hub.append_message(session_id, "assistant", response_text)
         await hub.set_session_decision(session_id, decision)
@@ -924,6 +947,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 "messages": messages,
                 "decision": current_decision,
                 "selected_model": current_model,
+                "approval_request": approval_request,
             },
         )
         response.headers[UI_SESSION_HEADER] = session_id
@@ -1027,6 +1051,9 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     },
                 )
             response_text = agent.respond(llm_messages)
+            approval_request = _serialize_approval_request(
+                getattr(agent, "last_approval_request", None),
+            )
 
         await hub.append_message(session_id, "assistant", response_text)
         messages = await hub.get_messages(session_id)
@@ -1038,6 +1065,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 "messages": messages,
                 "decision": current_decision,
                 "selected_model": current_model,
+                "approval_request": approval_request,
             },
         )
         response.headers[UI_SESSION_HEADER] = session_id

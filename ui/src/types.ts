@@ -42,3 +42,19 @@ export type SessionSummary = {
   updated_at: string;
   message_count: number;
 };
+
+export type ApprovalPromptView = {
+  what: string;
+  why: string;
+  risk: string;
+  changes: string[];
+};
+
+export type ApprovalRequestView = {
+  category: string;
+  required_categories: string[];
+  tool: string;
+  details: Record<string, unknown>;
+  session_id: string | null;
+  prompt: ApprovalPromptView;
+};

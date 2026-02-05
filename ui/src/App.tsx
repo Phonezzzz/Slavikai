@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 
 import ChatView from "./components/ChatView";
 import DecisionPanel from "./components/DecisionPanel";
+import ApprovalPanel from "./components/ApprovalPanel";
 import type {
+  ApprovalRequestView,
   DecisionOptionView,
   DecisionPacketView,
   Message,
@@ -17,6 +19,9 @@ const SESSION_STORAGE_KEY = "slavik.ui.session_id";
 const SESSION_TAB_STORAGE_KEY = "slavik.ui.session_id.tab";
 const SESSION_QUERY_PARAM = "session";
 type ProjectCommand = "find" | "index";
+type PendingRetryAction =
+  | { kind: "chat"; content: string }
+  | { kind: "project"; command: ProjectCommand; args: string };
 
 const isMessage = (value: unknown): value is Message => {
   if (!value || typeof value !== "object") {
@@ -159,6 +164,68 @@ const parseSessionsList = (value: unknown): SessionSummary[] => {
     .filter((item): item is SessionSummary => item !== null);
 };
 
+const parseApprovalRequest = (value: unknown): ApprovalRequestView | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as {
+    category?: unknown;
+    required_categories?: unknown;
+    tool?: unknown;
+    details?: unknown;
+    session_id?: unknown;
+    prompt?: unknown;
+  };
+  if (
+    typeof candidate.category !== "string" ||
+    !Array.isArray(candidate.required_categories) ||
+    typeof candidate.tool !== "string" ||
+    !candidate.details ||
+    typeof candidate.details !== "object" ||
+    !candidate.prompt ||
+    typeof candidate.prompt !== "object"
+  ) {
+    return null;
+  }
+  const prompt = candidate.prompt as {
+    what?: unknown;
+    why?: unknown;
+    risk?: unknown;
+    changes?: unknown;
+  };
+  if (
+    typeof prompt.what !== "string" ||
+    typeof prompt.why !== "string" ||
+    typeof prompt.risk !== "string" ||
+    !Array.isArray(prompt.changes)
+  ) {
+    return null;
+  }
+  const requiredCategories = candidate.required_categories.filter(
+    (item): item is string => typeof item === "string",
+  );
+  const changes = prompt.changes.filter((item): item is string => typeof item === "string");
+  const sessionId =
+    typeof candidate.session_id === "string"
+      ? candidate.session_id
+      : candidate.session_id === null
+        ? null
+        : null;
+  return {
+    category: candidate.category,
+    required_categories: requiredCategories,
+    tool: candidate.tool,
+    details: candidate.details as Record<string, unknown>,
+    session_id: sessionId,
+    prompt: {
+      what: prompt.what,
+      why: prompt.why,
+      risk: prompt.risk,
+      changes,
+    },
+  };
+};
+
 const toEventPreview = (payload: unknown): string => {
   try {
     const raw = JSON.stringify(payload ?? {}, null, 0);
@@ -265,6 +332,9 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<ApprovalRequestView | null>(null);
+  const [approving, setApproving] = useState(false);
+  const [pendingRetry, setPendingRetry] = useState<PendingRetryAction | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>("");
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [savingModel, setSavingModel] = useState(false);
@@ -520,12 +590,15 @@ export default function App() {
     }
     setSessionId(nextSessionId);
     setEvents([]);
+    setPendingApproval(null);
+    setPendingRetry(null);
     await hydrateSession(nextSessionId);
     setStatusOk(true);
   };
 
-  const handleSend = async () => {
-    const trimmed = input.trim();
+  const handleSend = async (contentOverride?: string) => {
+    const sourceInput = typeof contentOverride === "string" ? contentOverride : input;
+    const trimmed = sourceInput.trim();
     if (!trimmed || sending) {
       return;
     }
@@ -585,6 +658,7 @@ export default function App() {
         messages?: unknown;
         decision?: unknown;
         selected_model?: unknown;
+        approval_request?: unknown;
       };
       const headerSession = resp.headers.get("X-Slavik-Session");
       const nextSession = headerSession || payload.session_id || null;
@@ -602,6 +676,13 @@ export default function App() {
       const nextModel = parseSelectedModel(payload.selected_model);
       if (nextModel) {
         setSelectedModel(nextModel);
+      }
+      const nextApproval = parseApprovalRequest(payload.approval_request);
+      setPendingApproval(nextApproval);
+      if (nextApproval) {
+        setPendingRetry({ kind: "chat", content: trimmed });
+      } else {
+        setPendingRetry(null);
       }
       setStatusOk(true);
       void refreshSessions();
@@ -665,6 +746,8 @@ export default function App() {
       setMessages([]);
       setEvents([]);
       setDecision(null);
+      setPendingApproval(null);
+      setPendingRetry(null);
       setStatusOk(true);
       void refreshSessions();
     } catch {
@@ -672,7 +755,11 @@ export default function App() {
     }
   };
 
-  const handleProjectRun = async () => {
+  const handleProjectRun = async (
+    override?: { command: ProjectCommand; args: string },
+  ) => {
+    const commandToRun = override?.command ?? projectCommand;
+    const argsToRun = override?.args ?? projectArgs;
     if (!sessionId || projectBusy) {
       appendSystemMessage("Сначала создай/выбери сессию и модель.");
       return;
@@ -685,7 +772,7 @@ export default function App() {
           "Content-Type": "application/json",
           "X-Slavik-Session": sessionId,
         },
-        body: JSON.stringify({ command: projectCommand, args: projectArgs }),
+        body: JSON.stringify({ command: commandToRun, args: argsToRun }),
       });
       if (!resp.ok) {
         try {
@@ -705,6 +792,7 @@ export default function App() {
         messages?: unknown;
         decision?: unknown;
         selected_model?: unknown;
+        approval_request?: unknown;
       };
       const headerSession = resp.headers.get("X-Slavik-Session");
       const nextSession = headerSession || payload.session_id || null;
@@ -723,6 +811,13 @@ export default function App() {
       if (nextModel) {
         setSelectedModel(nextModel);
       }
+      const nextApproval = parseApprovalRequest(payload.approval_request);
+      setPendingApproval(nextApproval);
+      if (nextApproval) {
+        setPendingRetry({ kind: "project", command: commandToRun, args: argsToRun });
+      } else {
+        setPendingRetry(null);
+      }
       setStatusOk(true);
       void refreshSessions();
     } catch {
@@ -730,6 +825,54 @@ export default function App() {
       setStatusOk(false);
     } finally {
       setProjectBusy(false);
+    }
+  };
+
+  const handleApprovalDismiss = () => {
+    setPendingApproval(null);
+    setPendingRetry(null);
+  };
+
+  const handleApproveRetry = async () => {
+    if (!pendingApproval || !pendingRetry || approving) {
+      return;
+    }
+    const approvalSessionId = pendingApproval.session_id || sessionId;
+    if (!approvalSessionId) {
+      appendSystemMessage("Не удалось определить сессию для approve.");
+      return;
+    }
+    setApproving(true);
+    try {
+      const resp = await fetch("/slavik/approve-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          session_id: approvalSessionId,
+          categories: pendingApproval.required_categories,
+        }),
+      });
+      if (!resp.ok) {
+        appendSystemMessage("Не удалось подтвердить risky action.");
+        return;
+      }
+      const retryAction = pendingRetry;
+      setPendingApproval(null);
+      setPendingRetry(null);
+      if (retryAction.kind === "chat") {
+        await handleSend(retryAction.content);
+        return;
+      }
+      await handleProjectRun({
+        command: retryAction.command,
+        args: retryAction.args,
+      });
+    } catch {
+      appendSystemMessage("Ошибка approve-запроса.");
+    } finally {
+      setApproving(false);
     }
   };
 
@@ -877,6 +1020,15 @@ export default function App() {
             </section>
 
             <aside className="flex w-full flex-col gap-4 lg:w-[360px]">
+              <ApprovalPanel
+                approval={pendingApproval}
+                approving={approving}
+                onApproveRetry={() => {
+                  void handleApproveRetry();
+                }}
+                onDismiss={handleApprovalDismiss}
+              />
+
               <DecisionPanel
                 decision={decision}
                 projectCommand={projectCommand}
