@@ -923,6 +923,26 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
+async def _publish_agent_activity(
+    hub: UIHub,
+    *,
+    session_id: str,
+    phase: str,
+    detail: str | None = None,
+) -> None:
+    payload: dict[str, JSONValue] = {"session_id": session_id, "phase": phase}
+    if detail is not None and detail.strip():
+        payload["detail"] = detail.strip()
+    event: dict[str, JSONValue] = {
+        "type": "agent.activity",
+        "payload": payload,
+    }
+    try:
+        await hub.publish(session_id, event)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to publish agent activity event", exc_info=True)
+
+
 async def handle_ui_redirect(request: web.Request) -> web.StreamResponse:
     raise web.HTTPFound("/ui/")
 
@@ -1413,10 +1433,22 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
 
         await hub.set_session_status(session_id, "busy")
         status_opened = True
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="request.received",
+            detail="chat",
+        )
 
         approved_categories = await session_store.get_categories(session_id)
         await hub.append_message(session_id, "user", content_raw.strip())
         llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="context.prepared",
+            detail="chat",
+        )
 
         async with agent_lock:
             try:
@@ -1444,7 +1476,19 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                         "error": str(exc),
                     },
                 )
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="agent.respond.start",
+                detail="chat",
+            )
             response_text = agent.respond(llm_messages)
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="agent.respond.end",
+                detail="chat",
+            )
             decision = _extract_decision_payload(response_text)
             trace_id = getattr(agent, "last_chat_interaction_id", None)
             approval_request = _serialize_approval_request(
@@ -1467,10 +1511,22 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             },
         )
         response.headers[UI_SESSION_HEADER] = session_id
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="response.ready",
+            detail="chat",
+        )
         return response
     except Exception as exc:  # noqa: BLE001
         error = True
         if status_opened and session_id is not None:
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="error",
+                detail=f"chat: {exc}",
+            )
             await hub.set_session_status(session_id, "error")
         return _error_response(
             status=500,
@@ -1535,10 +1591,22 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             return _model_not_selected_response()
         await hub.set_session_status(session_id, "busy")
         status_opened = True
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="request.received",
+            detail="project",
+        )
 
         approved_categories = await session_store.get_categories(session_id)
         await hub.append_message(session_id, "user", user_command)
         llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="context.prepared",
+            detail="project",
+        )
 
         async with agent_lock:
             try:
@@ -1566,7 +1634,19 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                         "error": str(exc),
                     },
                 )
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="agent.respond.start",
+                detail="project",
+            )
             response_text = agent.respond(llm_messages)
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="agent.respond.end",
+                detail="project",
+            )
             trace_id = getattr(agent, "last_chat_interaction_id", None)
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
@@ -1587,10 +1667,22 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             },
         )
         response.headers[UI_SESSION_HEADER] = session_id
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="response.ready",
+            detail="project",
+        )
         return response
     except Exception as exc:  # noqa: BLE001
         error = True
         if status_opened and session_id is not None:
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="error",
+                detail=f"project: {exc}",
+            )
             await hub.set_session_status(session_id, "error")
         return _error_response(
             status=500,

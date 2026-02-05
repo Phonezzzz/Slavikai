@@ -191,6 +191,27 @@ async def _read_first_sse_event(response) -> dict[str, object]:
             return parsed
 
 
+async def _read_sse_event_types(response, *, max_events: int = 20) -> list[str]:
+    types: list[str] = []
+    while len(types) < max_events:
+        try:
+            line = await asyncio.wait_for(response.content.readline(), timeout=2)
+        except TimeoutError:
+            break
+        if not line:
+            break
+        if not line.startswith(b"data: "):
+            continue
+        raw = line.removeprefix(b"data: ").decode("utf-8").strip()
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            continue
+        event_type = parsed.get("type")
+        if isinstance(event_type, str):
+            types.append(event_type)
+    return types
+
+
 async def _select_local_model(client: TestClient, session_id: str) -> str:
     models_response = await client.get("/ui/api/models?provider=local")
     assert models_response.status == 200
@@ -523,6 +544,40 @@ def test_ui_events_stream_first_event_is_status() -> None:
             assert payload.get("session_id") == session_id
             assert payload.get("ok") is True
             assert payload.get("state") == "ok"
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_events_stream_includes_agent_activity() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Ping with activity"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+
+            event_types = await _read_sse_event_types(stream_resp, max_events=16)
+            assert "agent.activity" in event_types
             stream_resp.close()
         finally:
             await client.close()

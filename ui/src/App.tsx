@@ -343,6 +343,32 @@ const formatSessionUpdatedAt = (updatedAt: string): string => {
   return new Date(parsed).toLocaleString();
 };
 
+const toActivityLine = (event: UIEvent): string => {
+  if (event.type === "agent.activity" && event.payload && typeof event.payload === "object") {
+    const payload = event.payload as { phase?: unknown; detail?: unknown };
+    const phase = typeof payload.phase === "string" ? payload.phase : "agent.activity";
+    const detail =
+      typeof payload.detail === "string" && payload.detail.trim() ? ` · ${payload.detail}` : "";
+    return `${phase}${detail}`;
+  }
+  if (event.type === "status" && event.payload && typeof event.payload === "object") {
+    const payload = event.payload as { state?: unknown };
+    if (typeof payload.state === "string" && payload.state.trim()) {
+      return `status.${payload.state}`;
+    }
+  }
+  if (event.type === "message.append" && event.payload && typeof event.payload === "object") {
+    const payload = event.payload as { message?: unknown };
+    if (payload.message && typeof payload.message === "object") {
+      const message = payload.message as { role?: unknown };
+      if (typeof message.role === "string") {
+        return `message.append.${message.role}`;
+      }
+    }
+  }
+  return event.type;
+};
+
 const statusDotClass = (status: string): string => {
   if (status === "busy") {
     return "bg-amber-400";
@@ -425,6 +451,7 @@ export default function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [events, setEvents] = useState<UIEvent[]>([]);
+  const [activity, setActivity] = useState<string[]>([]);
   const [decision, setDecision] = useState<DecisionPacketView | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -825,6 +852,14 @@ export default function App() {
           }
           return next;
         });
+        setActivity((prev) => {
+          const line = `${parsed.ts} · ${toActivityLine(parsed)}`;
+          const next = [...prev, line];
+          if (next.length > MAX_EVENTS) {
+            next.splice(0, next.length - MAX_EVENTS);
+          }
+          return next;
+        });
         if (parsed.type === "message.append" && parsed.payload) {
           const payload = parsed.payload as { message?: unknown };
           if (payload.message && isMessage(payload.message)) {
@@ -922,6 +957,7 @@ export default function App() {
     }
     setSessionId(nextSessionId);
     setEvents([]);
+    setActivity([]);
     setPendingApproval(null);
     setPendingRetry(null);
     setLastTraceId(null);
@@ -1084,6 +1120,7 @@ export default function App() {
       }
       setMessages([]);
       setEvents([]);
+      setActivity([]);
       setDecision(null);
       setPendingApproval(null);
       setPendingRetry(null);
@@ -1361,6 +1398,7 @@ export default function App() {
               </div>
               <ChatView
                 messages={messages}
+                activity={activity}
                 input={input}
                 sending={sending}
                 onInputChange={setInput}
