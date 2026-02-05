@@ -46,7 +46,7 @@ export function Sidebar({
   return (
     <motion.div
       initial={false}
-      animate={{ width: collapsed ? '0px' : '300px' }}
+      animate={{ width: collapsed ? '24px' : '300px' }}
       transition={{ duration: 0.3, ease: 'easeInOut' }}
       className="relative bg-zinc-950"
     >
@@ -165,7 +165,7 @@ export function Sidebar({
       <button
         type="button"
         onClick={onToggleCollapse}
-        className="absolute -right-3 top-1/2 z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-white/10 backdrop-blur-xl transition-all duration-200 hover:bg-white/20"
+        className="absolute -right-3 top-1/2 z-20 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-white/10 backdrop-blur-xl transition-all duration-200 hover:bg-white/20"
       >
         {collapsed ? (
           <ChevronRight className="h-3.5 w-3.5 text-white/60" />

@@ -17,7 +17,7 @@ interface WorkspaceProps {
   onToggleCollapse: () => void;
 }
 
-type WorkspaceTab = 'code' | 'diff' | 'audit' | 'files' | 'logs';
+type WorkspaceTab = 'code' | 'diff' | 'audit' | 'files' | 'logs' | 'index';
 
 const mockCodeContent = `// src/app/components/ChatArea.tsx
 import { useState } from 'react';
@@ -164,7 +164,7 @@ export function Workspace({ sessionId, collapsed, onToggleCollapse }: WorkspaceP
             {/* Header */}
             <div className="p-4">
               <h2 className="text-sm font-medium text-white/50 mb-3">{workspaceTitle}</h2>
-              <div className="flex gap-1 bg-black/40 rounded-lg p-1">
+              <div className="flex flex-wrap gap-1 bg-black/40 rounded-lg p-1">
                 <button
                   onClick={() => setActiveTab('code')}
                   className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
@@ -209,6 +209,15 @@ export function Workspace({ sessionId, collapsed, onToggleCollapse }: WorkspaceP
                 >
                   <Terminal className="w-3 h-3 inline mr-1" />
                   Logs
+                </button>
+                <button
+                  onClick={() => setActiveTab('index')}
+                  className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                    activeTab === 'index' ? 'bg-white text-black' : 'text-white/60 hover:text-white/90'
+                  }`}
+                >
+                  <FolderOpen className="w-3 h-3 inline mr-1" />
+                  Index
                 </button>
               </div>
             </div>
@@ -321,7 +330,42 @@ export function Workspace({ sessionId, collapsed, onToggleCollapse }: WorkspaceP
                   animate={{ opacity: 1, y: 0 }}
                   className="space-y-1"
                 >
-                  <div className="mb-3 rounded-lg border border-white/10 bg-black/40 p-3 text-xs text-white/60">
+                  {logs.length === 0 ? (
+                    <div className="rounded-lg border border-white/10 bg-black/40 p-2 text-xs text-white/50">
+                      Нет событий. Запусти индексирование проекта.
+                    </div>
+                  ) : (
+                    logs.map((log, i) => (
+                      <div
+                        key={`${log.time}-${i}`}
+                        className="bg-black/40 border border-white/10 rounded-lg p-2 font-mono text-xs"
+                      >
+                        <span className="text-white/40">{log.time}</span>
+                        <span
+                          className={`ml-2 ${
+                            log.level === 'success'
+                              ? 'text-green-400'
+                              : log.level === 'error'
+                              ? 'text-red-400'
+                              : 'text-white/60'
+                          }`}
+                        >
+                          [{log.level}]
+                        </span>
+                        <span className="ml-2 text-white/70">{log.message}</span>
+                      </div>
+                    ))
+                  )}
+                </motion.div>
+              )}
+
+              {activeTab === 'index' && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="space-y-3"
+                >
+                  <div className="rounded-lg border border-white/10 bg-black/40 p-3 text-xs text-white/60">
                     <div className="mb-2 font-medium text-white/70">Project index</div>
                     <div className="flex items-center gap-2">
                       <input
@@ -349,33 +393,9 @@ export function Workspace({ sessionId, collapsed, onToggleCollapse }: WorkspaceP
                       Индексируется sandbox/project. После индексации агент может искать по проекту.
                     </div>
                   </div>
-
-                  {logs.length === 0 ? (
-                    <div className="rounded-lg border border-white/10 bg-black/40 p-2 text-xs text-white/50">
-                      Нет событий. Запусти индексирование проекта.
-                    </div>
-                  ) : (
-                    logs.map((log, i) => (
-                      <div
-                        key={`${log.time}-${i}`}
-                        className="bg-black/40 border border-white/10 rounded-lg p-2 font-mono text-xs"
-                      >
-                        <span className="text-white/40">{log.time}</span>
-                        <span
-                          className={`ml-2 ${
-                            log.level === 'success'
-                              ? 'text-green-400'
-                              : log.level === 'error'
-                              ? 'text-red-400'
-                              : 'text-white/60'
-                          }`}
-                        >
-                          [{log.level}]
-                        </span>
-                        <span className="ml-2 text-white/70">{log.message}</span>
-                      </div>
-                    ))
-                  )}
+                  <div className="rounded-lg border border-white/10 bg-black/40 p-2 text-xs text-white/50">
+                    Результаты индексации появятся во вкладке Logs.
+                  </div>
                 </motion.div>
               )}
             </div>
