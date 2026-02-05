@@ -137,7 +137,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         saved_main = load_model_configs()
         self.main_config = main_config or saved_main
         if self.main_config is not None:
-            ensure_model_allowed(self.main_config.model)
+            ensure_model_allowed(self.main_config.model, self.main_config.provider)
         self.main_api_key = main_api_key
         self.shell_config_path = str(DEFAULT_SHELL_CONFIG_PATH)
         self._external_brain = brain
