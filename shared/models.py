@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 JSONPrimitive = str | bytes | int | float | bool | None
 JSONValue = JSONPrimitive | Sequence["JSONValue"] | Mapping[str, "JSONValue"]
 
 
-class ToolResultStatus(str, Enum):
+class ToolResultStatus(StrEnum):
     OK = "ok"
     ERROR = "error"
 
@@ -46,7 +46,7 @@ class LLMMessage:
     content: str
 
 
-class PlanStepStatus(str, Enum):
+class PlanStepStatus(StrEnum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     DONE = "done"
@@ -81,7 +81,7 @@ class MemoryItem:
     timestamp: str
 
 
-class MemoryKind(str, Enum):
+class MemoryKind(StrEnum):
     NOTE = "note"
     USER_PREF = "user_pref"
     PROJECT_FACT = "project_fact"
@@ -118,7 +118,7 @@ class ProjectFact:
     meta: dict[str, JSONValue] | None = None
 
 
-class TaskComplexity(str, Enum):
+class TaskComplexity(StrEnum):
     SIMPLE = "simple"
     COMPLEX = "complex"
 

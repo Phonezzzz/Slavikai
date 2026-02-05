@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from shared.policy_models import PolicyAction, PolicyTrigger
 
 
-class CandidateStatus(str, Enum):
+class CandidateStatus(StrEnum):
     PROPOSED = "proposed"
     APPROVED = "approved"
     REJECTED = "rejected"
 
 
-class Signal(str, Enum):
+class Signal(StrEnum):
     DIRECT_NEGATIVE_FEEDBACK = "direct_negative_feedback"
     EXPLICIT_POSITIVE = "explicit_positive"
     RATING_OK = "rating_ok"
@@ -28,7 +28,7 @@ class Signal(str, Enum):
     STYLE_PROFANITY_ONLY = "style_profanity_only"
 
 
-class IntentKind(str, Enum):
+class IntentKind(StrEnum):
     QUESTION = "question"
     REQUEST_ACTION = "request_action"
     REPORT_PROBLEM = "report_problem"
@@ -37,7 +37,7 @@ class IntentKind(str, Enum):
     OTHER = "other"
 
 
-class ParadoxFlag(str, Enum):
+class ParadoxFlag(StrEnum):
     STYLE_CONFLICT = "style_conflict"
     ALWAYS_NEVER_CONFLICT = "always_never_conflict"
     DO_DONT_CONFLICT = "do_dont_conflict"

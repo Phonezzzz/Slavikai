@@ -3,19 +3,19 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from shared.models import JSONValue
 
 
-class ResponseVerbosity(str, Enum):
+class ResponseVerbosity(StrEnum):
     CONCISE = "concise"
     NORMAL = "normal"
     DETAILED = "detailed"
 
 
-class PolicyScope(str, Enum):
+class PolicyScope(StrEnum):
     GLOBAL = "global"
     USER = "user"
 

@@ -1,36 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Final, Literal
 
 from shared.models import JSONValue
 
 
-class WorkStatus(str, Enum):
+class WorkStatus(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
 
 
-class VerificationStatus(str, Enum):
+class VerificationStatus(StrEnum):
     PASSED = "passed"
     FAILED = "failed"
     ERROR = "error"
 
 
-class ChangeType(str, Enum):
+class ChangeType(StrEnum):
     CREATE = "create"
     UPDATE = "update"
     DELETE = "delete"
     RENAME = "rename"
 
 
-class RetryPolicy(str, Enum):
+class RetryPolicy(StrEnum):
     NONE = "none"
     LIMITED = "limited"
 
 
-class StopReasonCode(str, Enum):
+class StopReasonCode(StrEnum):
     BLOCKED_SKILL_AMBIGUOUS = "BLOCKED_SKILL_AMBIGUOUS"
     BLOCKED_SKILL_DEPRECATED = "BLOCKED_SKILL_DEPRECATED"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"

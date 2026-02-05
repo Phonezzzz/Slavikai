@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from shared.models import JSONValue
@@ -11,7 +11,7 @@ from shared.models import JSONValue
 DecisionRisk = Literal["low", "medium", "high"]
 
 
-class DecisionReason(str, Enum):
+class DecisionReason(StrEnum):
     BLOCKED = "blocked"
     RISK = "risk"
     NEED_USER_INPUT = "need_user_input"
@@ -20,7 +20,7 @@ class DecisionReason(str, Enum):
     VERIFIER_FAIL = "verifier_fail"
 
 
-class DecisionAction(str, Enum):
+class DecisionAction(StrEnum):
     ASK_USER = "ask_user"
     PROCEED_SAFE = "proceed_safe"
     RETRY = "retry"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from shared.models import JSONValue
@@ -10,7 +10,7 @@ from shared.models import JSONValue
 MemorySource = Literal["agent", "user", "triage"]
 
 
-class MemoryCategory(str, Enum):
+class MemoryCategory(StrEnum):
     INBOX = "inbox"
     NOTES = "notes"
     FACTS = "facts"

@@ -1,28 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from shared.models import JSONValue
 
 
-class InteractionKind(str, Enum):
+class InteractionKind(StrEnum):
     CHAT = "chat"
     TOOL = "tool"
 
 
-class InteractionMode(str, Enum):
+class InteractionMode(StrEnum):
     STANDARD = "standard"
     MEMORY_COMPANION = "memory_companion"
 
 
-class ToolStatus(str, Enum):
+class ToolStatus(StrEnum):
     OK = "ok"
     ERROR = "error"
     BLOCKED = "blocked"
 
 
-class BlockedReason(str, Enum):
+class BlockedReason(StrEnum):
     APPROVAL_REQUIRED = "approval_required"
     SAFE_MODE_BLOCKED = "safe_mode_blocked"
     SANDBOX_VIOLATION = "sandbox_violation"
@@ -31,13 +31,13 @@ class BlockedReason(str, Enum):
     VALIDATION_ERROR = "validation_error"
 
 
-class FeedbackRating(str, Enum):
+class FeedbackRating(StrEnum):
     GOOD = "good"
     OK = "ok"
     BAD = "bad"
 
 
-class FeedbackLabel(str, Enum):
+class FeedbackLabel(StrEnum):
     TOO_LONG = "too_long"
     OFF_TOPIC = "off_topic"
     NO_SOURCES = "no_sources"
