@@ -12,6 +12,7 @@ import type {
 } from "./types";
 
 const MAX_EVENTS = 120;
+const SESSION_STORAGE_KEY = "slavik.ui.session_id";
 type ProjectCommand = "find" | "index";
 
 const isMessage = (value: unknown): value is Message => {
@@ -144,6 +145,31 @@ const statusDotClass = (status: string): string => {
 
 const isRecoverableHttpStatus = (status: number): boolean => status >= 400 && status < 500;
 
+const readStoredSessionId = (): string | null => {
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (typeof raw !== "string") {
+      return null;
+    }
+    const trimmed = raw.trim();
+    return trimmed || null;
+  } catch {
+    return null;
+  }
+};
+
+const persistSessionId = (sessionId: string | null): void => {
+  try {
+    if (!sessionId) {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  } catch {
+    return;
+  }
+};
+
 export default function App() {
   const [statusOk, setStatusOk] = useState<boolean | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -187,9 +213,50 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    const hydrateSession = async (currentSessionId: string) => {
+      try {
+        const resp = await fetch(`/ui/api/sessions/${encodeURIComponent(currentSessionId)}`, {
+          headers: {
+            "X-Slavik-Session": currentSessionId,
+          },
+        });
+        if (!resp.ok || !active) {
+          return;
+        }
+        const payload = (await resp.json()) as {
+          session?: {
+            messages?: unknown;
+            decision?: unknown;
+            selected_model?: unknown;
+          };
+        };
+        if (!payload.session || !active) {
+          return;
+        }
+        const parsedMessages = parseMessages(payload.session.messages);
+        setMessages(parsedMessages);
+        setDecision(parseDecision(payload.session.decision));
+        const parsedModel = parseSelectedModel(payload.session.selected_model);
+        setSelectedModel(parsedModel);
+        if (parsedModel) {
+          setSelectedProvider(parsedModel.provider);
+          setSelectedModelId(parsedModel.model);
+        }
+      } catch {
+        return;
+      }
+    };
     const loadStatus = async () => {
       try {
-        const resp = await fetch("/ui/api/status");
+        const storedSession = readStoredSessionId();
+        const headers: Record<string, string> = {};
+        if (storedSession) {
+          headers["X-Slavik-Session"] = storedSession;
+        }
+        const resp = await fetch(
+          "/ui/api/status",
+          Object.keys(headers).length > 0 ? { headers } : undefined,
+        );
         if (!resp.ok) {
           throw new Error(`Status ${resp.status}`);
         }
@@ -205,6 +272,8 @@ export default function App() {
           setStatusOk(Boolean(payload.ok));
           if (nextSession) {
             setSessionId(nextSession);
+            persistSessionId(nextSession);
+            void hydrateSession(nextSession);
           }
           setDecision(parseDecision(payload.decision));
           const parsedModel = parseSelectedModel(payload.selected_model);
@@ -225,6 +294,10 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    persistSessionId(sessionId);
+  }, [sessionId]);
 
   useEffect(() => {
     let active = true;
