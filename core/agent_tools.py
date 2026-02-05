@@ -56,6 +56,7 @@ from shared.models import (
     ToolCallRecord,
     ToolRequest,
     ToolResult,
+    UXContractSummary,
     WorkspaceDiffEntry,
 )
 from shared.policy_models import PolicyAction, PolicyRule, PolicyScope
@@ -67,6 +68,7 @@ SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
 MAX_SHORT_TERM_MESSAGES = 20
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 _MIN_BASE64_LEN = 64
+_MAX_UX_SUMMARY_CHARS = 220
 
 
 def _workspace_root() -> Path:
@@ -96,6 +98,8 @@ class AgentToolsMixin:
     last_chat_interaction_id: str | None
     last_approval_request: ApprovalRequest | None
     last_decision_packet: DecisionPacket | None
+    last_plan_summary: str | None
+    last_execution_summary: str | None
     _pending_decision_packet: DecisionPacket | None
 
     def _inc_metric(self, name: str) -> None:
@@ -872,6 +876,8 @@ class AgentToolsMixin:
             verifier=None,
             next_steps=[],
             stop_reason_code=StopReasonCode.COMMAND_LANE_NOTICE,
+            plan_summary="Ручной command lane без MWV-плана.",
+            execution_summary=response or "Командный ответ сформирован.",
         )
 
     def _format_report_block(
@@ -883,8 +889,11 @@ class AgentToolsMixin:
         verifier: VerificationResult | None,
         next_steps: list[str] | None,
         stop_reason_code: StopReasonCode | None,
+        ux_contract: UXContractSummary,
     ) -> str:
         payload: dict[str, JSONValue] = {"route": route, "trace_id": trace_id}
+        payload["plan_summary"] = ux_contract.plan_summary
+        payload["execution_summary"] = ux_contract.execution_summary
         if attempts is not None:
             payload["attempts"] = {"current": attempts[0], "max": attempts[1]}
         if verifier is not None:
@@ -908,6 +917,45 @@ class AgentToolsMixin:
             normalized.append(cleaned)
         return normalized[:3]
 
+    def _compact_summary_text(self, text: str, *, fallback: str) -> str:
+        cleaned = " ".join(text.split()).strip()
+        if not cleaned:
+            cleaned = fallback
+        if len(cleaned) <= _MAX_UX_SUMMARY_CHARS:
+            return cleaned
+        return f"{cleaned[: _MAX_UX_SUMMARY_CHARS - 3].rstrip()}..."
+
+    def _build_ux_contract(
+        self,
+        *,
+        route: str,
+        text: str,
+        plan_summary: str | None,
+        execution_summary: str | None,
+    ) -> UXContractSummary:
+        plan_fallbacks = {
+            "chat": "План не требуется для chat-маршрута.",
+            "command": "Ручной command lane без MWV-плана.",
+        }
+        execution_fallbacks = {
+            "chat": "Ответ сформирован моделью.",
+            "command": "Командный ответ сформирован.",
+        }
+        plan = self._compact_summary_text(
+            plan_summary or "",
+            fallback=plan_fallbacks.get(route, "План не указан."),
+        )
+        execution = self._compact_summary_text(
+            execution_summary or "",
+            fallback=execution_fallbacks.get(
+                route,
+                self._compact_summary_text(text, fallback="Выполнение завершено."),
+            ),
+        )
+        self.last_plan_summary = plan
+        self.last_execution_summary = execution
+        return UXContractSummary(plan_summary=plan, execution_summary=execution)
+
     def _append_report_block(
         self,
         text: str,
@@ -918,7 +966,15 @@ class AgentToolsMixin:
         verifier: VerificationResult | None,
         next_steps: list[str] | None,
         stop_reason_code: StopReasonCode | None,
+        plan_summary: str | None = None,
+        execution_summary: str | None = None,
     ) -> str:
+        ux_contract = self._build_ux_contract(
+            route=route,
+            text=text,
+            plan_summary=plan_summary,
+            execution_summary=execution_summary,
+        )
         report = self._format_report_block(
             route=route,
             trace_id=trace_id,
@@ -926,6 +982,7 @@ class AgentToolsMixin:
             verifier=verifier,
             next_steps=next_steps,
             stop_reason_code=stop_reason_code,
+            ux_contract=ux_contract,
         )
         if not text:
             return report
@@ -942,6 +999,8 @@ class AgentToolsMixin:
         trace_id: str | None = None,
         attempts: tuple[int, int] | None = None,
         verifier: VerificationResult | None = None,
+        plan_summary: str | None = None,
+        execution_summary: str | None = None,
     ) -> str:
         steps = next_steps or ["Уточни запрос или попробуй снова."]
         lines = [
@@ -969,6 +1028,8 @@ class AgentToolsMixin:
             verifier=verifier,
             next_steps=steps,
             stop_reason_code=stop_reason_code,
+            plan_summary=plan_summary or what,
+            execution_summary=execution_summary or why,
         )
 
     def _handle_approval_required(

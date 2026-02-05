@@ -67,6 +67,12 @@ class TaskPlan:
     steps: list[PlanStep]
 
 
+@dataclass(frozen=True)
+class UXContractSummary:
+    plan_summary: str
+    execution_summary: str
+
+
 @dataclass
 class MemoryItem:
     id: str

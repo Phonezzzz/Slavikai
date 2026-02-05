@@ -132,6 +132,8 @@ class AgentRoutingMixin:
                 verifier=None,
                 next_steps=None,
                 stop_reason_code=None,
+                plan_summary="План не требуется для chat-маршрута.",
+                execution_summary="Ответ сформирован моделью.",
             )
             if self.memory_config.auto_save_dialogue:
                 self.save_to_memory(last_content, response_text)

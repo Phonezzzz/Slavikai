@@ -250,6 +250,8 @@ class AgentMWVMixin:
 
     def _format_mwv_response(self, result: MWVRunResult) -> str:
         trace_id = result.task.trace_id
+        report_plan_summary = self._mwv_plan_summary_for_report(result)
+        report_execution_summary = self._mwv_execution_summary_for_report(result)
         if result.work_result.status == WorkStatus.FAILURE:
             summary = self._summarize_work_failure(result.work_result)
             return self._format_stop_response(
@@ -264,6 +266,8 @@ class AgentMWVMixin:
                 trace_id=trace_id,
                 attempts=(result.attempt, result.max_attempts),
                 verifier=result.verification_result,
+                plan_summary=report_plan_summary,
+                execution_summary=report_execution_summary,
             )
         if result.verification_result.status != VerificationStatus.PASSED:
             note = self._mwv_verifier_note(result.verification_result)
@@ -285,6 +289,8 @@ class AgentMWVMixin:
                 trace_id=trace_id,
                 attempts=(result.attempt, result.max_attempts),
                 verifier=result.verification_result,
+                plan_summary=report_plan_summary,
+                execution_summary=report_execution_summary,
             )
         outcome = self._mwv_outcome_label(result)
         lines = [
@@ -313,6 +319,8 @@ class AgentMWVMixin:
             verifier=result.verification_result,
             next_steps=next_steps,
             stop_reason_code=None,
+            plan_summary=report_plan_summary,
+            execution_summary=report_execution_summary,
         )
 
     def _summarize_work_failure(self, work_result: WorkResult) -> str:
@@ -349,6 +357,23 @@ class AgentMWVMixin:
         if verification.exit_code is None:
             return base
         return f"{base} (exit_code={verification.exit_code})"
+
+    def _mwv_plan_summary_for_report(self, result: MWVRunResult) -> str:
+        summary = result.work_result.summary.strip()
+        if summary:
+            first_line = summary.splitlines()[0].strip()
+            if first_line:
+                return first_line
+        if result.work_result.changes:
+            return f"Изменено файлов: {len(result.work_result.changes)}"
+        return "План выполнен без изменений."
+
+    def _mwv_execution_summary_for_report(self, result: MWVRunResult) -> str:
+        return (
+            f"worker={result.work_result.status.value}; "
+            f"verifier={self._mwv_verifier_label(result.verification_result)}; "
+            f"changes={len(result.work_result.changes)}"
+        )
 
     def _format_mwv_changes(self, changes: list[WorkChange]) -> list[str]:
         if not changes:
