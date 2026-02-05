@@ -141,10 +141,55 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === 'undefined') {
+      return true;
+    }
+    const stored = window.localStorage.getItem('slavik.sidebar.collapsed');
+    return stored ? stored === 'true' : true;
+  });
+  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(() => {
+    if (typeof window === 'undefined') {
+      return true;
+    }
+    const stored = window.localStorage.getItem('slavik.workspace.collapsed');
+    return stored ? stored === 'true' : true;
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [lastModelApplied, setLastModelApplied] = useState(false);
+
+  const loadLastModel = (): SelectedModel | null => {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    const raw = window.localStorage.getItem('slavik.last.model');
+    if (!raw) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(raw) as { provider?: unknown; model?: unknown };
+      if (typeof parsed.provider === 'string' && typeof parsed.model === 'string') {
+        return { provider: parsed.provider, model: parsed.model };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
+  const saveLastModel = (model: SelectedModel | null) => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (!model) {
+      return;
+    }
+    window.localStorage.setItem('slavik.last.model', JSON.stringify(model));
+  };
+
+  const isModelAvailable = (model: SelectedModel, providers: ProviderModels[]) =>
+    providers.some((provider) => provider.provider === model.provider && provider.models.includes(model.model));
 
   const loadSessions = async (): Promise<SessionSummary[]> => {
     const response = await fetch('/ui/api/sessions');
@@ -173,6 +218,27 @@ export default function App() {
     }
   };
 
+  const setSessionModel = async (
+    sessionId: string,
+    provider: string,
+    model: string,
+  ): Promise<SelectedModel | null> => {
+    const response = await fetch('/ui/api/session-model', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [SESSION_HEADER]: sessionId,
+      },
+      body: JSON.stringify({ provider, model }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to set model.'));
+    }
+    const parsed = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
+    return parsed || { provider, model };
+  };
+
   const loadConversation = async (sessionId: string): Promise<void> => {
     const response = await fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
       headers: {
@@ -188,7 +254,10 @@ export default function App() {
     setSelectedModel(parseSelectedModel(session?.selected_model));
   };
 
-  const createConversation = async (): Promise<string | null> => {
+  const createConversation = async (): Promise<{
+    sessionId: string | null;
+    selectedModel: SelectedModel | null;
+  }> => {
     const response = await fetch('/ui/api/sessions', {
       method: 'POST',
     });
@@ -200,9 +269,10 @@ export default function App() {
     const payloadSession = extractSessionIdFromPayload(payload);
     const nextSession = (headerSession && headerSession.trim()) || payloadSession || null;
     const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
+    const sessionModel = parseSelectedModel(session?.selected_model);
     setMessages(parseMessages(session?.messages));
-    setSelectedModel(parseSelectedModel(session?.selected_model));
-    return nextSession;
+    setSelectedModel(sessionModel);
+    return { sessionId: nextSession, selectedModel: sessionModel };
   };
 
   useEffect(() => {
@@ -219,7 +289,10 @@ export default function App() {
         const fromHeader = statusResp.headers.get(SESSION_HEADER);
         const fromPayload = extractSessionIdFromPayload(statusPayload);
         const statusSession = (fromHeader && fromHeader.trim()) || fromPayload || null;
-        setSelectedModel(parseSelectedModel((statusPayload as { selected_model?: unknown }).selected_model));
+        const statusSelected = parseSelectedModel(
+          (statusPayload as { selected_model?: unknown }).selected_model,
+        );
+        setSelectedModel(statusSelected);
 
         const modelsPromise = loadModels();
         const listedSessions = await loadSessions();
@@ -229,7 +302,8 @@ export default function App() {
           nextSession = listedSessions[0].session_id;
         }
         if (!nextSession) {
-          nextSession = await createConversation();
+          const created = await createConversation();
+          nextSession = created.sessionId;
         }
 
         if (!cancelled) {
@@ -237,7 +311,26 @@ export default function App() {
             setSelectedConversation(nextSession);
             await loadConversation(nextSession);
           }
-          await modelsPromise;
+          const models = await modelsPromise;
+          if (nextSession && !statusSelected && !lastModelApplied) {
+            const lastModel = loadLastModel();
+            if (lastModel && isModelAvailable(lastModel, models)) {
+              try {
+                const applied = await setSessionModel(
+                  nextSession,
+                  lastModel.provider,
+                  lastModel.model,
+                );
+                setSelectedModel(applied);
+                saveLastModel(applied);
+                setLastModelApplied(true);
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : 'Failed to restore last model.';
+                setStatusMessage(message);
+              }
+            }
+          }
           setStatusMessage(null);
         }
       } catch (error) {
@@ -259,6 +352,12 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (selectedModel) {
+      saveLastModel(selectedModel);
+    }
+  }, [selectedModel]);
+
   const handleSelectConversation = async (sessionId: string) => {
     if (!sessionId || sessionId === selectedConversation) {
       return;
@@ -275,13 +374,33 @@ export default function App() {
 
   const handleCreateConversation = async () => {
     try {
-      const nextSession = await createConversation();
+      const created = await createConversation();
+      const nextSession = created.sessionId;
       if (!nextSession) {
         setStatusMessage('Failed to create chat.');
         return;
       }
       setSelectedConversation(nextSession);
       await loadSessions();
+      if (!created.selectedModel && providerModels.length > 0) {
+        const lastModel = loadLastModel();
+        if (lastModel && isModelAvailable(lastModel, providerModels)) {
+          try {
+            const applied = await setSessionModel(
+              nextSession,
+              lastModel.provider,
+              lastModel.model,
+            );
+            setSelectedModel(applied);
+            saveLastModel(applied);
+            setLastModelApplied(true);
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : 'Failed to restore last model.';
+            setStatusMessage(message);
+          }
+        }
+      }
       setStatusMessage(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create chat.';
@@ -312,8 +431,8 @@ export default function App() {
           await loadConversation(nextSession);
         } else {
           const created = await createConversation();
-          if (created) {
-            setSelectedConversation(created);
+          if (created.sessionId) {
+            setSelectedConversation(created.sessionId);
             await loadSessions();
           } else {
             setSelectedConversation(null);
@@ -338,20 +457,9 @@ export default function App() {
     }
     setSavingModel(true);
     try {
-      const response = await fetch('/ui/api/session-model', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          [SESSION_HEADER]: selectedConversation,
-        },
-        body: JSON.stringify({ provider, model }),
-      });
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, 'Failed to set model.'));
-      }
-      const parsed = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
-      setSelectedModel(parsed || { provider, model });
+      const nextModel = await setSessionModel(selectedConversation, provider, model);
+      setSelectedModel(nextModel);
+      saveLastModel(nextModel);
       setStatusMessage(null);
       return true;
     } catch (error) {
@@ -394,6 +502,7 @@ export default function App() {
       const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
       if (parsedModel) {
         setSelectedModel(parsedModel);
+        saveLastModel(parsedModel);
       }
       await loadSessions();
       setStatusMessage(null);
@@ -435,7 +544,13 @@ export default function App() {
           void handleDeleteConversation(sessionId);
         }}
         collapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+        onToggleCollapse={() => {
+          const next = !sidebarCollapsed;
+          setSidebarCollapsed(next);
+          if (typeof window !== 'undefined') {
+            window.localStorage.setItem('slavik.sidebar.collapsed', String(next));
+          }
+        }}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
@@ -453,8 +568,15 @@ export default function App() {
       />
 
       <Workspace
+        sessionId={selectedConversation}
         collapsed={workspaceCollapsed}
-        onToggleCollapse={() => setWorkspaceCollapsed(!workspaceCollapsed)}
+        onToggleCollapse={() => {
+          const next = !workspaceCollapsed;
+          setWorkspaceCollapsed(next);
+          if (typeof window !== 'undefined') {
+            window.localStorage.setItem('slavik.workspace.collapsed', String(next));
+          }
+        }}
       />
 
       <Settings

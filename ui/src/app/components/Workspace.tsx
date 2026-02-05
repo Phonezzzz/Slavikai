@@ -1,8 +1,18 @@
-import { ChevronLeft, ChevronRight, Code2, FileText, Diff, Bug, FolderOpen, Terminal } from 'lucide-react';
+import {
+  ChevronLeft,
+  ChevronRight,
+  Code2,
+  FileText,
+  Diff,
+  Bug,
+  FolderOpen,
+  Terminal,
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 interface WorkspaceProps {
+  sessionId: string | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -45,15 +55,95 @@ const mockFiles = [
   { name: 'Settings.tsx', path: '/src/app/components/Settings.tsx', status: 'created' },
 ];
 
-const mockLogs = [
-  { time: '13:15:01', level: 'info', message: 'workspace_read: /src/app/App.tsx' },
-  { time: '13:15:12', level: 'info', message: 'workspace_write: /src/app/components/Workspace.tsx' },
-  { time: '13:15:45', level: 'success', message: 'MWV: Worker completed task' },
-  { time: '13:16:02', level: 'info', message: 'workspace_patch: Applied changes to App.tsx' },
-];
+type WorkspaceLogLevel = 'info' | 'success' | 'error';
 
-export function Workspace({ collapsed, onToggleCollapse }: WorkspaceProps) {
+type WorkspaceLog = {
+  time: string;
+  level: WorkspaceLogLevel;
+  message: string;
+};
+
+const formatNow = () =>
+  new Date().toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+export function Workspace({ sessionId, collapsed, onToggleCollapse }: WorkspaceProps) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('code');
+  const [projectPath, setProjectPath] = useState(() => {
+    if (typeof window === 'undefined') {
+      return '.';
+    }
+    return window.localStorage.getItem('slavik.project.path') || '.';
+  });
+  const [indexing, setIndexing] = useState(false);
+  const [logs, setLogs] = useState<WorkspaceLog[]>([]);
+
+  const workspaceTitle = useMemo(() => (indexing ? 'WORKSPACE · indexing' : 'WORKSPACE'), [indexing]);
+
+  const addLog = (level: WorkspaceLogLevel, message: string) => {
+    const entry: WorkspaceLog = { time: formatNow(), level, message };
+    setLogs((prev) => [entry, ...prev].slice(0, 200));
+  };
+
+  const handleIndex = async () => {
+    if (!sessionId) {
+      addLog('error', 'Нет активной сессии для индексации проекта.');
+      return;
+    }
+    if (indexing) {
+      return;
+    }
+    const trimmedPath = projectPath.trim() || '.';
+    setIndexing(true);
+    addLog('info', `project index: ${trimmedPath}`);
+    try {
+      const response = await fetch('/ui/api/tools/project', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Slavik-Session': sessionId,
+        },
+        body: JSON.stringify({ command: 'index', args: trimmedPath }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        const errorPayload = payload as { error?: { message?: unknown } };
+        const message =
+          typeof errorPayload.error?.message === 'string'
+            ? errorPayload.error?.message
+            : 'Не удалось запустить индекс проекта.';
+        addLog('error', message);
+        return;
+      }
+      const messages = (payload as { messages?: unknown }).messages;
+      if (Array.isArray(messages)) {
+        let lastContent = 'Индексирование завершено.';
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          const item = messages[index];
+          if (!item || typeof item !== 'object') {
+            continue;
+          }
+          const role = (item as { role?: unknown }).role;
+          const content = (item as { content?: unknown }).content;
+          if (role === 'assistant' && typeof content === 'string') {
+            lastContent = content;
+            break;
+          }
+        }
+        addLog('success', lastContent.replace(/\s+/g, ' ').trim());
+      } else {
+        addLog('success', 'Индексирование завершено.');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ошибка индексирования проекта.';
+      addLog('error', message);
+    } finally {
+      setIndexing(false);
+    }
+  };
 
   return (
     <motion.div
@@ -73,7 +163,7 @@ export function Workspace({ collapsed, onToggleCollapse }: WorkspaceProps) {
           >
             {/* Header */}
             <div className="p-4">
-              <h2 className="text-sm font-medium text-white/50 mb-3">WORKSPACE</h2>
+              <h2 className="text-sm font-medium text-white/50 mb-3">{workspaceTitle}</h2>
               <div className="flex gap-1 bg-black/40 rounded-lg p-1">
                 <button
                   onClick={() => setActiveTab('code')}
@@ -231,26 +321,61 @@ export function Workspace({ collapsed, onToggleCollapse }: WorkspaceProps) {
                   animate={{ opacity: 1, y: 0 }}
                   className="space-y-1"
                 >
-                  {mockLogs.map((log, i) => (
-                    <div
-                      key={i}
-                      className="bg-black/40 border border-white/10 rounded-lg p-2 font-mono text-xs"
-                    >
-                      <span className="text-white/40">{log.time}</span>
-                      <span
-                        className={`ml-2 ${
-                          log.level === 'success'
-                            ? 'text-green-400'
-                            : log.level === 'error'
-                            ? 'text-red-400'
-                            : 'text-white/60'
-                        }`}
+                  <div className="mb-3 rounded-lg border border-white/10 bg-black/40 p-3 text-xs text-white/60">
+                    <div className="mb-2 font-medium text-white/70">Project index</div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={projectPath}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setProjectPath(next);
+                          if (typeof window !== 'undefined') {
+                            window.localStorage.setItem('slavik.project.path', next);
+                          }
+                        }}
+                        className="flex-1 rounded-md border border-white/10 bg-black/60 px-2 py-1 text-xs text-white/80"
+                        placeholder="sandbox/project path (.)"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void handleIndex()}
+                        disabled={indexing}
+                        className="rounded-md border border-white/10 bg-white/10 px-2 py-1 text-xs text-white/80 hover:bg-white/20 disabled:opacity-40"
                       >
-                        [{log.level}]
-                      </span>
-                      <span className="ml-2 text-white/70">{log.message}</span>
+                        {indexing ? 'Indexing...' : 'Index'}
+                      </button>
                     </div>
-                  ))}
+                    <div className="mt-2 text-[11px] text-white/40">
+                      Индексируется sandbox/project. После индексации агент может искать по проекту.
+                    </div>
+                  </div>
+
+                  {logs.length === 0 ? (
+                    <div className="rounded-lg border border-white/10 bg-black/40 p-2 text-xs text-white/50">
+                      Нет событий. Запусти индексирование проекта.
+                    </div>
+                  ) : (
+                    logs.map((log, i) => (
+                      <div
+                        key={`${log.time}-${i}`}
+                        className="bg-black/40 border border-white/10 rounded-lg p-2 font-mono text-xs"
+                      >
+                        <span className="text-white/40">{log.time}</span>
+                        <span
+                          className={`ml-2 ${
+                            log.level === 'success'
+                              ? 'text-green-400'
+                              : log.level === 'error'
+                              ? 'text-red-400'
+                              : 'text-white/60'
+                          }`}
+                        >
+                          [{log.level}]
+                        </span>
+                        <span className="ml-2 text-white/70">{log.message}</span>
+                      </div>
+                    ))
+                  )}
                 </motion.div>
               )}
             </div>
