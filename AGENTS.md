@@ -1,57 +1,65 @@
-# AGENTS — mandatory entry point
+# AGENTS — обязательная точка входа
 
-This repository is rules-first and policy-driven.
-All agents must read and follow the documents listed below before doing any work.
+Репозиторий работает по принципу rules-first/policies-first.
+Любой агент обязан прочитать и применить правила из этого файла до начала работы.
 
-## Initialization protocol (mandatory)
+## Initialization protocol (обязательно)
 
-Before any work, the agent must:
+Перед любыми действиями агент обязан:
 
-1. Read all documents under "Canonical rules (must read)" — always.
-2. Identify which contextual documents are relevant (architecture, flows, mini-prompts, other docs) and read them.
-3. Create a Rules + Context Snapshot and treat it as hard constraints for all actions.
+1. Прочитать все документы из раздела **Canonical rules**.
+2. Определить релевантные контекстные документы и прочитать их.
+3. Сформировать **Rules + Context Snapshot** и считать его жёсткими ограничениями на всю сессию.
 
-No task execution is allowed before completing this initialization.
+Работу над задачей начинать только после этого.
 
 ## Canonical rules (must read)
 
-- docs/DevRules.md — global invariants and project policies
-- docs/dev_workflow.md — Git workflow (режим A)
-- docs/merge_process.md — exact merge sequence (fast-forward only)
-- docs/COMMAND_LANE_POLICY.md — command execution boundaries
-- docs/ROUTING_POLICY.md — routing logic and escalation rules
-- docs/STOP_RESPONSES.md — when to stop and ask for human input
+- `docs/DevRules.md` — глобальные инварианты проекта.
+- `docs/dev_workflow.md` — git-процесс (режим A).
+- `docs/merge_process.md` — точная последовательность merge (`ff-only`).
+- `docs/COMMAND_LANE_POLICY.md` — границы командного режима.
+- `docs/ROUTING_POLICY.md` — маршрутизация chat/mwv.
+- `docs/STOP_RESPONSES.md` — единый формат остановки.
 
-## Contextual references (read if relevant)
+## Contextual references (читать по релевантности)
 
-- docs/Architecture.md
-- docs/MWV_CANONICAL_FLOW.md
-- docs/RUNTIME_MWV_FLOW.md
-- docs/AGENT_MINIPROMPTS.md — task-specific mini-prompts
+- `docs/Architecture.md`
+- `docs/PROJECT_OVERVIEW.md`
+- `docs/COMMANDS.md`
+- `docs/CONTRIBUTING.md`
+- `docs/MWV_CANONICAL_FLOW.md`
+- `docs/RUNTIME_MWV_FLOW.md`
+- `docs/AGENT_MINIPROMPTS.md`
 
-## Non-negotiable rules (summary)
+## Rules + Context Snapshot (формат)
 
-- Work never happens on `main`
-- Every task uses a PR branch
-- Before any work: `make git-check`
-- Before finalizing: `make check`
-- Merge to `main` only via `git merge --ff-only`
-- After merge always return to `main`
-- If anything is unclear — stop and ask
+- Какие канонические правила применяются в текущей задаче.
+- Какие контекстные документы прочитаны и почему они релевантны.
+- Какие ограничения являются жёсткими (sandbox, safe-mode, MWV, git-flow, approvals).
 
-### Язык (обязательно)
+## Non-negotiable rules
+
+- Работа никогда не ведётся напрямую в `main`.
+- Каждая задача выполняется в отдельной PR-ветке.
+- Перед началом работы в PR-ветке: `make git-check`.
+- Перед завершением: `make check`.
+- В `main` только `git merge --ff-only`.
+- После merge обязательно вернуться в `main`.
+- Если что-то неясно — остановиться и запросить решение у человека.
+
+## Язык (обязательно)
+
 - Все ответы, планы, объяснения и комментарии — на русском.
-- Английский допускается только внутри кода, команд, логов, названий файлов и точных цитат ошибок/документации.
-- “Размышления” оформляй как: **Краткий план (RU)** + **Проверки/риски (RU)**. Без англ. текста.
+- Английский допускается только в коде, командах, логах, именах файлов и точных цитатах ошибок/документации.
+- Размышления оформлять как: **Краткий план (RU)** + **Проверки/риски (RU)**.
 
-## Workflow (short)
+## Workflow (кратко)
 
 1. `git checkout main`
 2. `git checkout -b pr-<id>-<name>`
 3. `make git-check`
-4. implement + commit + push
+4. реализация + commit + push
 5. `make check`
-6. rebase + fast-forward merge
-7. back to `main`
-
-No exceptions.
+6. `git rebase origin/main` + `git merge --ff-only`
+7. `git checkout main`
