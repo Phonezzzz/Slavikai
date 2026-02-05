@@ -91,6 +91,16 @@ class UIHub:
     async def create_session(self) -> str:
         return await self.get_or_create_session(None)
 
+    async def delete_session(self, session_id: str) -> bool:
+        normalized = session_id.strip()
+        if not normalized:
+            return False
+        async with self._lock:
+            if normalized not in self._sessions:
+                return False
+            self._drop_sessions_locked([normalized])
+            return True
+
     async def get_messages(self, session_id: str) -> list[dict[str, str]]:
         async with self._lock:
             state = self._sessions.get(session_id)

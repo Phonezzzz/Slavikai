@@ -730,6 +730,57 @@ def test_ui_sessions_api_create_send_get_history() -> None:
     asyncio.run(run())
 
 
+def test_ui_sessions_api_delete_chat() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            created = create_payload.get("session")
+            assert isinstance(created, dict)
+            session_id = created.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Delete me"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+
+            delete_resp = await client.delete(f"/ui/api/sessions/{session_id}")
+            assert delete_resp.status == 200
+            delete_payload = await delete_resp.json()
+            assert delete_payload.get("session_id") == session_id
+            assert delete_payload.get("deleted") is True
+
+            get_resp = await client.get(f"/ui/api/sessions/{session_id}")
+            assert get_resp.status == 404
+            get_payload = await get_resp.json()
+            error = get_payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "session_not_found"
+
+            list_resp = await client.get("/ui/api/sessions")
+            assert list_resp.status == 200
+            list_payload = await list_resp.json()
+            sessions = list_payload.get("sessions")
+            assert isinstance(sessions, list)
+            assert all(
+                item.get("session_id") != session_id for item in sessions if isinstance(item, dict)
+            )
+
+            delete_missing_resp = await client.delete(f"/ui/api/sessions/{session_id}")
+            assert delete_missing_resp.status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_sessions_persist_after_restart(tmp_path) -> None:
     async def run() -> None:
         db_path = tmp_path / "ui_sessions.db"
