@@ -25,7 +25,7 @@ type ProjectCommand = "find" | "index" | "github_import";
 type PendingRetryAction =
   | { kind: "chat"; content: string }
   | { kind: "project"; command: ProjectCommand; args: string };
-type SidePanelTab = "chat" | "debug";
+type WorkspaceTab = "output" | "code" | "diff" | "logs" | "analysis";
 
 const isMessage = (value: unknown): value is Message => {
   if (!value || typeof value !== "object") {
@@ -369,6 +369,53 @@ const toActivityLine = (event: UIEvent): string => {
   return event.type;
 };
 
+const extractCodeBlocks = (messages: Message[]): string[] => {
+  const blocks: string[] = [];
+  const pattern = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
+  for (const message of messages) {
+    if (message.role !== "assistant") {
+      continue;
+    }
+    const content = message.content;
+    let match = pattern.exec(content);
+    while (match) {
+      const lang = (match[1] || "").trim().toLowerCase();
+      const code = (match[2] || "").trim();
+      if (code && lang !== "diff") {
+        blocks.push(code);
+      }
+      match = pattern.exec(content);
+    }
+  }
+  return blocks;
+};
+
+const extractDiffBlocks = (messages: Message[]): string[] => {
+  const blocks: string[] = [];
+  const pattern = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
+  for (const message of messages) {
+    if (message.role !== "assistant") {
+      continue;
+    }
+    const content = message.content;
+    let match = pattern.exec(content);
+    while (match) {
+      const lang = (match[1] || "").trim().toLowerCase();
+      const code = (match[2] || "").trim();
+      if (!code) {
+        match = pattern.exec(content);
+        continue;
+      }
+      const hasDiffLines = /^(\+|-)[^\n]/m.test(code);
+      if (lang === "diff" || hasDiffLines) {
+        blocks.push(code);
+      }
+      match = pattern.exec(content);
+    }
+  }
+  return blocks;
+};
+
 const statusDotClass = (status: string): string => {
   if (status === "busy") {
     return "bg-amber-400";
@@ -462,7 +509,7 @@ export default function App() {
   const [pendingApproval, setPendingApproval] = useState<ApprovalRequestView | null>(null);
   const [approving, setApproving] = useState(false);
   const [pendingRetry, setPendingRetry] = useState<PendingRetryAction | null>(null);
-  const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>("chat");
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("output");
   const [lastTraceId, setLastTraceId] = useState<string | null>(null);
   const [traceEvents, setTraceEvents] = useState<unknown[]>([]);
   const [toolCalls, setToolCalls] = useState<unknown[]>([]);
@@ -908,7 +955,7 @@ export default function App() {
   }, [sessionId]);
 
   useEffect(() => {
-    if (sidePanelTab !== "debug" || !lastTraceId) {
+    if (workspaceTab !== "logs" || !lastTraceId) {
       return;
     }
     let active = true;
@@ -949,7 +996,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [sidePanelTab, lastTraceId]);
+  }, [workspaceTab, lastTraceId]);
 
   const handleSelectSession = async (nextSessionId: string) => {
     if (!nextSessionId || nextSessionId === sessionId) {
@@ -1263,6 +1310,8 @@ export default function App() {
     const found = providerModels.find((item) => item.provider === selectedProvider);
     return found?.models ?? [];
   }, [providerModels, selectedProvider]);
+  const codeBlocks = useMemo(() => extractCodeBlocks(messages), [messages]);
+  const diffBlocks = useMemo(() => extractDiffBlocks(messages), [messages]);
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
@@ -1406,33 +1455,71 @@ export default function App() {
               />
             </section>
 
-            <aside className="flex w-full flex-col gap-4 lg:w-[360px]">
-              <div className="flex items-center gap-2 rounded-full border border-neutral-800/80 bg-neutral-900/60 p-1">
-                <button
-                  type="button"
-                  onClick={() => setSidePanelTab("chat")}
-                  className={`flex-1 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition ${
-                    sidePanelTab === "chat"
-                      ? "bg-neutral-200 text-neutral-950"
-                      : "text-neutral-300 hover:bg-neutral-800/70"
-                  }`}
-                >
-                  Chat
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSidePanelTab("debug")}
-                  className={`flex-1 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition ${
-                    sidePanelTab === "debug"
-                      ? "bg-neutral-200 text-neutral-950"
-                      : "text-neutral-300 hover:bg-neutral-800/70"
-                  }`}
-                >
-                  Debug
-                </button>
+            <aside className="flex w-full flex-col gap-4 lg:w-[420px]">
+              <div className="rounded-2xl border border-neutral-800/80 bg-neutral-900/60 p-3">
+                <div className="text-[11px] uppercase tracking-[0.28em] text-neutral-500">
+                  Agent Workspace
+                </div>
+                <div className="mt-2 grid grid-cols-5 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceTab("output")}
+                    className={`rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide ${
+                      workspaceTab === "output"
+                        ? "bg-neutral-200 text-neutral-950"
+                        : "bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
+                    }`}
+                  >
+                    Output
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceTab("code")}
+                    className={`rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide ${
+                      workspaceTab === "code"
+                        ? "bg-neutral-200 text-neutral-950"
+                        : "bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
+                    }`}
+                  >
+                    Code
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceTab("diff")}
+                    className={`rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide ${
+                      workspaceTab === "diff"
+                        ? "bg-neutral-200 text-neutral-950"
+                        : "bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
+                    }`}
+                  >
+                    Diff
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceTab("logs")}
+                    className={`rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide ${
+                      workspaceTab === "logs"
+                        ? "bg-neutral-200 text-neutral-950"
+                        : "bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
+                    }`}
+                  >
+                    Logs
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceTab("analysis")}
+                    className={`rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide ${
+                      workspaceTab === "analysis"
+                        ? "bg-neutral-200 text-neutral-950"
+                        : "bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
+                    }`}
+                  >
+                    Analysis
+                  </button>
+                </div>
               </div>
 
-              {sidePanelTab === "chat" ? (
+              {workspaceTab === "output" ? (
                 <>
                   <ApprovalPanel
                     approval={pendingApproval}
@@ -1452,7 +1539,9 @@ export default function App() {
                     onProjectRun={handleProjectRun}
                   />
                 </>
-              ) : (
+              ) : null}
+
+              {workspaceTab === "logs" ? (
                 <DebugPanel
                   events={events}
                   traceId={lastTraceId}
@@ -1460,7 +1549,86 @@ export default function App() {
                   toolCalls={toolCalls}
                   loading={debugLoading}
                 />
-              )}
+              ) : null}
+
+              {workspaceTab === "code" ? (
+                <section className="flex flex-col gap-3 rounded-3xl border border-neutral-800/80 bg-neutral-900/60 p-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold text-neutral-100">Code</h2>
+                    <span className="text-xs text-neutral-500">{codeBlocks.length} blocks</span>
+                  </div>
+                  {codeBlocks.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-neutral-800/70 bg-neutral-950/40 px-4 py-6 text-sm text-neutral-400">
+                      No code snippets yet.
+                    </div>
+                  ) : (
+                    <div className="max-h-[52vh] space-y-3 overflow-y-auto">
+                      {codeBlocks.slice(-6).map((block, index) => (
+                        <pre
+                          key={`code-${index}`}
+                          className="overflow-x-auto rounded-2xl border border-neutral-800/80 bg-neutral-950/50 p-3 font-mono text-[11px] text-neutral-300"
+                        >
+                          {block}
+                        </pre>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              ) : null}
+
+              {workspaceTab === "diff" ? (
+                <section className="flex flex-col gap-3 rounded-3xl border border-neutral-800/80 bg-neutral-900/60 p-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold text-neutral-100">Diff</h2>
+                    <span className="text-xs text-neutral-500">{diffBlocks.length} blocks</span>
+                  </div>
+                  {diffBlocks.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-neutral-800/70 bg-neutral-950/40 px-4 py-6 text-sm text-neutral-400">
+                      No diff blocks yet.
+                    </div>
+                  ) : (
+                    <div className="max-h-[52vh] space-y-3 overflow-y-auto">
+                      {diffBlocks.slice(-6).map((block, index) => (
+                        <pre
+                          key={`diff-${index}`}
+                          className="overflow-x-auto rounded-2xl border border-neutral-800/80 bg-neutral-950/50 p-3 font-mono text-[11px] text-neutral-300"
+                        >
+                          {block}
+                        </pre>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              ) : null}
+
+              {workspaceTab === "analysis" ? (
+                <section className="flex flex-col gap-3 rounded-3xl border border-neutral-800/80 bg-neutral-900/60 p-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold text-neutral-100">Analysis</h2>
+                    <span className="text-xs text-neutral-500">{activity.length} events</span>
+                  </div>
+                  <div className="rounded-2xl border border-neutral-800/80 bg-neutral-950/40 p-3 text-sm text-neutral-300">
+                    <div className="text-xs uppercase tracking-[0.2em] text-neutral-500">Decision</div>
+                    <div className="mt-2 text-neutral-200">
+                      {decision ? decision.summary : "No active decision packet."}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-neutral-800/80 bg-neutral-950/40 p-3 text-sm text-neutral-300">
+                    <div className="text-xs uppercase tracking-[0.2em] text-neutral-500">
+                      Recent activity
+                    </div>
+                    {activity.length === 0 ? (
+                      <div className="mt-2 text-neutral-500">No SSE activity yet.</div>
+                    ) : (
+                      <div className="mt-2 max-h-48 space-y-1 overflow-y-auto font-mono text-[11px] text-neutral-400">
+                        {activity.slice(-20).map((line, index) => (
+                          <div key={`analysis-${index}`}>{line}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              ) : null}
             </aside>
           </div>
         </main>
