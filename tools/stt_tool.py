@@ -17,7 +17,8 @@ class SttTool:
 
     def handle(self, request: ToolRequest) -> ToolResult:
         file_path_raw = str(request.args.get("file_path") or "").strip()
-        language = str(request.args.get("language") or self.config.language)
+        language_raw = str(request.args.get("language") or self.config.language).strip()
+        language = language_raw or self.config.language
         if not file_path_raw:
             return ToolResult.failure("Не указан путь к аудио.")
 
@@ -29,10 +30,13 @@ class SttTool:
 
         api_key = self.config.resolve_api_key()
         if not api_key:
-            return ToolResult.failure("STT API key не задан (STT_API_KEY).")
+            return ToolResult.failure(
+                "STT API key не задан (OPENAI_API_KEY или settings.providers.openai.api_key)."
+            )
 
         files = {"file": file_path.open("rb")}
-        data = {"language": language}
+        data = {"model": self.config.model, "language": language, "response_format": "json"}
+        headers = {"Authorization": f"Bearer {api_key}"}
 
         try:
             result: HttpResult = self.http._request(
@@ -42,6 +46,7 @@ class SttTool:
                 as_bytes=False,
                 files=files,
                 data=data,
+                headers=headers,
                 timeout=self.config.timeout,
             )
         finally:

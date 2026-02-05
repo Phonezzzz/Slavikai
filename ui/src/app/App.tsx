@@ -407,6 +407,17 @@ export default function App() {
     }
   };
 
+  const handleSettingsSaved = async () => {
+    try {
+      await loadModels();
+      setStatusMessage('Settings saved.');
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Settings saved, but models refresh failed.';
+      setStatusMessage(message);
+    }
+  };
+
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-950 text-foreground">
       <Sidebar
@@ -446,7 +457,13 @@ export default function App() {
         onToggleCollapse={() => setWorkspaceCollapsed(!workspaceCollapsed)}
       />
 
-      <Settings isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <Settings
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={() => {
+          void handleSettingsSaved();
+        }}
+      />
     </div>
   );
 }

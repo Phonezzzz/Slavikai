@@ -39,6 +39,7 @@ from core.approval_policy import (
     ApprovalPrompt,
     ApprovalRequest,
 )
+from core.mwv.models import MWV_REPORT_PREFIX
 from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
@@ -83,8 +84,16 @@ logger = logging.getLogger("SlavikAI.HttpAPI")
 
 UI_SESSION_HEADER: Final[str] = "X-Slavik-Session"
 SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local"}
+API_KEY_SETTINGS_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local", "openai"}
+PROVIDER_API_KEY_ENV: Final[dict[str, str]] = {
+    "xai": "XAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "local": "LOCAL_LLM_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
 XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
 OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
+OPENAI_STT_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/transcriptions"
 MODEL_FETCH_TIMEOUT: Final[int] = 20
 UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index", "github_import"}
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parent.parent / ".run" / "ui_settings.json"
@@ -307,17 +316,17 @@ def _provider_models_endpoint(provider: str) -> str:
 
 def _provider_auth_headers(provider: str) -> tuple[dict[str, str], str | None]:
     if provider == "xai":
-        api_key = os.getenv("XAI_API_KEY", "").strip()
+        api_key = _resolve_provider_api_key("xai")
         if not api_key:
-            return {}, "Не задан XAI_API_KEY."
+            return {}, "Не задан XAI_API_KEY (env или UI settings)."
         return {"Authorization": f"Bearer {api_key}"}, None
     if provider == "openrouter":
-        api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        api_key = _resolve_provider_api_key("openrouter")
         if not api_key:
-            return {}, "Не задан OPENROUTER_API_KEY."
+            return {}, "Не задан OPENROUTER_API_KEY (env или UI settings)."
         return {"Authorization": f"Bearer {api_key}"}, None
     if provider == "local":
-        api_key = os.getenv("LOCAL_LLM_API_KEY", "").strip()
+        api_key = _resolve_provider_api_key("local")
         if not api_key:
             return {}, None
         return {"Authorization": f"Bearer {api_key}"}, None
@@ -711,6 +720,29 @@ def _normalize_json_value(value: object) -> JSONValue:
     return str(value)
 
 
+def _split_response_and_report(response_text: str) -> tuple[str, dict[str, JSONValue] | None]:
+    marker_index = response_text.rfind(MWV_REPORT_PREFIX)
+    if marker_index < 0:
+        return response_text, None
+
+    report_raw = response_text[marker_index + len(MWV_REPORT_PREFIX) :].strip()
+    if not report_raw:
+        return response_text, None
+
+    parsed_report = safe_json_loads(report_raw)
+    if not isinstance(parsed_report, dict):
+        return response_text, None
+
+    clean_text = response_text[:marker_index].rstrip()
+    normalized_report: dict[str, JSONValue] = {}
+    for key, value in parsed_report.items():
+        normalized_report[str(key)] = _normalize_json_value(value)
+
+    if not clean_text:
+        return response_text, normalized_report
+    return clean_text, normalized_report
+
+
 def _load_ui_settings_blob() -> dict[str, object]:
     if not UI_SETTINGS_PATH.exists():
         return {}
@@ -789,28 +821,135 @@ def _save_tools_state(state: dict[str, bool]) -> None:
     save_tools_config(ToolsConfig.from_dict(payload))
 
 
+def _load_provider_api_keys() -> dict[str, str]:
+    payload = _load_ui_settings_blob()
+    providers_raw = payload.get("providers")
+    if not isinstance(providers_raw, dict):
+        return {}
+    api_keys: dict[str, str] = {}
+    for provider in API_KEY_SETTINGS_PROVIDERS:
+        entry = providers_raw.get(provider)
+        key_raw: object | None = None
+        if isinstance(entry, dict):
+            key_raw = entry.get("api_key")
+        elif isinstance(entry, str):
+            key_raw = entry
+        if isinstance(key_raw, str):
+            normalized = key_raw.strip()
+            if normalized:
+                api_keys[provider] = normalized
+    return api_keys
+
+
+def _save_provider_api_keys(api_keys: dict[str, str]) -> None:
+    payload = _load_ui_settings_blob()
+    providers_payload: dict[str, object] = {}
+    for provider in sorted(API_KEY_SETTINGS_PROVIDERS):
+        key_raw = api_keys.get(provider)
+        if not isinstance(key_raw, str):
+            continue
+        normalized = key_raw.strip()
+        if normalized:
+            providers_payload[provider] = {"api_key": normalized}
+    if providers_payload:
+        payload["providers"] = providers_payload
+    else:
+        payload.pop("providers", None)
+    _save_ui_settings_blob(payload)
+
+
+def _load_provider_env_api_key(provider: str) -> str | None:
+    env_name = PROVIDER_API_KEY_ENV.get(provider)
+    if env_name is None:
+        return None
+    key_raw = os.getenv(env_name, "")
+    normalized = key_raw.strip()
+    return normalized or None
+
+
+def _resolve_provider_api_key(
+    provider: str,
+    *,
+    settings_api_keys: dict[str, str] | None = None,
+) -> str | None:
+    saved = settings_api_keys if settings_api_keys is not None else _load_provider_api_keys()
+    from_settings = saved.get(provider, "").strip()
+    if from_settings:
+        return from_settings
+    return _load_provider_env_api_key(provider)
+
+
+def _provider_api_key_source(
+    provider: str,
+    *,
+    settings_api_keys: dict[str, str] | None = None,
+) -> Literal["settings", "env", "missing"]:
+    saved = settings_api_keys if settings_api_keys is not None else _load_provider_api_keys()
+    from_settings = saved.get(provider, "").strip()
+    if from_settings:
+        return "settings"
+    if _load_provider_env_api_key(provider) is not None:
+        return "env"
+    return "missing"
+
+
 def _provider_settings_payload() -> list[dict[str, JSONValue]]:
     local_endpoint = (
         os.getenv("LOCAL_LLM_URL", DEFAULT_LOCAL_ENDPOINT).strip() or DEFAULT_LOCAL_ENDPOINT
     )
+    saved_api_keys = _load_provider_api_keys()
+    xai_saved_key = saved_api_keys.get("xai", "").strip()
+    openrouter_saved_key = saved_api_keys.get("openrouter", "").strip()
+    local_saved_key = saved_api_keys.get("local", "").strip()
+    openai_saved_key = saved_api_keys.get("openai", "").strip()
     return [
         {
             "provider": "xai",
             "api_key_env": "XAI_API_KEY",
-            "api_key_set": bool(os.getenv("XAI_API_KEY", "").strip()),
+            "api_key_set": _resolve_provider_api_key("xai", settings_api_keys=saved_api_keys)
+            is not None,
+            "api_key_source": _provider_api_key_source("xai", settings_api_keys=saved_api_keys),
+            "api_key_value": xai_saved_key or None,
             "endpoint": XAI_MODELS_ENDPOINT,
         },
         {
             "provider": "openrouter",
             "api_key_env": "OPENROUTER_API_KEY",
-            "api_key_set": bool(os.getenv("OPENROUTER_API_KEY", "").strip()),
+            "api_key_set": _resolve_provider_api_key(
+                "openrouter",
+                settings_api_keys=saved_api_keys,
+            )
+            is not None,
+            "api_key_source": _provider_api_key_source(
+                "openrouter",
+                settings_api_keys=saved_api_keys,
+            ),
+            "api_key_value": openrouter_saved_key or None,
             "endpoint": OPENROUTER_MODELS_ENDPOINT,
         },
         {
             "provider": "local",
             "api_key_env": "LOCAL_LLM_API_KEY",
-            "api_key_set": bool(os.getenv("LOCAL_LLM_API_KEY", "").strip()),
+            "api_key_set": _resolve_provider_api_key("local", settings_api_keys=saved_api_keys)
+            is not None,
+            "api_key_source": _provider_api_key_source(
+                "local",
+                settings_api_keys=saved_api_keys,
+            ),
+            "api_key_value": local_saved_key or None,
             "endpoint": local_endpoint,
+        },
+        {
+            "provider": "openai",
+            "api_key_env": "OPENAI_API_KEY",
+            "api_key_set": _resolve_provider_api_key("openai", settings_api_keys=saved_api_keys)
+            is not None,
+            "api_key_source": _provider_api_key_source(
+                "openai",
+                settings_api_keys=saved_api_keys,
+            ),
+            "api_key_value": openai_saved_key or None,
+            "endpoint": OPENAI_STT_ENDPOINT,
         },
     ]
 
@@ -1304,6 +1443,56 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             next_state[key] = raw_value
         _save_tools_state(next_state)
 
+    providers_raw = payload.get("providers")
+    if providers_raw is not None:
+        if not isinstance(providers_raw, dict):
+            return _error_response(
+                status=400,
+                message="providers должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        next_api_keys = _load_provider_api_keys()
+        for provider, provider_payload in providers_raw.items():
+            if provider not in API_KEY_SETTINGS_PROVIDERS:
+                return _error_response(
+                    status=400,
+                    message=f"Неизвестный provider: {provider}",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if provider_payload is None:
+                next_api_keys.pop(provider, None)
+                continue
+            api_key_raw: object | None = None
+            if isinstance(provider_payload, dict):
+                api_key_raw = provider_payload.get("api_key")
+            elif isinstance(provider_payload, str):
+                api_key_raw = provider_payload
+            else:
+                return _error_response(
+                    status=400,
+                    message=f"providers.{provider} должен быть объектом или строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if api_key_raw is None:
+                next_api_keys.pop(provider, None)
+                continue
+            if not isinstance(api_key_raw, str):
+                return _error_response(
+                    status=400,
+                    message=f"providers.{provider}.api_key должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            normalized_key = api_key_raw.strip()
+            if normalized_key:
+                next_api_keys[provider] = normalized_key
+            else:
+                next_api_keys.pop(provider, None)
+        _save_provider_api_keys(next_api_keys)
+
     return _json_response(_build_settings_payload())
 
 
@@ -1617,13 +1806,15 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             detail="chat",
         )
 
+        mwv_report: dict[str, JSONValue] | None = None
         async with agent_lock:
             try:
                 model_config = _build_model_config(
                     selected_model["provider"],
                     selected_model["model"],
                 )
-                agent.reconfigure_models(model_config, persist=False)
+                api_key = _resolve_provider_api_key(selected_model["provider"])
+                agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
             except Exception as exc:  # noqa: BLE001
                 return _error_response(
                     status=400,
@@ -1649,7 +1840,8 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 phase="agent.respond.start",
                 detail="chat",
             )
-            response_text = agent.respond(llm_messages)
+            response_raw = agent.respond(llm_messages)
+            response_text, mwv_report = _split_response_and_report(response_raw)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -1675,6 +1867,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 "selected_model": current_model,
                 "trace_id": trace_id,
                 "approval_request": approval_request,
+                "mwv_report": mwv_report,
             },
         )
         response.headers[UI_SESSION_HEADER] = session_id
@@ -1899,13 +2092,15 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
 
         llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
 
+        mwv_report: dict[str, JSONValue] | None = None
         async with agent_lock:
             try:
                 model_config = _build_model_config(
                     selected_model["provider"],
                     selected_model["model"],
                 )
-                agent.reconfigure_models(model_config, persist=False)
+                api_key = _resolve_provider_api_key(selected_model["provider"])
+                agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
             except Exception as exc:  # noqa: BLE001
                 return _error_response(
                     status=400,
@@ -1931,7 +2126,8 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 phase="agent.respond.start",
                 detail="project",
             )
-            response_text = agent.respond(llm_messages)
+            response_raw = agent.respond(llm_messages)
+            response_text, mwv_report = _split_response_and_report(response_raw)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -1955,6 +2151,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 "selected_model": current_model,
                 "trace_id": trace_id,
                 "approval_request": approval_request,
+                "mwv_report": mwv_report,
             },
         )
         response.headers[UI_SESSION_HEADER] = session_id
@@ -2091,9 +2288,11 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         )
 
     trace_id: str | None = None
+    mwv_report: dict[str, JSONValue] | None = None
     try:
         async with agent_lock:
-            response_text = agent.respond(parsed.messages)
+            response_raw = agent.respond(parsed.messages)
+            response_text, mwv_report = _split_response_and_report(response_raw)
             trace_id = agent.last_chat_interaction_id
     except Exception as exc:  # noqa: BLE001
         return _error_response(
@@ -2152,6 +2351,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         "session_approved": session_approved,
         "safe_mode": safe_mode,
     }
+    if mwv_report is not None:
+        slavik_meta["mwv_report"] = mwv_report
 
     response_payload: dict[str, JSONValue] = {
         "id": f"chatcmpl-{uuid.uuid4().hex}",

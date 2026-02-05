@@ -38,6 +38,20 @@ class DummyAgent:
         del main_config, main_api_key, persist
 
 
+class CaptureConfigAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_provider: str | None = None
+        self.last_model: str | None = None
+        self.last_api_key: str | None = None
+
+    def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
+        del persist
+        self.last_provider = getattr(main_config, "provider", None)
+        self.last_model = getattr(main_config, "model", None)
+        self.last_api_key = main_api_key
+
+
 class ProjectCommandAgent(DummyAgent):
     def respond(self, messages) -> str:
         if not messages:
@@ -47,6 +61,14 @@ class ProjectCommandAgent(DummyAgent):
         if isinstance(content, str) and content.startswith("/project "):
             return f"Командный режим (без MWV)\n{content}"
         return "ok"
+
+
+class UIReportAgent(DummyAgent):
+    def respond(self, messages) -> str:
+        del messages
+        return (
+            'ok\nMWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
+        )
 
 
 class DecisionEchoAgent:
@@ -297,6 +319,41 @@ def test_ui_chat_send_endpoint() -> None:
             assert isinstance(selected, dict)
             assert selected.get("provider") == "local"
             assert selected.get("model") == selected_model
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_strips_mwv_report_block() -> None:
+    async def run() -> None:
+        client = await _create_client(UIReportAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Ping"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            report = payload.get("mwv_report")
+            assert isinstance(report, dict)
+            assert report.get("route") == "chat"
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            content = last.get("content")
+            assert isinstance(content, str)
+            assert content == "ok"
+            assert "MWV_REPORT_JSON=" not in content
         finally:
             await client.close()
 
@@ -901,7 +958,7 @@ def test_ui_settings_endpoint() -> None:
             providers = settings.get("providers")
             assert isinstance(providers, list)
             provider_names = {item.get("provider") for item in providers if isinstance(item, dict)}
-            assert provider_names == {"local", "openrouter", "xai"}
+            assert provider_names == {"local", "openrouter", "xai", "openai"}
         finally:
             await client.close()
 
@@ -954,6 +1011,11 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
                             "web": True,
                         },
                     },
+                    "providers": {
+                        "xai": {"api_key": "xai-test-key"},
+                        "openrouter": {"api_key": "or-test-key"},
+                        "openai": {"api_key": "openai-test-key"},
+                    },
                 },
             )
             assert response.status == 200
@@ -979,6 +1041,91 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert isinstance(state, dict)
             assert state.get("safe_mode") is False
             assert state.get("web") is True
+            providers = settings.get("providers")
+            assert isinstance(providers, list)
+            provider_by_name = {
+                item.get("provider"): item for item in providers if isinstance(item, dict)
+            }
+            xai_provider = provider_by_name.get("xai")
+            assert isinstance(xai_provider, dict)
+            assert xai_provider.get("api_key_set") is True
+            assert xai_provider.get("api_key_source") == "settings"
+            assert xai_provider.get("api_key_value") == "xai-test-key"
+            openrouter_provider = provider_by_name.get("openrouter")
+            assert isinstance(openrouter_provider, dict)
+            assert openrouter_provider.get("api_key_set") is True
+            assert openrouter_provider.get("api_key_source") == "settings"
+            assert openrouter_provider.get("api_key_value") == "or-test-key"
+
+            saved_payload = json.loads(ui_settings_path.read_text(encoding="utf-8"))
+            assert isinstance(saved_payload, dict)
+            providers_blob = saved_payload.get("providers")
+            assert isinstance(providers_blob, dict)
+            xai_saved = providers_blob.get("xai")
+            assert isinstance(xai_saved, dict)
+            assert xai_saved.get("api_key") == "xai-test-key"
+            openrouter_saved = providers_blob.get("openrouter")
+            assert isinstance(openrouter_saved, dict)
+            assert openrouter_saved.get("api_key") == "or-test-key"
+            openai_provider = provider_by_name.get("openai")
+            assert isinstance(openai_provider, dict)
+            assert openai_provider.get("api_key_set") is True
+            assert openai_provider.get("api_key_source") == "settings"
+            assert openai_provider.get("api_key_value") == "openai-test-key"
+            openai_saved = providers_blob.get("openai")
+            assert isinstance(openai_saved, dict)
+            assert openai_saved.get("api_key") == "openai-test-key"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_uses_api_key_from_settings(monkeypatch, tmp_path) -> None:
+    ui_settings_path = tmp_path / "ui_settings.json"
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["grok-4x"], None)
+        if provider == "openrouter"
+        else (["local-default"], None),
+    )
+
+    async def run() -> None:
+        agent = CaptureConfigAgent()
+        client = await _create_client(agent)
+        try:
+            settings_resp = await client.post(
+                "/ui/api/settings",
+                json={"providers": {"openrouter": {"api_key": "or-ui-test-key"}}},
+            )
+            assert settings_resp.status == 200
+
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_payload = create_payload.get("session")
+            assert isinstance(session_payload, dict)
+            session_id = session_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+
+            select_resp = await client.post(
+                "/ui/api/session-model",
+                headers={"X-Slavik-Session": session_id},
+                json={"provider": "openrouter", "model": "grok-4x"},
+            )
+            assert select_resp.status == 200
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "ping"},
+            )
+            assert send_resp.status == 200
+            assert agent.last_provider == "openrouter"
+            assert agent.last_model == "grok-4x"
+            assert agent.last_api_key == "or-ui-test-key"
         finally:
             await client.close()
 
