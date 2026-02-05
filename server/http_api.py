@@ -2434,6 +2434,7 @@ def create_app(
     app.router.add_get("/slavik/tool-calls/{trace_id}", handle_tool_calls)
     app.router.add_post("/slavik/feedback", handle_feedback)
     app.router.add_post("/slavik/approve-session", handle_approve_session)
+    app.router.add_get("/", handle_ui_index)
     app.router.add_get("/ui", handle_ui_redirect)
     app.router.add_get("/ui/", handle_ui_index)
     app.router.add_get("/ui/api/status", handle_ui_status)
