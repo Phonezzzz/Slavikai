@@ -24,6 +24,7 @@ SessionStatus = Literal["ok", "busy", "error"]
 
 class SessionListItem(TypedDict):
     session_id: str
+    title: str
     created_at: str
     updated_at: str
     message_count: int
@@ -31,6 +32,7 @@ class SessionListItem(TypedDict):
 
 class _SessionListSortableItem(TypedDict):
     session_id: str
+    title: str
     created_at: str
     updated_at: datetime
     message_count: int
@@ -116,6 +118,7 @@ class UIHub:
                 items.append(
                     {
                         "session_id": session_id,
+                        "title": self._build_session_title(state.messages),
                         "created_at": state.created_at,
                         "updated_at": datetime.fromisoformat(state.updated_at),
                         "message_count": len(state.messages),
@@ -125,6 +128,7 @@ class UIHub:
             return [
                 {
                     "session_id": item["session_id"],
+                    "title": item["title"],
                     "created_at": item["created_at"],
                     "updated_at": item["updated_at"].isoformat(),
                     "message_count": item["message_count"],
@@ -501,3 +505,20 @@ class UIHub:
             return parsed.astimezone(timezone.utc)  # noqa: UP017
         except ValueError:
             return datetime.fromtimestamp(0, tz=timezone.utc)  # noqa: UP017
+
+    def _build_session_title(self, messages: list[dict[str, str]]) -> str:
+        for message in messages:
+            role = message.get("role", "")
+            if role != "user":
+                continue
+            raw_content = message.get("content", "").strip()
+            if not raw_content:
+                continue
+            first_line = raw_content.splitlines()[0].strip()
+            compact = " ".join(first_line.split())
+            if not compact:
+                continue
+            if len(compact) <= 48:
+                return compact
+            return f"{compact[:45].rstrip()}..."
+        return "New chat"

@@ -724,6 +724,7 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             )
             assert isinstance(selected, dict)
             assert selected.get("message_count") == len(messages)
+            assert selected.get("title") == "Ping"
         finally:
             await client.close()
 

@@ -4,7 +4,7 @@ import { ChatArea } from './components/ChatArea';
 import { Settings } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
 import { Workspace } from './components/Workspace';
-import type { ChatMessage, SessionSummary } from './types';
+import type { ChatMessage, ProviderModels, SelectedModel, SessionSummary } from './types';
 
 const SESSION_HEADER = 'X-Slavik-Session';
 
@@ -26,6 +26,40 @@ const parseMessages = (value: unknown): ChatMessage[] => {
   return value.filter(isChatMessage);
 };
 
+const parseSelectedModel = (value: unknown): SelectedModel | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as { provider?: unknown; model?: unknown };
+  if (typeof candidate.provider !== 'string' || typeof candidate.model !== 'string') {
+    return null;
+  }
+  return { provider: candidate.provider, model: candidate.model };
+};
+
+const parseProviderModels = (value: unknown): ProviderModels[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const providers: ProviderModels[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const candidate = item as { provider?: unknown; models?: unknown; error?: unknown };
+    if (typeof candidate.provider !== 'string' || !Array.isArray(candidate.models)) {
+      continue;
+    }
+    providers.push({
+      provider: candidate.provider,
+      models: candidate.models.filter((entry): entry is string => typeof entry === 'string'),
+      error:
+        typeof candidate.error === 'string' || candidate.error === null ? candidate.error : null,
+    });
+  }
+  return providers;
+};
+
 const parseSessions = (value: unknown): SessionSummary[] => {
   if (!Array.isArray(value)) {
     return [];
@@ -37,6 +71,7 @@ const parseSessions = (value: unknown): SessionSummary[] => {
     }
     const candidate = item as {
       session_id?: unknown;
+      title?: unknown;
       created_at?: unknown;
       updated_at?: unknown;
       message_count?: unknown;
@@ -49,8 +84,13 @@ const parseSessions = (value: unknown): SessionSummary[] => {
     ) {
       continue;
     }
+    const title =
+      typeof candidate.title === 'string' && candidate.title.trim()
+        ? candidate.title.trim()
+        : candidate.session_id.slice(0, 8);
     sessions.push({
       session_id: candidate.session_id,
+      title,
       created_at: candidate.created_at,
       updated_at: candidate.updated_at,
       message_count: candidate.message_count,
@@ -90,11 +130,17 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
 
 export default function App() {
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
+  const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [savingModel, setSavingModel] = useState(false);
   const [sending, setSending] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -111,6 +157,22 @@ export default function App() {
     return parsed;
   };
 
+  const loadModels = async (): Promise<ProviderModels[]> => {
+    setModelsLoading(true);
+    try {
+      const response = await fetch('/ui/api/models');
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to load models.'));
+      }
+      const parsed = parseProviderModels((payload as { providers?: unknown }).providers);
+      setProviderModels(parsed);
+      return parsed;
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
   const loadConversation = async (sessionId: string): Promise<void> => {
     const response = await fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
       headers: {
@@ -121,8 +183,9 @@ export default function App() {
     if (!response.ok) {
       throw new Error(extractErrorMessage(payload, 'Failed to load chat history.'));
     }
-    const session = (payload as { session?: { messages?: unknown } }).session;
+    const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
     setMessages(parseMessages(session?.messages));
+    setSelectedModel(parseSelectedModel(session?.selected_model));
   };
 
   const createConversation = async (): Promise<string | null> => {
@@ -136,8 +199,9 @@ export default function App() {
     const headerSession = response.headers.get(SESSION_HEADER);
     const payloadSession = extractSessionIdFromPayload(payload);
     const nextSession = (headerSession && headerSession.trim()) || payloadSession || null;
-    const messagesFromPayload = (payload as { session?: { messages?: unknown } }).session?.messages;
-    setMessages(parseMessages(messagesFromPayload));
+    const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
+    setMessages(parseMessages(session?.messages));
+    setSelectedModel(parseSelectedModel(session?.selected_model));
     return nextSession;
   };
 
@@ -155,7 +219,9 @@ export default function App() {
         const fromHeader = statusResp.headers.get(SESSION_HEADER);
         const fromPayload = extractSessionIdFromPayload(statusPayload);
         const statusSession = (fromHeader && fromHeader.trim()) || fromPayload || null;
+        setSelectedModel(parseSelectedModel((statusPayload as { selected_model?: unknown }).selected_model));
 
+        const modelsPromise = loadModels();
         const listedSessions = await loadSessions();
 
         let nextSession = statusSession;
@@ -171,6 +237,7 @@ export default function App() {
             setSelectedConversation(nextSession);
             await loadConversation(nextSession);
           }
+          await modelsPromise;
           setStatusMessage(null);
         }
       } catch (error) {
@@ -251,6 +318,7 @@ export default function App() {
           } else {
             setSelectedConversation(null);
             setMessages([]);
+            setSelectedModel(null);
           }
         }
       }
@@ -261,6 +329,37 @@ export default function App() {
       setStatusMessage(message);
     } finally {
       setDeletingSessionId(null);
+    }
+  };
+
+  const handleSetModel = async (provider: string, model: string): Promise<boolean> => {
+    if (!selectedConversation || savingModel) {
+      return false;
+    }
+    setSavingModel(true);
+    try {
+      const response = await fetch('/ui/api/session-model', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [SESSION_HEADER]: selectedConversation,
+        },
+        body: JSON.stringify({ provider, model }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to set model.'));
+      }
+      const parsed = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
+      setSelectedModel(parsed || { provider, model });
+      setStatusMessage(null);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to set model.';
+      setStatusMessage(message);
+      return false;
+    } finally {
+      setSavingModel(false);
     }
   };
 
@@ -285,12 +384,17 @@ export default function App() {
 
       const headerSession = response.headers.get(SESSION_HEADER);
       const payloadSession = extractSessionIdFromPayload(payload);
-      const nextSession = (headerSession && headerSession.trim()) || payloadSession || selectedConversation;
+      const nextSession =
+        (headerSession && headerSession.trim()) || payloadSession || selectedConversation;
       if (nextSession !== selectedConversation) {
         setSelectedConversation(nextSession);
       }
 
       setMessages(parseMessages((payload as { messages?: unknown }).messages));
+      const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
+      if (parsedModel) {
+        setSelectedModel(parsedModel);
+      }
       await loadSessions();
       setStatusMessage(null);
       return true;
@@ -329,7 +433,12 @@ export default function App() {
         messages={messages}
         sending={sending}
         statusMessage={statusMessage}
+        selectedModel={selectedModel}
+        providerModels={providerModels}
+        modelsLoading={modelsLoading}
+        savingModel={savingModel}
         onSend={handleSend}
+        onSetModel={handleSetModel}
       />
 
       <Workspace

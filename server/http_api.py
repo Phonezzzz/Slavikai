@@ -1481,6 +1481,7 @@ async def handle_ui_sessions_list(request: web.Request) -> web.Response:
     serialized_sessions: list[dict[str, JSONValue]] = [
         {
             "session_id": item["session_id"],
+            "title": item["title"],
             "created_at": item["created_at"],
             "updated_at": item["updated_at"],
             "message_count": item["message_count"],

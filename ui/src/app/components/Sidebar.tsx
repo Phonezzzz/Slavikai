@@ -101,9 +101,12 @@ export function Sidebar({
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
-                            <div className="truncate text-sm font-medium">{conv.session_id.slice(0, 8)}</div>
+                            <div className="truncate text-sm font-medium">{conv.title}</div>
                             <div className="truncate text-xs text-white/40">
                               {conv.message_count} messages
+                            </div>
+                            <div className="truncate text-xs text-white/35">
+                              {conv.session_id.slice(0, 8)}
                             </div>
                             <div className="mt-1 truncate text-xs text-white/30">
                               {formatUpdatedAt(conv.updated_at)}
