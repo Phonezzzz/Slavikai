@@ -7,9 +7,13 @@
 - Язык проекта: Python 3.12 (`pyproject.toml` → `tool.ruff.target-version = py312`, `tool.mypy.python_version = 3.12`).
 - Типизация: `mypy` в режиме `strict = true` (tests исключены через `exclude = [...]`).
 - Форматирование и линт: `ruff` (линт + формат) — конфиг в `pyproject.toml`.
-- TypeScript/JavaScript кода в репозитории нет. Правило “no any/as/optional-chaining без проверки” в этом проекте трактуется как:
+- UI-часть находится в `ui/` и содержит TypeScript/JavaScript (`*.ts`, `*.tsx`).
+- Для backend/Python части правило “no any/as/optional-chaining без проверки” трактуется как:
   - **запрещено** “расплывать” типы через `Any`/`cast()` в доменной логике;
   - **запрещено** использовать `Optional[...]` без явной проверки на `None` (или без безопасного значения по умолчанию).
+- Для UI/TypeScript части (в `ui/`) это правило трактуется так:
+  - **избегать** `any` и небезопасных `as` в прикладной логике;
+  - `?.` использовать только там, где `undefined/null` действительно допустимы и есть явная обработка/fallback.
 
 ## 2) Никаких “silent-fallback”
 
