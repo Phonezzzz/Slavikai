@@ -529,7 +529,25 @@ export default function App() {
     if (!trimmed || sending) {
       return;
     }
+    const rollbackOptimisticUserMessage = () => {
+      setMessages((prev) => {
+        let index = -1;
+        for (let currentIndex = prev.length - 1; currentIndex >= 0; currentIndex -= 1) {
+          const item = prev[currentIndex];
+          if (item.role === "user" && item.content === trimmed) {
+            index = currentIndex;
+            break;
+          }
+        }
+        if (index < 0) {
+          return prev;
+        }
+        return prev.filter((_, currentIndex) => currentIndex !== index);
+      });
+    };
     setSending(true);
+    setInput("");
+    setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
@@ -543,6 +561,8 @@ export default function App() {
         body: JSON.stringify({ content: trimmed }),
       });
       if (!resp.ok) {
+        rollbackOptimisticUserMessage();
+        setInput(trimmed);
         try {
           const errorPayload = (await resp.json()) as {
             error?: { code?: string; message?: string };
@@ -583,10 +603,11 @@ export default function App() {
       if (nextModel) {
         setSelectedModel(nextModel);
       }
-      setInput("");
       setStatusOk(true);
       void refreshSessions();
     } catch {
+      rollbackOptimisticUserMessage();
+      setInput(trimmed);
       appendSystemMessage("Сервис недоступен. Проверь сеть и повтори.");
       setStatusOk(false);
     } finally {

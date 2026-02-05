@@ -9,10 +9,29 @@ type MessageListProps = {
 
 export default function MessageList({ messages }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+  const NEAR_BOTTOM_PX = 72;
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) {
+      return;
+    }
+    const updateStickState = () => {
+      const distanceFromBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight;
+      stickToBottomRef.current = distanceFromBottom <= NEAR_BOTTOM_PX;
+    };
+    updateStickState();
+    container.addEventListener("scroll", updateStickState);
+    return () => {
+      container.removeEventListener("scroll", updateStickState);
+    };
+  }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !stickToBottomRef.current) {
       return;
     }
     requestAnimationFrame(() => {
