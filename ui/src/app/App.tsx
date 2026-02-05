@@ -141,13 +141,7 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (typeof window === 'undefined') {
-      return true;
-    }
-    const stored = window.localStorage.getItem('slavik.sidebar.collapsed');
-    return stored ? stored === 'true' : true;
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(() => {
     if (typeof window === 'undefined') {
       return true;
