@@ -2674,7 +2674,11 @@ def create_app(
     app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
     app.router.add_post("/ui/api/tools/project", handle_ui_project_command)
     app.router.add_get("/ui/api/events/stream", handle_ui_events_stream)
-    app.router.add_static("/ui/assets/", dist_path / "assets")
+    assets_path = dist_path / "assets"
+    if assets_path.exists():
+        app.router.add_static("/ui/assets/", assets_path)
+    else:
+        logger.warning("UI assets directory missing at %s; skipping static assets.", assets_path)
     return app
 
 
