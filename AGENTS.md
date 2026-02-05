@@ -30,7 +30,8 @@
 - `docs/CONTRIBUTING.md`
 - `docs/MWV_CANONICAL_FLOW.md`
 - `docs/RUNTIME_MWV_FLOW.md`
-- `docs/AGENT_MINIPROMPTS.md`
+- `docs/LIFECYCLE.md`
+- `docs/archive/README.md` (если нужен исторический контекст)
 
 ## Rules + Context Snapshot (формат)
 

@@ -1,35 +1,68 @@
-# Architecture — Slavik AI
+# Architecture — SlavikAI
 
-## Цель системы
-Локальный агент с пошаговым планированием и набором инструментов (файлы, shell, web, проектный индекс, workspace, TTS/STT, картинки) с трассировкой и памятью.
+## Цель
 
-## Слои и компоненты
-- **Core** (`core/*`): `Agent` маршрутизирует запросы, включает Safe Mode для инструментов, строит контекст (memory, feedback hints, prefs, vector search, workspace). `Planner` генерирует 2–8 шагов (LLM или эвристика). `Executor` выполняет шаги последовательно. `AutoAgent` — примитивный параллельный запуск подагентов без инструментов. `Tracer` пишет reasoning/шаги в `logs/trace.log`.
-- **LLM** (`llm/*`): `OpenRouterBrain`, `LocalHttpBrain`, фабрика `create_brain`, менеджер `BrainManager`. Конфиги — `config/model_config.json`.
-- **Tools Layer** (`tools/*`): регистрируются через `ToolRegistry`, лог вызовов `logs/tool_calls.log`, Safe Mode блокирует `web` и `shell`. Инструменты: filesystem (sandbox), shell (whitelist), web search/fetch (Serper + HTTP fetch), project index/search (VectorIndex), workspace (list/read/write/patch/run в sandbox/project), TTS/STT (HTTP), image analyze/generate (локально), http client (лимиты).
-- **Memory & Index** (`memory/*`): `MemoryManager` (SQLite, строгая валидация записей/prefs/facts), `FeedbackManager` (rating/severity/hint, авто-инжект major/fatal), `VectorIndex` (sentence-transformers, namespaces `code`/`docs`, лимиты per-namespace и total).
-- **Sandbox/Safety**: fs/shell/workspace ограничены `sandbox` (shell cwd `sandbox`, workspace `sandbox/project`). Safe Mode в реестре отключает `web` и `shell` (другие сетевые инструменты пока не блокируются). ProjectTool не привязан к sandbox (риск).
+SlavikAI — локальный/серверный агент с детерминированной маршрутизацией `chat`/`mwv`, инструментами в песочнице и журналированием всех ключевых действий.
 
-## Поток одного запроса
-1) Если сообщение — команда `/fs|/web|/sh|/plan|/auto|/project|/img...` → прямой вызов инструмента через ToolRegistry.
-2) Иначе: классификация сложности (`simple|complex`). Для complex — построение плана (LLM/эвристика), исполнение шагов через Executor+ToolGateway.
-3) Для простых ответов — Brain.generate с добавленным контекстом (memory, feedback hints, prefs, vector index, workspace file/selection). Результат сохраняется в память, трассируется.
+## Основные слои
 
-## Память и индекс
-- `MemoryManager`: таблица memory (id/kind/content/tags/meta/timestamp), методы save/search/get_recent/get_user_prefs/get_project_facts.
-- `VectorIndex`: SQLite + embeddings, namespaces `code`/`docs`, prune по max_records и max_total, cosine search.
-- `FeedbackManager`: рейтинг/серьёзность/hint, статистика, выборка bad/offtopic; major/fatal hints попадают в контекст.
+- **Core** (`core/*`)
+  - `core/agent.py` + mixin-модули `core/agent_routing.py`, `core/agent_mwv.py`, `core/agent_tools.py`.
+  - `Planner` (`core/planner.py`) строит план (LLM или эвристика).
+  - `Executor` (`core/executor.py`) исполняет шаги через `ToolGateway`.
+  - `Tracer` (`core/tracer.py`) пишет trace в `logs/trace.log`.
+- **MWV runtime** (`core/mwv/*`)
+  - `ManagerRuntime` -> `WorkerRuntime` -> `VerifierRuntime`.
+  - Успех только при `WorkStatus.SUCCESS` + `VerificationStatus.PASSED`.
+  - bounded retry с лимитом попыток (через `RunContext.max_retries`).
+- **LLM слой** (`llm/*`)
+  - Провайдеры: `xai`, `openrouter`, `local`.
+  - Фабрика: `llm/brain_factory.py`.
+- **Tools** (`tools/*`)
+  - Реестр: `tools/tool_registry.py`.
+  - Логи вызовов: `logs/tool_calls.log`.
+- **Storage/Memory** (`memory/*`)
+  - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
+  - Векторный индекс `VectorIndex` с lazy-load.
 
-## Workspace слой
-- Инструменты `workspace_list/read/write/patch/run` работают в `sandbox/project`, ограниченные расширения (.py/.md/.txt/.json/.toml/.yaml/.yml), лимит размера (2 MB), run только .py с таймаутом.
-- Контракт `workspace_patch`: только **single-file** unified hunk patch для одного `path` (обязателен `@@ ... @@`), multi-file diff и заголовки `diff --git` / `---` / `+++` блокируются.
+## Маршрутизация запроса
+
+1. `/...` команды -> **command lane** (без MWV), через `Agent.handle_tool_command`.
+2. Обычный текст -> `classify_request(...)` из `core/mwv/routing.py`:
+   - `chat`: прямой LLM-ответ с контекстом.
+   - `mwv`: Manager -> Worker -> Verifier.
+
+## Инструменты
+
+Зарегистрированы в `core/agent.py`:
+
+- `fs`, `web`, `shell`, `project`
+- `image_analyze`, `image_generate`
+- `tts`, `stt`
+- `workspace_list`, `workspace_read`, `workspace_write`, `workspace_patch`, `workspace_run`
+
+## Sandbox и безопасность
+
+- `filesystem`: внутри `sandbox/`.
+- `workspace_*` и `project`: внутри `sandbox/project/`.
+- `shell`: `sandbox_root` нормализуется относительно `sandbox/` и проверяется от escape.
+- Safe-mode block-list (`SAFE_MODE_TOOLS_OFF`):
+  - `web`, `web_search`, `shell`, `project`,
+  - `tts`, `stt`, `http_client`,
+  - `image_analyze`, `image_generate`,
+  - `workspace_run`.
+
+## HTTP/UI слой
+
+`server/http_api.py` поднимает OpenAI-совместимые и UI-endpoints:
+
+- `/v1/models`, `/v1/chat/completions`
+- `/slavik/trace/{trace_id}`, `/slavik/tool-calls/{trace_id}`
+- `/slavik/feedback`, `/slavik/approve-session`
+- `/ui/*` API (status, models, sessions, chat, project command, SSE events)
 
 ## Наблюдаемость
-- Trace: `logs/trace.log` — reasoning, шаги плана, ошибки.
-- Tool calls: `logs/tool_calls.log` — инструмент, ok/error, meta/args.
 
-## Ограничения и пробелы
-- Safe Mode покрывает только `web` и `shell`; TTS/STT/web-fetch/project index не блокируются.
-- ProjectTool работает по абсолютным путям (нет sandbox).
-- Планировщик/исполнитель выбирают инструменты по ключевым словам, без строгой схемы.
-- VectorIndex загружает sentence-transformers синхронно (потенциальная задержка).
+- Trace событий: `logs/trace.log`.
+- Tool-call журнал: `logs/tool_calls.log`.
+- Для UI-сессий: `.run/ui_sessions.db`.

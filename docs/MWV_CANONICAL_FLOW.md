@@ -1,59 +1,31 @@
-# MWV_CANONICAL_FLOW — канонический поток Manager → Worker → Verifier
+# MWV_CANONICAL_FLOW — канонический поток Manager -> Worker -> Verifier
 
-Документ фиксирует единственный допустимый runtime‑поток для MWV.
-LLM не используется как арбитр.
+Этот документ фиксирует фактический runtime-контур MWV.
 
-## 1) Маршрутизация (chat vs mwv)
+## Маршрутизация
 
-| Сценарий запроса | Route | Почему |
-| --- | --- | --- |
-| Объяснение/теория/консультация без инструментов | chat | Не требует изменений кода или действий инструментами |
-| Любые изменения кода/файлов/инструментов | mwv | Нужна проверка Verifier, иначе нет успеха |
-| Командный lane (fs/shell/git/etc.) | mwv | Инструменты = действия, нужна верификация |
+- `chat`: объяснение/консультация без явных действий.
+- `mwv`: задачи с кодом, файлами, инструментами, командами установки/системы.
+- `/...` команды: command lane, **вне MWV** (см. `docs/COMMAND_LANE_POLICY.md`).
 
-Источник правил: `core/mwv/routing.py` (deterministic, rule‑based).
+## Канонический цикл
 
-## 2) Канонический поток MWV
+1. `ManagerRuntime` строит `TaskPacket`.
+2. `WorkerRuntime` выполняет задачу через `Planner` + `Executor` + tools.
+3. `VerifierRuntime` запускает проверку (`scripts/check.sh`, с fallback-командами при отсутствии скрипта).
+4. Успех только если одновременно:
+   - `work_result.status == success`
+   - `verification_result.status == passed`
 
-```
-User Input
-  -> Routing (chat | mwv)
-     -> chat: LLM‑ответ, без planner/executor/MWV
-     -> mwv:
-          Manager -> TaskPacket
-          Worker  -> WorkResult (diff/steps/tools)
-          Verifier -> VerificationResult (scripts/check.sh)
-          if FAIL and retries left: Manager уточняет задачу -> Worker -> Verifier
-          if FAIL and no retries: STOP
-```
+## Retry (bounded)
 
-## 3) Verifier — единственный арбитр
+- Количество попыток определяется через `RunContext.max_retries`.
+- При verifier fail используется ограниченный retry с дополнительными constraints.
+- Остановка без retry при:
+  - verifier error,
+  - worker failure,
+  - исчерпании лимита.
 
-- Verifier детерминированный: выполняет `scripts/check.sh` (или зафиксированный эквивалент).
-- Успех = только зелёный Verifier.
-- Если Verifier FAIL → итог НЕ может быть “сделано”.
+## Stop-ответы
 
-## 4) Retry (bounded)
-
-- Максимум попыток: фиксированный лимит (см. `core/mwv/manager.py`).
-- Каждая попытка отражается в ответе (attempt X/Y).
-- Причина повторной попытки: только FAIL от Verifier.
-- После исчерпания лимита → STOP с отчётом.
-
-## 5) Остановка и блокировки
-
-MWV обязан остановиться, если:
-- Требуется approval (safe‑mode gate).
-- Verifier FAIL после лимита попыток.
-- Worker вернул FAILURE.
-
-## 6) Выходные данные (UX‑минимум)
-
-MWV‑ответ пользователю должен содержать:
-- Короткий итог (PASS/FAIL).
-- Статус Verifier.
-- Изменения (файлы + краткий summary).
-- Если FAIL — что делать дальше (1–3 пункта).
-- Детали (логи/шаги) — отдельным блоком, коротко.
-
-Chat‑ответы не включают MWV‑отчёт.
+Формат stop-ответов соответствует `docs/STOP_RESPONSES.md`.

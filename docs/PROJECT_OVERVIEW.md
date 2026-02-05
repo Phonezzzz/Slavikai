@@ -1,82 +1,50 @@
-# SlavikAI — обзор проекта
+# PROJECT_OVERVIEW — SlavikAI
 
-SlavikAI — Python‑агент с планированием и исполнением действий через инструменты в песочнице.
+SlavikAI — Python-агент с двумя основными режимами выполнения:
 
-## Назначение
+- `chat`: ответ без выполнения инструментов.
+- `mwv`: цикл Manager -> Worker -> Verifier для задач с изменениями.
 
-- Чат‑интерфейс + наблюдаемость (трейсы, логи вызовов инструментов).
-- LLM-ответы через абстракцию `Brain` (OpenRouter или локальный HTTP endpoint).
-- Пошаговые планы (`Planner`) и исполнение (`Executor`) через слой инструментов (`ToolRegistry`).
-- Память/фидбек (SQLite) и векторный поиск контекста по индексированным файлам.
-- Workspace-редактор в песочнице: list/read/write/patch/run.
-- Голос: TTS/STT (HTTP).
+## Что в проекте есть сейчас
 
-## Архитектура (по коду)
+- Поддержка моделей: `xai`, `openrouter`, `local`.
+- Командный режим (`/fs`, `/web`, `/sh`, `/project`, `/plan`, `/auto`, `/imggen`, `/imganalyze`, `/trace`) без MWV.
+- Workspace инструменты: `workspace_list/read/write/patch/run`.
+- Контракт `workspace_patch`: только single-file hunk patch для одного `path`.
+- Session-based выбор модели в UI.
+- Safe-mode и approvals.
 
-**Core**
-- `core/agent.py` — главный роутер: команды, планирование/исполнение, safe-mode, сбор контекста.
-- `core/planner.py` — классификация сложности и построение `TaskPlan` (LLM или эвристика).
-- `core/executor.py` — пошаговое выполнение плана.
-- `core/auto_agent.py` — параллельные мини-агенты (простая декомпозиция цели).
-- `core/tracer.py` — запись трейсов в `logs/trace.log`.
+## Ключевые модули
 
-**LLM**
-- `llm/openrouter_brain.py` — клиент OpenRouter.
-- `llm/local_http_brain.py` — клиент для локального OpenAI-compatible endpoint.
-- `llm/brain_factory.py`, `llm/brain_manager.py`, `llm/types.py` — сборка и типы.
+- `core/agent.py` + mixin-модули: orchestration, tool commands, MWV integration.
+- `core/planner.py`: построение плана.
+- `core/executor.py`: выполнение шагов плана.
+- `core/mwv/*`: Manager/Worker/Verifier runtime.
+- `server/http_api.py`: HTTP + UI API.
 
-**Tools**
-- `tools/tool_registry.py` — реестр, включение/выключение инструментов, safe-mode блок.
-- `tools/tool_logger.py` — лог вызовов инструментов в `logs/tool_calls.log`.
-- Реальные инструменты: `tools/filesystem_tool.py`, `tools/shell_tool.py`, `tools/web_search_tool.py`,
-  `tools/project_tool.py`, `tools/image_*`, `tools/tts_tool.py`, `tools/stt_tool.py`,
-  `tools/workspace_tools.py`.
+## Инструменты (факт)
 
-**Memory / Index / Feedback**
-- `memory/memory_manager.py` — SQLite память (`memory/memory.db`).
-- `memory/feedback_manager.py` — SQLite фидбек (`memory/feedback.db`).
-- `memory/vector_index.py` — SQLite векторный индекс (`memory/vectors.db`) + `sentence-transformers`.
+- Файлы: `fs`, `workspace_*`.
+- Команды: `shell`.
+- Сеть/поиск: `web`.
+- Проектный индекс: `project`.
+- Медиа: `image_analyze`, `image_generate`, `tts`, `stt`.
 
-## Pipeline одного запроса (Agent → Planner → Executor → Tools → Memory/Index → Workspace)
-1. Клиент отправляет текст в `Agent.respond(...)`.
-2. `core/agent.py`:
-   - если это команда (`/...`) — маршрутизирует в инструменты/режимы;
-   - иначе оценивает сложность (`Planner.classify_complexity`);
-   - “сложные” запросы: `Planner.build_plan(...)` → `Executor.run(...)` → `ToolRegistry.call(...)`;
-   - “простые” запросы: строит контекст (память/фидбек/векторный поиск/workspace) и вызывает `Brain.generate(...)`.
-3. Результаты исполнения шагов и вызовов инструментов пишутся в `logs/trace.log` и `logs/tool_calls.log`.
-4. Часть ответов/фидбека сохраняется в SQLite (`memory/*`).
+## Ограничения безопасности
 
-## TTS/STT
+- Sandbox для файловых/workspace/project операций.
+- Ограничения shell-команд (allowlist + проверка аргументов + sandbox root).
+- Safe-mode блокирует рискованные инструменты через `SAFE_MODE_TOOLS_OFF`.
 
-- `tools/tts_tool.py` генерирует аудио и пишет файл в `sandbox/audio/`.
-- `tools/stt_tool.py` читает файл из `sandbox/audio/` и отправляет на распознавание.
+## Проверки качества
 
-## Workspace (list/read/write/patch/run)
+Основной one-shot прогон:
 
-Workspace — это каталог `sandbox/project/`.
+- `make check`
 
-- `workspace_list` — показать дерево файлов.
-- `workspace_read` — прочитать файл (только разрешённые расширения, лимит размера).
-- `workspace_write` — записать файл (только разрешённые расширения).
-- `workspace_patch` — применить `unified diff` к одному файлу (строгая проверка, лимиты на размер/строки).
-- `workspace_run` — запустить `.py` через `sys.executable` (таймаут, cwd=`sandbox/`).
+Включает:
 
-Инструменты workspace вызываются через публичный API `agent.call_tool(...)` (см. `_call_tool`).
-
-## Ограничения (sandbox, safe-mode)
-
-- Большинство файловых операций инструментов ограничены песочницей `sandbox/` и/или `sandbox/project/`.
-- `shell` использует whitelist команд из `config/shell_config.json`, запрещает цепочки `&&/||/;`, абсолютные пути и `..`.
-- Safe mode (по умолчанию включён) отключает инструменты `web`, `shell`, `project`, `tts`, `stt` (см. `SAFE_MODE_TOOLS_OFF` в `core/agent.py`).
-
-## Структура репозитория
-
-- `config/` — конфиги моделей/tools/shell.
-- `core/` — Agent/Planner/Executor/Tracer.
-- `llm/` — клиенты LLM.
-- `tools/` — инструменты и реестр.
-- `memory/` — SQLite хранилища и векторный индекс.
-- `sandbox/` — песочница (workspace, аудио).
-- `tests/` — pytest тесты (настройки в `pyproject.toml`).
-- `scripts/` — скрипты качества.
+- `ruff check .`
+- `ruff format --check .`
+- `mypy .`
+- `pytest` c покрытием (порог >= 80%).
