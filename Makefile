@@ -17,6 +17,8 @@ APP_PID_FILE := $(RUN_DIR)/slavikai-ui.pid
 APP_LOG_FILE := $(RUN_DIR)/slavikai-ui.log
 UI_PID_FILE := $(RUN_DIR)/ui-server.pid
 UI_LOG_FILE := $(RUN_DIR)/ui-server.log
+PROD_HOST ?= 0.0.0.0
+PROD_PORT ?= 8000
 
 .PHONY: help
 help:
@@ -42,10 +44,12 @@ help:
 	@echo
 	@echo "Run:"
 	@echo "  make run             Run UI in foreground"
+	@echo "  make run-prod        Run server in foreground for production host/port"
 	@echo "  make up              Run UI in background (pid/log in .run/)"
 	@echo "  make down            Stop background UI started by make up"
 	@echo "  make status          Show background UI status"
 	@echo "  make logs            Tail background UI log"
+	@echo "  make deploy-example  Print production deployment command sequence"
 	@echo
 	@echo "UI:"
 	@echo "  make ui-install       Install UI dependencies"
@@ -180,6 +184,19 @@ ci: venv
 .PHONY: run
 run: venv
 	"$(VENV_PY)" -m server
+
+.PHONY: run-prod
+run-prod: venv
+	SLAVIK_HTTP_HOST="$(PROD_HOST)" SLAVIK_HTTP_PORT="$(PROD_PORT)" "$(VENV_PY)" -m server
+
+.PHONY: deploy-example
+deploy-example:
+	@echo "Production example:"
+	@echo "  make venv"
+	@echo "  make ui-build"
+	@echo "  export XAI_API_KEY=***"
+	@echo "  export SLAVIK_MODEL_WHITELIST='your-model-id'"
+	@echo "  make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000"
 
 .PHONY: ui-install
 ui-install:
