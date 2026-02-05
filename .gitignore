@@ -45,3 +45,5 @@ skills/_candidates/**
 
 # UI pilot
 ui/node_modules/
+node_modules/
+ui/dist/
