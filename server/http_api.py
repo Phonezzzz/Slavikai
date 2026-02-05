@@ -932,6 +932,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 )
             response_text = agent.respond(llm_messages)
             decision = _extract_decision_payload(response_text)
+            trace_id = getattr(agent, "last_chat_interaction_id", None)
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
             )
@@ -947,6 +948,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 "messages": messages,
                 "decision": current_decision,
                 "selected_model": current_model,
+                "trace_id": trace_id,
                 "approval_request": approval_request,
             },
         )
@@ -1051,6 +1053,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     },
                 )
             response_text = agent.respond(llm_messages)
+            trace_id = getattr(agent, "last_chat_interaction_id", None)
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
             )
@@ -1065,6 +1068,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 "messages": messages,
                 "decision": current_decision,
                 "selected_model": current_model,
+                "trace_id": trace_id,
                 "approval_request": approval_request,
             },
         )

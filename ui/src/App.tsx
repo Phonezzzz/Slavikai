@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import ChatView from "./components/ChatView";
 import DecisionPanel from "./components/DecisionPanel";
 import ApprovalPanel from "./components/ApprovalPanel";
+import DebugPanel from "./components/DebugPanel";
 import type {
   ApprovalRequestView,
   DecisionOptionView,
@@ -22,6 +23,7 @@ type ProjectCommand = "find" | "index";
 type PendingRetryAction =
   | { kind: "chat"; content: string }
   | { kind: "project"; command: ProjectCommand; args: string };
+type SidePanelTab = "chat" | "debug";
 
 const isMessage = (value: unknown): value is Message => {
   if (!value || typeof value !== "object") {
@@ -226,15 +228,6 @@ const parseApprovalRequest = (value: unknown): ApprovalRequestView | null => {
   };
 };
 
-const toEventPreview = (payload: unknown): string => {
-  try {
-    const raw = JSON.stringify(payload ?? {}, null, 0);
-    return raw.length > 160 ? `${raw.slice(0, 160)}...` : raw;
-  } catch {
-    return "{unserializable}";
-  }
-};
-
 const formatSessionUpdatedAt = (updatedAt: string): string => {
   const parsed = Date.parse(updatedAt);
   if (Number.isNaN(parsed)) {
@@ -335,6 +328,11 @@ export default function App() {
   const [pendingApproval, setPendingApproval] = useState<ApprovalRequestView | null>(null);
   const [approving, setApproving] = useState(false);
   const [pendingRetry, setPendingRetry] = useState<PendingRetryAction | null>(null);
+  const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>("chat");
+  const [lastTraceId, setLastTraceId] = useState<string | null>(null);
+  const [traceEvents, setTraceEvents] = useState<unknown[]>([]);
+  const [toolCalls, setToolCalls] = useState<unknown[]>([]);
+  const [debugLoading, setDebugLoading] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<string>("");
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [savingModel, setSavingModel] = useState(false);
@@ -584,6 +582,50 @@ export default function App() {
     };
   }, [sessionId]);
 
+  useEffect(() => {
+    if (sidePanelTab !== "debug" || !lastTraceId) {
+      return;
+    }
+    let active = true;
+    const loadDebugData = async () => {
+      setDebugLoading(true);
+      try {
+        const [traceResponse, toolCallsResponse] = await Promise.all([
+          fetch(`/slavik/trace/${encodeURIComponent(lastTraceId)}`),
+          fetch(`/slavik/tool-calls/${encodeURIComponent(lastTraceId)}`),
+        ]);
+        if (!active) {
+          return;
+        }
+        if (traceResponse.ok) {
+          const tracePayload = (await traceResponse.json()) as { events?: unknown };
+          setTraceEvents(Array.isArray(tracePayload.events) ? tracePayload.events : []);
+        } else {
+          setTraceEvents([]);
+        }
+        if (toolCallsResponse.ok) {
+          const toolCallsPayload = (await toolCallsResponse.json()) as { tool_calls?: unknown };
+          setToolCalls(Array.isArray(toolCallsPayload.tool_calls) ? toolCallsPayload.tool_calls : []);
+        } else {
+          setToolCalls([]);
+        }
+      } catch {
+        if (active) {
+          setTraceEvents([]);
+          setToolCalls([]);
+        }
+      } finally {
+        if (active) {
+          setDebugLoading(false);
+        }
+      }
+    };
+    void loadDebugData();
+    return () => {
+      active = false;
+    };
+  }, [sidePanelTab, lastTraceId]);
+
   const handleSelectSession = async (nextSessionId: string) => {
     if (!nextSessionId || nextSessionId === sessionId) {
       return;
@@ -592,6 +634,9 @@ export default function App() {
     setEvents([]);
     setPendingApproval(null);
     setPendingRetry(null);
+    setLastTraceId(null);
+    setTraceEvents([]);
+    setToolCalls([]);
     await hydrateSession(nextSessionId);
     setStatusOk(true);
   };
@@ -658,6 +703,7 @@ export default function App() {
         messages?: unknown;
         decision?: unknown;
         selected_model?: unknown;
+        trace_id?: unknown;
         approval_request?: unknown;
       };
       const headerSession = resp.headers.get("X-Slavik-Session");
@@ -676,6 +722,9 @@ export default function App() {
       const nextModel = parseSelectedModel(payload.selected_model);
       if (nextModel) {
         setSelectedModel(nextModel);
+      }
+      if (typeof payload.trace_id === "string" && payload.trace_id.trim()) {
+        setLastTraceId(payload.trace_id);
       }
       const nextApproval = parseApprovalRequest(payload.approval_request);
       setPendingApproval(nextApproval);
@@ -748,6 +797,9 @@ export default function App() {
       setDecision(null);
       setPendingApproval(null);
       setPendingRetry(null);
+      setLastTraceId(null);
+      setTraceEvents([]);
+      setToolCalls([]);
       setStatusOk(true);
       void refreshSessions();
     } catch {
@@ -792,6 +844,7 @@ export default function App() {
         messages?: unknown;
         decision?: unknown;
         selected_model?: unknown;
+        trace_id?: unknown;
         approval_request?: unknown;
       };
       const headerSession = resp.headers.get("X-Slavik-Session");
@@ -810,6 +863,9 @@ export default function App() {
       const nextModel = parseSelectedModel(payload.selected_model);
       if (nextModel) {
         setSelectedModel(nextModel);
+      }
+      if (typeof payload.trace_id === "string" && payload.trace_id.trim()) {
+        setLastTraceId(payload.trace_id);
       }
       const nextApproval = parseApprovalRequest(payload.approval_request);
       setPendingApproval(nextApproval);
@@ -1020,51 +1076,60 @@ export default function App() {
             </section>
 
             <aside className="flex w-full flex-col gap-4 lg:w-[360px]">
-              <ApprovalPanel
-                approval={pendingApproval}
-                approving={approving}
-                onApproveRetry={() => {
-                  void handleApproveRetry();
-                }}
-                onDismiss={handleApprovalDismiss}
-              />
-
-              <DecisionPanel
-                decision={decision}
-                projectCommand={projectCommand}
-                projectArgs={projectArgs}
-                projectBusy={projectBusy}
-                onProjectCommandChange={setProjectCommand}
-                onProjectArgsChange={setProjectArgs}
-                onProjectRun={handleProjectRun}
-              />
-
-              <div className="flex flex-1 flex-col gap-4 rounded-3xl border border-neutral-800/80 bg-neutral-900/60 p-4">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-lg font-semibold text-neutral-100">Event log</h2>
-                  <span className="text-xs text-neutral-500">{events.length} items</span>
-                </div>
-                <div className="flex min-h-[30vh] flex-1 flex-col gap-3 overflow-y-auto rounded-3xl border border-neutral-800/80 bg-neutral-950/40 p-3 font-mono text-xs">
-                  {events.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-neutral-800/70 bg-neutral-900/60 px-4 py-6 text-neutral-400">
-                      Awaiting SSE events.
-                    </div>
-                  ) : (
-                    events.map((evt) => (
-                      <div
-                        key={evt.id}
-                        className="rounded-2xl border border-neutral-800/80 bg-neutral-900/80 px-3 py-2"
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-semibold text-neutral-200">{evt.type}</span>
-                          <span className="text-[10px] text-neutral-500">{evt.ts}</span>
-                        </div>
-                        <div className="mt-1 text-neutral-400">{toEventPreview(evt.payload)}</div>
-                      </div>
-                    ))
-                  )}
-                </div>
+              <div className="flex items-center gap-2 rounded-full border border-neutral-800/80 bg-neutral-900/60 p-1">
+                <button
+                  type="button"
+                  onClick={() => setSidePanelTab("chat")}
+                  className={`flex-1 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition ${
+                    sidePanelTab === "chat"
+                      ? "bg-neutral-200 text-neutral-950"
+                      : "text-neutral-300 hover:bg-neutral-800/70"
+                  }`}
+                >
+                  Chat
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSidePanelTab("debug")}
+                  className={`flex-1 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition ${
+                    sidePanelTab === "debug"
+                      ? "bg-neutral-200 text-neutral-950"
+                      : "text-neutral-300 hover:bg-neutral-800/70"
+                  }`}
+                >
+                  Debug
+                </button>
               </div>
+
+              {sidePanelTab === "chat" ? (
+                <>
+                  <ApprovalPanel
+                    approval={pendingApproval}
+                    approving={approving}
+                    onApproveRetry={() => {
+                      void handleApproveRetry();
+                    }}
+                    onDismiss={handleApprovalDismiss}
+                  />
+                  <DecisionPanel
+                    decision={decision}
+                    projectCommand={projectCommand}
+                    projectArgs={projectArgs}
+                    projectBusy={projectBusy}
+                    onProjectCommandChange={setProjectCommand}
+                    onProjectArgsChange={setProjectArgs}
+                    onProjectRun={handleProjectRun}
+                  />
+                </>
+              ) : (
+                <DebugPanel
+                  events={events}
+                  traceId={lastTraceId}
+                  traceEvents={traceEvents}
+                  toolCalls={toolCalls}
+                  loading={debugLoading}
+                />
+              )}
             </aside>
           </div>
         </main>
