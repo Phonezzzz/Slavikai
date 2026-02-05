@@ -451,7 +451,7 @@ export function ChatArea({
         </div>
       </div>
 
-      <div className="relative z-10 border-t border-zinc-800 bg-zinc-950/85 p-6 backdrop-blur-xl">
+      <div className="relative z-10 bg-zinc-950/85 p-6 backdrop-blur-xl">
         <div className="mx-auto max-w-3xl">
           <div className="mb-2 flex items-center justify-between gap-3">
             <button

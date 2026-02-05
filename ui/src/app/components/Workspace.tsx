@@ -60,7 +60,7 @@ export function Workspace({ collapsed, onToggleCollapse }: WorkspaceProps) {
       initial={false}
       animate={{ width: collapsed ? '0px' : '480px' }}
       transition={{ duration: 0.3, ease: 'easeInOut' }}
-      className="relative border-l border-white/10 bg-zinc-900/50 backdrop-blur-xl"
+      className="relative bg-zinc-900/50 backdrop-blur-xl"
     >
       <AnimatePresence>
         {!collapsed && (
@@ -72,7 +72,7 @@ export function Workspace({ collapsed, onToggleCollapse }: WorkspaceProps) {
             className="flex flex-col h-full w-[480px]"
           >
             {/* Header */}
-            <div className="p-4 border-b border-white/10">
+            <div className="p-4">
               <h2 className="text-sm font-medium text-white/50 mb-3">WORKSPACE</h2>
               <div className="flex gap-1 bg-black/40 rounded-lg p-1">
                 <button

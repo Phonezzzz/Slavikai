@@ -48,7 +48,7 @@ export function Sidebar({
       initial={false}
       animate={{ width: collapsed ? '0px' : '300px' }}
       transition={{ duration: 0.3, ease: 'easeInOut' }}
-      className="relative border-r border-white/5 bg-zinc-900/50 backdrop-blur-xl"
+      className="relative bg-zinc-900/50 backdrop-blur-xl"
     >
       <AnimatePresence>
         {!collapsed && (
@@ -59,7 +59,7 @@ export function Sidebar({
             transition={{ duration: 0.2 }}
             className="flex h-full w-[300px] flex-col"
           >
-            <div className="border-b border-white/5 p-4">
+            <div className="p-4">
               <div className="mb-4 flex items-center gap-2">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/20 bg-white/10">
                   <Sparkles className="h-5 w-5 text-white" />
@@ -147,7 +147,7 @@ export function Sidebar({
               )}
             </div>
 
-            <div className="space-y-3 border-t border-white/5 p-4">
+            <div className="space-y-3 p-4">
               <button
                 type="button"
                 onClick={onOpenSettings}
