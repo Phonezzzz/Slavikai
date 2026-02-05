@@ -1,6 +1,6 @@
 import type { DecisionPacketView } from "../types";
 
-type ProjectCommand = "find" | "index";
+type ProjectCommand = "find" | "index" | "github_import";
 
 type DecisionPanelProps = {
   decision: DecisionPacketView | null;
@@ -24,7 +24,9 @@ export default function DecisionPanel({
   const projectHint =
     projectCommand === "find"
       ? "Поиск по индексу (пример: payment timeout)"
-      : "Путь внутри sandbox/project (пусто = весь workspace)";
+      : projectCommand === "index"
+        ? "Путь внутри sandbox/project (пусто = весь workspace)"
+        : "GitHub URL и optional branch (пример: https://github.com/user/repo main)";
   if (!decision) {
     return (
       <section className="flex flex-col gap-4 rounded-3xl border border-neutral-800/80 bg-neutral-900/60 p-4">
@@ -47,6 +49,7 @@ export default function DecisionPanel({
             >
               <option value="find">find</option>
               <option value="index">index</option>
+              <option value="github_import">github_import</option>
             </select>
             <button
               type="button"
@@ -98,6 +101,7 @@ export default function DecisionPanel({
           >
             <option value="find">find</option>
             <option value="index">index</option>
+            <option value="github_import">github_import</option>
           </select>
           <button
             type="button"

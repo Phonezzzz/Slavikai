@@ -21,7 +21,7 @@ const MAX_EVENTS = 120;
 const SESSION_STORAGE_KEY = "slavik.ui.session_id";
 const SESSION_TAB_STORAGE_KEY = "slavik.ui.session_id.tab";
 const SESSION_QUERY_PARAM = "session";
-type ProjectCommand = "find" | "index";
+type ProjectCommand = "find" | "index" | "github_import";
 type PendingRetryAction =
   | { kind: "chat"; content: string }
   | { kind: "project"; command: ProjectCommand; args: string };

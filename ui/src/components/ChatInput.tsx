@@ -50,6 +50,7 @@ type SpeechWindow = Window & {
 const quickTools: Array<{ label: string; snippet: string }> = [
   { label: "Find", snippet: "/project find " },
   { label: "Index", snippet: "/project index ." },
+  { label: "GitHub", snippet: "/project github_import https://github.com/" },
   { label: "Trace", snippet: "/trace" },
   { label: "Plan", snippet: "/plan " },
 ];

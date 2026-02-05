@@ -391,6 +391,98 @@ def test_ui_project_tool_endpoint_rejects_unknown_command() -> None:
     asyncio.run(run())
 
 
+def test_ui_project_github_import_requires_approval() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            response = await client.post(
+                "/ui/api/tools/project",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "command": "github_import",
+                    "args": "https://github.com/example/repo",
+                },
+            )
+            assert response.status == 200
+            payload = await response.json()
+            approval_request = payload.get("approval_request")
+            assert isinstance(approval_request, dict)
+            required_categories = approval_request.get("required_categories")
+            assert isinstance(required_categories, list)
+            assert "NETWORK_RISK" in required_categories
+            assert "EXEC_ARBITRARY" in required_categories
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_project_github_import_runs_after_approval(monkeypatch, tmp_path) -> None:
+    async def fake_clone(**kwargs):
+        del kwargs
+        return True, "ok"
+
+    monkeypatch.setattr("server.http_api._clone_github_repository", fake_clone)
+    monkeypatch.setattr(
+        "server.http_api._resolve_github_target",
+        lambda repo_url: (tmp_path / "repo", "github/example/repo"),
+    )
+    monkeypatch.setattr(
+        "server.http_api._index_imported_project",
+        lambda relative_path: (True, f"Code=1, Docs=1 ({relative_path})"),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            approve_resp = await client.post(
+                "/slavik/approve-session",
+                json={
+                    "session_id": session_id,
+                    "categories": ["NETWORK_RISK", "EXEC_ARBITRARY"],
+                },
+            )
+            assert approve_resp.status == 200
+
+            response = await client.post(
+                "/ui/api/tools/project",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "command": "github_import",
+                    "args": "https://github.com/example/repo",
+                },
+            )
+            assert response.status == 200
+            payload = await response.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last_message = messages[-1]
+            assert isinstance(last_message, dict)
+            content = last_message.get("content")
+            assert isinstance(content, str)
+            assert "GitHub import completed" in content
+            assert "Code=1, Docs=1" in content
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_session_model_not_found_suggests_closest(monkeypatch) -> None:
     monkeypatch.setattr(
         "server.http_api._fetch_provider_models",

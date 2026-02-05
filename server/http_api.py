@@ -6,12 +6,16 @@ import importlib
 import json
 import logging
 import os
+import shlex
+import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
+from urllib.parse import urlparse
 
 import requests
 from aiohttp import web
@@ -29,7 +33,12 @@ from config.tools_config import (
     load_tools_config,
     save_tools_config,
 )
-from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
+from core.approval_policy import (
+    ALL_CATEGORIES,
+    ApprovalCategory,
+    ApprovalPrompt,
+    ApprovalRequest,
+)
 from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
@@ -37,8 +46,9 @@ from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession, SQLiteUISessionStorage, UISessionStorage
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
-from shared.models import JSONValue, LLMMessage
+from shared.models import JSONValue, LLMMessage, ToolRequest
 from shared.sanitize import safe_json_loads
+from tools.project_tool import handle_project_request
 from tools.tool_logger import DEFAULT_LOG_PATH as TOOL_CALLS_LOG
 
 ALLOWED_ROLES: Final[set[str]] = {"system", "user", "assistant", "tool"}
@@ -76,10 +86,12 @@ SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local"}
 XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
 OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
 MODEL_FETCH_TIMEOUT: Final[int] = 20
-UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index"}
+UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index", "github_import"}
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parent.parent / ".run" / "ui_settings.json"
 DEFAULT_UI_TONE: Final[str] = "balanced"
 DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
+UI_GITHUB_REQUIRED_CATEGORIES: Final[list[ApprovalCategory]] = ["NETWORK_RISK", "EXEC_ARBITRARY"]
+UI_GITHUB_ROOT: Final[Path] = Path("sandbox/project/github").resolve()
 
 
 @dataclass(frozen=True)
@@ -943,6 +955,139 @@ async def _publish_agent_activity(
         logger.debug("Failed to publish agent activity event", exc_info=True)
 
 
+def _parse_github_import_args(args_raw: str) -> tuple[str, str | None]:
+    try:
+        parts = shlex.split(args_raw)
+    except ValueError as exc:
+        raise ValueError(f"Некорректные аргументы github_import: {exc}") from exc
+    if not parts:
+        raise ValueError("Укажи ссылку на GitHub репозиторий.")
+    repo_url = parts[0].strip()
+    if not repo_url:
+        raise ValueError("Укажи ссылку на GitHub репозиторий.")
+    branch = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+    return repo_url, branch
+
+
+def _validate_github_segment(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("Некорректный сегмент пути GitHub.")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+    if any(char not in allowed for char in normalized):
+        raise ValueError("Допустимы только owner/repo с символами [a-zA-Z0-9-_.].")
+    return normalized
+
+
+def _resolve_github_target(repo_url: str) -> tuple[Path, str]:
+    parsed = urlparse(repo_url)
+    if parsed.scheme not in {"https", "http"}:
+        raise ValueError("Поддерживаются только http(s) GitHub URL.")
+    if parsed.netloc.lower() not in {"github.com", "www.github.com"}:
+        raise ValueError("Поддерживаются только github.com репозитории.")
+    path_parts = [part for part in parsed.path.split("/") if part.strip()]
+    if len(path_parts) < 2:
+        raise ValueError("URL должен содержать owner/repo.")
+    owner = _validate_github_segment(path_parts[0])
+    repo_name_raw = path_parts[1].removesuffix(".git")
+    repo_name = _validate_github_segment(repo_name_raw)
+    UI_GITHUB_ROOT.mkdir(parents=True, exist_ok=True)
+    target_root = UI_GITHUB_ROOT / owner
+    target_root.mkdir(parents=True, exist_ok=True)
+    candidate = target_root / repo_name
+    suffix = 1
+    while candidate.exists():
+        candidate = target_root / f"{repo_name}-{suffix}"
+        suffix += 1
+    sandbox_root = Path("sandbox/project").resolve()
+    relative_target = candidate.resolve().relative_to(sandbox_root)
+    return candidate, str(relative_target)
+
+
+def _build_github_import_approval_request(
+    *,
+    session_id: str,
+    repo_url: str,
+    branch: str | None,
+    required_categories: list[ApprovalCategory],
+) -> ApprovalRequest:
+    branch_text = f", branch={branch}" if branch else ""
+    return ApprovalRequest(
+        category=required_categories[0],
+        required_categories=required_categories,
+        prompt=ApprovalPrompt(
+            what=f"GitHub import: {repo_url}{branch_text}",
+            why="Нужно скачать внешний репозиторий и проиндексировать код.",
+            risk="Сетевой доступ и выполнение git clone.",
+            changes=[
+                "Создание каталога в sandbox/project/github/*",
+                "Скачивание внешнего репозитория",
+                "Индексация файлов в memory/vectors.db",
+            ],
+        ),
+        tool="project",
+        details={
+            "command": "github_import",
+            "repo_url": repo_url,
+            "branch": branch,
+        },
+        session_id=session_id,
+    )
+
+
+async def _clone_github_repository(
+    *,
+    repo_url: str,
+    branch: str | None,
+    target_path: Path,
+) -> tuple[bool, str]:
+    cmd = ["git", "clone", "--depth", "1"]
+    if branch:
+        cmd.extend(["--branch", branch])
+    cmd.extend([repo_url, str(target_path)])
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Git clone failed: {exc}"
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+        details = stderr or stdout or "unknown error"
+        try:
+            if target_path.exists():
+                shutil.rmtree(target_path, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to cleanup clone target after error", exc_info=True)
+        return False, f"Git clone failed: {details}"
+    return True, "ok"
+
+
+def _index_imported_project(relative_path: str) -> tuple[bool, str]:
+    try:
+        tool_result = handle_project_request(
+            ToolRequest(
+                name="project",
+                args={"cmd": "index", "args": [relative_path]},
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"project index exception: {exc}"
+    if not tool_result.ok:
+        message = tool_result.error or "project index failed"
+        return False, message
+    data = tool_result.data if isinstance(tool_result.data, dict) else {}
+    indexed_code = data.get("indexed_code")
+    indexed_docs = data.get("indexed_docs")
+    return True, f"Code={indexed_code}, Docs={indexed_docs}"
+
+
 async def handle_ui_redirect(request: web.Request) -> web.StreamResponse:
     raise web.HTTPFound("/ui/")
 
@@ -1577,7 +1722,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         if command not in UI_PROJECT_COMMANDS:
             return _error_response(
                 status=400,
-                message="Поддерживаются только project команды: find, index.",
+                message="Поддерживаются project команды: find, index, github_import.",
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
@@ -1600,13 +1745,137 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
 
         approved_categories = await session_store.get_categories(session_id)
         await hub.append_message(session_id, "user", user_command)
-        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
         await _publish_agent_activity(
             hub,
             session_id=session_id,
             phase="context.prepared",
             detail="project",
         )
+
+        if command == "github_import":
+            try:
+                repo_url, branch = _parse_github_import_args(args_raw)
+            except ValueError as exc:
+                return _error_response(
+                    status=400,
+                    message=str(exc),
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            missing_categories = [
+                category
+                for category in UI_GITHUB_REQUIRED_CATEGORIES
+                if category not in approved_categories
+            ]
+            if missing_categories:
+                approval_request_obj = _build_github_import_approval_request(
+                    session_id=session_id,
+                    repo_url=repo_url,
+                    branch=branch,
+                    required_categories=missing_categories,
+                )
+                approval_payload = _serialize_approval_request(approval_request_obj)
+                await hub.append_message(
+                    session_id,
+                    "assistant",
+                    "Approval required for GitHub import.",
+                )
+                messages = await hub.get_messages(session_id)
+                current_decision = await hub.get_session_decision(session_id)
+                current_model = await hub.get_session_model(session_id)
+                response = _json_response(
+                    {
+                        "session_id": session_id,
+                        "messages": messages,
+                        "decision": current_decision,
+                        "selected_model": current_model,
+                        "trace_id": None,
+                        "approval_request": approval_payload,
+                    },
+                )
+                response.headers[UI_SESSION_HEADER] = session_id
+                await _publish_agent_activity(
+                    hub,
+                    session_id=session_id,
+                    phase="approval.required",
+                    detail="project/github_import",
+                )
+                return response
+
+            try:
+                target_path, relative_target = _resolve_github_target(repo_url)
+            except ValueError as exc:
+                return _error_response(
+                    status=400,
+                    message=str(exc),
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="github.clone.start",
+                detail=repo_url,
+            )
+            cloned, clone_result = await _clone_github_repository(
+                repo_url=repo_url,
+                branch=branch,
+                target_path=target_path,
+            )
+            if not cloned:
+                response_text = f"Командный режим (без MWV)\n{clone_result}"
+            else:
+                await _publish_agent_activity(
+                    hub,
+                    session_id=session_id,
+                    phase="github.index.start",
+                    detail=relative_target,
+                )
+                indexed, index_result = _index_imported_project(relative_target)
+                await _publish_agent_activity(
+                    hub,
+                    session_id=session_id,
+                    phase="github.index.end",
+                    detail=index_result,
+                )
+                if indexed:
+                    response_text = (
+                        "Командный режим (без MWV)\n"
+                        f"GitHub import completed: {repo_url}\n"
+                        f"Path: {relative_target}\n"
+                        f"Index: {index_result}"
+                    )
+                else:
+                    response_text = (
+                        "Командный режим (без MWV)\n"
+                        f"GitHub import completed with indexing errors: {repo_url}\n"
+                        f"Path: {relative_target}\n"
+                        f"Index error: {index_result}"
+                    )
+            await hub.append_message(session_id, "assistant", response_text)
+            messages = await hub.get_messages(session_id)
+            current_decision = await hub.get_session_decision(session_id)
+            current_model = await hub.get_session_model(session_id)
+            response = _json_response(
+                {
+                    "session_id": session_id,
+                    "messages": messages,
+                    "decision": current_decision,
+                    "selected_model": current_model,
+                    "trace_id": None,
+                    "approval_request": None,
+                },
+            )
+            response.headers[UI_SESSION_HEADER] = session_id
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="response.ready",
+                detail="project/github_import",
+            )
+            return response
+
+        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
 
         async with agent_lock:
             try:
