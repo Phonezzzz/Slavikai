@@ -154,6 +154,11 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
 
         self.brain = self._build_brain()
         self.logger = logging.getLogger("SlavikAI.Agent")
+        if self.memory_config.auto_save_dialogue:
+            self.logger.warning(
+                "auto_save_dialogue включен явно через config/memory.json "
+                "(policies-first override)."
+            )
         self.tracer = Tracer()
         self.planner = Planner()
         self.executor = Executor(self.tracer)

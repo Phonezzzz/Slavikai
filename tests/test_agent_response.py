@@ -75,3 +75,26 @@ def test_agent_plan_execution_path(tmp_path: Path) -> None:
     result = agent.respond([LLMMessage(role="user", content="планируй задачу")])
     assert "ok" in result
     assert not agent.executor.run_called  # type: ignore[attr-defined]
+
+
+def test_agent_does_not_auto_save_dialogue_by_default(tmp_path: Path) -> None:
+    brain = SimpleBrain("hello")
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+
+    calls = {"count": 0}
+
+    def _save_to_memory(_prompt: str, _answer: str) -> None:
+        calls["count"] += 1
+
+    agent.save_to_memory = _save_to_memory  # type: ignore[method-assign]
+    assert agent.memory_config.auto_save_dialogue is False
+
+    _ = agent.respond([LLMMessage(role="user", content="привет")])
+    assert calls["count"] == 0

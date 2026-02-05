@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_PATH = Path("config/memory.json")
+# policies-first: автосохранение диалога выключено по умолчанию
+# и включается только явно через config
 DEFAULT_AUTO_SAVE_DIALOGUE = False
 DEFAULT_INBOX_MAX_ITEMS = 200
 DEFAULT_INBOX_TTL_DAYS = 30
