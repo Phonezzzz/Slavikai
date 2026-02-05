@@ -910,8 +910,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                         "error": str(exc),
                     },
                 )
-            loop = asyncio.get_running_loop()
-            response_text = await loop.run_in_executor(None, agent.respond, llm_messages)
+            response_text = agent.respond(llm_messages)
             decision = _extract_decision_payload(response_text)
 
         await hub.append_message(session_id, "assistant", response_text)
@@ -1027,8 +1026,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                         "error": str(exc),
                     },
                 )
-            loop = asyncio.get_running_loop()
-            response_text = await loop.run_in_executor(None, agent.respond, llm_messages)
+            response_text = agent.respond(llm_messages)
 
         await hub.append_message(session_id, "assistant", response_text)
         messages = await hub.get_messages(session_id)
@@ -1166,12 +1164,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     trace_id: str | None = None
     try:
         async with agent_lock:
-            loop = asyncio.get_running_loop()
-            response_text = await loop.run_in_executor(
-                None,
-                agent.respond,
-                parsed.messages,
-            )
+            response_text = agent.respond(parsed.messages)
             trace_id = agent.last_chat_interaction_id
     except Exception as exc:  # noqa: BLE001
         return _error_response(

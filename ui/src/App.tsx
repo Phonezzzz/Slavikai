@@ -142,6 +142,8 @@ const statusDotClass = (status: string): string => {
   return "bg-emerald-500";
 };
 
+const isRecoverableHttpStatus = (status: number): boolean => status >= 400 && status < 500;
+
 export default function App() {
   const [statusOk, setStatusOk] = useState<boolean | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -360,7 +362,8 @@ export default function App() {
         } catch {
           appendSystemMessage("Ошибка запроса. Проверь выбор модели и повтори.");
         }
-        throw new Error(`Status ${resp.status}`);
+        setStatusOk(isRecoverableHttpStatus(resp.status));
+        return;
       }
       const payload = (await resp.json()) as {
         session_id?: string;
@@ -388,6 +391,7 @@ export default function App() {
       setInput("");
       setStatusOk(true);
     } catch {
+      appendSystemMessage("Сервис недоступен. Проверь сеть и повтори.");
       setStatusOk(false);
     } finally {
       setSending(false);
@@ -474,6 +478,7 @@ export default function App() {
         } catch {
           appendSystemMessage("Ошибка вызова project инструмента.");
         }
+        setStatusOk(isRecoverableHttpStatus(resp.status));
         return;
       }
       const payload = (await resp.json()) as {
@@ -501,8 +506,8 @@ export default function App() {
       }
       setStatusOk(true);
     } catch {
+      appendSystemMessage("Сервис недоступен. Проверь сеть и повтори.");
       setStatusOk(false);
-      appendSystemMessage("Ошибка project запроса.");
     } finally {
       setProjectBusy(false);
     }

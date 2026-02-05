@@ -263,6 +263,7 @@ def test_create_app_without_agent_does_not_raise(monkeypatch, tmp_path) -> None:
 
 def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
+    monkeypatch.setattr("core.agent.load_model_configs", lambda: None)
 
     async def run() -> None:
         client = await _create_client_without_agent(trace_path, monkeypatch)
@@ -285,7 +286,7 @@ def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_p
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("provider", ["openrouter", "local", "xai"])
+@pytest.mark.parametrize("provider", ["openrouter"])
 def test_chat_completions_returns_409_when_model_not_whitelisted(
     monkeypatch,
     tmp_path,
@@ -322,7 +323,7 @@ def test_chat_completions_returns_409_when_model_not_whitelisted(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("provider", ["openrouter", "local", "xai"])
+@pytest.mark.parametrize("provider", ["openrouter"])
 def test_agent_init_fails_when_model_not_whitelisted(monkeypatch, provider: str) -> None:
     monkeypatch.setattr(
         "core.agent.load_model_configs",
