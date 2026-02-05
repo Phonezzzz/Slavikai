@@ -60,7 +60,7 @@ export function Workspace({ collapsed, onToggleCollapse }: WorkspaceProps) {
       initial={false}
       animate={{ width: collapsed ? '0px' : '480px' }}
       transition={{ duration: 0.3, ease: 'easeInOut' }}
-      className="relative bg-zinc-900/50 backdrop-blur-xl"
+      className="relative bg-zinc-950"
     >
       <AnimatePresence>
         {!collapsed && (

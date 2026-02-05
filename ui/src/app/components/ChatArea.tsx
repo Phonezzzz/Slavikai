@@ -218,6 +218,7 @@ export function ChatArea({
 
   const sendDisabled =
     !conversationId || sending || (input.trim().length === 0 && attachments.length === 0);
+  const isEmpty = messages.length === 0;
 
   const handleAttachFiles = async (fileList: FileList | null) => {
     if (!fileList) {
@@ -330,18 +331,200 @@ export function ChatArea({
     window.speechSynthesis.cancel();
   };
 
+  const inputPanel = (
+    <>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => setModelOpen((prev) => !prev)}
+          className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-900"
+          title="Model selector"
+        >
+          <Bot className="h-3.5 w-3.5" />
+          {selectedModel ? `${selectedModel.provider}/${selectedModel.model}` : 'Select model'}
+        </button>
+
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="rounded-md border border-zinc-700 bg-zinc-950 p-1.5 text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
+            title="Attach files"
+          >
+            <Paperclip className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={handleToggleRecording}
+            disabled={!speechCtor}
+            className={`rounded-md border p-1.5 transition-colors ${
+              !speechCtor
+                ? 'border-zinc-700 bg-zinc-950 text-zinc-600'
+                : recording
+                  ? 'border-rose-400/60 bg-rose-500/20 text-rose-200'
+                  : 'border-zinc-700 bg-zinc-950 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+            }`}
+            title="Rec / STT"
+          >
+            <Mic className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setWebSearchMode((prev) => !prev)}
+            className={`rounded-md border p-1.5 transition-colors ${
+              webSearchMode
+                ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
+                : 'border-zinc-700 bg-zinc-950 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+            }`}
+            title="Web search mode"
+          >
+            <Globe className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {modelOpen ? (
+        <div className="mb-2 rounded-xl border border-zinc-700 bg-zinc-950 p-3">
+          <div className="grid gap-2 sm:grid-cols-[1fr,1fr,auto]">
+            <select
+              value={modelProvider}
+              onChange={(event) => {
+                const provider = event.target.value;
+                setModelProvider(provider);
+                const nextModels =
+                  providerModels.find((item) => item.provider === provider)?.models ?? [];
+                setModelId(nextModels[0] ?? '');
+              }}
+              className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100"
+              disabled={modelsLoading || savingModel || providerModels.length === 0}
+            >
+              {providerModels.map((item) => (
+                <option key={item.provider} value={item.provider} className="bg-zinc-950 text-zinc-100">
+                  {item.provider}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={modelId}
+              onChange={(event) => setModelId(event.target.value)}
+              className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100"
+              disabled={modelsLoading || savingModel || modelsForProvider.length === 0}
+            >
+              {modelsForProvider.map((item) => (
+                <option key={item} value={item} className="bg-zinc-950 text-zinc-100">
+                  {item}
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={() => {
+                void handleApplyModel();
+              }}
+              disabled={
+                !conversationId || !modelProvider || !modelId || modelsLoading || savingModel
+              }
+              className="rounded-lg border border-zinc-600 bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:bg-zinc-800 disabled:opacity-40"
+            >
+              {savingModel ? '...' : 'Set'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(event) => {
+          void handleAttachFiles(event.target.files);
+        }}
+      />
+
+      {attachments.length > 0 ? (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {attachments.map((item, index) => (
+            <button
+              key={`${item.name}-${index}`}
+              type="button"
+              onClick={() => {
+                setAttachments((prev) => prev.filter((_, current) => current !== index));
+              }}
+              className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-900"
+            >
+              {item.name} · {formatSize(item.size)} · remove
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="relative">
+        <textarea
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              void handleSend();
+            }
+          }}
+          placeholder={
+            conversationId
+              ? webSearchMode
+                ? 'Web search mode is ON. Type query...'
+                : 'Type your message... (Shift+Enter for new line)'
+              : 'Create a chat first'
+          }
+          className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 pr-12 text-zinc-100 placeholder-zinc-500 transition-all duration-200 focus:border-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600/50"
+          rows={1}
+          style={{ minHeight: '48px', maxHeight: '220px' }}
+          disabled={!conversationId || sending}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            void handleSend();
+          }}
+          disabled={sendDisabled}
+          className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 transition-all duration-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-30"
+        >
+          <Send className="h-4 w-4 text-zinc-100" />
+        </button>
+      </div>
+
+      <div className="mt-2 min-h-5 text-xs text-zinc-500">
+        {statusMessage ||
+          (savingModel
+            ? 'Saving model...'
+            : modelsLoading
+              ? 'Loading models...'
+              : webSearchMode
+                ? 'Web search mode enabled'
+                : recording
+                  ? 'Recording...'
+                  : sending
+                    ? 'Sending...'
+                    : '')}
+      </div>
+    </>
+  );
+
   return (
     <div className="relative flex flex-1 flex-col">
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-zinc-200/[0.03] via-transparent to-zinc-200/[0.03]" />
-
-      <div className="relative z-10 flex-1 overflow-y-auto px-6 py-8">
-        <div className="mx-auto max-w-3xl space-y-6">
-          {messages.length === 0 ? (
-            <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 px-4 py-6 text-center text-sm text-zinc-400">
-              No messages in this chat yet.
-            </div>
-          ) : (
-            messages.map((message, index) => {
+      {isEmpty ? (
+        <div className="relative z-10 flex flex-1 items-center justify-center px-6 py-10">
+          <div className="w-full max-w-3xl rounded-2xl bg-zinc-950 p-6 shadow-2xl shadow-black/40">
+            {inputPanel}
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="relative z-10 flex-1 overflow-y-auto px-6 py-8">
+            <div className="mx-auto max-w-3xl space-y-6">
+              {messages.map((message, index) => {
               const isAssistant = message.role === 'assistant';
               const isUser = message.role === 'user';
               const previousUserMessage = isAssistant
@@ -445,196 +628,16 @@ export function ChatArea({
                   ) : null}
                 </motion.div>
               );
-            })
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-      </div>
-
-      <div className="relative z-10 bg-zinc-950/85 p-6 backdrop-blur-xl">
-        <div className="mx-auto max-w-3xl">
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <button
-              type="button"
-              onClick={() => setModelOpen((prev) => !prev)}
-              className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800"
-              title="Model selector"
-            >
-              <Bot className="h-3.5 w-3.5" />
-              {selectedModel ? `${selectedModel.provider}/${selectedModel.model}` : 'Select model'}
-            </button>
-
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="rounded-md border border-zinc-700 bg-zinc-900 p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
-                title="Attach files"
-              >
-                <Paperclip className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={handleToggleRecording}
-                disabled={!speechCtor}
-                className={`rounded-md border p-1.5 transition-colors ${
-                  !speechCtor
-                    ? 'border-zinc-700 bg-zinc-900 text-zinc-600'
-                    : recording
-                      ? 'border-rose-400/60 bg-rose-500/20 text-rose-200'
-                      : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-                }`}
-                title="Rec / STT"
-              >
-                <Mic className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setWebSearchMode((prev) => !prev)}
-                className={`rounded-md border p-1.5 transition-colors ${
-                  webSearchMode
-                    ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-200'
-                    : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-                }`}
-                title="Web search mode"
-              >
-                <Globe className="h-3.5 w-3.5" />
-              </button>
+              })}
+              <div ref={messagesEndRef} />
             </div>
           </div>
 
-          {modelOpen ? (
-            <div className="mb-2 rounded-xl border border-zinc-700 bg-zinc-900/80 p-3">
-              <div className="grid gap-2 sm:grid-cols-[1fr,1fr,auto]">
-                <select
-                  value={modelProvider}
-                  onChange={(event) => {
-                    const provider = event.target.value;
-                    setModelProvider(provider);
-                    const nextModels =
-                      providerModels.find((item) => item.provider === provider)?.models ?? [];
-                    setModelId(nextModels[0] ?? '');
-                  }}
-                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100"
-                  disabled={modelsLoading || savingModel || providerModels.length === 0}
-                >
-                  {providerModels.map((item) => (
-                    <option key={item.provider} value={item.provider} className="bg-zinc-950 text-zinc-100">
-                      {item.provider}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  value={modelId}
-                  onChange={(event) => setModelId(event.target.value)}
-                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100"
-                  disabled={modelsLoading || savingModel || modelsForProvider.length === 0}
-                >
-                  {modelsForProvider.map((item) => (
-                    <option key={item} value={item} className="bg-zinc-950 text-zinc-100">
-                      {item}
-                    </option>
-                  ))}
-                </select>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    void handleApplyModel();
-                  }}
-                  disabled={
-                    !conversationId ||
-                    !modelProvider ||
-                    !modelId ||
-                    modelsLoading ||
-                    savingModel
-                  }
-                  className="rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-100 hover:bg-zinc-700 disabled:opacity-40"
-                >
-                  {savingModel ? '...' : 'Set'}
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(event) => {
-              void handleAttachFiles(event.target.files);
-            }}
-          />
-
-          {attachments.length > 0 ? (
-            <div className="mb-2 flex flex-wrap gap-2">
-              {attachments.map((item, index) => (
-                <button
-                  key={`${item.name}-${index}`}
-                  type="button"
-                  onClick={() => {
-                    setAttachments((prev) => prev.filter((_, current) => current !== index));
-                  }}
-                  className="rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-                >
-                  {item.name} · {formatSize(item.size)} · remove
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="relative">
-            <textarea
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  void handleSend();
-                }
-              }}
-              placeholder={
-                conversationId
-                  ? webSearchMode
-                    ? 'Web search mode is ON. Type query...'
-                    : 'Type your message... (Shift+Enter for new line)'
-                  : 'Create a chat first'
-              }
-              className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 pr-12 text-zinc-100 placeholder-zinc-500 transition-all duration-200 focus:border-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600/50"
-              rows={1}
-              style={{ minHeight: '48px', maxHeight: '220px' }}
-              disabled={!conversationId || sending}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                void handleSend();
-              }}
-              disabled={sendDisabled}
-              className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-800 transition-all duration-200 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-30"
-            >
-              <Send className="h-4 w-4 text-zinc-100" />
-            </button>
+          <div className="relative z-10 bg-zinc-950 p-6">
+            <div className="mx-auto max-w-3xl">{inputPanel}</div>
           </div>
-
-          <div className="mt-2 min-h-5 text-xs text-zinc-500">
-            {statusMessage ||
-              (savingModel
-                ? 'Saving model...'
-                : modelsLoading
-                  ? 'Loading models...'
-                  : webSearchMode
-                    ? 'Web search mode enabled'
-                    : recording
-                      ? 'Recording...'
-                      : sending
-                        ? 'Sending...'
-                        : '')}
-          </div>
-        </div>
-      </div>
+        </>
+      )}
     </div>
   );
 }

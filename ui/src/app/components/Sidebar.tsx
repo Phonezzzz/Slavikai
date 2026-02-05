@@ -48,7 +48,7 @@ export function Sidebar({
       initial={false}
       animate={{ width: collapsed ? '0px' : '300px' }}
       transition={{ duration: 0.3, ease: 'easeInOut' }}
-      className="relative bg-zinc-900/50 backdrop-blur-xl"
+      className="relative bg-zinc-950"
     >
       <AnimatePresence>
         {!collapsed && (
