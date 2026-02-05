@@ -8,11 +8,14 @@ import type {
   Message,
   ProviderModels,
   SelectedModel,
+  SessionSummary,
   UIEvent,
 } from "./types";
 
 const MAX_EVENTS = 120;
 const SESSION_STORAGE_KEY = "slavik.ui.session_id";
+const SESSION_TAB_STORAGE_KEY = "slavik.ui.session_id.tab";
+const SESSION_QUERY_PARAM = "session";
 type ProjectCommand = "find" | "index";
 
 const isMessage = (value: unknown): value is Message => {
@@ -121,6 +124,41 @@ const parseProviderModels = (value: unknown): ProviderModels[] => {
   return items;
 };
 
+const parseSessionSummary = (value: unknown): SessionSummary | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as {
+    session_id?: unknown;
+    created_at?: unknown;
+    updated_at?: unknown;
+    message_count?: unknown;
+  };
+  if (
+    typeof candidate.session_id !== "string" ||
+    typeof candidate.created_at !== "string" ||
+    typeof candidate.updated_at !== "string" ||
+    typeof candidate.message_count !== "number"
+  ) {
+    return null;
+  }
+  return {
+    session_id: candidate.session_id,
+    created_at: candidate.created_at,
+    updated_at: candidate.updated_at,
+    message_count: candidate.message_count,
+  };
+};
+
+const parseSessionsList = (value: unknown): SessionSummary[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => parseSessionSummary(item))
+    .filter((item): item is SessionSummary => item !== null);
+};
+
 const toEventPreview = (payload: unknown): string => {
   try {
     const raw = JSON.stringify(payload ?? {}, null, 0);
@@ -128,6 +166,14 @@ const toEventPreview = (payload: unknown): string => {
   } catch {
     return "{unserializable}";
   }
+};
+
+const formatSessionUpdatedAt = (updatedAt: string): string => {
+  const parsed = Date.parse(updatedAt);
+  if (Number.isNaN(parsed)) {
+    return updatedAt;
+  }
+  return new Date(parsed).toLocaleString();
 };
 
 const statusDotClass = (status: string): string => {
@@ -147,6 +193,23 @@ const isRecoverableHttpStatus = (status: number): boolean => status >= 400 && st
 
 const readStoredSessionId = (): string | null => {
   try {
+    const url = new URL(window.location.href);
+    const fromQuery = (url.searchParams.get(SESSION_QUERY_PARAM) || "").trim();
+    if (fromQuery) {
+      return fromQuery;
+    }
+  } catch {
+    // ignore malformed URL edge-cases
+  }
+  try {
+    const tabValue = window.sessionStorage.getItem(SESSION_TAB_STORAGE_KEY);
+    if (typeof tabValue === "string" && tabValue.trim()) {
+      return tabValue.trim();
+    }
+  } catch {
+    // ignore storage restrictions
+  }
+  try {
     const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
     if (typeof raw !== "string") {
       return null;
@@ -159,6 +222,26 @@ const readStoredSessionId = (): string | null => {
 };
 
 const persistSessionId = (sessionId: string | null): void => {
+  try {
+    const url = new URL(window.location.href);
+    if (!sessionId) {
+      url.searchParams.delete(SESSION_QUERY_PARAM);
+    } else {
+      url.searchParams.set(SESSION_QUERY_PARAM, sessionId);
+    }
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // ignore URL update failures
+  }
+  try {
+    if (!sessionId) {
+      window.sessionStorage.removeItem(SESSION_TAB_STORAGE_KEY);
+    } else {
+      window.sessionStorage.setItem(SESSION_TAB_STORAGE_KEY, sessionId);
+    }
+  } catch {
+    // ignore storage restrictions
+  }
   try {
     if (!sessionId) {
       window.localStorage.removeItem(SESSION_STORAGE_KEY);
@@ -179,6 +262,8 @@ export default function App() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>("");
   const [selectedModelId, setSelectedModelId] = useState<string>("");
@@ -211,41 +296,67 @@ export default function App() {
     return statusOk ? "ok" : "error";
   }, [sending, statusOk]);
 
-  useEffect(() => {
-    let active = true;
-    const hydrateSession = async (currentSessionId: string) => {
-      try {
-        const resp = await fetch(`/ui/api/sessions/${encodeURIComponent(currentSessionId)}`, {
-          headers: {
-            "X-Slavik-Session": currentSessionId,
-          },
-        });
-        if (!resp.ok || !active) {
-          return;
-        }
-        const payload = (await resp.json()) as {
-          session?: {
-            messages?: unknown;
-            decision?: unknown;
-            selected_model?: unknown;
-          };
-        };
-        if (!payload.session || !active) {
-          return;
-        }
-        const parsedMessages = parseMessages(payload.session.messages);
-        setMessages(parsedMessages);
-        setDecision(parseDecision(payload.session.decision));
-        const parsedModel = parseSelectedModel(payload.session.selected_model);
-        setSelectedModel(parsedModel);
-        if (parsedModel) {
-          setSelectedProvider(parsedModel.provider);
-          setSelectedModelId(parsedModel.model);
-        }
-      } catch {
+  const applySessionSnapshot = (session: {
+    messages?: unknown;
+    decision?: unknown;
+    selected_model?: unknown;
+  }) => {
+    setMessages(parseMessages(session.messages));
+    setDecision(parseDecision(session.decision));
+    const parsedModel = parseSelectedModel(session.selected_model);
+    setSelectedModel(parsedModel);
+    if (parsedModel) {
+      setSelectedProvider(parsedModel.provider);
+      setSelectedModelId(parsedModel.model);
+      return;
+    }
+    setSelectedModelId("");
+  };
+
+  const hydrateSession = async (currentSessionId: string) => {
+    try {
+      const resp = await fetch(`/ui/api/sessions/${encodeURIComponent(currentSessionId)}`, {
+        headers: {
+          "X-Slavik-Session": currentSessionId,
+        },
+      });
+      if (!resp.ok) {
         return;
       }
-    };
+      const payload = (await resp.json()) as {
+        session?: {
+          messages?: unknown;
+          decision?: unknown;
+          selected_model?: unknown;
+        };
+      };
+      if (!payload.session) {
+        return;
+      }
+      applySessionSnapshot(payload.session);
+    } catch {
+      return;
+    }
+  };
+
+  const refreshSessions = async () => {
+    setSessionsLoading(true);
+    try {
+      const resp = await fetch("/ui/api/sessions");
+      if (!resp.ok) {
+        return;
+      }
+      const payload = (await resp.json()) as { sessions?: unknown };
+      setSessions(parseSessionsList(payload.sessions));
+    } catch {
+      return;
+    } finally {
+      setSessionsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
     const loadStatus = async () => {
       try {
         const storedSession = readStoredSessionId();
@@ -288,6 +399,7 @@ export default function App() {
           setStatusOk(false);
         }
       }
+      void refreshSessions();
     };
     loadStatus();
     return () => {
@@ -402,6 +514,16 @@ export default function App() {
     };
   }, [sessionId]);
 
+  const handleSelectSession = async (nextSessionId: string) => {
+    if (!nextSessionId || nextSessionId === sessionId) {
+      return;
+    }
+    setSessionId(nextSessionId);
+    setEvents([]);
+    await hydrateSession(nextSessionId);
+    setStatusOk(true);
+  };
+
   const handleSend = async () => {
     const trimmed = input.trim();
     if (!trimmed || sending) {
@@ -463,6 +585,7 @@ export default function App() {
       }
       setInput("");
       setStatusOk(true);
+      void refreshSessions();
     } catch {
       appendSystemMessage("Сервис недоступен. Проверь сеть и повтори.");
       setStatusOk(false);
@@ -499,6 +622,7 @@ export default function App() {
       if (nextModel) {
         setSelectedModel(nextModel);
       }
+      void refreshSessions();
     } catch {
       appendSystemMessage("Ошибка установки модели.");
     } finally {
@@ -521,6 +645,7 @@ export default function App() {
       setEvents([]);
       setDecision(null);
       setStatusOk(true);
+      void refreshSessions();
     } catch {
       appendSystemMessage("Не удалось создать новую сессию.");
     }
@@ -578,6 +703,7 @@ export default function App() {
         setSelectedModel(nextModel);
       }
       setStatusOk(true);
+      void refreshSessions();
     } catch {
       appendSystemMessage("Сервис недоступен. Проверь сеть и повтори.");
       setStatusOk(false);
@@ -609,15 +735,46 @@ export default function App() {
           <div className="mt-6 text-xs uppercase tracking-[0.3em] text-neutral-500">
             Conversations
           </div>
-          <div className="mt-3 space-y-2 text-sm text-neutral-400">
-            <div className="rounded-xl border border-dashed border-neutral-800/80 px-3 py-2">
-              No chats yet
-            </div>
-            <div className="rounded-xl border border-neutral-800/60 bg-neutral-900/50 px-3 py-2 opacity-60">
-              Placeholder thread
-            </div>
+          <div className="mt-3 flex flex-1 flex-col gap-2 overflow-y-auto text-sm text-neutral-400">
+            {sessionsLoading ? (
+              <div className="rounded-xl border border-dashed border-neutral-800/80 px-3 py-2">
+                Loading...
+              </div>
+            ) : sessions.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-neutral-800/80 px-3 py-2">
+                No chats yet
+              </div>
+            ) : (
+              sessions.map((item) => {
+                const isActive = item.session_id === sessionId;
+                return (
+                  <button
+                    key={item.session_id}
+                    type="button"
+                    onClick={() => {
+                      void handleSelectSession(item.session_id);
+                    }}
+                    className={`rounded-xl border px-3 py-2 text-left transition ${
+                      isActive
+                        ? "border-neutral-200 bg-neutral-200 text-neutral-900"
+                        : "border-neutral-800/70 bg-neutral-900/40 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-900/70"
+                    }`}
+                  >
+                    <div className="text-xs font-semibold uppercase tracking-[0.2em]">
+                      {item.session_id.slice(0, 8)}
+                    </div>
+                    <div className="mt-1 text-[11px] opacity-80">{item.message_count} messages</div>
+                    <div className="mt-1 text-[10px] opacity-70">
+                      {formatSessionUpdatedAt(item.updated_at)}
+                    </div>
+                  </button>
+                );
+              })
+            )}
           </div>
-          <div className="mt-auto pt-6 text-xs text-neutral-500">v0 skeleton</div>
+          <div className="mt-auto pt-6 text-xs text-neutral-500">
+            {sessionId ? `Active: ${sessionId}` : "No active session"}
+          </div>
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">

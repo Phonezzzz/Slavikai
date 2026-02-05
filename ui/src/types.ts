@@ -35,3 +35,10 @@ export type UIEvent = {
   ts: string;
   payload: unknown;
 };
+
+export type SessionSummary = {
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+};
