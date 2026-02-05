@@ -9,9 +9,9 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 import requests
 from aiohttp import web
@@ -21,14 +21,21 @@ from config.http_server_config import (
     HttpServerConfig,
     resolve_http_server_config,
 )
+from config.memory_config import MemoryConfig, load_memory_config, save_memory_config
 from config.model_whitelist import ModelNotAllowedError
+from config.tools_config import (
+    DEFAULT_TOOLS_STATE,
+    ToolsConfig,
+    load_tools_config,
+    save_tools_config,
+)
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
-from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
+from server.ui_session_storage import PersistedSession, SQLiteUISessionStorage, UISessionStorage
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
@@ -70,6 +77,9 @@ XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
 OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
 MODEL_FETCH_TIMEOUT: Final[int] = 20
 UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index"}
+UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parent.parent / ".run" / "ui_settings.json"
+DEFAULT_UI_TONE: Final[str] = "balanced"
+DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
 
 
 @dataclass(frozen=True)
@@ -674,6 +684,245 @@ def _serialize_approval_request(
     }
 
 
+def _normalize_json_value(value: object) -> JSONValue:
+    if value is None:
+        return None
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, list):
+        return [_normalize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        normalized: dict[str, JSONValue] = {}
+        for key, item in value.items():
+            normalized[str(key)] = _normalize_json_value(item)
+        return normalized
+    return str(value)
+
+
+def _load_ui_settings_blob() -> dict[str, object]:
+    if not UI_SETTINGS_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(UI_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def _save_ui_settings_blob(payload: dict[str, object]) -> None:
+    UI_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UI_SETTINGS_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _load_personalization_settings() -> tuple[str, str]:
+    payload = _load_ui_settings_blob()
+    personalization_raw = payload.get("personalization")
+    if not isinstance(personalization_raw, dict):
+        return DEFAULT_UI_TONE, ""
+    tone_raw = personalization_raw.get("tone")
+    prompt_raw = personalization_raw.get("system_prompt")
+    tone = tone_raw.strip() if isinstance(tone_raw, str) and tone_raw.strip() else DEFAULT_UI_TONE
+    system_prompt = prompt_raw if isinstance(prompt_raw, str) else ""
+    return tone, system_prompt
+
+
+def _save_personalization_settings(*, tone: str, system_prompt: str) -> None:
+    payload = _load_ui_settings_blob()
+    payload["personalization"] = {
+        "tone": tone.strip() or DEFAULT_UI_TONE,
+        "system_prompt": system_prompt,
+    }
+    _save_ui_settings_blob(payload)
+
+
+def _load_embeddings_model_setting() -> str:
+    payload = _load_ui_settings_blob()
+    memory_raw = payload.get("memory")
+    if not isinstance(memory_raw, dict):
+        return DEFAULT_EMBEDDINGS_MODEL
+    model_raw = memory_raw.get("embeddings_model")
+    if not isinstance(model_raw, str):
+        return DEFAULT_EMBEDDINGS_MODEL
+    normalized = model_raw.strip()
+    return normalized or DEFAULT_EMBEDDINGS_MODEL
+
+
+def _save_embeddings_model_setting(model_name: str) -> None:
+    payload = _load_ui_settings_blob()
+    memory_raw = payload.get("memory")
+    memory_payload: dict[str, object]
+    if isinstance(memory_raw, dict):
+        memory_payload = dict(memory_raw)
+    else:
+        memory_payload = {}
+    memory_payload["embeddings_model"] = model_name.strip() or DEFAULT_EMBEDDINGS_MODEL
+    payload["memory"] = memory_payload
+    _save_ui_settings_blob(payload)
+
+
+def _load_tools_state() -> dict[str, bool]:
+    try:
+        return load_tools_config().to_dict()
+    except Exception:  # noqa: BLE001
+        return dict(DEFAULT_TOOLS_STATE)
+
+
+def _save_tools_state(state: dict[str, bool]) -> None:
+    payload: dict[str, object] = {key: value for key, value in state.items()}
+    save_tools_config(ToolsConfig.from_dict(payload))
+
+
+def _provider_settings_payload() -> list[dict[str, JSONValue]]:
+    local_endpoint = (
+        os.getenv("LOCAL_LLM_URL", DEFAULT_LOCAL_ENDPOINT).strip() or DEFAULT_LOCAL_ENDPOINT
+    )
+    return [
+        {
+            "provider": "xai",
+            "api_key_env": "XAI_API_KEY",
+            "api_key_set": bool(os.getenv("XAI_API_KEY", "").strip()),
+            "endpoint": XAI_MODELS_ENDPOINT,
+        },
+        {
+            "provider": "openrouter",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "api_key_set": bool(os.getenv("OPENROUTER_API_KEY", "").strip()),
+            "endpoint": OPENROUTER_MODELS_ENDPOINT,
+        },
+        {
+            "provider": "local",
+            "api_key_env": "LOCAL_LLM_API_KEY",
+            "api_key_set": bool(os.getenv("LOCAL_LLM_API_KEY", "").strip()),
+            "endpoint": local_endpoint,
+        },
+    ]
+
+
+def _build_settings_payload() -> dict[str, JSONValue]:
+    tone, system_prompt = _load_personalization_settings()
+    memory_config = load_memory_config()
+    tools_state = _load_tools_state()
+    tools_registry = {key: value for key, value in tools_state.items() if key != "safe_mode"}
+    return {
+        "settings": {
+            "personalization": {"tone": tone, "system_prompt": system_prompt},
+            "memory": {
+                "auto_save_dialogue": memory_config.auto_save_dialogue,
+                "inbox_max_items": memory_config.inbox_max_items,
+                "inbox_ttl_days": memory_config.inbox_ttl_days,
+                "inbox_writes_per_minute": memory_config.inbox_writes_per_minute,
+                "embeddings_model": _load_embeddings_model_setting(),
+            },
+            "tools": {
+                "state": tools_state,
+                "registry": tools_registry,
+            },
+            "providers": _provider_settings_payload(),
+        },
+    }
+
+
+def _normalize_import_status(raw: object) -> str:
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"ok", "busy", "error"}:
+            return normalized
+    return "ok"
+
+
+def _parse_imported_message(raw: object) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    role_raw = raw.get("role")
+    content_raw = raw.get("content")
+    if not isinstance(role_raw, str) or role_raw not in {"user", "assistant", "system"}:
+        return None
+    if not isinstance(content_raw, str):
+        return None
+    return {"role": role_raw, "content": content_raw}
+
+
+def _parse_imported_session(raw: object) -> PersistedSession | None:
+    if not isinstance(raw, dict):
+        return None
+    session_id_raw = raw.get("session_id")
+    if not isinstance(session_id_raw, str) or not session_id_raw.strip():
+        return None
+    session_id = session_id_raw.strip()
+    created_at_raw = raw.get("created_at")
+    updated_at_raw = raw.get("updated_at")
+    created_at = (
+        created_at_raw if isinstance(created_at_raw, str) and created_at_raw.strip() else _utc_iso()
+    )
+    updated_at = (
+        updated_at_raw if isinstance(updated_at_raw, str) and updated_at_raw.strip() else created_at
+    )
+    messages_raw = raw.get("messages")
+    if not isinstance(messages_raw, list):
+        return None
+    messages: list[dict[str, str]] = []
+    for item in messages_raw:
+        parsed_message = _parse_imported_message(item)
+        if parsed_message is None:
+            return None
+        messages.append(parsed_message)
+    decision_raw = raw.get("decision")
+    decision: dict[str, JSONValue] | None = None
+    if isinstance(decision_raw, dict):
+        parsed_decision: dict[str, JSONValue] = {}
+        for key, item in decision_raw.items():
+            parsed_decision[str(key)] = _normalize_json_value(item)
+        decision = parsed_decision
+    selected_model_raw = raw.get("selected_model")
+    model_provider: str | None = None
+    model_id: str | None = None
+    if isinstance(selected_model_raw, dict):
+        provider_raw = selected_model_raw.get("provider")
+        model_raw = selected_model_raw.get("model")
+        if isinstance(provider_raw, str) and provider_raw.strip():
+            model_provider = provider_raw.strip()
+        if isinstance(model_raw, str) and model_raw.strip():
+            model_id = model_raw.strip()
+    return PersistedSession(
+        session_id=session_id,
+        created_at=created_at,
+        updated_at=updated_at,
+        status=_normalize_import_status(raw.get("status")),
+        decision=decision,
+        messages=messages,
+        model_provider=model_provider,
+        model_id=model_id,
+    )
+
+
+def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONValue]:
+    selected_model: dict[str, JSONValue] | None = None
+    if session.model_provider and session.model_id:
+        selected_model = {
+            "provider": session.model_provider,
+            "model": session.model_id,
+        }
+    payload: dict[str, JSONValue] = {
+        "session_id": session.session_id,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "status": session.status,
+        "messages": [dict(item) for item in session.messages],
+        "decision": dict(session.decision) if session.decision is not None else None,
+        "selected_model": selected_model,
+    }
+    return payload
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
+
+
 async def handle_ui_redirect(request: web.Request) -> web.StreamResponse:
     raise web.HTTPFound("/ui/")
 
@@ -699,6 +948,271 @@ async def handle_ui_status(request: web.Request) -> web.Response:
     )
     response.headers[UI_SESSION_HEADER] = session_id
     return response
+
+
+async def handle_ui_settings(request: web.Request) -> web.Response:
+    del request
+    try:
+        return _json_response(_build_settings_payload())
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=500,
+            message=f"Не удалось загрузить settings: {exc}",
+            error_type="internal_error",
+            code="settings_load_failed",
+        )
+
+
+async def handle_ui_settings_update(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+
+    personalization_raw = payload.get("personalization")
+    if personalization_raw is not None:
+        if not isinstance(personalization_raw, dict):
+            return _error_response(
+                status=400,
+                message="personalization должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        tone, system_prompt = _load_personalization_settings()
+        if "tone" in personalization_raw:
+            tone_raw = personalization_raw.get("tone")
+            if not isinstance(tone_raw, str):
+                return _error_response(
+                    status=400,
+                    message="personalization.tone должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            normalized_tone = tone_raw.strip()
+            if not normalized_tone:
+                return _error_response(
+                    status=400,
+                    message="personalization.tone не должен быть пустым.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            tone = normalized_tone
+        if "system_prompt" in personalization_raw:
+            prompt_raw = personalization_raw.get("system_prompt")
+            if not isinstance(prompt_raw, str):
+                return _error_response(
+                    status=400,
+                    message="personalization.system_prompt должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            system_prompt = prompt_raw
+        _save_personalization_settings(tone=tone, system_prompt=system_prompt)
+
+    memory_raw = payload.get("memory")
+    if memory_raw is not None:
+        if not isinstance(memory_raw, dict):
+            return _error_response(
+                status=400,
+                message="memory должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        current_memory = load_memory_config()
+        auto_save_dialogue = current_memory.auto_save_dialogue
+        inbox_max_items = current_memory.inbox_max_items
+        inbox_ttl_days = current_memory.inbox_ttl_days
+        inbox_writes_per_minute = current_memory.inbox_writes_per_minute
+        if "auto_save_dialogue" in memory_raw:
+            raw_auto_save = memory_raw.get("auto_save_dialogue")
+            if not isinstance(raw_auto_save, bool):
+                return _error_response(
+                    status=400,
+                    message="memory.auto_save_dialogue должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            auto_save_dialogue = raw_auto_save
+        if "inbox_max_items" in memory_raw:
+            raw_value = memory_raw.get("inbox_max_items")
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+                return _error_response(
+                    status=400,
+                    message="memory.inbox_max_items должен быть положительным int.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            inbox_max_items = raw_value
+        if "inbox_ttl_days" in memory_raw:
+            raw_value = memory_raw.get("inbox_ttl_days")
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+                return _error_response(
+                    status=400,
+                    message="memory.inbox_ttl_days должен быть положительным int.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            inbox_ttl_days = raw_value
+        if "inbox_writes_per_minute" in memory_raw:
+            raw_value = memory_raw.get("inbox_writes_per_minute")
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+                return _error_response(
+                    status=400,
+                    message="memory.inbox_writes_per_minute должен быть положительным int.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            inbox_writes_per_minute = raw_value
+        if "embeddings_model" in memory_raw:
+            raw_model = memory_raw.get("embeddings_model")
+            if not isinstance(raw_model, str):
+                return _error_response(
+                    status=400,
+                    message="memory.embeddings_model должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            normalized_model = raw_model.strip()
+            if not normalized_model:
+                return _error_response(
+                    status=400,
+                    message="memory.embeddings_model не должен быть пустым.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            _save_embeddings_model_setting(normalized_model)
+        save_memory_config(
+            MemoryConfig(
+                auto_save_dialogue=auto_save_dialogue,
+                inbox_max_items=inbox_max_items,
+                inbox_ttl_days=inbox_ttl_days,
+                inbox_writes_per_minute=inbox_writes_per_minute,
+            ),
+        )
+
+    tools_raw = payload.get("tools")
+    if tools_raw is not None:
+        if not isinstance(tools_raw, dict):
+            return _error_response(
+                status=400,
+                message="tools должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        state_raw = tools_raw.get("state", tools_raw)
+        if not isinstance(state_raw, dict):
+            return _error_response(
+                status=400,
+                message="tools.state должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        current_state = _load_tools_state()
+        next_state = dict(current_state)
+        for key, raw_value in state_raw.items():
+            if not isinstance(key, str) or key not in DEFAULT_TOOLS_STATE:
+                return _error_response(
+                    status=400,
+                    message=f"Неизвестный tools ключ: {key}",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if not isinstance(raw_value, bool):
+                return _error_response(
+                    status=400,
+                    message=f"tools.{key} должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            next_state[key] = raw_value
+        _save_tools_state(next_state)
+
+    return _json_response(_build_settings_payload())
+
+
+async def handle_ui_chats_export(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    sessions = await hub.export_sessions()
+    payload_sessions = [_serialize_persisted_session(item) for item in sessions]
+    return _json_response(
+        {
+            "exported_at": _utc_iso(),
+            "count": len(payload_sessions),
+            "sessions": payload_sessions,
+        },
+    )
+
+
+async def handle_ui_chats_import(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    sessions_raw = payload.get("sessions")
+    if not isinstance(sessions_raw, list):
+        return _error_response(
+            status=400,
+            message="sessions должен быть списком.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    mode: Literal["replace", "merge"] = "replace"
+    raw_mode = payload.get("mode")
+    if isinstance(raw_mode, str):
+        normalized_mode = raw_mode.strip().lower()
+        if normalized_mode in {"replace", "merge"}:
+            mode = cast(Literal["replace", "merge"], normalized_mode)
+        else:
+            return _error_response(
+                status=400,
+                message="mode должен быть replace или merge.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+
+    sessions: list[PersistedSession] = []
+    for index, item in enumerate(sessions_raw):
+        parsed = _parse_imported_session(item)
+        if parsed is None:
+            return _error_response(
+                status=400,
+                message=f"sessions[{index}] имеет некорректный формат.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        sessions.append(parsed)
+    imported = await hub.import_sessions(sessions, mode=mode)
+    return _json_response(
+        {
+            "imported": imported,
+            "mode": mode,
+        },
+    )
 
 
 async def handle_ui_models(request: web.Request) -> web.Response:
@@ -1562,6 +2076,10 @@ def create_app(
     app.router.add_get("/ui", handle_ui_redirect)
     app.router.add_get("/ui/", handle_ui_index)
     app.router.add_get("/ui/api/status", handle_ui_status)
+    app.router.add_get("/ui/api/settings", handle_ui_settings)
+    app.router.add_post("/ui/api/settings", handle_ui_settings_update)
+    app.router.add_get("/ui/api/settings/chats/export", handle_ui_chats_export)
+    app.router.add_post("/ui/api/settings/chats/import", handle_ui_chats_import)
     app.router.add_get("/ui/api/models", handle_ui_models)
     app.router.add_get("/ui/api/sessions", handle_ui_sessions_list)
     app.router.add_post("/ui/api/sessions", handle_ui_sessions_create)

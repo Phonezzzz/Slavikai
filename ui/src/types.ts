@@ -58,3 +58,35 @@ export type ApprovalRequestView = {
   session_id: string | null;
   prompt: ApprovalPromptView;
 };
+
+export type ProviderSettingsView = {
+  provider: string;
+  api_key_env: string;
+  api_key_set: boolean;
+  endpoint: string;
+};
+
+export type PersonalizationSettingsView = {
+  tone: string;
+  system_prompt: string;
+};
+
+export type MemorySettingsView = {
+  auto_save_dialogue: boolean;
+  inbox_max_items: number;
+  inbox_ttl_days: number;
+  inbox_writes_per_minute: number;
+  embeddings_model: string;
+};
+
+export type ToolsSettingsView = {
+  state: Record<string, boolean>;
+  registry: Record<string, boolean>;
+};
+
+export type AppSettingsView = {
+  personalization: PersonalizationSettingsView;
+  memory: MemorySettingsView;
+  tools: ToolsSettingsView;
+  providers: ProviderSettingsView[];
+};

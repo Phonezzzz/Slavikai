@@ -4,7 +4,9 @@ import ChatView from "./components/ChatView";
 import DecisionPanel from "./components/DecisionPanel";
 import ApprovalPanel from "./components/ApprovalPanel";
 import DebugPanel from "./components/DebugPanel";
+import SettingsPanel from "./components/SettingsPanel";
 import type {
+  AppSettingsView,
   ApprovalRequestView,
   DecisionOptionView,
   DecisionPacketView,
@@ -228,6 +230,111 @@ const parseApprovalRequest = (value: unknown): ApprovalRequestView | null => {
   };
 };
 
+const parseBooleanMap = (value: unknown): Record<string, boolean> => {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  const map: Record<string, boolean> = {};
+  for (const [key, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof key !== "string" || typeof rawValue !== "boolean") {
+      continue;
+    }
+    map[key] = rawValue;
+  }
+  return map;
+};
+
+const parseSettings = (value: unknown): AppSettingsView | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as {
+    personalization?: unknown;
+    memory?: unknown;
+    tools?: unknown;
+    providers?: unknown;
+  };
+  if (
+    !candidate.personalization ||
+    typeof candidate.personalization !== "object" ||
+    !candidate.memory ||
+    typeof candidate.memory !== "object" ||
+    !candidate.tools ||
+    typeof candidate.tools !== "object" ||
+    !Array.isArray(candidate.providers)
+  ) {
+    return null;
+  }
+  const personalization = candidate.personalization as {
+    tone?: unknown;
+    system_prompt?: unknown;
+  };
+  const memory = candidate.memory as {
+    auto_save_dialogue?: unknown;
+    inbox_max_items?: unknown;
+    inbox_ttl_days?: unknown;
+    inbox_writes_per_minute?: unknown;
+    embeddings_model?: unknown;
+  };
+  const tools = candidate.tools as { state?: unknown; registry?: unknown };
+  if (
+    typeof personalization.tone !== "string" ||
+    typeof personalization.system_prompt !== "string" ||
+    typeof memory.auto_save_dialogue !== "boolean" ||
+    typeof memory.inbox_max_items !== "number" ||
+    typeof memory.inbox_ttl_days !== "number" ||
+    typeof memory.inbox_writes_per_minute !== "number" ||
+    typeof memory.embeddings_model !== "string"
+  ) {
+    return null;
+  }
+  const providers = candidate.providers
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const provider = item as {
+        provider?: unknown;
+        api_key_env?: unknown;
+        api_key_set?: unknown;
+        endpoint?: unknown;
+      };
+      if (
+        typeof provider.provider !== "string" ||
+        typeof provider.api_key_env !== "string" ||
+        typeof provider.api_key_set !== "boolean" ||
+        typeof provider.endpoint !== "string"
+      ) {
+        return null;
+      }
+      return {
+        provider: provider.provider,
+        api_key_env: provider.api_key_env,
+        api_key_set: provider.api_key_set,
+        endpoint: provider.endpoint,
+      };
+    })
+    .filter((item): item is AppSettingsView["providers"][number] => item !== null);
+  return {
+    personalization: {
+      tone: personalization.tone,
+      system_prompt: personalization.system_prompt,
+    },
+    memory: {
+      auto_save_dialogue: memory.auto_save_dialogue,
+      inbox_max_items: memory.inbox_max_items,
+      inbox_ttl_days: memory.inbox_ttl_days,
+      inbox_writes_per_minute: memory.inbox_writes_per_minute,
+      embeddings_model: memory.embeddings_model,
+    },
+    tools: {
+      state: parseBooleanMap(tools.state),
+      registry: parseBooleanMap(tools.registry),
+    },
+    providers,
+  };
+};
+
 const formatSessionUpdatedAt = (updatedAt: string): string => {
   const parsed = Date.parse(updatedAt);
   if (Number.isNaN(parsed)) {
@@ -339,6 +446,12 @@ export default function App() {
   const [projectCommand, setProjectCommand] = useState<ProjectCommand>("find");
   const [projectArgs, setProjectArgs] = useState("");
   const [projectBusy, setProjectBusy] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsExportBusy, setSettingsExportBusy] = useState(false);
+  const [settingsImportBusy, setSettingsImportBusy] = useState(false);
+  const [settingsData, setSettingsData] = useState<AppSettingsView | null>(null);
 
   const appendSystemMessage = (content: string) => {
     const normalized = content.trim();
@@ -420,6 +533,176 @@ export default function App() {
       return;
     } finally {
       setSessionsLoading(false);
+    }
+  };
+
+  const loadSettings = async () => {
+    setSettingsLoading(true);
+    try {
+      const response = await fetch("/ui/api/settings");
+      if (!response.ok) {
+        appendSystemMessage("Не удалось загрузить settings.");
+        return;
+      }
+      const payload = (await response.json()) as { settings?: unknown };
+      const parsed = parseSettings(payload.settings);
+      if (!parsed) {
+        appendSystemMessage("Settings payload имеет некорректный формат.");
+        return;
+      }
+      setSettingsData(parsed);
+    } catch {
+      appendSystemMessage("Ошибка загрузки settings.");
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
+
+  const postSettings = async (payload: Record<string, unknown>): Promise<void> => {
+    setSettingsSaving(true);
+    try {
+      const response = await fetch("/ui/api/settings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        appendSystemMessage("Не удалось сохранить settings.");
+        return;
+      }
+      const body = (await response.json()) as { settings?: unknown };
+      const parsed = parseSettings(body.settings);
+      if (!parsed) {
+        appendSystemMessage("Settings update вернул некорректный payload.");
+        return;
+      }
+      setSettingsData(parsed);
+      appendSystemMessage("Settings сохранены.");
+    } catch {
+      appendSystemMessage("Ошибка сохранения settings.");
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const handleSavePersonalization = async (payload: {
+    tone: string;
+    system_prompt: string;
+  }): Promise<void> => {
+    await postSettings({ personalization: payload });
+  };
+
+  const handleSaveMemory = async (payload: {
+    auto_save_dialogue: boolean;
+    inbox_max_items: number;
+    inbox_ttl_days: number;
+    inbox_writes_per_minute: number;
+    embeddings_model: string;
+  }): Promise<void> => {
+    await postSettings({ memory: payload });
+  };
+
+  const handleSaveTools = async (payload: {
+    state: Record<string, boolean>;
+  }): Promise<void> => {
+    await postSettings({ tools: payload });
+  };
+
+  const handleExportChats = async (): Promise<void> => {
+    setSettingsExportBusy(true);
+    try {
+      const response = await fetch("/ui/api/settings/chats/export");
+      if (!response.ok) {
+        appendSystemMessage("Не удалось экспортировать chats DB.");
+        return;
+      }
+      const payload = (await response.json()) as {
+        exported_at?: unknown;
+        count?: unknown;
+        sessions?: unknown;
+      };
+      const timestamp =
+        typeof payload.exported_at === "string" && payload.exported_at.trim()
+          ? payload.exported_at.replace(/[:.]/g, "-")
+          : Date.now().toString();
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `slavik-ui-chats-${timestamp}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      const count = typeof payload.count === "number" ? payload.count : 0;
+      appendSystemMessage(`Экспорт завершён: ${count} сессий.`);
+    } catch {
+      appendSystemMessage("Ошибка экспорта chats DB.");
+    } finally {
+      setSettingsExportBusy(false);
+    }
+  };
+
+  const handleImportChats = async (file: File, mode: "replace" | "merge"): Promise<void> => {
+    setSettingsImportBusy(true);
+    try {
+      const raw = await file.text();
+      const parsedPayload = JSON.parse(raw) as { sessions?: unknown };
+      if (!Array.isArray(parsedPayload.sessions)) {
+        appendSystemMessage("Файл импорта должен содержать поле sessions[].");
+        return;
+      }
+      const response = await fetch("/ui/api/settings/chats/import", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mode,
+          sessions: parsedPayload.sessions,
+        }),
+      });
+      if (!response.ok) {
+        appendSystemMessage("Не удалось импортировать chats DB.");
+        return;
+      }
+      const payload = (await response.json()) as {
+        imported?: unknown;
+      };
+      const importedCount = typeof payload.imported === "number" ? payload.imported : 0;
+      appendSystemMessage(`Импорт завершён: ${importedCount} сессий.`);
+      const statusResponse = await fetch("/ui/api/status");
+      if (statusResponse.ok) {
+        const statusPayload = (await statusResponse.json()) as {
+          session_id?: unknown;
+          selected_model?: unknown;
+          decision?: unknown;
+        };
+        const headerSession = statusResponse.headers.get("X-Slavik-Session");
+        const nextSessionId =
+          headerSession ||
+          (typeof statusPayload.session_id === "string" ? statusPayload.session_id : null);
+        if (nextSessionId) {
+          setSessionId(nextSessionId);
+          await hydrateSession(nextSessionId);
+        }
+        setDecision(parseDecision(statusPayload.decision));
+        const nextModel = parseSelectedModel(statusPayload.selected_model);
+        if (nextModel) {
+          setSelectedModel(nextModel);
+          setSelectedProvider(nextModel.provider);
+          setSelectedModelId(nextModel.model);
+        }
+      }
+      void refreshSessions();
+    } catch {
+      appendSystemMessage("Ошибка импорта chats DB.");
+    } finally {
+      setSettingsImportBusy(false);
     }
   };
 
@@ -514,6 +797,13 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      return;
+    }
+    void loadSettings();
+  }, [settingsOpen]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -1050,6 +1340,9 @@ export default function App() {
               </div>
               <button
                 type="button"
+                onClick={() => {
+                  setSettingsOpen(true);
+                }}
                 className="rounded-full border border-neutral-800/80 bg-neutral-900/60 px-3 py-1.5 text-neutral-300"
               >
                 Settings
@@ -1134,6 +1427,24 @@ export default function App() {
           </div>
         </main>
       </div>
+      <SettingsPanel
+        open={settingsOpen}
+        settings={settingsData}
+        providerModels={providerModels}
+        loading={settingsLoading}
+        saving={settingsSaving}
+        importBusy={settingsImportBusy}
+        exportBusy={settingsExportBusy}
+        onClose={() => setSettingsOpen(false)}
+        onRefresh={() => {
+          void loadSettings();
+        }}
+        onSavePersonalization={handleSavePersonalization}
+        onSaveMemory={handleSaveMemory}
+        onSaveTools={handleSaveTools}
+        onExportChats={handleExportChats}
+        onImportChats={handleImportChats}
+      />
     </div>
   );
 }

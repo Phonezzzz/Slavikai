@@ -5,6 +5,18 @@ import json
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from config.memory_config import (
+    load_memory_config as load_memory_config_from_path,
+)
+from config.memory_config import (
+    save_memory_config as save_memory_config_to_path,
+)
+from config.tools_config import (
+    load_tools_config as load_tools_config_from_path,
+)
+from config.tools_config import (
+    save_tools_config as save_tools_config_to_path,
+)
 from server.http_api import create_app
 from server.ui_hub import UIHub
 from server.ui_session_storage import InMemoryUISessionStorage, SQLiteUISessionStorage
@@ -660,5 +672,187 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             assert selected_from_status.get("model") == selected_model
         finally:
             await client_after.close()
+
+    asyncio.run(run())
+
+
+def test_ui_settings_endpoint() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.get("/ui/api/settings")
+            assert response.status == 200
+            payload = await response.json()
+            settings = payload.get("settings")
+            assert isinstance(settings, dict)
+            personalization = settings.get("personalization")
+            assert isinstance(personalization, dict)
+            assert isinstance(personalization.get("tone"), str)
+            assert isinstance(personalization.get("system_prompt"), str)
+            memory = settings.get("memory")
+            assert isinstance(memory, dict)
+            assert isinstance(memory.get("auto_save_dialogue"), bool)
+            assert isinstance(memory.get("inbox_max_items"), int)
+            assert isinstance(memory.get("embeddings_model"), str)
+            tools = settings.get("tools")
+            assert isinstance(tools, dict)
+            state = tools.get("state")
+            assert isinstance(state, dict)
+            assert "safe_mode" in state
+            providers = settings.get("providers")
+            assert isinstance(providers, list)
+            provider_names = {item.get("provider") for item in providers if isinstance(item, dict)}
+            assert provider_names == {"local", "openrouter", "xai"}
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
+    memory_path = tmp_path / "memory.json"
+    tools_path = tmp_path / "tools.json"
+    ui_settings_path = tmp_path / "ui_settings.json"
+
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
+    monkeypatch.setattr(
+        "server.http_api.load_memory_config",
+        lambda: load_memory_config_from_path(path=memory_path),
+    )
+    monkeypatch.setattr(
+        "server.http_api.save_memory_config",
+        lambda config: save_memory_config_to_path(config, path=memory_path),
+    )
+    monkeypatch.setattr(
+        "server.http_api.load_tools_config",
+        lambda: load_tools_config_from_path(path=tools_path),
+    )
+    monkeypatch.setattr(
+        "server.http_api.save_tools_config",
+        lambda config: save_tools_config_to_path(config, path=tools_path),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post(
+                "/ui/api/settings",
+                json={
+                    "personalization": {
+                        "tone": "direct",
+                        "system_prompt": "Focus on concise implementation details.",
+                    },
+                    "memory": {
+                        "auto_save_dialogue": True,
+                        "inbox_max_items": 77,
+                        "inbox_ttl_days": 14,
+                        "inbox_writes_per_minute": 9,
+                        "embeddings_model": "test-embeddings-v1",
+                    },
+                    "tools": {
+                        "state": {
+                            "safe_mode": False,
+                            "web": True,
+                        },
+                    },
+                },
+            )
+            assert response.status == 200
+            payload = await response.json()
+            settings = payload.get("settings")
+            assert isinstance(settings, dict)
+            personalization = settings.get("personalization")
+            assert isinstance(personalization, dict)
+            assert personalization.get("tone") == "direct"
+            assert (
+                personalization.get("system_prompt") == "Focus on concise implementation details."
+            )
+            memory = settings.get("memory")
+            assert isinstance(memory, dict)
+            assert memory.get("auto_save_dialogue") is True
+            assert memory.get("inbox_max_items") == 77
+            assert memory.get("inbox_ttl_days") == 14
+            assert memory.get("inbox_writes_per_minute") == 9
+            assert memory.get("embeddings_model") == "test-embeddings-v1"
+            tools = settings.get("tools")
+            assert isinstance(tools, dict)
+            state = tools.get("state")
+            assert isinstance(state, dict)
+            assert state.get("safe_mode") is False
+            assert state.get("web") is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chats_export_import_endpoints() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_payload = create_payload.get("session")
+            assert isinstance(session_payload, dict)
+            session_id = session_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "export me"},
+            )
+            assert send_resp.status == 200
+
+            export_resp = await client.get("/ui/api/settings/chats/export")
+            assert export_resp.status == 200
+            export_payload = await export_resp.json()
+            exported_sessions = export_payload.get("sessions")
+            assert isinstance(exported_sessions, list)
+            assert len(exported_sessions) >= 1
+
+            import_resp = await client.post(
+                "/ui/api/settings/chats/import",
+                json={
+                    "mode": "replace",
+                    "sessions": [
+                        {
+                            "session_id": "imported-session",
+                            "created_at": "2026-01-01T00:00:00+00:00",
+                            "updated_at": "2026-01-01T00:00:00+00:00",
+                            "status": "ok",
+                            "messages": [
+                                {"role": "user", "content": "hello import"},
+                                {"role": "assistant", "content": "import ok"},
+                            ],
+                            "decision": None,
+                            "selected_model": {"provider": "local", "model": "local-default"},
+                        },
+                    ],
+                },
+            )
+            assert import_resp.status == 200
+            import_payload = await import_resp.json()
+            assert import_payload.get("imported") == 1
+            assert import_payload.get("mode") == "replace"
+
+            imported_resp = await client.get("/ui/api/sessions/imported-session")
+            assert imported_resp.status == 200
+            imported_payload = await imported_resp.json()
+            imported_session = imported_payload.get("session")
+            assert isinstance(imported_session, dict)
+            messages = imported_session.get("messages")
+            assert isinstance(messages, list)
+            assert len(messages) == 2
+            first = messages[0]
+            second = messages[1]
+            assert isinstance(first, dict)
+            assert isinstance(second, dict)
+            assert first.get("content") == "hello import"
+            assert second.get("content") == "import ok"
+        finally:
+            await client.close()
 
     asyncio.run(run())

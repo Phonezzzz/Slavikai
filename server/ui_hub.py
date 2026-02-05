@@ -122,6 +122,70 @@ class UIHub:
                 for item in items
             ]
 
+    async def export_sessions(self) -> list[PersistedSession]:
+        async with self._lock:
+            self._prune_sessions_locked()
+            items: list[PersistedSession] = []
+            for session_id, state in self._sessions.items():
+                items.append(
+                    PersistedSession(
+                        session_id=session_id,
+                        created_at=state.created_at,
+                        updated_at=state.updated_at,
+                        status=self._normalize_status(state.status_state),
+                        decision=(
+                            dict(state.decision_packet)
+                            if state.decision_packet is not None
+                            else None
+                        ),
+                        messages=[dict(message) for message in state.messages],
+                        model_provider=state.model_provider,
+                        model_id=state.model_id,
+                    ),
+                )
+            items.sort(
+                key=lambda item: self._parse_session_timestamp(item.updated_at),
+                reverse=True,
+            )
+            return items
+
+    async def import_sessions(
+        self,
+        sessions: list[PersistedSession],
+        *,
+        mode: Literal["replace", "merge"] = "replace",
+    ) -> int:
+        async with self._lock:
+            if mode == "replace":
+                self._drop_sessions_locked(list(self._sessions.keys()))
+            imported = 0
+            for item in sessions:
+                decision = dict(item.decision) if item.decision is not None else None
+                last_decision_id: str | None = None
+                if decision is not None:
+                    decision_id = decision.get("id")
+                    if isinstance(decision_id, str):
+                        last_decision_id = decision_id
+                restored_updated_at = _utc_iso_now()
+                created_at = item.created_at or restored_updated_at
+                existing = self._sessions.get(item.session_id)
+                subscribers = set(existing.subscribers) if existing is not None else set()
+                self._sessions[item.session_id] = _SessionState(
+                    messages=[dict(message) for message in item.messages],
+                    subscribers=subscribers,
+                    last_decision_id=last_decision_id,
+                    decision_packet=decision,
+                    status_state=self._normalize_status(item.status),
+                    model_provider=item.model_provider,
+                    model_id=item.model_id,
+                    created_at=created_at,
+                    updated_at=restored_updated_at,
+                )
+                self._persist_session_locked(item.session_id)
+                imported += 1
+            self._prune_sessions_locked()
+            return imported
+
     async def get_session(self, session_id: str) -> dict[str, JSONValue] | None:
         async with self._lock:
             state = self._sessions.get(session_id)
