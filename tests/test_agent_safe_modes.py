@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.agent import Agent
+from core.agent import SAFE_MODE_TOOLS_OFF, Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage, ToolRequest, ToolResult
@@ -59,3 +59,15 @@ def test_safe_mode_on_blocks_web_shell(tmp_path: Path) -> None:
     assert not res_shell.ok and res_shell.error
     assert "Safe mode" in res_web.error or "safe mode" in res_web.error.lower()
     assert dummy.calls == 0
+
+
+def test_safe_mode_config_includes_extended_network_tools() -> None:
+    required = {
+        "tts",
+        "stt",
+        "web_search",
+        "http_client",
+        "image_analyze",
+        "image_generate",
+    }
+    assert required.issubset(SAFE_MODE_TOOLS_OFF)

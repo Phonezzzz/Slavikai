@@ -1,25 +1,48 @@
 from __future__ import annotations
 
+import pytest
+
 from shared.models import ToolRequest, ToolResult
 from tools.tool_registry import ToolRegistry
 
 
-def test_safe_mode_blocks_web_shell() -> None:
-    registry = ToolRegistry(safe_block={"web", "shell"})
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "web",
+        "shell",
+        "tts",
+        "stt",
+        "web_search",
+        "http_client",
+        "image_analyze",
+        "image_generate",
+    ],
+)
+def test_safe_mode_blocks_network_and_system_tools(tool_name: str) -> None:
+    registry = ToolRegistry(
+        safe_block={
+            "web",
+            "shell",
+            "tts",
+            "stt",
+            "web_search",
+            "http_client",
+            "image_analyze",
+            "image_generate",
+        }
+    )
 
     def ok_handler(_: ToolRequest) -> ToolResult:
         return ToolResult.success({"output": "ok"})
 
-    registry.register("web", ok_handler, enabled=True)
-    registry.register("shell", ok_handler, enabled=True)
+    registry.register(tool_name, ok_handler, enabled=True)
     registry.apply_safe_mode(True)
 
-    res_web = registry.call(ToolRequest(name="web"))
-    assert not res_web.ok
-    assert (
-        "safe mode" in (res_web.error or "").lower() or "отключён" in (res_web.error or "").lower()
-    )
+    result = registry.call(ToolRequest(name=tool_name))
+    assert not result.ok
+    assert "safe mode" in (result.error or "").lower() or "отключён" in (result.error or "").lower()
 
     registry.apply_safe_mode(False)
-    res_web2 = registry.call(ToolRequest(name="web"))
-    assert res_web2.ok
+    result_enabled = registry.call(ToolRequest(name=tool_name))
+    assert result_enabled.ok

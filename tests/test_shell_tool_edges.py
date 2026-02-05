@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from shared.models import ToolRequest
 from tools.shell_tool import ShellConfig, handle_shell_request
 
@@ -130,3 +132,49 @@ def test_normalize_shell_sandbox_root_empty_uses_root(tmp_path, monkeypatch) -> 
     from shared.sandbox import normalize_shell_sandbox_root
 
     assert normalize_shell_sandbox_root("") == (tmp_path / "sandbox").resolve()
+
+
+def test_normalize_shell_sandbox_root_rejects_symlink_escape(tmp_path, monkeypatch) -> None:
+    sandbox_root = (tmp_path / "sandbox").resolve()
+    sandbox_root.mkdir(parents=True)
+    outside = (tmp_path / "outside").resolve()
+    outside.mkdir()
+    link = sandbox_root / "escape"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlink недоступен в этом окружении.")
+    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", sandbox_root)
+
+    from shared.sandbox import SandboxViolationError, normalize_shell_sandbox_root
+
+    with pytest.raises(SandboxViolationError):
+        normalize_shell_sandbox_root("escape")
+
+
+def test_shell_rejects_symlink_sandbox_root(tmp_path, monkeypatch) -> None:
+    sandbox_root = (tmp_path / "sandbox").resolve()
+    sandbox_root.mkdir(parents=True)
+    outside = (tmp_path / "outside").resolve()
+    outside.mkdir()
+    link = sandbox_root / "escape"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlink недоступен в этом окружении.")
+    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", sandbox_root)
+
+    config_path = tmp_path / "shell_config.json"
+    cfg = ShellConfig(
+        allowed_commands=["echo"],
+        timeout_seconds=2,
+        max_output_chars=100,
+        sandbox_root="escape",
+    )
+    req = ToolRequest(
+        name="shell",
+        args={"command": "echo hi", "shell_config": cfg.__dict__, "config_path": str(config_path)},
+    )
+    res = handle_shell_request(req)
+    assert not res.ok
+    assert "sandbox violation" in (res.error or "").lower()

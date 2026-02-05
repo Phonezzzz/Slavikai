@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Final
@@ -60,6 +61,12 @@ def normalize_sandbox_path(raw_path: str, sandbox_root: Path) -> Path:
         candidate.relative_to(root)
     except ValueError as exc:
         raise SandboxViolationError(raw, candidate) from exc
+    root_real = Path(os.path.realpath(root))
+    candidate_real = Path(os.path.realpath(candidate))
+    try:
+        candidate_real.relative_to(root_real)
+    except ValueError as exc:
+        raise SandboxViolationError(raw, candidate_real) from exc
     return candidate
 
 

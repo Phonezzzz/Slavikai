@@ -6,6 +6,7 @@ from typing import Final
 
 from memory.vector_index import VectorIndex
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.sandbox import SandboxViolationError, normalize_sandbox_path
 
 ALLOWED_EXTENSIONS: Final[tuple[str, ...]] = (".py", ".md", ".txt")
 IGNORED_DIRS: Final[set[str]] = {".git", "__pycache__", "venv", ".venv"}
@@ -17,10 +18,19 @@ SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _normalize_path(raw: str) -> Path:
-    base_candidate = (SANDBOX_ROOT / (raw or ".")).resolve()
-    if not str(base_candidate).startswith(str(SANDBOX_ROOT)):
-        raise ValueError("Путь вне sandbox/project запрещён")
-    return base_candidate
+    try:
+        return normalize_sandbox_path(raw or ".", SANDBOX_ROOT)
+    except SandboxViolationError as exc:
+        raise ValueError("Путь вне sandbox/project запрещён") from exc
+
+
+def _resolve_in_sandbox(path: Path) -> Path:
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(SANDBOX_ROOT)
+    except ValueError as exc:
+        raise ValueError("Путь вне sandbox/project запрещён") from exc
+    return resolved
 
 
 def handle_project_request(request: ToolRequest) -> ToolResult:
@@ -30,9 +40,8 @@ def handle_project_request(request: ToolRequest) -> ToolResult:
     index = VectorIndex("memory/vectors.db")
     if cmd == "index":
         path_str = args[0] if args else "."
-        base_path = Path(path_str)
         try:
-            base = base_path.resolve() if base_path.is_absolute() else _normalize_path(path_str)
+            base = _normalize_path(path_str)
         except ValueError as exc:
             return ToolResult.failure(str(exc))
         if not base.exists() or not base.is_dir():
@@ -42,13 +51,12 @@ def handle_project_request(request: ToolRequest) -> ToolResult:
         indexed_docs = 0
         skipped: list[str] = []
 
-        base_root = SANDBOX_ROOT if str(base).startswith(str(SANDBOX_ROOT)) else base
-
         for root, dirs, files in os.walk(base):
             try:
-                rel_depth = len(Path(root).resolve().relative_to(base_root).parts)
+                current_root = _resolve_in_sandbox(Path(root))
+                rel_depth = len(current_root.relative_to(base).parts)
             except Exception:
-                skipped.append(f"{root}: вне sandbox/project")
+                skipped.append(f"{root}: путь вне sandbox/project")
                 continue
             if rel_depth > MAX_DEPTH:
                 skipped.append(f"{root}: превышена глубина {MAX_DEPTH}")
@@ -60,6 +68,7 @@ def handle_project_request(request: ToolRequest) -> ToolResult:
                     continue
                 full_path = Path(root, filename)
                 try:
+                    full_path = _resolve_in_sandbox(full_path)
                     if full_path.stat().st_size > MAX_FILE_BYTES:
                         skipped.append(f"{full_path}: файл больше {MAX_FILE_BYTES} байт")
                         continue
