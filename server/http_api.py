@@ -774,6 +774,14 @@ def _build_canvas_output(response_text: str) -> dict[str, JSONValue] | None:
     }
 
 
+def _chat_response_for_canvas(
+    response_text: str, canvas_output: dict[str, JSONValue] | None
+) -> str:
+    if canvas_output is None:
+        return response_text
+    return "Готово. Результат в Canvas."
+
+
 def _load_ui_settings_blob() -> dict[str, object]:
     if not UI_SETTINGS_PATH.exists():
         return {}
@@ -1912,7 +1920,8 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 getattr(agent, "last_approval_request", None),
             )
 
-        await hub.append_message(session_id, "assistant", response_text)
+        chat_response = _chat_response_for_canvas(response_text, canvas_output)
+        await hub.append_message(session_id, "assistant", chat_response)
         if canvas_output is not None:
             await hub.set_canvas_output(session_id, canvas_output)
         await hub.set_session_decision(session_id, decision)
@@ -2132,7 +2141,8 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                         f"Index error: {index_result}"
                     )
             canvas_output = _build_canvas_output(response_text)
-            await hub.append_message(session_id, "assistant", response_text)
+            chat_response = _chat_response_for_canvas(response_text, canvas_output)
+            await hub.append_message(session_id, "assistant", chat_response)
             if canvas_output is not None:
                 await hub.set_canvas_output(session_id, canvas_output)
             messages = await hub.get_messages(session_id)
@@ -2209,7 +2219,8 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 getattr(agent, "last_approval_request", None),
             )
 
-        await hub.append_message(session_id, "assistant", response_text)
+        chat_response = _chat_response_for_canvas(response_text, canvas_output)
+        await hub.append_message(session_id, "assistant", chat_response)
         if canvas_output is not None:
             await hub.set_canvas_output(session_id, canvas_output)
         messages = await hub.get_messages(session_id)
