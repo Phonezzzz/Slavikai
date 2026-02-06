@@ -1,111 +1,185 @@
-import { ChevronLeft, ChevronRight, FileText, FolderOpen, History } from 'lucide-react';
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Download,
+  FileText,
+  LayoutGrid,
+  Share2,
+  X,
+} from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import JSZip from 'jszip';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import type { Components } from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
+import 'highlight.js/styles/atom-one-dark.css';
 
-import type { ChatMessage, UploadHistoryItem } from '../types';
+import type { CanvasOutput } from '../types';
 
-type CanvasTab = 'output' | 'files' | 'history';
+export type CanvasView = 'sidebar' | 'detail';
 
-type ExportFormat = 'txt' | 'md' | 'json' | 'zip';
-
-type ArtifactItem = {
-  id: string;
-  title: string;
-  content: string;
-};
+type CanvasFormat = 'txt' | 'md' | 'py' | 'json' | 'yaml';
 
 interface ChatCanvasProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
-  messages: ChatMessage[];
-  uploads: UploadHistoryItem[];
+  canvas: CanvasOutput | null;
+  view: CanvasView;
+  onViewChange: (view: CanvasView) => void;
 }
 
-const markdownComponents: Components = {
-  h1: ({ children }) => <h1 className="text-lg font-semibold text-white">{children}</h1>,
-  h2: ({ children }) => <h2 className="text-base font-semibold text-white">{children}</h2>,
-  h3: ({ children }) => <h3 className="text-sm font-semibold text-white">{children}</h3>,
-  p: ({ children }) => <p className="leading-relaxed text-white/80">{children}</p>,
-  ul: ({ children }) => <ul className="list-disc space-y-1 pl-5 text-white/80">{children}</ul>,
-  ol: ({ children }) => <ol className="list-decimal space-y-1 pl-5 text-white/80">{children}</ol>,
-  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-  blockquote: ({ children }) => (
-    <blockquote className="border-l-2 border-white/20 pl-3 text-white/70">{children}</blockquote>
-  ),
-  a: ({ children, href }) => (
-    <a
-      href={href}
-      className="text-sky-300 underline decoration-sky-400/60 underline-offset-4"
-      target="_blank"
-      rel="noreferrer"
-    >
-      {children}
-    </a>
-  ),
-  code: ({ inline, className, children }) => {
-    if (inline) {
-      return (
-        <code className="rounded bg-white/10 px-1 py-0.5 text-[12px] text-white/90">
-          {children}
-        </code>
-      );
+const FORMAT_OPTIONS: Array<{ value: CanvasFormat; label: string }> = [
+  { value: 'txt', label: 'txt' },
+  { value: 'md', label: 'md' },
+  { value: 'py', label: 'py' },
+  { value: 'json', label: 'json' },
+  { value: 'yaml', label: 'yaml' },
+];
+
+const normalizeContent = (content: string): string => content.replace(/\r\n/g, '\n');
+
+const inferFormatFromFilename = (filename: string | null): CanvasFormat | null => {
+  if (!filename) {
+    return null;
+  }
+  const parts = filename.toLowerCase().split('.');
+  if (parts.length < 2) {
+    return null;
+  }
+  const ext = parts[parts.length - 1];
+  if (ext === 'md') return 'md';
+  if (ext === 'txt') return 'txt';
+  if (ext === 'py') return 'py';
+  if (ext === 'json') return 'json';
+  if (ext === 'yaml' || ext === 'yml') return 'yaml';
+  return null;
+};
+
+const inferFormatFromMime = (format: string | null): CanvasFormat | null => {
+  if (!format) {
+    return null;
+  }
+  const normalized = format.toLowerCase();
+  if (normalized.includes('markdown')) return 'md';
+  if (normalized.includes('json')) return 'json';
+  if (normalized.includes('yaml')) return 'yaml';
+  if (normalized.includes('python')) return 'py';
+  if (normalized.includes('plain')) return 'txt';
+  return null;
+};
+
+const inferLanguage = (format: string | null): string | null => {
+  if (!format) {
+    return null;
+  }
+  const normalized = format.toLowerCase();
+  if (normalized.includes('python')) return 'python';
+  if (normalized.includes('json')) return 'json';
+  if (normalized.includes('yaml')) return 'yaml';
+  if (normalized.includes('markdown')) return 'markdown';
+  return null;
+};
+
+const formatToLanguage = (format: CanvasFormat): string | null => {
+  if (format === 'py') return 'python';
+  if (format === 'json') return 'json';
+  if (format === 'yaml') return 'yaml';
+  return null;
+};
+
+const looksLikeCode = (content: string): boolean => {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed.includes('```')) {
+    return true;
+  }
+  const lines = trimmed.split('\n');
+  if (lines.length < 3) {
+    return false;
+  }
+  let score = 0;
+  const patterns: RegExp[] = [
+    /^\s*(const|let|var|function|class|import|export|def|return|if|for|while|switch|case|try|catch)\b/i,
+    /[{};]/,
+    /<\/?[a-z][\s\S]*>/i,
+    /=>/,
+    /#/,
+  ];
+  for (const line of lines.slice(0, 12)) {
+    if (patterns.some((pattern) => pattern.test(line))) {
+      score += 1;
     }
-    return (
-      <code className={`block text-xs text-white/90 ${className ?? ''}`}>{children}</code>
-    );
-  },
-  pre: ({ children }) => (
-    <pre className="overflow-x-auto rounded-lg border border-white/10 bg-black/60 p-3 text-xs text-white/80">
-      {children}
-    </pre>
-  ),
-};
-
-const findLatestOutput = (messages: ChatMessage[]): string => {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role === 'assistant' && message.content.trim()) {
-      return message.content;
+    if (score >= 2) {
+      return true;
     }
   }
-  return '';
+  return false;
 };
 
-const buildArtifacts = (messages: ChatMessage[]): ArtifactItem[] => {
-  let counter = 0;
-  return messages
-    .filter((message) => message.role === 'assistant' && message.content.trim())
-    .map((message) => {
-      counter += 1;
-      const firstLine = message.content.split('\n').find((line) => line.trim());
-      const title = firstLine ? firstLine.trim().slice(0, 60) : `Output ${counter}`;
-      return {
-        id: `artifact-${counter}`,
-        title,
-        content: message.content,
-      };
-    });
+const resolveDefaultFormat = (canvas: CanvasOutput | null): CanvasFormat => {
+  if (!canvas) {
+    return 'txt';
+  }
+  const byName = inferFormatFromFilename(canvas.suggestedFilename);
+  if (byName) {
+    return byName;
+  }
+  const byMime = inferFormatFromMime(canvas.format);
+  if (byMime) {
+    return byMime;
+  }
+  return 'txt';
 };
 
-const formatFileName = (title: string): string =>
-  title
-    .toLowerCase()
-    .replace(/[^a-z0-9-_]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '') || 'artifact';
+const resolveFilename = (canvas: CanvasOutput | null, format: CanvasFormat): string => {
+  const extension = format;
+  const raw = canvas?.suggestedFilename?.trim();
+  if (!raw) {
+    return `output.${extension}`;
+  }
+  const sanitized = raw.split('/').pop()?.split('\\').pop() || raw;
+  const lower = sanitized.toLowerCase();
+  if (lower.endsWith(`.${extension}`)) {
+    return sanitized;
+  }
+  const base = sanitized.replace(/\.[^.]+$/, '');
+  return `${base || 'output'}.${extension}`;
+};
 
-const buildContentForFormat = (artifact: ArtifactItem, format: Exclude<ExportFormat, 'zip'>): string => {
-  if (format === 'json') {
-    return JSON.stringify({ title: artifact.title, content: artifact.content }, null, 2);
+const shouldRenderMarkdown = (canvas: CanvasOutput | null, content: string): boolean => {
+  if (!content.trim()) {
+    return false;
   }
-  if (format === 'txt') {
-    return artifact.content.replace(/\r\n/g, '\n');
+  if (content.includes('```')) {
+    return true;
   }
-  return artifact.content;
+  if (!canvas?.format) {
+    return false;
+  }
+  return canvas.format.toLowerCase().includes('markdown');
+};
+
+const contentForDownload = (
+  content: string,
+  format: CanvasFormat,
+  canvas: CanvasOutput | null,
+): string => {
+  const normalized = normalizeContent(content);
+  if (format !== 'md') {
+    return normalized;
+  }
+  if (normalized.includes('```')) {
+    return normalized;
+  }
+  const lang = inferLanguage(canvas?.format);
+  if (!lang || lang === 'markdown') {
+    return normalized;
+  }
+  return `\`\`\`${lang}\n${normalized}\n\`\`\``;
 };
 
 const downloadBlob = (blob: Blob, filename: string) => {
@@ -119,92 +193,124 @@ const downloadBlob = (blob: Blob, filename: string) => {
   URL.revokeObjectURL(url);
 };
 
-const formatSize = (bytes: number): string => {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+const MIME_BY_FORMAT: Record<CanvasFormat, string> = {
+  txt: 'text/plain;charset=utf-8',
+  md: 'text/markdown;charset=utf-8',
+  py: 'text/x-python;charset=utf-8',
+  json: 'application/json;charset=utf-8',
+  yaml: 'text/yaml;charset=utf-8',
 };
 
-const formatTimestamp = (value: string): string => {
-  const parsed = Date.parse(value);
-  if (Number.isNaN(parsed)) {
-    return value;
-  }
-  return new Date(parsed).toLocaleString();
+const formatBadge = (format: string | null): string => {
+  if (!format) return 'TXT';
+  const normalized = format.toLowerCase();
+  if (normalized.includes('markdown')) return 'MD';
+  if (normalized.includes('json')) return 'JSON';
+  if (normalized.includes('yaml')) return 'YAML';
+  if (normalized.includes('python')) return 'PY';
+  if (normalized.includes('plain')) return 'TXT';
+  return 'TXT';
 };
 
-export function ChatCanvas({ collapsed, onToggleCollapse, messages, uploads }: ChatCanvasProps) {
-  const [activeTab, setActiveTab] = useState<CanvasTab>('output');
-  const [format, setFormat] = useState<ExportFormat>('md');
-  const [busy, setBusy] = useState(false);
+const formatMeta = (format: string | null): string => {
+  const badge = formatBadge(format);
+  if (badge === 'MD') return 'Document · MD';
+  if (badge === 'JSON') return 'Data · JSON';
+  if (badge === 'YAML') return 'Config · YAML';
+  if (badge === 'PY') return 'Code · PY';
+  return 'Document · TXT';
+};
+
+export function ChatCanvas({
+  collapsed,
+  onToggleCollapse,
+  canvas,
+  view,
+  onViewChange,
+}: ChatCanvasProps) {
+  const [format, setFormat] = useState<CanvasFormat>(() => resolveDefaultFormat(canvas));
   const [status, setStatus] = useState<string | null>(null);
 
-  const output = useMemo(() => findLatestOutput(messages), [messages]);
-  const hasOutput = output.trim().length > 0;
-  const artifacts = useMemo(() => buildArtifacts(messages), [messages]);
-  const uploadsSorted = useMemo(
-    () =>
-      [...uploads].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)),
-    [uploads],
-  );
-
-  const handleDownloadOne = async (artifact: ArtifactItem) => {
+  useEffect(() => {
+    setFormat(resolveDefaultFormat(canvas));
     setStatus(null);
-    try {
-      if (format === 'zip') {
-        const zip = new JSZip();
-        const fileName = `${formatFileName(artifact.title)}.md`;
-        zip.file(fileName, artifact.content);
-        const blob = await zip.generateAsync({ type: 'blob' });
-        downloadBlob(blob, `${formatFileName(artifact.title)}.zip`);
-        return;
-      }
-      const content = buildContentForFormat(artifact, format);
-      const extension = format;
-      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-      downloadBlob(blob, `${formatFileName(artifact.title)}.${extension}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Не удалось скачать файл.';
-      setStatus(message);
+  }, [canvas?.updatedAt, canvas?.format, canvas?.suggestedFilename]);
+
+  const content = canvas?.content ?? '';
+  const hasOutput = content.trim().length > 0;
+  const updatedAt = canvas?.updatedAt ?? null;
+  const normalizedContent = normalizeContent(content);
+  const renderMarkdown = shouldRenderMarkdown(canvas, normalizedContent);
+  const selectedLanguage = formatToLanguage(format);
+  const shouldWrapCode =
+    !renderMarkdown &&
+    !normalizedContent.includes('```') &&
+    (selectedLanguage !== null || looksLikeCode(normalizedContent));
+  const markdownSource = shouldWrapCode
+    ? `\`\`\`${selectedLanguage ?? ''}\n${normalizedContent}\n\`\`\``
+    : normalizedContent;
+  const renderMarkdownOutput = renderMarkdown || shouldWrapCode;
+
+  const infoLine = useMemo(() => {
+    if (!updatedAt) {
+      return null;
     }
-  };
+    const parsed = Date.parse(updatedAt);
+    if (Number.isNaN(parsed)) {
+      return updatedAt;
+    }
+    return new Date(parsed).toLocaleString();
+  }, [updatedAt]);
 
-  const handleDownloadAll = async () => {
-    setStatus(null);
-    if (artifacts.length === 0 || busy) {
+  const previewText = useMemo(() => {
+    if (!normalizedContent.trim()) {
+      return '';
+    }
+    return normalizedContent.split('\n').slice(0, 8).join('\n');
+  }, [normalizedContent]);
+
+  const handleCopy = async () => {
+    if (!hasOutput) {
       return;
     }
-    setBusy(true);
+    setStatus(null);
     try {
-      const zip = new JSZip();
-      const exportFormat: Exclude<ExportFormat, 'zip'> = format === 'zip' ? 'md' : format;
-      artifacts.forEach((artifact, index) => {
-        const content = buildContentForFormat(artifact, exportFormat);
-        const filename = `${formatFileName(artifact.title) || `artifact-${index + 1}`}.${
-          exportFormat
-        }`;
-        zip.file(filename, content);
-      });
-      const blob = await zip.generateAsync({ type: 'blob' });
-      downloadBlob(blob, 'chat-artifacts.zip');
+      await navigator.clipboard.writeText(content);
+      setStatus('Скопировано');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Не удалось сформировать архив.';
+      const message = error instanceof Error ? error.message : 'Не удалось скопировать.';
       setStatus(message);
-    } finally {
-      setBusy(false);
     }
   };
+
+  const handleDownload = () => {
+    if (!hasOutput) {
+      return;
+    }
+    setStatus(null);
+    try {
+      const filename = resolveFilename(canvas, format);
+      const output = contentForDownload(content, format, canvas);
+      const blob = new Blob([output], { type: MIME_BY_FORMAT[format] });
+      downloadBlob(blob, filename);
+      setStatus(`Скачано: ${filename}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось скачать.';
+      setStatus(message);
+    }
+  };
+
+  const title = canvas?.suggestedFilename?.trim() || resolveFilename(canvas, format);
+  const meta = formatMeta(canvas?.format ?? null);
+  const badge = formatBadge(canvas?.format ?? null);
+  const expandedWidth = view === 'detail' ? '640px' : '380px';
 
   return (
     <motion.div
       initial={false}
-      animate={{ width: collapsed ? '0px' : '480px' }}
+      animate={{ width: collapsed ? '0px' : expandedWidth }}
       transition={{ duration: 0.3, ease: 'easeInOut' }}
-      className="relative bg-zinc-950"
+      className="relative max-w-[90vw] bg-zinc-950"
     >
       <AnimatePresence>
         {!collapsed && (
@@ -213,176 +319,245 @@ export function ChatCanvas({ collapsed, onToggleCollapse, messages, uploads }: C
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="flex h-full w-[480px] flex-col"
+            className="flex h-full w-full flex-col"
           >
-            <div className="p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('output')}
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                    activeTab === 'output'
-                      ? 'border-white/30 bg-white/15 text-white'
-                      : 'border-white/10 bg-white/5 text-white/60 hover:text-white'
-                  }`}
-                >
-                  <FileText className="h-3.5 w-3.5" />
-                  Preview / Output
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('files')}
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                    activeTab === 'files'
-                      ? 'border-white/30 bg-white/15 text-white'
-                      : 'border-white/10 bg-white/5 text-white/60 hover:text-white'
-                  }`}
-                >
-                  <FolderOpen className="h-3.5 w-3.5" />
-                  Files
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('history')}
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                    activeTab === 'history'
-                      ? 'border-white/30 bg-white/15 text-white'
-                      : 'border-white/10 bg-white/5 text-white/60 hover:text-white'
-                  }`}
-                >
-                  <History className="h-3.5 w-3.5" />
-                  History
-                </button>
-              </div>
-              <div className="mt-2 text-xs text-white/40">
-                {activeTab === 'output'
-                  ? 'Последний результат агента из текущей сессии.'
-                  : activeTab === 'files'
-                    ? 'Экспорт артефактов, которые сгенерировал агент.'
-                    : 'История загруженных файлов в этом чате.'}
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto px-4 pb-6">
-              {activeTab === 'output' && (
-                <div className="space-y-4">
-                  {!hasOutput ? (
-                    <div className="rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/60">
-                      Пока нет результата. После ответа ассистента он появится здесь.
-                    </div>
-                  ) : (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {output}
-                    </ReactMarkdown>
-                  )}
+            {view === 'sidebar' ? (
+              <div className="flex h-full flex-col gap-6 p-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-white/70">
+                    <FileText className="h-3.5 w-3.5 text-white/60" />
+                    Canvas
+                  </div>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70 transition-colors hover:bg-white/10"
+                  >
+                    <Share2 className="h-3.5 w-3.5" />
+                    Share
+                  </button>
                 </div>
-              )}
 
-              {activeTab === 'files' && (
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/40 p-3 text-xs text-white/60">
-                    <div className="flex items-center gap-2">
-                      <span className="text-white/70">Формат:</span>
-                      <select
-                        value={format}
-                        onChange={(event) => setFormat(event.target.value as ExportFormat)}
-                        className="rounded-md border border-white/10 bg-black/50 px-2 py-1 text-xs text-white/80"
-                      >
-                        <option value="txt">txt</option>
-                        <option value="md">md</option>
-                        <option value="json">json</option>
-                        <option value="zip">zip</option>
-                      </select>
-                    </div>
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.2em] text-white/40">
+                    <span>Artifacts</span>
                     <button
                       type="button"
-                      onClick={() => void handleDownloadAll()}
-                      disabled={busy || artifacts.length === 0}
-                      className="rounded-md border border-white/10 bg-white/10 px-3 py-1 text-xs text-white/80 transition-colors hover:bg-white/20 disabled:opacity-40"
+                      onClick={handleDownload}
+                      disabled={!hasOutput}
+                      className="text-[11px] font-semibold text-white/50 transition-colors hover:text-white/80 disabled:opacity-40"
                     >
-                      {busy ? 'Готовлю архив...' : 'Скачать всё'}
+                      Download all
                     </button>
                   </div>
-
-                  {status && (
-                    <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-200">
-                      {status}
-                    </div>
-                  )}
-
-                  {artifacts.length === 0 ? (
-                    <div className="rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/60">
-                      Артефактов пока нет.
+                  {!hasOutput ? (
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/50">
+                      Пока нет артефактов.
                     </div>
                   ) : (
-                    artifacts.map((artifact) => (
-                      <div
-                        key={artifact.id}
-                        className="rounded-lg border border-white/10 bg-black/40 p-3"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm text-white">{artifact.title}</div>
-                            <div className="text-xs text-white/40">
-                              {artifact.content.length.toLocaleString()} символов
-                            </div>
+                    <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-white/5 to-white/0 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <button
+                          type="button"
+                          onClick={() => onViewChange('detail')}
+                          className="flex flex-1 items-center gap-3 text-left"
+                        >
+                          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-black/40">
+                            <FileText className="h-5 w-5 text-white/70" />
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => void handleDownloadOne(artifact)}
-                            className="rounded-md border border-white/10 bg-white/10 px-3 py-1 text-xs text-white/80 transition-colors hover:bg-white/20"
-                          >
-                            Скачать
-                          </button>
-                        </div>
+                          <div className="flex flex-col">
+                            <span className="text-sm font-semibold text-white/85">{title}</span>
+                            <span className="text-xs text-white/45">{meta}</span>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDownload}
+                          className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/70 transition-colors hover:bg-white/10"
+                        >
+                          <Download className="h-4 w-4" />
+                        </button>
                       </div>
-                    ))
+                    </div>
                   )}
-                </div>
-              )}
+                </section>
 
-              {activeTab === 'history' && (
-                <div className="space-y-3">
-                  {uploadsSorted.length === 0 ? (
-                    <div className="rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/60">
-                      Загрузок пока нет.
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.2em] text-white/40">
+                    <div className="flex items-center gap-2">
+                      <LayoutGrid className="h-3.5 w-3.5" />
+                      Content
+                    </div>
+                  </div>
+                  {!hasOutput ? (
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-white/50">
+                      Пока нет превью.
                     </div>
                   ) : (
-                    uploadsSorted.map((item) => (
-                      <div
-                        key={item.id}
-                        className="rounded-lg border border-white/10 bg-black/40 p-3"
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => onViewChange('detail')}
+                        className="rounded-2xl border border-white/10 bg-black/40 p-3 text-left transition-colors hover:border-white/20"
                       >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm text-white">{item.name}</div>
-                            <div className="text-xs text-white/40">
-                              {formatSize(item.size)} · {item.type || 'file'}
-                            </div>
-                          </div>
-                          <div className="text-[11px] text-white/40">
-                            {formatTimestamp(item.createdAt)}
-                          </div>
+                        <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/40">
+                          {badge}
                         </div>
-                        <div className="mt-2">
-                          {item.previewType === 'image' && item.previewUrl ? (
-                            <img
-                              src={item.previewUrl}
-                              alt={item.name}
-                              className="max-h-40 w-auto rounded-md border border-white/10"
-                            />
-                          ) : (
-                            <div className="rounded-md border border-white/10 bg-black/60 p-2 text-xs text-white/70">
-                              {item.preview.trim() ? item.preview : 'Нет превью.'}
-                            </div>
-                          )}
-                        </div>
+                        <pre className="mt-2 max-h-24 overflow-hidden whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-white/70">
+                          {previewText}
+                        </pre>
+                      </button>
+                    </div>
+                  )}
+                </section>
+
+                {status ? <div className="text-[11px] text-white/60">{status}</div> : null}
+              </div>
+            ) : (
+              <div className="flex h-full flex-col">
+                <div className="border-b border-white/10 px-5 py-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <button
+                        type="button"
+                        onClick={() => onViewChange('sidebar')}
+                        className="mt-0.5 inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/70 transition-colors hover:bg-white/10"
+                      >
+                        <ArrowLeft className="h-4 w-4" />
+                      </button>
+                      <div>
+                        <div className="text-sm font-semibold text-white/85">{title}</div>
+                        <div className="text-xs text-white/45">{meta}</div>
                       </div>
-                    ))
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleCopy()}
+                        disabled={!hasOutput}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70 transition-colors hover:bg-white/10 disabled:opacity-40"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDownload}
+                        disabled={!hasOutput}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70 transition-colors hover:bg-white/10 disabled:opacity-40"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Download
+                      </button>
+                      <select
+                        value={format}
+                        onChange={(event) => setFormat(event.target.value as CanvasFormat)}
+                        className="rounded-full border border-white/10 bg-black/40 px-3 py-1 text-xs text-white/80"
+                      >
+                        {FORMAT_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value} className="bg-zinc-950 text-white">
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={onToggleCollapse}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/70 transition-colors hover:bg-white/10"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-[11px] text-white/40">
+                    <span>
+                      {hasOutput ? 'Последний длинный результат этой сессии.' : 'Пока нет результата.'}
+                    </span>
+                    {infoLine ? <span>{infoLine}</span> : null}
+                  </div>
+                  {status ? <div className="mt-2 text-[11px] text-white/60">{status}</div> : null}
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-6 py-6">
+                  {!hasOutput ? (
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-4 text-sm text-white/60">
+                      Canvas обновится после того, как агент пришлёт длинный результат.
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                      {renderMarkdownOutput ? (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+                          components={{
+                            h1: ({ children }) => (
+                              <h1 className="mb-3 text-base font-semibold text-white/90">{children}</h1>
+                            ),
+                            h2: ({ children }) => (
+                              <h2 className="mb-2 text-sm font-semibold text-white/85">{children}</h2>
+                            ),
+                            h3: ({ children }) => (
+                              <h3 className="mb-2 text-sm font-semibold text-white/80">{children}</h3>
+                            ),
+                            p: ({ children }) => (
+                              <p className="mb-3 text-sm leading-relaxed text-white/75">{children}</p>
+                            ),
+                            ul: ({ children }) => (
+                              <ul className="mb-3 list-disc space-y-1 pl-5 text-sm text-white/75">
+                                {children}
+                              </ul>
+                            ),
+                            ol: ({ children }) => (
+                              <ol className="mb-3 list-decimal space-y-1 pl-5 text-sm text-white/75">
+                                {children}
+                              </ol>
+                            ),
+                            li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+                            a: ({ href, children }) => (
+                              <a
+                                href={href}
+                                className="text-emerald-300 underline underline-offset-4 transition-colors hover:text-emerald-200"
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {children}
+                              </a>
+                            ),
+                            code: ({ inline, className, children }) => {
+                              if (!inline) {
+                                return (
+                                  <pre className="mb-3 overflow-x-auto rounded-lg border border-white/10 bg-black/60 p-4 text-xs leading-relaxed">
+                                    <code className={className}>{children}</code>
+                                  </pre>
+                                );
+                              }
+                              const text = String(children ?? '').replace(/\n$/, '');
+                              if (inline) {
+                                return (
+                                  <code className="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-emerald-200">
+                                    {text}
+                                  </code>
+                                );
+                              }
+                            },
+                            blockquote: ({ children }) => (
+                              <blockquote className="mb-3 border-l-2 border-white/10 pl-3 text-sm text-white/60">
+                                {children}
+                              </blockquote>
+                            ),
+                          }}
+                        >
+                          {markdownSource}
+                        </ReactMarkdown>
+                      ) : (
+                        <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-emerald-200">
+                          {normalizedContent}
+                        </pre>
+                      )}
+                    </div>
                   )}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -390,12 +565,12 @@ export function ChatCanvas({ collapsed, onToggleCollapse, messages, uploads }: C
       <button
         type="button"
         onClick={onToggleCollapse}
-        className="absolute -left-3 top-1/2 z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-white/10 backdrop-blur-xl transition-all duration-200 hover:bg-white/20"
+        className="absolute -left-3 top-1/2 z-10 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-white/10 backdrop-blur-xl transition-all duration-200 hover:bg-white/20"
       >
         {collapsed ? (
-          <ChevronLeft className="h-3.5 w-3.5 text-white/60" />
+          <ChevronLeft className="h-4 w-4 text-white/60" />
         ) : (
-          <ChevronRight className="h-3.5 w-3.5 text-white/60" />
+          <ChevronRight className="h-4 w-4 text-white/60" />
         )}
       </button>
     </motion.div>
