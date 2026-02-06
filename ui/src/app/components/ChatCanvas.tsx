@@ -1,6 +1,8 @@
 import { ChevronLeft, ChevronRight, Copy, Download, FileText } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useEffect, useMemo, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 import type { CanvasOutput } from '../types';
 
@@ -94,6 +96,19 @@ const resolveFilename = (canvas: CanvasOutput | null, format: CanvasFormat): str
   return `${base || 'output'}.${extension}`;
 };
 
+const shouldRenderMarkdown = (canvas: CanvasOutput | null, content: string): boolean => {
+  if (!content.trim()) {
+    return false;
+  }
+  if (content.includes('```')) {
+    return true;
+  }
+  if (!canvas?.format) {
+    return false;
+  }
+  return canvas.format.toLowerCase().includes('markdown');
+};
+
 const contentForDownload = (
   content: string,
   format: CanvasFormat,
@@ -144,6 +159,8 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
   const content = canvas?.content ?? '';
   const hasOutput = content.trim().length > 0;
   const updatedAt = canvas?.updatedAt ?? null;
+  const normalizedContent = normalizeContent(content);
+  const renderMarkdown = shouldRenderMarkdown(canvas, normalizedContent);
 
   const infoLine = useMemo(() => {
     if (!updatedAt) {
@@ -260,9 +277,74 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
                   Canvas обновится после того, как агент пришлёт длинный результат.
                 </div>
               ) : (
-                <pre className="whitespace-pre-wrap rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/80">
-                  {normalizeContent(content)}
-                </pre>
+                <div className="rounded-lg border border-white/10 bg-black/40 p-4">
+                  {renderMarkdown ? (
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        h1: ({ children }) => (
+                          <h1 className="mb-3 text-base font-semibold text-white/90">{children}</h1>
+                        ),
+                        h2: ({ children }) => (
+                          <h2 className="mb-2 text-sm font-semibold text-white/85">{children}</h2>
+                        ),
+                        h3: ({ children }) => (
+                          <h3 className="mb-2 text-sm font-semibold text-white/80">{children}</h3>
+                        ),
+                        p: ({ children }) => (
+                          <p className="mb-3 text-sm leading-relaxed text-white/75">{children}</p>
+                        ),
+                        ul: ({ children }) => (
+                          <ul className="mb-3 list-disc space-y-1 pl-5 text-sm text-white/75">
+                            {children}
+                          </ul>
+                        ),
+                        ol: ({ children }) => (
+                          <ol className="mb-3 list-decimal space-y-1 pl-5 text-sm text-white/75">
+                            {children}
+                          </ol>
+                        ),
+                        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+                        a: ({ href, children }) => (
+                          <a
+                            href={href}
+                            className="text-emerald-300 underline underline-offset-4 transition-colors hover:text-emerald-200"
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {children}
+                          </a>
+                        ),
+                        code: ({ inline, children }) => {
+                          const text = String(children ?? '').replace(/\n$/, '');
+                          if (inline) {
+                            return (
+                              <code className="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-emerald-200">
+                                {text}
+                              </code>
+                            );
+                          }
+                          return (
+                            <pre className="mb-3 overflow-x-auto rounded-lg border border-white/10 bg-black/60 p-4 text-xs leading-relaxed text-emerald-200">
+                              <code className="font-mono">{text}</code>
+                            </pre>
+                          );
+                        },
+                        blockquote: ({ children }) => (
+                          <blockquote className="mb-3 border-l-2 border-white/10 pl-3 text-sm text-white/60">
+                            {children}
+                          </blockquote>
+                        ),
+                      }}
+                    >
+                      {normalizedContent}
+                    </ReactMarkdown>
+                  ) : (
+                    <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-emerald-200">
+                      {normalizedContent}
+                    </pre>
+                  )}
+                </div>
               )}
             </div>
           </motion.div>
