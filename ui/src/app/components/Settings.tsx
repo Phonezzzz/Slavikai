@@ -383,7 +383,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                   </div>
                 </div>
 
-                <div className="min-h-0 flex-1 overflow-y-auto p-6">
+                <div className="min-h-0 flex-1 overflow-y-auto p-6" data-scrollbar>
                   {status ? <div className="mb-4 text-sm text-zinc-300">{status}</div> : null}
                   {loading ? <div className="text-sm text-zinc-400">Loading settings...</div> : null}
 

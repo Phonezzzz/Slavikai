@@ -13,6 +13,7 @@ import type {
 } from './types';
 
 const SESSION_HEADER = 'X-Slavik-Session';
+const SCROLLBAR_REVEAL_DISTANCE_PX = 38;
 
 const isChatMessage = (value: unknown): value is ChatMessage => {
   if (!value || typeof value !== 'object') {
@@ -238,6 +239,61 @@ export default function App() {
       }
     });
   }, [selectedConversation]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    let raf = 0;
+    const clearReveal = () => {
+      const elements = document.querySelectorAll<HTMLElement>('[data-scrollbar]');
+      elements.forEach((element) => element.classList.remove('scrollbar-reveal'));
+    };
+    const handleMove = (event: MouseEvent) => {
+      const x = event.clientX;
+      const y = event.clientY;
+      if (raf) {
+        cancelAnimationFrame(raf);
+      }
+      raf = window.requestAnimationFrame(() => {
+        const elements = document.querySelectorAll<HTMLElement>('[data-scrollbar]');
+        elements.forEach((element) => {
+          const rect = element.getBoundingClientRect();
+          const hasVertical = element.scrollHeight > element.clientHeight;
+          const hasHorizontal = element.scrollWidth > element.clientWidth;
+          let reveal = false;
+
+          if (hasVertical) {
+            const withinY = y >= rect.top && y <= rect.bottom;
+            const nearRight = x >= rect.right - SCROLLBAR_REVEAL_DISTANCE_PX && x <= rect.right;
+            reveal = withinY && nearRight;
+          }
+
+          if (!reveal && hasHorizontal) {
+            const withinX = x >= rect.left && x <= rect.right;
+            const nearBottom = y >= rect.bottom - SCROLLBAR_REVEAL_DISTANCE_PX && y <= rect.bottom;
+            reveal = withinX && nearBottom;
+          }
+
+          element.classList.toggle('scrollbar-reveal', reveal);
+        });
+      });
+    };
+
+    window.addEventListener('mousemove', handleMove, { passive: true });
+    window.addEventListener('mouseleave', clearReveal);
+    window.addEventListener('blur', clearReveal);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseleave', clearReveal);
+      window.removeEventListener('blur', clearReveal);
+      if (raf) {
+        cancelAnimationFrame(raf);
+      }
+      clearReveal();
+    };
+  }, []);
 
   const loadLastModel = (): SelectedModel | null => {
     if (typeof window === 'undefined') {

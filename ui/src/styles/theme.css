@@ -187,40 +187,36 @@
 }
 
 @layer base {
-  * {
+  [data-scrollbar] {
     scrollbar-width: thin;
     scrollbar-color: rgba(120, 120, 120, 0) transparent;
   }
 
-  *:hover,
-  *:active,
-  *:focus-within {
+  [data-scrollbar].scrollbar-reveal {
     scrollbar-color: rgba(120, 120, 120, 0.55) transparent;
   }
 
-  *::-webkit-scrollbar {
+  [data-scrollbar]::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
 
-  *::-webkit-scrollbar-track {
+  [data-scrollbar]::-webkit-scrollbar-track {
     background: transparent;
   }
 
-  *::-webkit-scrollbar-thumb {
+  [data-scrollbar]::-webkit-scrollbar-thumb {
     background-color: rgba(120, 120, 120, 0);
     border-radius: 999px;
     border: 2px solid transparent;
     background-clip: padding-box;
   }
 
-  *:hover::-webkit-scrollbar-thumb,
-  *:active::-webkit-scrollbar-thumb,
-  *:focus-within::-webkit-scrollbar-thumb {
+  [data-scrollbar].scrollbar-reveal::-webkit-scrollbar-thumb {
     background-color: rgba(120, 120, 120, 0.55);
   }
 
-  *::-webkit-scrollbar-thumb:hover {
+  [data-scrollbar].scrollbar-reveal::-webkit-scrollbar-thumb:hover {
     background-color: rgba(160, 160, 160, 0.65);
   }
 }

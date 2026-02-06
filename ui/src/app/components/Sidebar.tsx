@@ -279,7 +279,7 @@ export function Sidebar({
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-2">
+            <div className="flex-1 overflow-y-auto p-2" data-scrollbar>
               <div className="mb-3 space-y-1 px-2">
                 <button
                   type="button"

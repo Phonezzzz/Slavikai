@@ -630,7 +630,7 @@ export function ChatArea({
         </div>
       ) : (
         <>
-          <div className="relative z-10 flex-1 overflow-y-auto px-6 py-8">
+          <div className="relative z-10 flex-1 overflow-y-auto px-6 py-8" data-scrollbar>
             <div className="mx-auto max-w-3xl space-y-6">
               {displayMessages.map((message, index) => {
               const isAssistant = message.role === 'assistant';
