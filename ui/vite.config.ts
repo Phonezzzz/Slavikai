@@ -23,7 +23,10 @@ export default defineConfig({
 
           if (
             id.includes("node_modules/react/") ||
-            id.includes("node_modules/react-dom/")
+            id.includes("node_modules/react-dom/") ||
+            id.includes("node_modules/scheduler/") ||
+            id.includes("node_modules/use-sync-external-store/") ||
+            id.includes("node_modules/react-is/")
           ) {
             return "vendor-react";
           }
@@ -37,10 +40,6 @@ export default defineConfig({
 
           if (id.includes("node_modules/lucide-react/")) {
             return "vendor-icons";
-          }
-
-          if (id.includes("node_modules/motion/")) {
-            return "vendor-motion";
           }
 
           if (id.includes("node_modules/jszip/")) {
@@ -58,7 +57,7 @@ export default defineConfig({
             return "vendor-styles";
           }
 
-          return "vendor";
+          return undefined;
         },
       },
     },
