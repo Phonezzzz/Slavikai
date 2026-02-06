@@ -21,6 +21,7 @@ class PersistedSession:
     messages: list[dict[str, str]]
     model_provider: str | None = None
     model_id: str | None = None
+    canvas_output: dict[str, JSONValue] | None = None
 
 
 class UISessionStorage(Protocol):
@@ -57,6 +58,9 @@ class InMemoryUISessionStorage:
             messages=messages,
             model_provider=session.model_provider,
             model_id=session.model_id,
+            canvas_output=(
+                dict(session.canvas_output) if session.canvas_output is not None else None
+            ),
         )
 
 
@@ -71,7 +75,7 @@ class SQLiteUISessionStorage:
             rows = conn.execute(
                 """
                 SELECT session_id, created_at, updated_at, status, decision_json
-                    , model_provider, model_id
+                    , model_provider, model_id, canvas_json
                 FROM ui_sessions
                 """,
             ).fetchall()
@@ -88,6 +92,7 @@ class SQLiteUISessionStorage:
                         messages=messages,
                         model_provider=_optional_str(row["model_provider"]),
                         model_id=_optional_str(row["model_id"]),
+                        canvas_output=self._decode_canvas(row["canvas_json"]),
                     ),
                 )
         return sessions
@@ -103,9 +108,10 @@ class SQLiteUISessionStorage:
                     status,
                     decision_json,
                     model_provider,
-                    model_id
+                    model_id,
+                    canvas_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     created_at=excluded.created_at,
@@ -113,7 +119,8 @@ class SQLiteUISessionStorage:
                     status=excluded.status,
                     decision_json=excluded.decision_json,
                     model_provider=excluded.model_provider,
-                    model_id=excluded.model_id
+                    model_id=excluded.model_id,
+                    canvas_json=excluded.canvas_json
                 """,
                 (
                     session.session_id,
@@ -123,6 +130,7 @@ class SQLiteUISessionStorage:
                     self._encode_decision(session.decision),
                     session.model_provider,
                     session.model_id,
+                    self._encode_canvas(session.canvas_output),
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
@@ -175,7 +183,8 @@ class SQLiteUISessionStorage:
                     status TEXT NOT NULL,
                     decision_json TEXT,
                     model_provider TEXT,
-                    model_id TEXT
+                    model_id TEXT,
+                    canvas_json TEXT
                 )
                 """,
             )
@@ -230,6 +239,24 @@ class SQLiteUISessionStorage:
             return None
         return json.dumps(value, ensure_ascii=False)
 
+    def _decode_canvas(self, value: object) -> dict[str, JSONValue] | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return None
+        parsed = safe_json_loads(value)
+        if not isinstance(parsed, dict):
+            return None
+        decoded: dict[str, JSONValue] = {}
+        for key, item in parsed.items():
+            decoded[str(key)] = item
+        return decoded
+
+    def _encode_canvas(self, value: dict[str, JSONValue] | None) -> str | None:
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False)
+
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         existing = {
             str(row["name"])
@@ -240,6 +267,8 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN model_provider TEXT")
         if "model_id" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN model_id TEXT")
+        if "canvas_json" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN canvas_json TEXT")
 
 
 def _optional_str(value: object) -> str | None:

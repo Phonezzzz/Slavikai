@@ -1,111 +1,116 @@
-import { ChevronLeft, ChevronRight, FileText, FolderOpen, History } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Copy, Download, FileText } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import JSZip from 'jszip';
-import { useMemo, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import type { Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useEffect, useMemo, useState } from 'react';
 
-import type { ChatMessage, UploadHistoryItem } from '../types';
+import type { CanvasOutput } from '../types';
 
-type CanvasTab = 'output' | 'files' | 'history';
-
-type ExportFormat = 'txt' | 'md' | 'json' | 'zip';
-
-type ArtifactItem = {
-  id: string;
-  title: string;
-  content: string;
-};
+type CanvasFormat = 'txt' | 'md' | 'py' | 'json' | 'yaml';
 
 interface ChatCanvasProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
-  messages: ChatMessage[];
-  uploads: UploadHistoryItem[];
+  canvas: CanvasOutput | null;
 }
 
-const markdownComponents: Components = {
-  h1: ({ children }) => <h1 className="text-lg font-semibold text-white">{children}</h1>,
-  h2: ({ children }) => <h2 className="text-base font-semibold text-white">{children}</h2>,
-  h3: ({ children }) => <h3 className="text-sm font-semibold text-white">{children}</h3>,
-  p: ({ children }) => <p className="leading-relaxed text-white/80">{children}</p>,
-  ul: ({ children }) => <ul className="list-disc space-y-1 pl-5 text-white/80">{children}</ul>,
-  ol: ({ children }) => <ol className="list-decimal space-y-1 pl-5 text-white/80">{children}</ol>,
-  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-  blockquote: ({ children }) => (
-    <blockquote className="border-l-2 border-white/20 pl-3 text-white/70">{children}</blockquote>
-  ),
-  a: ({ children, href }) => (
-    <a
-      href={href}
-      className="text-sky-300 underline decoration-sky-400/60 underline-offset-4"
-      target="_blank"
-      rel="noreferrer"
-    >
-      {children}
-    </a>
-  ),
-  code: ({ inline, className, children }) => {
-    if (inline) {
-      return (
-        <code className="rounded bg-white/10 px-1 py-0.5 text-[12px] text-white/90">
-          {children}
-        </code>
-      );
-    }
-    return (
-      <code className={`block text-xs text-white/90 ${className ?? ''}`}>{children}</code>
-    );
-  },
-  pre: ({ children }) => (
-    <pre className="overflow-x-auto rounded-lg border border-white/10 bg-black/60 p-3 text-xs text-white/80">
-      {children}
-    </pre>
-  ),
+const FORMAT_OPTIONS: Array<{ value: CanvasFormat; label: string }> = [
+  { value: 'txt', label: 'txt' },
+  { value: 'md', label: 'md' },
+  { value: 'py', label: 'py' },
+  { value: 'json', label: 'json' },
+  { value: 'yaml', label: 'yaml' },
+];
+
+const normalizeContent = (content: string): string => content.replace(/\r\n/g, '\n');
+
+const inferFormatFromFilename = (filename: string | null): CanvasFormat | null => {
+  if (!filename) {
+    return null;
+  }
+  const parts = filename.toLowerCase().split('.');
+  if (parts.length < 2) {
+    return null;
+  }
+  const ext = parts[parts.length - 1];
+  if (ext === 'md') return 'md';
+  if (ext === 'txt') return 'txt';
+  if (ext === 'py') return 'py';
+  if (ext === 'json') return 'json';
+  if (ext === 'yaml' || ext === 'yml') return 'yaml';
+  return null;
 };
 
-const findLatestOutput = (messages: ChatMessage[]): string => {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role === 'assistant' && message.content.trim()) {
-      return message.content;
-    }
+const inferFormatFromMime = (format: string | null): CanvasFormat | null => {
+  if (!format) {
+    return null;
   }
-  return '';
+  const normalized = format.toLowerCase();
+  if (normalized.includes('markdown')) return 'md';
+  if (normalized.includes('json')) return 'json';
+  if (normalized.includes('yaml')) return 'yaml';
+  if (normalized.includes('python')) return 'py';
+  if (normalized.includes('plain')) return 'txt';
+  return null;
 };
 
-const buildArtifacts = (messages: ChatMessage[]): ArtifactItem[] => {
-  let counter = 0;
-  return messages
-    .filter((message) => message.role === 'assistant' && message.content.trim())
-    .map((message) => {
-      counter += 1;
-      const firstLine = message.content.split('\n').find((line) => line.trim());
-      const title = firstLine ? firstLine.trim().slice(0, 60) : `Output ${counter}`;
-      return {
-        id: `artifact-${counter}`,
-        title,
-        content: message.content,
-      };
-    });
+const inferLanguage = (format: string | null): string | null => {
+  if (!format) {
+    return null;
+  }
+  const normalized = format.toLowerCase();
+  if (normalized.includes('python')) return 'python';
+  if (normalized.includes('json')) return 'json';
+  if (normalized.includes('yaml')) return 'yaml';
+  if (normalized.includes('markdown')) return 'markdown';
+  return null;
 };
 
-const formatFileName = (title: string): string =>
-  title
-    .toLowerCase()
-    .replace(/[^a-z0-9-_]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '') || 'artifact';
+const resolveDefaultFormat = (canvas: CanvasOutput | null): CanvasFormat => {
+  if (!canvas) {
+    return 'txt';
+  }
+  const byName = inferFormatFromFilename(canvas.suggestedFilename);
+  if (byName) {
+    return byName;
+  }
+  const byMime = inferFormatFromMime(canvas.format);
+  if (byMime) {
+    return byMime;
+  }
+  return 'txt';
+};
 
-const buildContentForFormat = (artifact: ArtifactItem, format: Exclude<ExportFormat, 'zip'>): string => {
-  if (format === 'json') {
-    return JSON.stringify({ title: artifact.title, content: artifact.content }, null, 2);
+const resolveFilename = (canvas: CanvasOutput | null, format: CanvasFormat): string => {
+  const extension = format;
+  const raw = canvas?.suggestedFilename?.trim();
+  if (!raw) {
+    return `output.${extension}`;
   }
-  if (format === 'txt') {
-    return artifact.content.replace(/\r\n/g, '\n');
+  const sanitized = raw.split('/').pop()?.split('\\').pop() || raw;
+  const lower = sanitized.toLowerCase();
+  if (lower.endsWith(`.${extension}`)) {
+    return sanitized;
   }
-  return artifact.content;
+  const base = sanitized.replace(/\.[^.]+$/, '');
+  return `${base || 'output'}.${extension}`;
+};
+
+const contentForDownload = (
+  content: string,
+  format: CanvasFormat,
+  canvas: CanvasOutput | null,
+): string => {
+  const normalized = normalizeContent(content);
+  if (format !== 'md') {
+    return normalized;
+  }
+  if (normalized.includes('```')) {
+    return normalized;
+  }
+  const lang = inferLanguage(canvas?.format);
+  if (!lang || lang === 'markdown') {
+    return normalized;
+  }
+  return `\`\`\`${lang}\n${normalized}\n\`\`\``;
 };
 
 const downloadBlob = (blob: Blob, filename: string) => {
@@ -119,83 +124,68 @@ const downloadBlob = (blob: Blob, filename: string) => {
   URL.revokeObjectURL(url);
 };
 
-const formatSize = (bytes: number): string => {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+const MIME_BY_FORMAT: Record<CanvasFormat, string> = {
+  txt: 'text/plain;charset=utf-8',
+  md: 'text/markdown;charset=utf-8',
+  py: 'text/x-python;charset=utf-8',
+  json: 'application/json;charset=utf-8',
+  yaml: 'text/yaml;charset=utf-8',
 };
 
-const formatTimestamp = (value: string): string => {
-  const parsed = Date.parse(value);
-  if (Number.isNaN(parsed)) {
-    return value;
-  }
-  return new Date(parsed).toLocaleString();
-};
-
-export function ChatCanvas({ collapsed, onToggleCollapse, messages, uploads }: ChatCanvasProps) {
-  const [activeTab, setActiveTab] = useState<CanvasTab>('output');
-  const [format, setFormat] = useState<ExportFormat>('md');
-  const [busy, setBusy] = useState(false);
+export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasProps) {
+  const [format, setFormat] = useState<CanvasFormat>(() => resolveDefaultFormat(canvas));
   const [status, setStatus] = useState<string | null>(null);
 
-  const output = useMemo(() => findLatestOutput(messages), [messages]);
-  const hasOutput = output.trim().length > 0;
-  const artifacts = useMemo(() => buildArtifacts(messages), [messages]);
-  const uploadsSorted = useMemo(
-    () =>
-      [...uploads].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)),
-    [uploads],
-  );
+  useEffect(() => {
+    setFormat(resolveDefaultFormat(canvas));
+    setStatus(null);
+  }, [canvas?.updatedAt, canvas?.format, canvas?.suggestedFilename]);
 
-  const handleDownloadOne = async (artifact: ArtifactItem) => {
+  const content = canvas?.content ?? '';
+  const hasOutput = content.trim().length > 0;
+  const updatedAt = canvas?.updatedAt ?? null;
+
+  const infoLine = useMemo(() => {
+    if (!updatedAt) {
+      return null;
+    }
+    const parsed = Date.parse(updatedAt);
+    if (Number.isNaN(parsed)) {
+      return updatedAt;
+    }
+    return new Date(parsed).toLocaleString();
+  }, [updatedAt]);
+
+  const handleCopy = async () => {
+    if (!hasOutput) {
+      return;
+    }
     setStatus(null);
     try {
-      if (format === 'zip') {
-        const zip = new JSZip();
-        const fileName = `${formatFileName(artifact.title)}.md`;
-        zip.file(fileName, artifact.content);
-        const blob = await zip.generateAsync({ type: 'blob' });
-        downloadBlob(blob, `${formatFileName(artifact.title)}.zip`);
-        return;
-      }
-      const content = buildContentForFormat(artifact, format);
-      const extension = format;
-      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-      downloadBlob(blob, `${formatFileName(artifact.title)}.${extension}`);
+      await navigator.clipboard.writeText(content);
+      setStatus('Скопировано');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Не удалось скачать файл.';
+      const message =
+        error instanceof Error ? error.message : 'Не удалось скопировать.';
       setStatus(message);
     }
   };
 
-  const handleDownloadAll = async () => {
-    setStatus(null);
-    if (artifacts.length === 0 || busy) {
+  const handleDownload = () => {
+    if (!hasOutput) {
       return;
     }
-    setBusy(true);
+    setStatus(null);
     try {
-      const zip = new JSZip();
-      const exportFormat: Exclude<ExportFormat, 'zip'> = format === 'zip' ? 'md' : format;
-      artifacts.forEach((artifact, index) => {
-        const content = buildContentForFormat(artifact, exportFormat);
-        const filename = `${formatFileName(artifact.title) || `artifact-${index + 1}`}.${
-          exportFormat
-        }`;
-        zip.file(filename, content);
-      });
-      const blob = await zip.generateAsync({ type: 'blob' });
-      downloadBlob(blob, 'chat-artifacts.zip');
+      const filename = resolveFilename(canvas, format);
+      const output = contentForDownload(content, format, canvas);
+      const blob = new Blob([output], { type: MIME_BY_FORMAT[format] });
+      downloadBlob(blob, filename);
+      setStatus(`Скачано: ${filename}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Не удалось сформировать архив.';
+      const message =
+        error instanceof Error ? error.message : 'Не удалось скачать.';
       setStatus(message);
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -215,172 +205,64 @@ export function ChatCanvas({ collapsed, onToggleCollapse, messages, uploads }: C
             transition={{ duration: 0.2 }}
             className="flex h-full w-[480px] flex-col"
           >
-            <div className="p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('output')}
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                    activeTab === 'output'
-                      ? 'border-white/30 bg-white/15 text-white'
-                      : 'border-white/10 bg-white/5 text-white/60 hover:text-white'
-                  }`}
-                >
-                  <FileText className="h-3.5 w-3.5" />
-                  Preview / Output
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('files')}
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                    activeTab === 'files'
-                      ? 'border-white/30 bg-white/15 text-white'
-                      : 'border-white/10 bg-white/5 text-white/60 hover:text-white'
-                  }`}
-                >
-                  <FolderOpen className="h-3.5 w-3.5" />
-                  Files
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('history')}
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                    activeTab === 'history'
-                      ? 'border-white/30 bg-white/15 text-white'
-                      : 'border-white/10 bg-white/5 text-white/60 hover:text-white'
-                  }`}
-                >
-                  <History className="h-3.5 w-3.5" />
-                  History
-                </button>
+            <div className="border-b border-white/10 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-white/70">
+                  <FileText className="h-3.5 w-3.5 text-white/60" />
+                  Canvas
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopy()}
+                    disabled={!hasOutput}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/70 transition-colors hover:bg-white/10 disabled:opacity-40"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                    Copy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownload}
+                    disabled={!hasOutput}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-white/70 transition-colors hover:bg-white/10 disabled:opacity-40"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download
+                  </button>
+                  <select
+                    value={format}
+                    onChange={(event) => setFormat(event.target.value as CanvasFormat)}
+                    className="rounded-md border border-white/10 bg-black/40 px-2 py-1 text-xs text-white/80"
+                  >
+                    {FORMAT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value} className="bg-zinc-950 text-white">
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-              <div className="mt-2 text-xs text-white/40">
-                {activeTab === 'output'
-                  ? 'Последний результат агента из текущей сессии.'
-                  : activeTab === 'files'
-                    ? 'Экспорт артефактов, которые сгенерировал агент.'
-                    : 'История загруженных файлов в этом чате.'}
+              <div className="mt-2 flex items-center justify-between text-[11px] text-white/40">
+                <span>
+                  {hasOutput
+                    ? 'Последний длинный результат этой сессии.'
+                    : 'Пока нет результата.'}
+                </span>
+                {infoLine ? <span>{infoLine}</span> : null}
               </div>
+              {status ? <div className="mt-2 text-[11px] text-white/60">{status}</div> : null}
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 pb-6">
-              {activeTab === 'output' && (
-                <div className="space-y-4">
-                  {!hasOutput ? (
-                    <div className="rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/60">
-                      Пока нет результата. После ответа ассистента он появится здесь.
-                    </div>
-                  ) : (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {output}
-                    </ReactMarkdown>
-                  )}
+            <div className="flex-1 overflow-y-auto px-4 py-5">
+              {!hasOutput ? (
+                <div className="rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/60">
+                  Canvas обновится после того, как агент пришлёт длинный результат.
                 </div>
-              )}
-
-              {activeTab === 'files' && (
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/40 p-3 text-xs text-white/60">
-                    <div className="flex items-center gap-2">
-                      <span className="text-white/70">Формат:</span>
-                      <select
-                        value={format}
-                        onChange={(event) => setFormat(event.target.value as ExportFormat)}
-                        className="rounded-md border border-white/10 bg-black/50 px-2 py-1 text-xs text-white/80"
-                      >
-                        <option value="txt">txt</option>
-                        <option value="md">md</option>
-                        <option value="json">json</option>
-                        <option value="zip">zip</option>
-                      </select>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void handleDownloadAll()}
-                      disabled={busy || artifacts.length === 0}
-                      className="rounded-md border border-white/10 bg-white/10 px-3 py-1 text-xs text-white/80 transition-colors hover:bg-white/20 disabled:opacity-40"
-                    >
-                      {busy ? 'Готовлю архив...' : 'Скачать всё'}
-                    </button>
-                  </div>
-
-                  {status && (
-                    <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-200">
-                      {status}
-                    </div>
-                  )}
-
-                  {artifacts.length === 0 ? (
-                    <div className="rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/60">
-                      Артефактов пока нет.
-                    </div>
-                  ) : (
-                    artifacts.map((artifact) => (
-                      <div
-                        key={artifact.id}
-                        className="rounded-lg border border-white/10 bg-black/40 p-3"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm text-white">{artifact.title}</div>
-                            <div className="text-xs text-white/40">
-                              {artifact.content.length.toLocaleString()} символов
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => void handleDownloadOne(artifact)}
-                            className="rounded-md border border-white/10 bg-white/10 px-3 py-1 text-xs text-white/80 transition-colors hover:bg-white/20"
-                          >
-                            Скачать
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-
-              {activeTab === 'history' && (
-                <div className="space-y-3">
-                  {uploadsSorted.length === 0 ? (
-                    <div className="rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/60">
-                      Загрузок пока нет.
-                    </div>
-                  ) : (
-                    uploadsSorted.map((item) => (
-                      <div
-                        key={item.id}
-                        className="rounded-lg border border-white/10 bg-black/40 p-3"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm text-white">{item.name}</div>
-                            <div className="text-xs text-white/40">
-                              {formatSize(item.size)} · {item.type || 'file'}
-                            </div>
-                          </div>
-                          <div className="text-[11px] text-white/40">
-                            {formatTimestamp(item.createdAt)}
-                          </div>
-                        </div>
-                        <div className="mt-2">
-                          {item.previewType === 'image' && item.previewUrl ? (
-                            <img
-                              src={item.previewUrl}
-                              alt={item.name}
-                              className="max-h-40 w-auto rounded-md border border-white/10"
-                            />
-                          ) : (
-                            <div className="rounded-md border border-white/10 bg-black/60 p-2 text-xs text-white/70">
-                              {item.preview.trim() ? item.preview : 'Нет превью.'}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
+              ) : (
+                <pre className="whitespace-pre-wrap rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/80">
+                  {normalizeContent(content)}
+                </pre>
               )}
             </div>
           </motion.div>

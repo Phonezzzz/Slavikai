@@ -5,6 +5,7 @@ import { Settings } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
 import { ChatCanvas } from './components/ChatCanvas';
 import type {
+  CanvasOutput,
   ChatMessage,
   ProviderModels,
   SelectedModel,
@@ -41,6 +42,28 @@ const parseSelectedModel = (value: unknown): SelectedModel | null => {
     return null;
   }
   return { provider: candidate.provider, model: candidate.model };
+};
+
+const parseCanvasOutput = (value: unknown): CanvasOutput | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as {
+    content?: unknown;
+    format?: unknown;
+    suggested_filename?: unknown;
+    updated_at?: unknown;
+  };
+  if (typeof candidate.content !== 'string' || typeof candidate.updated_at !== 'string') {
+    return null;
+  }
+  return {
+    content: candidate.content,
+    format: typeof candidate.format === 'string' ? candidate.format : null,
+    suggestedFilename:
+      typeof candidate.suggested_filename === 'string' ? candidate.suggested_filename : null,
+    updatedAt: candidate.updated_at,
+  };
 };
 
 const parseProviderModels = (value: unknown): ProviderModels[] => {
@@ -195,6 +218,7 @@ export default function App() {
   const [uploadsBySession, setUploadsBySession] = useState<Record<string, UploadHistoryItem[]>>(
     {},
   );
+  const [canvasBySession, setCanvasBySession] = useState<Record<string, CanvasOutput | null>>({});
 
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -346,9 +370,13 @@ export default function App() {
     if (!response.ok) {
       throw new Error(extractErrorMessage(payload, 'Failed to load chat history.'));
     }
-    const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
+    const session = (payload as {
+      session?: { messages?: unknown; selected_model?: unknown; canvas_output?: unknown };
+    }).session;
     setMessages(parseMessages(session?.messages));
     setSelectedModel(parseSelectedModel(session?.selected_model));
+    const parsedCanvas = parseCanvasOutput(session?.canvas_output);
+    setCanvasBySession((prev) => ({ ...prev, [sessionId]: parsedCanvas }));
   };
 
   const createConversation = async (): Promise<{
@@ -365,10 +393,16 @@ export default function App() {
     const headerSession = response.headers.get(SESSION_HEADER);
     const payloadSession = extractSessionIdFromPayload(payload);
     const nextSession = (headerSession && headerSession.trim()) || payloadSession || null;
-    const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
+    const session = (payload as {
+      session?: { messages?: unknown; selected_model?: unknown; canvas_output?: unknown };
+    }).session;
     const sessionModel = parseSelectedModel(session?.selected_model);
     setMessages(parseMessages(session?.messages));
     setSelectedModel(sessionModel);
+    const parsedCanvas = parseCanvasOutput(session?.canvas_output);
+    if (nextSession) {
+      setCanvasBySession((prev) => ({ ...prev, [nextSession]: parsedCanvas }));
+    }
     return { sessionId: nextSession, selectedModel: sessionModel };
   };
 
@@ -547,6 +581,11 @@ export default function App() {
         delete next[sessionId];
         return next;
       });
+      setCanvasBySession((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
 
       setStatusMessage(null);
     } catch (error) {
@@ -612,6 +651,17 @@ export default function App() {
 
       setPendingUserMessage(null);
       setPendingSessionId(null);
+      if (payload && typeof payload === 'object') {
+        const hasCanvasOutput = Object.prototype.hasOwnProperty.call(
+          payload as object,
+          'canvas_output',
+        );
+        if (hasCanvasOutput) {
+          const canvasOutputValue = (payload as { canvas_output?: unknown }).canvas_output;
+          const parsedCanvas = parseCanvasOutput(canvasOutputValue);
+          setCanvasBySession((prev) => ({ ...prev, [nextSession]: parsedCanvas }));
+        }
+      }
       setMessages(parseMessages((payload as { messages?: unknown }).messages));
       const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
       if (parsedModel) {
@@ -688,8 +738,7 @@ export default function App() {
       />
 
       <ChatCanvas
-        messages={messages}
-        uploads={selectedConversation ? uploadsBySession[selectedConversation] ?? [] : []}
+        canvas={selectedConversation ? canvasBySession[selectedConversation] ?? null : null}
         collapsed={chatCanvasCollapsed}
         onToggleCollapse={() => {
           const next = !chatCanvasCollapsed;

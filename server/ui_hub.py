@@ -52,6 +52,7 @@ class _SessionState:
     status_state: SessionStatus = "ok"
     model_provider: str | None = None
     model_id: str | None = None
+    canvas_output: dict[str, JSONValue] | None = None
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
 
@@ -155,6 +156,9 @@ class UIHub:
                         messages=[dict(message) for message in state.messages],
                         model_provider=state.model_provider,
                         model_id=state.model_id,
+                        canvas_output=(
+                            dict(state.canvas_output) if state.canvas_output is not None else None
+                        ),
                     ),
                 )
             items.sort(
@@ -192,6 +196,9 @@ class UIHub:
                     status_state=self._normalize_status(item.status),
                     model_provider=item.model_provider,
                     model_id=item.model_id,
+                    canvas_output=(
+                        dict(item.canvas_output) if item.canvas_output is not None else None
+                    ),
                     created_at=created_at,
                     updated_at=restored_updated_at,
                 )
@@ -208,6 +215,7 @@ class UIHub:
             decision = dict(state.decision_packet) if state.decision_packet is not None else None
             status_value = self._normalize_status(state.status_state)
             selected_model = self._selected_model_payload(state)
+            canvas_output = dict(state.canvas_output) if state.canvas_output is not None else None
             return {
                 "session_id": session_id,
                 "created_at": state.created_at,
@@ -216,6 +224,7 @@ class UIHub:
                 "messages": [dict(item) for item in state.messages],
                 "decision": decision,
                 "selected_model": selected_model,
+                "canvas_output": canvas_output,
             }
 
     async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
@@ -261,6 +270,35 @@ class UIHub:
             if not isinstance(provider, str) or not isinstance(model_id, str):
                 return None
             return {"provider": provider, "model": model_id}
+
+    async def set_canvas_output(
+        self,
+        session_id: str,
+        canvas_output: dict[str, JSONValue] | None,
+    ) -> None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            state.canvas_output = dict(canvas_output) if canvas_output is not None else None
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            subscribers = list(state.subscribers)
+            payload: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "canvas_output": (dict(canvas_output) if canvas_output is not None else None),
+            }
+        event = self._build_event("canvas.output", payload)
+        self._publish_to_subscribers(subscribers, event)
+
+    async def get_canvas_output(self, session_id: str) -> dict[str, JSONValue] | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or state.canvas_output is None:
+                return None
+            return dict(state.canvas_output)
 
     async def set_session_status(self, session_id: str, status_state: str) -> None:
         normalized = self._normalize_status(status_state)
@@ -441,6 +479,7 @@ class UIHub:
                 status_state=self._normalize_status(item.status),
                 model_provider=item.model_provider,
                 model_id=item.model_id,
+                canvas_output=dict(item.canvas_output) if item.canvas_output is not None else None,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
@@ -461,6 +500,9 @@ class UIHub:
                 messages=[dict(message) for message in state.messages],
                 model_provider=state.model_provider,
                 model_id=state.model_id,
+                canvas_output=(
+                    dict(state.canvas_output) if state.canvas_output is not None else None
+                ),
             ),
         )
 

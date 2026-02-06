@@ -5,6 +5,13 @@ export type ChatMessage = {
   content: string;
 };
 
+export type CanvasOutput = {
+  content: string;
+  format: string | null;
+  suggestedFilename: string | null;
+  updatedAt: string;
+};
+
 export type SessionSummary = {
   session_id: string;
   title: string;

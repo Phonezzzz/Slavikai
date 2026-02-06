@@ -743,6 +743,37 @@ def _split_response_and_report(response_text: str) -> tuple[str, dict[str, JSONV
     return clean_text, normalized_report
 
 
+def _infer_canvas_format(response_text: str) -> str:
+    if "```" in response_text:
+        return "text/markdown"
+    return "text/plain"
+
+
+def _should_capture_canvas(response_text: str) -> bool:
+    stripped = response_text.strip()
+    if not stripped:
+        return False
+    if "```" in stripped:
+        return True
+    if len(stripped) >= 400:
+        return True
+    if stripped.count("\n") >= 8:
+        return True
+    return False
+
+
+def _build_canvas_output(response_text: str) -> dict[str, JSONValue] | None:
+    if not _should_capture_canvas(response_text):
+        return None
+    stripped = response_text.strip()
+    return {
+        "content": stripped,
+        "format": _infer_canvas_format(stripped),
+        "suggested_filename": None,
+        "updated_at": _utc_iso(),
+    }
+
+
 def _load_ui_settings_blob() -> dict[str, object]:
     if not UI_SETTINGS_PATH.exists():
         return {}
@@ -998,6 +1029,28 @@ def _parse_imported_message(raw: object) -> dict[str, str] | None:
     return {"role": role_raw, "content": content_raw}
 
 
+def _parse_imported_canvas_output(raw: object) -> dict[str, JSONValue] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    content = raw.get("content")
+    updated_at = raw.get("updated_at")
+    if not isinstance(content, str) or not isinstance(updated_at, str):
+        return None
+    payload: dict[str, JSONValue] = {
+        "content": content,
+        "updated_at": updated_at,
+    }
+    format_raw = raw.get("format")
+    if isinstance(format_raw, str):
+        payload["format"] = format_raw
+    filename_raw = raw.get("suggested_filename")
+    if isinstance(filename_raw, str):
+        payload["suggested_filename"] = filename_raw
+    return payload
+
+
 def _parse_imported_session(raw: object) -> PersistedSession | None:
     if not isinstance(raw, dict):
         return None
@@ -1039,6 +1092,7 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
             model_provider = provider_raw.strip()
         if isinstance(model_raw, str) and model_raw.strip():
             model_id = model_raw.strip()
+    canvas_output = _parse_imported_canvas_output(raw.get("canvas_output"))
     return PersistedSession(
         session_id=session_id,
         created_at=created_at,
@@ -1048,6 +1102,7 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
         messages=messages,
         model_provider=model_provider,
         model_id=model_id,
+        canvas_output=canvas_output,
     )
 
 
@@ -1066,6 +1121,7 @@ def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONVal
         "messages": [dict(item) for item in session.messages],
         "decision": dict(session.decision) if session.decision is not None else None,
         "selected_model": selected_model,
+        "canvas_output": dict(session.canvas_output) if session.canvas_output is not None else None,
     }
     return payload
 
@@ -1807,6 +1863,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         )
 
         mwv_report: dict[str, JSONValue] | None = None
+        canvas_output: dict[str, JSONValue] | None = None
         async with agent_lock:
             try:
                 model_config = _build_model_config(
@@ -1842,6 +1899,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             )
             response_raw = agent.respond(llm_messages)
             response_text, mwv_report = _split_response_and_report(response_raw)
+            canvas_output = _build_canvas_output(response_text)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -1855,16 +1913,20 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             )
 
         await hub.append_message(session_id, "assistant", response_text)
+        if canvas_output is not None:
+            await hub.set_canvas_output(session_id, canvas_output)
         await hub.set_session_decision(session_id, decision)
         messages = await hub.get_messages(session_id)
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
+        current_canvas = await hub.get_canvas_output(session_id)
         response = _json_response(
             {
                 "session_id": session_id,
                 "messages": messages,
                 "decision": current_decision,
                 "selected_model": current_model,
+                "canvas_output": current_canvas,
                 "trace_id": trace_id,
                 "approval_request": approval_request,
                 "mwv_report": mwv_report,
@@ -1998,12 +2060,14 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 messages = await hub.get_messages(session_id)
                 current_decision = await hub.get_session_decision(session_id)
                 current_model = await hub.get_session_model(session_id)
+                current_canvas = await hub.get_canvas_output(session_id)
                 response = _json_response(
                     {
                         "session_id": session_id,
                         "messages": messages,
                         "decision": current_decision,
                         "selected_model": current_model,
+                        "canvas_output": current_canvas,
                         "trace_id": None,
                         "approval_request": approval_payload,
                     },
@@ -2067,16 +2131,21 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                         f"Path: {relative_target}\n"
                         f"Index error: {index_result}"
                     )
+            canvas_output = _build_canvas_output(response_text)
             await hub.append_message(session_id, "assistant", response_text)
+            if canvas_output is not None:
+                await hub.set_canvas_output(session_id, canvas_output)
             messages = await hub.get_messages(session_id)
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
+            current_canvas = await hub.get_canvas_output(session_id)
             response = _json_response(
                 {
                     "session_id": session_id,
                     "messages": messages,
                     "decision": current_decision,
                     "selected_model": current_model,
+                    "canvas_output": current_canvas,
                     "trace_id": None,
                     "approval_request": None,
                 },
@@ -2128,6 +2197,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             )
             response_raw = agent.respond(llm_messages)
             response_text, mwv_report = _split_response_and_report(response_raw)
+            canvas_output = _build_canvas_output(response_text)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -2140,15 +2210,19 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             )
 
         await hub.append_message(session_id, "assistant", response_text)
+        if canvas_output is not None:
+            await hub.set_canvas_output(session_id, canvas_output)
         messages = await hub.get_messages(session_id)
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
+        current_canvas = await hub.get_canvas_output(session_id)
         response = _json_response(
             {
                 "session_id": session_id,
                 "messages": messages,
                 "decision": current_decision,
                 "selected_model": current_model,
+                "canvas_output": current_canvas,
                 "trace_id": trace_id,
                 "approval_request": approval_request,
                 "mwv_report": mwv_report,
