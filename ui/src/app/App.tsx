@@ -562,6 +562,7 @@ export default function App() {
       />
 
       <ChatCanvas
+        messages={messages}
         collapsed={chatCanvasCollapsed}
         onToggleCollapse={() => {
           const next = !chatCanvasCollapsed;
