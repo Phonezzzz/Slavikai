@@ -18,14 +18,21 @@ htmlcov/
 
 # Logs
 logs/*.log
+logs/
 
 # SQLite DB
 memory/memory.db
 memory/memory_companion.db
+memory/*.db
 
 # Sandbox generated files
 sandbox/**/*.txt
 sandbox/**/*.mp3
+sandbox/**/*.wav
+
+# UI/local artifacts
+.anima/
+config/model_config.json
 
 # Vector model cache
 *.bin
