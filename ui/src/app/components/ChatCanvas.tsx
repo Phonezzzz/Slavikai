@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, FileText, FolderOpen } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileText, FolderOpen, History } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import JSZip from 'jszip';
 import { useMemo, useState } from 'react';
@@ -6,9 +6,9 @@ import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-import type { ChatMessage } from '../types';
+import type { ChatMessage, UploadHistoryItem } from '../types';
 
-type CanvasTab = 'output' | 'files';
+type CanvasTab = 'output' | 'files' | 'history';
 
 type ExportFormat = 'txt' | 'md' | 'json' | 'zip';
 
@@ -22,6 +22,7 @@ interface ChatCanvasProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
   messages: ChatMessage[];
+  uploads: UploadHistoryItem[];
 }
 
 const markdownComponents: Components = {
@@ -118,7 +119,25 @@ const downloadBlob = (blob: Blob, filename: string) => {
   URL.revokeObjectURL(url);
 };
 
-export function ChatCanvas({ collapsed, onToggleCollapse, messages }: ChatCanvasProps) {
+const formatSize = (bytes: number): string => {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const formatTimestamp = (value: string): string => {
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return value;
+  }
+  return new Date(parsed).toLocaleString();
+};
+
+export function ChatCanvas({ collapsed, onToggleCollapse, messages, uploads }: ChatCanvasProps) {
   const [activeTab, setActiveTab] = useState<CanvasTab>('output');
   const [format, setFormat] = useState<ExportFormat>('md');
   const [busy, setBusy] = useState(false);
@@ -127,6 +146,11 @@ export function ChatCanvas({ collapsed, onToggleCollapse, messages }: ChatCanvas
   const output = useMemo(() => findLatestOutput(messages), [messages]);
   const hasOutput = output.trim().length > 0;
   const artifacts = useMemo(() => buildArtifacts(messages), [messages]);
+  const uploadsSorted = useMemo(
+    () =>
+      [...uploads].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)),
+    [uploads],
+  );
 
   const handleDownloadOne = async (artifact: ArtifactItem) => {
     setStatus(null);
@@ -217,11 +241,25 @@ export function ChatCanvas({ collapsed, onToggleCollapse, messages }: ChatCanvas
                   <FolderOpen className="h-3.5 w-3.5" />
                   Files
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('history')}
+                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors ${
+                    activeTab === 'history'
+                      ? 'border-white/30 bg-white/15 text-white'
+                      : 'border-white/10 bg-white/5 text-white/60 hover:text-white'
+                  }`}
+                >
+                  <History className="h-3.5 w-3.5" />
+                  History
+                </button>
               </div>
               <div className="mt-2 text-xs text-white/40">
                 {activeTab === 'output'
                   ? 'Последний результат агента из текущей сессии.'
-                  : 'Экспорт артефактов, которые сгенерировал агент.'}
+                  : activeTab === 'files'
+                    ? 'Экспорт артефактов, которые сгенерировал агент.'
+                    : 'История загруженных файлов в этом чате.'}
               </div>
             </div>
 
@@ -296,6 +334,48 @@ export function ChatCanvas({ collapsed, onToggleCollapse, messages }: ChatCanvas
                           >
                             Скачать
                           </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'history' && (
+                <div className="space-y-3">
+                  {uploadsSorted.length === 0 ? (
+                    <div className="rounded-lg border border-white/10 bg-black/40 p-4 text-sm text-white/60">
+                      Загрузок пока нет.
+                    </div>
+                  ) : (
+                    uploadsSorted.map((item) => (
+                      <div
+                        key={item.id}
+                        className="rounded-lg border border-white/10 bg-black/40 p-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm text-white">{item.name}</div>
+                            <div className="text-xs text-white/40">
+                              {formatSize(item.size)} · {item.type || 'file'}
+                            </div>
+                          </div>
+                          <div className="text-[11px] text-white/40">
+                            {formatTimestamp(item.createdAt)}
+                          </div>
+                        </div>
+                        <div className="mt-2">
+                          {item.previewType === 'image' && item.previewUrl ? (
+                            <img
+                              src={item.previewUrl}
+                              alt={item.name}
+                              className="max-h-40 w-auto rounded-md border border-white/10"
+                            />
+                          ) : (
+                            <div className="rounded-md border border-white/10 bg-black/60 p-2 text-xs text-white/70">
+                              {item.preview.trim() ? item.preview : 'Нет превью.'}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))

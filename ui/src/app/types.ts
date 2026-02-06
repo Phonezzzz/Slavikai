@@ -23,3 +23,16 @@ export type ProviderModels = {
   models: string[];
   error: string | null;
 };
+
+export type UploadPreviewType = 'text' | 'image' | 'binary';
+
+export type UploadHistoryItem = {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  preview: string;
+  previewType: UploadPreviewType;
+  previewUrl: string | null;
+  createdAt: string;
+};

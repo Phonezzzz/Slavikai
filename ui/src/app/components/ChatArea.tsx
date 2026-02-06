@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { motion } from 'motion/react';
 
-import type { ChatMessage, ProviderModels, SelectedModel } from '../types';
+import type { ChatMessage, ProviderModels, SelectedModel, UploadHistoryItem } from '../types';
 
 type ChatAreaProps = {
   conversationId: string | null;
@@ -28,6 +28,7 @@ type ChatAreaProps = {
   savingModel: boolean;
   onSend: (content: string) => Promise<boolean>;
   onSetModel: (provider: string, model: string) => Promise<boolean>;
+  onRecordUploads: (sessionId: string, uploads: UploadHistoryItem[]) => void;
 };
 
 type InputAttachment = {
@@ -35,6 +36,8 @@ type InputAttachment = {
   size: number;
   type: string;
   preview: string;
+  previewType: UploadHistoryItem['previewType'];
+  previewUrl: string | null;
 };
 
 type SpeechRecognitionAlternativeLike = {
@@ -71,6 +74,7 @@ type SpeechWindow = Window & {
 
 const MAX_ATTACHMENTS = 6;
 const MAX_PREVIEW_CHARS = 3000;
+const MAX_IMAGE_PREVIEW_BYTES = 1_500_000;
 
 const canReadAsText = (file: File): boolean => {
   if (file.type.startsWith('text/')) {
@@ -93,19 +97,73 @@ const serializeAttachments = (attachments: InputAttachment[]): string => {
   const lines: string[] = ['[Attached files]'];
   attachments.forEach((item, index) => {
     lines.push(`#${index + 1} ${item.name} (${item.type || 'file'}, ${formatSize(item.size)})`);
-    lines.push(item.preview.trim() ? item.preview.trim() : '(empty preview)');
+    if (item.previewType === 'image') {
+      lines.push('[image preview attached]');
+    } else if (item.preview.trim()) {
+      lines.push(item.preview.trim());
+    } else {
+      lines.push('(empty preview)');
+    }
     lines.push('---');
   });
   return lines.join('\n');
 };
 
+const readAsDataUrl = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+      } else {
+        reject(new Error('Failed to read image preview.'));
+      }
+    };
+    reader.onerror = () => reject(new Error('Failed to read image preview.'));
+    reader.readAsDataURL(file);
+  });
+
 const readAttachment = async (file: File): Promise<InputAttachment> => {
+  if (file.type.startsWith('image/')) {
+    if (file.size <= MAX_IMAGE_PREVIEW_BYTES) {
+      try {
+        const dataUrl = await readAsDataUrl(file);
+        return {
+          name: file.name,
+          size: file.size,
+          type: file.type || 'image',
+          preview: '[image attached]',
+          previewType: 'image',
+          previewUrl: dataUrl,
+        };
+      } catch {
+        return {
+          name: file.name,
+          size: file.size,
+          type: file.type || 'image',
+          preview: '[image attached]',
+          previewType: 'binary',
+          previewUrl: null,
+        };
+      }
+    }
+    return {
+      name: file.name,
+      size: file.size,
+      type: file.type || 'image',
+      preview: '[image too large for preview]',
+      previewType: 'binary',
+      previewUrl: null,
+    };
+  }
   if (!canReadAsText(file)) {
     return {
       name: file.name,
       size: file.size,
       type: file.type || 'binary',
       preview: '[binary file attached]',
+      previewType: 'binary',
+      previewUrl: null,
     };
   }
   try {
@@ -115,6 +173,8 @@ const readAttachment = async (file: File): Promise<InputAttachment> => {
       size: file.size,
       type: file.type || 'text/plain',
       preview: text.slice(0, MAX_PREVIEW_CHARS),
+      previewType: 'text',
+      previewUrl: null,
     };
   } catch {
     return {
@@ -122,8 +182,17 @@ const readAttachment = async (file: File): Promise<InputAttachment> => {
       size: file.size,
       type: file.type || 'text/plain',
       preview: '[failed to read file preview]',
+      previewType: 'text',
+      previewUrl: null,
     };
   }
+};
+
+const createUploadId = (seed: string): string => {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `upload-${seed}-${Date.now()}`;
 };
 
 const formatRole = (role: ChatMessage['role']): string => {
@@ -157,6 +226,7 @@ export function ChatArea({
   savingModel,
   onSend,
   onSetModel,
+  onRecordUploads,
 }: ChatAreaProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<InputAttachment[]>([]);
@@ -292,6 +362,20 @@ export function ChatArea({
       webSearchMode && !composed.trimStart().startsWith('/') ? `/web ${composed}` : composed;
     const ok = await onSend(payload);
     if (ok && typeof overrideContent !== 'string') {
+      if (conversationId && attachments.length > 0) {
+        const now = new Date().toISOString();
+        const uploads: UploadHistoryItem[] = attachments.map((item, index) => ({
+          id: createUploadId(`${conversationId}-${index}`),
+          name: item.name,
+          size: item.size,
+          type: item.type,
+          preview: item.preview,
+          previewType: item.previewType,
+          previewUrl: item.previewUrl,
+          createdAt: now,
+        }));
+        onRecordUploads(conversationId, uploads);
+      }
       setInput('');
       setAttachments([]);
     }

@@ -4,7 +4,13 @@ import { ChatArea } from './components/ChatArea';
 import { Settings } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
 import { ChatCanvas } from './components/ChatCanvas';
-import type { ChatMessage, ProviderModels, SelectedModel, SessionSummary } from './types';
+import type {
+  ChatMessage,
+  ProviderModels,
+  SelectedModel,
+  SessionSummary,
+  UploadHistoryItem,
+} from './types';
 
 const SESSION_HEADER = 'X-Slavik-Session';
 
@@ -58,6 +64,58 @@ const parseProviderModels = (value: unknown): ProviderModels[] => {
     });
   }
   return providers;
+};
+
+const uploadStorageKey = (sessionId: string) => `slavik.uploads.${sessionId}`;
+
+const parseUploads = (value: unknown): UploadHistoryItem[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const uploads: UploadHistoryItem[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const candidate = item as {
+      id?: unknown;
+      name?: unknown;
+      size?: unknown;
+      type?: unknown;
+      preview?: unknown;
+      previewType?: unknown;
+      previewUrl?: unknown;
+      createdAt?: unknown;
+    };
+    if (
+      typeof candidate.id !== 'string' ||
+      typeof candidate.name !== 'string' ||
+      typeof candidate.size !== 'number' ||
+      typeof candidate.type !== 'string' ||
+      typeof candidate.preview !== 'string' ||
+      typeof candidate.createdAt !== 'string'
+    ) {
+      continue;
+    }
+    if (
+      candidate.previewType !== 'text' &&
+      candidate.previewType !== 'image' &&
+      candidate.previewType !== 'binary'
+    ) {
+      continue;
+    }
+    uploads.push({
+      id: candidate.id,
+      name: candidate.name,
+      size: candidate.size,
+      type: candidate.type,
+      preview: candidate.preview,
+      previewType: candidate.previewType,
+      previewUrl: typeof candidate.previewUrl === 'string' ? candidate.previewUrl : null,
+      createdAt: candidate.createdAt,
+    });
+  }
+  return uploads;
 };
 
 const parseSessions = (value: unknown): SessionSummary[] => {
@@ -134,6 +192,9 @@ export default function App() {
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [uploadsBySession, setUploadsBySession] = useState<Record<string, UploadHistoryItem[]>>(
+    {},
+  );
 
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -152,6 +213,29 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
+
+  useEffect(() => {
+    if (!selectedConversation || typeof window === 'undefined') {
+      return;
+    }
+    setUploadsBySession((prev) => {
+      if (prev[selectedConversation]) {
+        return prev;
+      }
+      const raw = window.localStorage.getItem(uploadStorageKey(selectedConversation));
+      if (!raw) {
+        return { ...prev, [selectedConversation]: [] };
+      }
+      try {
+        const parsed = parseUploads(JSON.parse(raw));
+        return { ...prev, [selectedConversation]: parsed };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to parse upload history.';
+        console.warn(message);
+        return { ...prev, [selectedConversation]: [] };
+      }
+    });
+  }, [selectedConversation]);
 
   const loadLastModel = (): SelectedModel | null => {
     if (typeof window === 'undefined') {
@@ -210,6 +294,23 @@ export default function App() {
     } finally {
       setModelsLoading(false);
     }
+  };
+
+  const handleRecordUploads = (sessionId: string, uploads: UploadHistoryItem[]) => {
+    setUploadsBySession((prev) => {
+      const current = prev[sessionId] ?? [];
+      const next = [...current, ...uploads];
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(uploadStorageKey(sessionId), JSON.stringify(next));
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : 'Failed to save upload history.';
+          console.warn(message);
+        }
+      }
+      return { ...prev, [sessionId]: next };
+    });
   };
 
   const setSessionModel = async (
@@ -436,6 +537,15 @@ export default function App() {
         }
       }
 
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(uploadStorageKey(sessionId));
+      }
+      setUploadsBySession((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+
       setStatusMessage(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to delete chat.';
@@ -559,10 +669,12 @@ export default function App() {
         savingModel={savingModel}
         onSend={handleSend}
         onSetModel={handleSetModel}
+        onRecordUploads={handleRecordUploads}
       />
 
       <ChatCanvas
         messages={messages}
+        uploads={selectedConversation ? uploadsBySession[selectedConversation] ?? [] : []}
         collapsed={chatCanvasCollapsed}
         onToggleCollapse={() => {
           const next = !chatCanvasCollapsed;
