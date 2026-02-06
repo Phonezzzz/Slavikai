@@ -3,6 +3,8 @@ import { AnimatePresence, motion } from 'motion/react';
 import { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
+import 'highlight.js/styles/github-dark.css';
 
 import type { CanvasOutput } from '../types';
 
@@ -63,6 +65,13 @@ const inferLanguage = (format: string | null): string | null => {
   if (normalized.includes('json')) return 'json';
   if (normalized.includes('yaml')) return 'yaml';
   if (normalized.includes('markdown')) return 'markdown';
+  return null;
+};
+
+const formatToLanguage = (format: CanvasFormat): string | null => {
+  if (format === 'py') return 'python';
+  if (format === 'json') return 'json';
+  if (format === 'yaml') return 'yaml';
   return null;
 };
 
@@ -161,6 +170,16 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
   const updatedAt = canvas?.updatedAt ?? null;
   const normalizedContent = normalizeContent(content);
   const renderMarkdown = shouldRenderMarkdown(canvas, normalizedContent);
+  const selectedLanguage = formatToLanguage(format);
+  const shouldWrapCode =
+    !renderMarkdown &&
+    selectedLanguage !== null &&
+    selectedLanguage !== 'markdown' &&
+    !normalizedContent.includes('```');
+  const markdownSource = shouldWrapCode
+    ? `\`\`\`${selectedLanguage}\n${normalizedContent}\n\`\`\``
+    : normalizedContent;
+  const renderMarkdownOutput = renderMarkdown || shouldWrapCode;
 
   const infoLine = useMemo(() => {
     if (!updatedAt) {
@@ -278,9 +297,10 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
                 </div>
               ) : (
                 <div className="rounded-lg border border-white/10 bg-black/40 p-4">
-                  {renderMarkdown ? (
+                  {renderMarkdownOutput ? (
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeHighlight]}
                       components={{
                         h1: ({ children }) => (
                           <h1 className="mb-3 text-base font-semibold text-white/90">{children}</h1>
@@ -315,7 +335,14 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
                             {children}
                           </a>
                         ),
-                        code: ({ inline, children }) => {
+                        code: ({ inline, className, children }) => {
+                          if (!inline) {
+                            return (
+                              <pre className="mb-3 overflow-x-auto rounded-lg border border-white/10 bg-black/60 p-4 text-xs leading-relaxed">
+                                <code className={className}>{children}</code>
+                              </pre>
+                            );
+                          }
                           const text = String(children ?? '').replace(/\n$/, '');
                           if (inline) {
                             return (
@@ -324,11 +351,6 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
                               </code>
                             );
                           }
-                          return (
-                            <pre className="mb-3 overflow-x-auto rounded-lg border border-white/10 bg-black/60 p-4 text-xs leading-relaxed text-emerald-200">
-                              <code className="font-mono">{text}</code>
-                            </pre>
-                          );
                         },
                         blockquote: ({ children }) => (
                           <blockquote className="mb-3 border-l-2 border-white/10 pl-3 text-sm text-white/60">
@@ -337,7 +359,7 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
                         ),
                       }}
                     >
-                      {normalizedContent}
+                      {markdownSource}
                     </ReactMarkdown>
                   ) : (
                     <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-emerald-200">
