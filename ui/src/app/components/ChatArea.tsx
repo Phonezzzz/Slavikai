@@ -21,6 +21,7 @@ type ChatAreaProps = {
   conversationId: string | null;
   messages: ChatMessage[];
   sending: boolean;
+  pendingUserMessage: ChatMessage | null;
   statusMessage: string | null;
   selectedModel: SelectedModel | null;
   providerModels: ProviderModels[];
@@ -219,6 +220,7 @@ export function ChatArea({
   conversationId,
   messages,
   sending,
+  pendingUserMessage,
   statusMessage,
   selectedModel,
   providerModels,
@@ -247,7 +249,7 @@ export function ChatArea({
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, pendingUserMessage, sending]);
 
   useEffect(() => {
     return () => {
@@ -286,9 +288,20 @@ export function ChatArea({
     return found?.models ?? [];
   }, [providerModels, modelProvider]);
 
+  const displayMessages = useMemo(() => {
+    if (!pendingUserMessage) {
+      return messages;
+    }
+    const last = messages[messages.length - 1];
+    if (last && last.role === pendingUserMessage.role && last.content === pendingUserMessage.content) {
+      return messages;
+    }
+    return [...messages, pendingUserMessage];
+  }, [messages, pendingUserMessage]);
+
   const sendDisabled =
     !conversationId || sending || (input.trim().length === 0 && attachments.length === 0);
-  const isEmpty = messages.length === 0;
+  const isEmpty = displayMessages.length === 0;
 
   const handleAttachFiles = async (fileList: FileList | null) => {
     if (!fileList) {
@@ -360,11 +373,20 @@ export function ChatArea({
 
     const payload =
       webSearchMode && !composed.trimStart().startsWith('/') ? `/web ${composed}` : composed;
+
+    const shouldClear = typeof overrideContent !== 'string';
+    const previousInput = input;
+    const previousAttachments = attachments;
+    if (shouldClear) {
+      setInput('');
+      setAttachments([]);
+    }
+
     const ok = await onSend(payload);
-    if (ok && typeof overrideContent !== 'string') {
-      if (conversationId && attachments.length > 0) {
+    if (ok && shouldClear) {
+      if (conversationId && previousAttachments.length > 0) {
         const now = new Date().toISOString();
-        const uploads: UploadHistoryItem[] = attachments.map((item, index) => ({
+        const uploads: UploadHistoryItem[] = previousAttachments.map((item, index) => ({
           id: createUploadId(`${conversationId}-${index}`),
           name: item.name,
           size: item.size,
@@ -376,8 +398,10 @@ export function ChatArea({
         }));
         onRecordUploads(conversationId, uploads);
       }
-      setInput('');
-      setAttachments([]);
+    }
+    if (!ok && shouldClear) {
+      setInput(previousInput);
+      setAttachments(previousAttachments);
     }
   };
 
@@ -590,7 +614,7 @@ export function ChatArea({
                 : recording
                   ? 'Recording...'
                   : sending
-                    ? 'Sending...'
+                    ? 'Assistant thinking...'
                     : '')}
       </div>
     </>
@@ -608,11 +632,11 @@ export function ChatArea({
         <>
           <div className="relative z-10 flex-1 overflow-y-auto px-6 py-8">
             <div className="mx-auto max-w-3xl space-y-6">
-              {messages.map((message, index) => {
+              {displayMessages.map((message, index) => {
               const isAssistant = message.role === 'assistant';
               const isUser = message.role === 'user';
               const previousUserMessage = isAssistant
-                ? findPreviousUserMessage(messages, index)
+                ? findPreviousUserMessage(displayMessages, index)
                 : null;
               return (
                 <motion.div
@@ -713,6 +737,26 @@ export function ChatArea({
                 </motion.div>
               );
               })}
+              {sending ? (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="flex gap-4 justify-start"
+                >
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900">
+                    <Sparkles className="h-4 w-4 animate-pulse text-zinc-300" />
+                  </div>
+                  <div className="flex max-w-[78%] flex-col gap-2 items-start">
+                    <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 px-4 py-3 text-zinc-200">
+                      <div className="mb-1 text-[10px] uppercase tracking-[0.2em] opacity-60">
+                        Assistant
+                      </div>
+                      <p className="text-sm leading-relaxed">Thinking…</p>
+                    </div>
+                  </div>
+                </motion.div>
+              ) : null}
               <div ref={messagesEndRef} />
             </div>
           </div>

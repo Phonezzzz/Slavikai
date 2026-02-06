@@ -200,6 +200,8 @@ export default function App() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [savingModel, setSavingModel] = useState(false);
   const [sending, setSending] = useState(false);
+  const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
+  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -579,6 +581,12 @@ export default function App() {
     if (!selectedConversation || sending) {
       return false;
     }
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return false;
+    }
+    setPendingUserMessage({ role: 'user', content: trimmed });
+    setPendingSessionId(selectedConversation);
     setSending(true);
     try {
       const response = await fetch('/ui/api/chat/send', {
@@ -602,6 +610,8 @@ export default function App() {
         setSelectedConversation(nextSession);
       }
 
+      setPendingUserMessage(null);
+      setPendingSessionId(null);
       setMessages(parseMessages((payload as { messages?: unknown }).messages));
       const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
       if (parsedModel) {
@@ -614,6 +624,8 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send message.';
       setStatusMessage(message);
+      setPendingUserMessage(null);
+      setPendingSessionId(null);
       return false;
     } finally {
       setSending(false);
@@ -662,6 +674,9 @@ export default function App() {
         conversationId={selectedConversation}
         messages={messages}
         sending={sending}
+        pendingUserMessage={
+          pendingSessionId === selectedConversation ? pendingUserMessage : null
+        }
         statusMessage={statusMessage}
         selectedModel={selectedModel}
         providerModels={providerModels}
