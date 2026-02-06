@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import 'highlight.js/styles/github-dark.css';
+import 'highlight.js/styles/atom-one-dark.css';
 
 import type { CanvasOutput } from '../types';
 
@@ -73,6 +73,37 @@ const formatToLanguage = (format: CanvasFormat): string | null => {
   if (format === 'json') return 'json';
   if (format === 'yaml') return 'yaml';
   return null;
+};
+
+const looksLikeCode = (content: string): boolean => {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed.includes('```')) {
+    return true;
+  }
+  const lines = trimmed.split('\n');
+  if (lines.length < 3) {
+    return false;
+  }
+  let score = 0;
+  const patterns: RegExp[] = [
+    /^\s*(const|let|var|function|class|import|export|def|return|if|for|while|switch|case|try|catch)\b/i,
+    /[{};]/,
+    /<\/?[a-z][\s\S]*>/i,
+    /=>/,
+    /#/,
+  ];
+  for (const line of lines.slice(0, 12)) {
+    if (patterns.some((pattern) => pattern.test(line))) {
+      score += 1;
+    }
+    if (score >= 2) {
+      return true;
+    }
+  }
+  return false;
 };
 
 const resolveDefaultFormat = (canvas: CanvasOutput | null): CanvasFormat => {
@@ -173,11 +204,10 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
   const selectedLanguage = formatToLanguage(format);
   const shouldWrapCode =
     !renderMarkdown &&
-    selectedLanguage !== null &&
-    selectedLanguage !== 'markdown' &&
-    !normalizedContent.includes('```');
+    !normalizedContent.includes('```') &&
+    (selectedLanguage !== null || looksLikeCode(normalizedContent));
   const markdownSource = shouldWrapCode
-    ? `\`\`\`${selectedLanguage}\n${normalizedContent}\n\`\`\``
+    ? `\`\`\`${selectedLanguage ?? ''}\n${normalizedContent}\n\`\`\``
     : normalizedContent;
   const renderMarkdownOutput = renderMarkdown || shouldWrapCode;
 
@@ -300,7 +330,7 @@ export function ChatCanvas({ collapsed, onToggleCollapse, canvas }: ChatCanvasPr
                   {renderMarkdownOutput ? (
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeHighlight]}
+                      rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
                       components={{
                         h1: ({ children }) => (
                           <h1 className="mb-3 text-base font-semibold text-white/90">{children}</h1>
