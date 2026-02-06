@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { ChatArea } from './components/ChatArea';
 import { Settings } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
-import { Workspace } from './components/Workspace';
+import { ChatCanvas } from './components/ChatCanvas';
 import type { ChatMessage, ProviderModels, SelectedModel, SessionSummary } from './types';
 
 const SESSION_HEADER = 'X-Slavik-Session';
@@ -142,11 +142,11 @@ export default function App() {
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(() => {
+  const [chatCanvasCollapsed, setChatCanvasCollapsed] = useState(() => {
     if (typeof window === 'undefined') {
       return true;
     }
-    const stored = window.localStorage.getItem('slavik.workspace.collapsed');
+    const stored = window.localStorage.getItem('slavik.chatcanvas.collapsed');
     return stored ? stored === 'true' : true;
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -561,14 +561,13 @@ export default function App() {
         onSetModel={handleSetModel}
       />
 
-      <Workspace
-        sessionId={selectedConversation}
-        collapsed={workspaceCollapsed}
+      <ChatCanvas
+        collapsed={chatCanvasCollapsed}
         onToggleCollapse={() => {
-          const next = !workspaceCollapsed;
-          setWorkspaceCollapsed(next);
+          const next = !chatCanvasCollapsed;
+          setChatCanvasCollapsed(next);
           if (typeof window !== 'undefined') {
-            window.localStorage.setItem('slavik.workspace.collapsed', String(next));
+            window.localStorage.setItem('slavik.chatcanvas.collapsed', String(next));
           }
         }}
       />
