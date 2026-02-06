@@ -189,6 +189,12 @@
 @layer base {
   * {
     scrollbar-width: thin;
+    scrollbar-color: rgba(120, 120, 120, 0) transparent;
+  }
+
+  *:hover,
+  *:active,
+  *:focus-within {
     scrollbar-color: rgba(120, 120, 120, 0.55) transparent;
   }
 
