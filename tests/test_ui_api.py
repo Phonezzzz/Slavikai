@@ -264,6 +264,32 @@ async def _read_sse_event_types(response, *, max_events: int = 20) -> list[str]:
     return types
 
 
+async def _read_sse_events_until_terminal(
+    response,
+    *,
+    max_events: int = 64,
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    while len(events) < max_events:
+        try:
+            line = await asyncio.wait_for(response.content.readline(), timeout=2)
+        except TimeoutError:
+            break
+        if not line:
+            break
+        if not line.startswith(b"data: "):
+            continue
+        raw = line.removeprefix(b"data: ").decode("utf-8").strip()
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            continue
+        events.append(parsed)
+        event_type = parsed.get("type")
+        if event_type == "done" or event_type == "error":
+            break
+    return events
+
+
 async def _select_local_model(client: TestClient, session_id: str) -> str:
     models_response = await client.get("/ui/api/models?provider=local")
     assert models_response.status == 200
@@ -355,6 +381,59 @@ def test_ui_chat_send_endpoint() -> None:
     asyncio.run(run())
 
 
+def test_ui_chat_stream_endpoint() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            selected_model = await _select_local_model(client, session_id)
+
+            stream_resp = await client.post(
+                "/ui/api/chat/stream",
+                json={"content": "Ping"},
+                headers={"X-Slavik-Session": session_id},
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            assert stream_resp.headers.get("X-Slavik-Session") == session_id
+
+            events = await _read_sse_events_until_terminal(stream_resp)
+            assert events
+            event_types = [item.get("type") for item in events]
+            assert "start" in event_types
+            assert "delta" in event_types
+            assert "done" in event_types
+
+            done = next(
+                (item for item in events if item.get("type") == "done"),
+                None,
+            )
+            assert isinstance(done, dict)
+            assert done.get("session_id") == session_id
+            messages = done.get("messages")
+            assert isinstance(messages, list)
+            assert len(messages) >= 2
+            last = messages[-1]
+            assert isinstance(last, dict)
+            assert last.get("role") == "assistant"
+            assert last.get("content") == "ok"
+            output = done.get("output")
+            assert isinstance(output, dict)
+            assert output.get("content") is None
+            selected = done.get("selected_model")
+            assert isinstance(selected, dict)
+            assert selected.get("provider") == "local"
+            assert selected.get("model") == selected_model
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_strips_mwv_report_block() -> None:
     async def run() -> None:
         client = await _create_client(UIReportAgent())
@@ -382,13 +461,11 @@ def test_ui_chat_send_strips_mwv_report_block() -> None:
             assert isinstance(last, dict)
             content = last.get("content")
             assert isinstance(content, str)
-            assert content == "Готово. Результат в Canvas."
+            assert content == "ok"
             output_payload = payload.get("output")
             assert isinstance(output_payload, dict)
             output_content = output_payload.get("content")
-            assert isinstance(output_content, str)
-            assert output_content == "ok"
-            assert "MWV_REPORT_JSON=" not in output_content
+            assert output_content is None
         finally:
             await client.close()
 
@@ -804,7 +881,7 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             assert isinstance(second, dict)
             assert first.get("role") == "user"
             assert second.get("role") == "assistant"
-            assert second.get("content") == "Готово. Результат в Canvas."
+            assert second.get("content") == "ok"
 
             history_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
             assert history_resp.status == 200
@@ -818,7 +895,7 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             output_payload = await output_resp.json()
             output = output_payload.get("output")
             assert isinstance(output, dict)
-            assert output.get("content") == "ok"
+            assert output.get("content") is None
 
             files_resp = await client.get(f"/ui/api/sessions/{session_id}/files")
             assert files_resp.status == 200
@@ -873,7 +950,7 @@ def test_ui_chat_send_stores_files_from_tool_calls(monkeypatch, tmp_path) -> Non
             send_payload = await send_resp.json()
             output = send_payload.get("output")
             assert isinstance(output, dict)
-            assert output.get("content") == "print('ok')"
+            assert output.get("content") is None
             files = send_payload.get("files")
             assert isinstance(files, list)
             assert "src/generated/demo.py" in files
@@ -1007,15 +1084,16 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             assert isinstance(second, dict)
             assert first.get("role") == "user"
             assert second.get("role") == "assistant"
-            assert second.get("content") == "Готово. Результат в Canvas."
+            second_content = second.get("content")
+            assert isinstance(second_content, str)
+            assert f"decision-{session_id}" in second_content
             restored_decision = session.get("decision")
             assert isinstance(restored_decision, dict)
             assert restored_decision.get("id") == f"decision-{session_id}"
             restored_output = session.get("output")
             assert isinstance(restored_output, dict)
             output_content = restored_output.get("content")
-            assert isinstance(output_content, str)
-            assert f"decision-{session_id}" in output_content
+            assert output_content is None
             restored_files = session.get("files")
             assert isinstance(restored_files, list)
             assert restored_files == []

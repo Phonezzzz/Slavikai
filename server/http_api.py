@@ -102,6 +102,7 @@ DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
 UI_GITHUB_REQUIRED_CATEGORIES: Final[list[ApprovalCategory]] = ["NETWORK_RISK", "EXEC_ARBITRARY"]
 UI_GITHUB_ROOT: Final[Path] = Path("sandbox/project/github").resolve()
 CANVAS_CHAT_SUMMARY: Final[str] = "Готово. Результат в Canvas."
+CANVAS_MIN_CONTENT_LENGTH: Final[int] = 280
 
 
 @dataclass(frozen=True)
@@ -811,6 +812,42 @@ def _split_response_and_report(response_text: str) -> tuple[str, dict[str, JSONV
     if not clean_text:
         return response_text, normalized_report
     return clean_text, normalized_report
+
+
+def _should_store_canvas_output(response_text: str) -> bool:
+    normalized = response_text.strip()
+    if not normalized:
+        return False
+    if "```" in normalized:
+        return True
+    return len(normalized) >= CANVAS_MIN_CONTENT_LENGTH
+
+
+def _split_chat_summary_and_canvas_payload(
+    *,
+    response_text: str,
+    approval_request: dict[str, JSONValue] | None,
+    decision_payload: dict[str, JSONValue] | None,
+) -> tuple[str, str | None]:
+    if approval_request is not None:
+        return response_text, None
+    if decision_payload is not None:
+        return response_text, None
+    if _should_store_canvas_output(response_text):
+        return CANVAS_CHAT_SUMMARY, response_text
+    return response_text, None
+
+
+async def _write_sse_event(
+    response: web.StreamResponse,
+    *,
+    event_type: str,
+    payload: dict[str, JSONValue],
+) -> None:
+    envelope: dict[str, JSONValue] = {"type": event_type}
+    envelope.update(payload)
+    body = json.dumps(envelope, ensure_ascii=False)
+    await response.write(f"data: {body}\n\n".encode())
 
 
 def _load_ui_settings_blob() -> dict[str, object]:
@@ -2187,13 +2224,18 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 getattr(agent, "last_approval_request", None),
             )
 
-        await hub.set_session_output(session_id, response_text)
+        chat_summary, canvas_payload = _split_chat_summary_and_canvas_payload(
+            response_text=response_text,
+            approval_request=approval_request,
+            decision_payload=decision,
+        )
+        if canvas_payload is not None:
+            await hub.set_session_output(session_id, canvas_payload)
         if trace_id:
             tool_calls = _tool_calls_for_trace_id(trace_id) or []
             files_from_tools = _extract_files_from_tool_calls(tool_calls)
             if files_from_tools:
                 await hub.merge_session_files(session_id, files_from_tools)
-        chat_summary = response_text if approval_request is not None else CANVAS_CHAT_SUMMARY
         await hub.append_message(session_id, "assistant", chat_summary)
         await hub.set_session_decision(session_id, decision)
         messages = await hub.get_messages(session_id)
@@ -2241,6 +2283,243 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
     finally:
         if status_opened and session_id is not None and not error:
             await hub.set_session_status(session_id, "ok")
+
+
+async def handle_ui_chat_stream(request: web.Request) -> web.StreamResponse | web.Response:
+    agent_lock = request.app["agent_lock"]
+    session_store = request.app["session_store"]
+    hub: UIHub = request.app["ui_hub"]
+
+    session_id: str | None = None
+    status_opened = False
+    error = False
+    stream_response: web.StreamResponse | None = None
+    try:
+        try:
+            agent = await _resolve_agent(request)
+        except ModelNotAllowedError as exc:
+            return _model_not_allowed_response(exc.model_id)
+        if agent is None:
+            return _model_not_selected_response()
+
+        try:
+            payload = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            return _error_response(
+                status=400,
+                message=f"Некорректный JSON: {exc}",
+                error_type="invalid_request_error",
+                code="invalid_json",
+            )
+        if not isinstance(payload, dict):
+            return _error_response(
+                status=400,
+                message="JSON должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_json",
+            )
+
+        content_raw = payload.get("content")
+        if not isinstance(content_raw, str) or not content_raw.strip():
+            return _error_response(
+                status=400,
+                message="content должен быть непустой строкой.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+
+        session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+        selected_model = await hub.get_session_model(session_id)
+        if selected_model is None:
+            return _model_not_selected_response()
+
+        await hub.set_session_status(session_id, "busy")
+        status_opened = True
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="request.received",
+            detail="chat.stream",
+        )
+
+        approved_categories = await session_store.get_categories(session_id)
+        await hub.append_message(session_id, "user", content_raw.strip())
+        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="context.prepared",
+            detail="chat.stream",
+        )
+
+        stream_response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                UI_SESSION_HEADER: session_id,
+            },
+        )
+        await stream_response.prepare(request)
+        await _write_sse_event(
+            stream_response,
+            event_type="start",
+            payload={"session_id": session_id},
+        )
+
+        mwv_report: dict[str, JSONValue] | None = None
+        trace_id: str | None = None
+        approval_request: dict[str, JSONValue] | None = None
+        decision: dict[str, JSONValue] | None = None
+        async with agent_lock:
+            try:
+                model_config = _build_model_config(
+                    selected_model["provider"],
+                    selected_model["model"],
+                )
+                api_key = _resolve_provider_api_key(selected_model["provider"])
+                agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
+            except Exception as exc:  # noqa: BLE001
+                error = True
+                await hub.set_session_status(session_id, "error")
+                await _write_sse_event(
+                    stream_response,
+                    event_type="error",
+                    payload={"session_id": session_id, "message": f"model_config_invalid: {exc}"},
+                )
+                return stream_response
+            try:
+                agent.set_session_context(session_id, approved_categories)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to set session context for ui stream",
+                    exc_info=True,
+                    extra={
+                        "session_id": session_id,
+                        "approved_categories": sorted(approved_categories),
+                        "error": str(exc),
+                    },
+                )
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="agent.respond.start",
+                detail="chat.stream",
+            )
+
+            response_chunks: list[str] = []
+            stream_method = getattr(agent, "respond_stream", None)
+            if callable(stream_method):
+                iterator = stream_method(llm_messages)
+            else:
+                iterator = iter([agent.respond(llm_messages)])
+            for chunk_raw in iterator:
+                if not isinstance(chunk_raw, str):
+                    continue
+                chunk = chunk_raw
+                if not chunk:
+                    continue
+                response_chunks.append(chunk)
+                await _write_sse_event(
+                    stream_response,
+                    event_type="delta",
+                    payload={"session_id": session_id, "delta": chunk},
+                )
+            response_text_raw = "".join(response_chunks)
+            response_text, mwv_report = _split_response_and_report(response_text_raw)
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="agent.respond.end",
+                detail="chat.stream",
+            )
+            decision = _extract_decision_payload(response_text)
+            trace_id_raw = getattr(agent, "last_chat_interaction_id", None)
+            trace_id = trace_id_raw.strip() if isinstance(trace_id_raw, str) else None
+            approval_request = _serialize_approval_request(
+                getattr(agent, "last_approval_request", None),
+            )
+
+        chat_summary, canvas_payload = _split_chat_summary_and_canvas_payload(
+            response_text=response_text,
+            approval_request=approval_request,
+            decision_payload=decision,
+        )
+        if canvas_payload is not None:
+            await hub.set_session_output(session_id, canvas_payload)
+        if trace_id:
+            tool_calls = _tool_calls_for_trace_id(trace_id) or []
+            files_from_tools = _extract_files_from_tool_calls(tool_calls)
+            if files_from_tools:
+                await hub.merge_session_files(session_id, files_from_tools)
+        await hub.append_message(session_id, "assistant", chat_summary)
+        await hub.set_session_decision(session_id, decision)
+        messages = await hub.get_messages(session_id)
+        output_payload = await hub.get_session_output(session_id)
+        files_payload = await hub.get_session_files(session_id)
+        current_decision = await hub.get_session_decision(session_id)
+        current_model = await hub.get_session_model(session_id)
+        done_payload: dict[str, JSONValue] = {
+            "session_id": session_id,
+            "messages": messages,
+            "output": output_payload,
+            "files": files_payload or [],
+            "decision": current_decision,
+            "selected_model": current_model,
+            "trace_id": trace_id,
+            "approval_request": approval_request,
+            "mwv_report": mwv_report,
+        }
+        await _write_sse_event(
+            stream_response,
+            event_type="done",
+            payload=done_payload,
+        )
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="response.ready",
+            detail="chat.stream",
+        )
+        return stream_response
+    except Exception as exc:  # noqa: BLE001
+        error = True
+        if status_opened and session_id is not None:
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="error",
+                detail=f"chat.stream: {exc}",
+            )
+            await hub.set_session_status(session_id, "error")
+        if stream_response is not None:
+            try:
+                await _write_sse_event(
+                    stream_response,
+                    event_type="error",
+                    payload={
+                        "session_id": session_id or "",
+                        "message": f"agent_error: {exc}",
+                    },
+                )
+            except ConnectionResetError:
+                pass
+            return stream_response
+        return _error_response(
+            status=500,
+            message=f"Agent stream error: {exc}",
+            error_type="internal_error",
+            code="agent_error",
+        )
+    finally:
+        if status_opened and session_id is not None and not error:
+            await hub.set_session_status(session_id, "ok")
+        if stream_response is not None:
+            try:
+                await stream_response.write_eof()
+            except (RuntimeError, ConnectionResetError):
+                pass
 
 
 async def handle_ui_project_command(request: web.Request) -> web.Response:
@@ -3011,6 +3290,7 @@ def create_app(
     app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)
     app.router.add_post("/ui/api/session-model", handle_ui_session_model)
     app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
+    app.router.add_post("/ui/api/chat/stream", handle_ui_chat_stream)
     app.router.add_post("/ui/api/tools/project", handle_ui_project_command)
     app.router.add_get("/ui/api/events/stream", handle_ui_events_stream)
     assets_path = dist_path / "assets"

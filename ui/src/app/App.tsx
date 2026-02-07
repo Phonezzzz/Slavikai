@@ -352,6 +352,8 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
+  const [streamingAssistantText, setStreamingAssistantText] = useState<string | null>(null);
+  const [streamingSessionId, setStreamingSessionId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
@@ -362,9 +364,21 @@ export default function App() {
 
   const pendingForCanvas =
     pendingSessionId === selectedConversation ? pendingUserMessage : null;
+  const streamingForCanvas =
+    streamingSessionId === selectedConversation ? streamingAssistantText : null;
   const canvasMessages = useMemo(
-    () => buildCanvasMessages(messages),
-    [messages],
+    () => {
+      const base = buildCanvasMessages(messages);
+      if (streamingForCanvas && streamingForCanvas.trim()) {
+        base.push({
+          id: 'assistant-stream',
+          role: 'assistant',
+          content: streamingForCanvas,
+        });
+      }
+      return base;
+    },
+    [messages, streamingForCanvas],
   );
   const pendingCanvasMessage = useMemo(() => {
     if (!pendingForCanvas || pendingForCanvas.role !== 'user') {
@@ -961,9 +975,11 @@ export default function App() {
     }
     setPendingUserMessage({ role: 'user', content: trimmed });
     setPendingSessionId(selectedConversation);
+    setStreamingSessionId(selectedConversation);
+    setStreamingAssistantText('');
     setSending(true);
     try {
-      const response = await fetch('/ui/api/chat/send', {
+      const response = await fetch('/ui/api/chat/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -971,22 +987,99 @@ export default function App() {
         },
         body: JSON.stringify({ content }),
       });
-      const payload: unknown = await response.json();
       if (!response.ok) {
+        const payload: unknown = await response.json();
         throw new Error(extractErrorMessage(payload, 'Failed to send message.'));
       }
+      if (!response.body) {
+        throw new Error('Streaming response body is empty.');
+      }
 
-      const headerSession = response.headers.get(SESSION_HEADER);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let streamedAssistant = '';
+      let donePayload: unknown = null;
+      let streamSessionId = selectedConversation;
+
+      const processEventChunk = (chunk: string) => {
+        const lines = chunk.split('\n');
+        const dataLines: string[] = [];
+        for (const lineRaw of lines) {
+          const line = lineRaw.trimEnd();
+          if (!line || line.startsWith(':')) {
+            continue;
+          }
+          if (line.startsWith('data:')) {
+            dataLines.push(line.slice('data:'.length).trimStart());
+          }
+        }
+        if (dataLines.length === 0) {
+          return;
+        }
+        const dataRaw = dataLines.join('\n');
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(dataRaw);
+        } catch {
+          return;
+        }
+        if (!parsed || typeof parsed !== 'object') {
+          return;
+        }
+        const event = parsed as { type?: unknown; delta?: unknown; message?: unknown; session_id?: unknown };
+        if (typeof event.session_id === 'string' && event.session_id.trim()) {
+          streamSessionId = event.session_id.trim();
+          setStreamingSessionId(streamSessionId);
+        }
+        if (event.type === 'delta') {
+          if (typeof event.delta === 'string' && event.delta) {
+            streamedAssistant += event.delta;
+            setStreamingAssistantText(streamedAssistant);
+          }
+          return;
+        }
+        if (event.type === 'error') {
+          const errorMessage =
+            typeof event.message === 'string' && event.message.trim()
+              ? event.message
+              : 'Failed to send message.';
+          throw new Error(errorMessage);
+        }
+        if (event.type === 'done') {
+          donePayload = parsed;
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let separatorIndex = buffer.indexOf('\n\n');
+        while (separatorIndex >= 0) {
+          const eventChunk = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + 2);
+          processEventChunk(eventChunk);
+          separatorIndex = buffer.indexOf('\n\n');
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        processEventChunk(buffer);
+      }
+
+      const payload = donePayload;
+      if (!payload || typeof payload !== 'object') {
+        throw new Error('Streaming finished without final payload.');
+      }
       const payloadSession = extractSessionIdFromPayload(payload);
-      const nextSession =
-        (headerSession && headerSession.trim()) || payloadSession || selectedConversation;
+      const nextSession = payloadSession || streamSessionId || selectedConversation;
       if (nextSession !== selectedConversation) {
         setSelectedConversation(nextSession);
       }
       saveLastSessionId(nextSession);
-
-      setPendingUserMessage(null);
-      setPendingSessionId(null);
       setMessages(parseMessages((payload as { messages?: unknown }).messages));
       const parsedOutput = parseSessionOutput((payload as { output?: unknown }).output);
       setSessionOutput(parsedOutput.content);
@@ -1006,10 +1099,12 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send message.';
       setStatusMessage(message);
-      setPendingUserMessage(null);
-      setPendingSessionId(null);
       return false;
     } finally {
+      setPendingUserMessage(null);
+      setPendingSessionId(null);
+      setStreamingAssistantText(null);
+      setStreamingSessionId(null);
       setSending(false);
     }
   };

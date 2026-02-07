@@ -24,6 +24,20 @@ def _mock_response(payload: dict[str, Any]):
     return Response()
 
 
+def _mock_stream_response(lines: list[str]):
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_lines(self, decode_unicode: bool = False):
+            del decode_unicode
+            yield from lines
+
+    return Response()
+
+
 def test_openrouter_generate(monkeypatch) -> None:
     calls: dict[str, Any] = {}
 
@@ -111,3 +125,62 @@ def test_xai_without_key_raises(monkeypatch) -> None:
     brain = XAiBrain(api_key=None, default_config=config)
     with pytest.raises(RuntimeError):
         brain.generate([LLMMessage(role="user", content="ping")])
+
+
+def test_openrouter_stream_generate(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_post(url, json, headers, timeout, stream):
+        calls["url"] = url
+        calls["json"] = json
+        calls["headers"] = headers
+        calls["stream"] = stream
+        return _mock_stream_response(
+            [
+                'data: {"choices":[{"delta":{"content":"Hel"}}]}',
+                'data: {"choices":[{"delta":{"content":"lo"}}]}',
+                "data: [DONE]",
+            ]
+        )
+
+    monkeypatch.setattr("llm.openrouter_brain.requests.post", fake_post)
+    config = ModelConfig(provider="openrouter", model="test-model", temperature=0.1)
+    brain = OpenRouterBrain(api_key="test-key", default_config=config)
+
+    chunks = list(brain.stream_generate([LLMMessage(role="user", content="ping")]))
+    assert "".join(chunks) == "Hello"
+    assert calls["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert calls["headers"]["Authorization"] == "Bearer test-key"
+    assert calls["json"]["model"] == "test-model"
+    assert calls["stream"] is True
+
+
+def test_local_http_stream_generate(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_post(url, json, headers, timeout, stream):
+        calls["url"] = url
+        calls["json"] = json
+        calls["stream"] = stream
+        return _mock_stream_response(
+            [
+                'data: {"choices":[{"delta":{"content":"po"}}]}',
+                'data: {"choices":[{"delta":{"content":"ng"}}]}',
+                "data: [DONE]",
+            ]
+        )
+
+    monkeypatch.setattr("llm.local_http_brain.requests.post", fake_post)
+    config = ModelConfig(
+        provider="local",
+        model="local-model",
+        temperature=0.2,
+        base_url="http://localhost:9999/v1/chat/completions",
+    )
+    brain = LocalHttpBrain(default_config=config)
+
+    chunks = list(brain.stream_generate([LLMMessage(role="user", content="hello")]))
+    assert "".join(chunks) == "pong"
+    assert calls["url"] == "http://localhost:9999/v1/chat/completions"
+    assert calls["json"]["model"] == "local-model"
+    assert calls["stream"] is True
