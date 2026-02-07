@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Search,
   StickyNote,
@@ -28,10 +28,13 @@ interface HistorySidebarProps {
   onNewChat?: () => void;
   onSelectChat?: (id: string) => void;
   onDeleteChat?: (id: string) => void;
+  onRenameChat?: (id: string) => void;
+  onMoveChatToFolder?: (id: string) => void;
   onOpenSearch?: () => void;
   onOpenNotes?: () => void;
   onOpenWorkspace?: () => void;
   onOpenSettings?: () => void;
+  onCreateFolder?: () => void;
   className?: string;
 }
 
@@ -43,14 +46,31 @@ export function HistorySidebar({
   onNewChat,
   onSelectChat,
   onDeleteChat,
+  onRenameChat,
+  onMoveChatToFolder,
   onOpenSearch,
   onOpenNotes,
   onOpenWorkspace,
   onOpenSettings,
+  onCreateFolder,
   className = "",
 }: HistorySidebarProps) {
   const [hoveredChat, setHoveredChat] = useState<string | null>(null);
+  const [menuChatId, setMenuChatId] = useState<string | null>(null);
   const hasChats = chats.length > 0;
+
+  useEffect(() => {
+    if (!menuChatId) {
+      return;
+    }
+    const handleClick = () => {
+      setMenuChatId(null);
+    };
+    document.addEventListener("click", handleClick);
+    return () => {
+      document.removeEventListener("click", handleClick);
+    };
+  }, [menuChatId]);
 
   const todayChats = chats.filter((c) => c.group === "today");
   const yesterdayChats = chats.filter((c) => c.group === "yesterday");
@@ -93,12 +113,15 @@ export function HistorySidebar({
         {items.map((chat) => (
           <div
             key={chat.id}
-            className={`group flex items-center gap-2 mx-2 px-3 py-2.5 rounded-lg cursor-pointer transition-all ${
+            className={`group relative flex items-center gap-2 mx-2 px-3 py-2.5 rounded-lg cursor-pointer transition-all ${
               activeChatId === chat.id
                 ? "bg-[#1b1b22]"
                 : "hover:bg-[#141418]"
             }`}
-            onClick={() => onSelectChat?.(chat.id)}
+            onClick={() => {
+              onSelectChat?.(chat.id);
+              setMenuChatId(null);
+            }}
             onMouseEnter={() => setHoveredChat(chat.id)}
             onMouseLeave={() => setHoveredChat(null)}
           >
@@ -127,18 +150,48 @@ export function HistorySidebar({
                 onClick={(e) => {
                   e.stopPropagation();
                   onDeleteChat?.(chat.id);
+                  setMenuChatId(null);
                 }}
                 className="p-1 rounded text-[#555] hover:text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
               <button
-                onClick={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMenuChatId((prev) => (prev === chat.id ? null : chat.id));
+                }}
                 className="p-1 rounded text-[#555] hover:text-[#aaa] hover:bg-[#333] transition-colors cursor-pointer"
               >
                 <MoreHorizontal className="w-3.5 h-3.5" />
               </button>
             </div>
+
+            {menuChatId === chat.id ? (
+              <div
+                className="absolute right-2 top-10 z-20 w-44 rounded-lg bg-[#141418] border border-[#1f1f24] shadow-xl shadow-black/40 py-1"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  onClick={() => {
+                    onRenameChat?.(chat.id);
+                    setMenuChatId(null);
+                  }}
+                  className="w-full px-3 py-2 text-left text-[12px] text-[#ddd] hover:bg-[#1b1b20] transition-colors"
+                >
+                  Rename
+                </button>
+                <button
+                  onClick={() => {
+                    onMoveChatToFolder?.(chat.id);
+                    setMenuChatId(null);
+                  }}
+                  className="w-full px-3 py-2 text-left text-[12px] text-[#ddd] hover:bg-[#1b1b20] transition-colors"
+                >
+                  Send to folder
+                </button>
+              </div>
+            ) : null}
           </div>
         ))}
       </div>
@@ -195,11 +248,20 @@ export function HistorySidebar({
 
       {/* Folders section */}
       <div className="px-3 mb-2">
-        <div className="flex items-center gap-2 px-2 py-1.5">
-          <FolderClosed className="w-3.5 h-3.5 text-[#555]" />
-          <span className="text-[11px] text-[#555] uppercase tracking-wider">
-            Folders
-          </span>
+        <div className="flex items-center justify-between px-2 py-1.5">
+          <div className="flex items-center gap-2">
+            <FolderClosed className="w-3.5 h-3.5 text-[#555]" />
+            <span className="text-[11px] text-[#555] uppercase tracking-wider">
+              Folders
+            </span>
+          </div>
+          <button
+            onClick={onCreateFolder}
+            className="p-1 rounded text-[#555] hover:text-[#ddd] hover:bg-[#141418] transition-colors cursor-pointer"
+            title="Create folder"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
         </div>
         <p className="px-3 py-2 text-[12px] text-[#444] italic">
           No folders yet
