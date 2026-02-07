@@ -1,15 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { PanelRight } from 'lucide-react';
 
-import { ChatArea } from './components/ChatArea';
+import { ArtifactPanel } from './components/artifact-panel';
+import { Canvas, type CanvasMessage } from './components/canvas';
+import type { Artifact } from './components/artifacts-sidebar';
+import { HistorySidebar } from './components/history-sidebar';
+import { SearchModal } from './components/search-modal';
 import { Settings } from './components/Settings';
-import { Sidebar } from './components/Sidebar';
-import { ChatCanvas } from './components/ChatCanvas';
 import type {
   ChatMessage,
   ProviderModels,
   SelectedModel,
   SessionSummary,
-  UploadHistoryItem,
 } from './types';
 
 const SESSION_HEADER = 'X-Slavik-Session';
@@ -67,57 +69,6 @@ const parseProviderModels = (value: unknown): ProviderModels[] => {
   return providers;
 };
 
-const uploadStorageKey = (sessionId: string) => `slavik.uploads.${sessionId}`;
-
-const parseUploads = (value: unknown): UploadHistoryItem[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const uploads: UploadHistoryItem[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-    const candidate = item as {
-      id?: unknown;
-      name?: unknown;
-      size?: unknown;
-      type?: unknown;
-      preview?: unknown;
-      previewType?: unknown;
-      previewUrl?: unknown;
-      createdAt?: unknown;
-    };
-    if (
-      typeof candidate.id !== 'string' ||
-      typeof candidate.name !== 'string' ||
-      typeof candidate.size !== 'number' ||
-      typeof candidate.type !== 'string' ||
-      typeof candidate.preview !== 'string' ||
-      typeof candidate.createdAt !== 'string'
-    ) {
-      continue;
-    }
-    if (
-      candidate.previewType !== 'text' &&
-      candidate.previewType !== 'image' &&
-      candidate.previewType !== 'binary'
-    ) {
-      continue;
-    }
-    uploads.push({
-      id: candidate.id,
-      name: candidate.name,
-      size: candidate.size,
-      type: candidate.type,
-      preview: candidate.preview,
-      previewType: candidate.previewType,
-      previewUrl: typeof candidate.previewUrl === 'string' ? candidate.previewUrl : null,
-      createdAt: candidate.createdAt,
-    });
-  }
-  return uploads;
-};
 
 const parseSessions = (value: unknown): SessionSummary[] => {
   if (!Array.isArray(value)) {
@@ -158,6 +109,75 @@ const parseSessions = (value: unknown): SessionSummary[] => {
   return sessions;
 };
 
+const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return 'older';
+  }
+  const date = new Date(parsed);
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfYesterday = new Date(startOfToday);
+  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+  if (date >= startOfToday) {
+    return 'today';
+  }
+  if (date >= startOfYesterday) {
+    return 'yesterday';
+  }
+  return 'older';
+};
+
+const buildCanvasMessages = (messages: ChatMessage[]): CanvasMessage[] => {
+  return messages
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .map((message, index) => ({
+      id: `${message.role}-${index}`,
+      role: message.role,
+      content: message.content,
+    }));
+};
+
+const inferArtifactType = (content: string): Artifact['type'] => {
+  if (content.includes('```')) {
+    const match = content.match(/```\\s*([a-zA-Z0-9_-]+)/);
+    const lang = match ? match[1].toLowerCase() : '';
+    if (lang === 'python' || lang === 'py') return 'PY';
+    if (lang === 'javascript' || lang === 'js') return 'JS';
+    if (lang === 'typescript' || lang === 'ts') return 'TS';
+    if (lang === 'json') return 'JSON';
+    if (lang === 'html') return 'HTML';
+    if (lang === 'css') return 'CSS';
+    return 'MD';
+  }
+  return 'TXT';
+};
+
+const inferArtifactCategory = (type: Artifact['type']): Artifact['category'] => {
+  if (type === 'TXT' || type === 'MD') return 'Document';
+  if (type === 'JSON') return 'Config';
+  return 'Code';
+};
+
+const buildArtifactsFromMessages = (messages: ChatMessage[]): Artifact[] => {
+  let counter = 0;
+  return messages
+    .filter((message) => message.role === 'assistant' && message.content.trim())
+    .map((message) => {
+      counter += 1;
+      const firstLine = message.content.split('\\n').find((line) => line.trim());
+      const title = firstLine ? firstLine.trim().slice(0, 60) : `Output ${counter}`;
+      const type = inferArtifactType(message.content);
+      return {
+        id: `artifact-${counter}`,
+        name: title,
+        type,
+        category: inferArtifactCategory(type),
+        content: message.content,
+      };
+    });
+};
+
 const extractSessionIdFromPayload = (payload: unknown): string | null => {
   if (!payload || typeof payload !== 'object') {
     return null;
@@ -193,9 +213,6 @@ export default function App() {
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [uploadsBySession, setUploadsBySession] = useState<Record<string, UploadHistoryItem[]>>(
-    {},
-  );
 
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -205,40 +222,73 @@ export default function App() {
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [chatCanvasCollapsed, setChatCanvasCollapsed] = useState(() => {
-    if (typeof window === 'undefined') {
-      return true;
-    }
-    const stored = window.localStorage.getItem('slavik.chatcanvas.collapsed');
-    return stored ? stored === 'true' : true;
-  });
+  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
 
-  useEffect(() => {
-    if (!selectedConversation || typeof window === 'undefined') {
-      return;
+  const pendingForCanvas =
+    pendingSessionId === selectedConversation ? pendingUserMessage : null;
+  const canvasMessages = useMemo(
+    () => buildCanvasMessages(messages),
+    [messages],
+  );
+  const pendingCanvasMessage = useMemo(() => {
+    if (!pendingForCanvas || pendingForCanvas.role !== 'user') {
+      return null;
     }
-    setUploadsBySession((prev) => {
-      if (prev[selectedConversation]) {
-        return prev;
-      }
-      const raw = window.localStorage.getItem(uploadStorageKey(selectedConversation));
-      if (!raw) {
-        return { ...prev, [selectedConversation]: [] };
-      }
-      try {
-        const parsed = parseUploads(JSON.parse(raw));
-        return { ...prev, [selectedConversation]: parsed };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to parse upload history.';
-        console.warn(message);
-        return { ...prev, [selectedConversation]: [] };
-      }
-    });
-  }, [selectedConversation]);
+    return {
+      id: `pending-${pendingForCanvas.content.length}`,
+      role: 'user' as const,
+      content: pendingForCanvas.content,
+    };
+  }, [pendingForCanvas]);
+  const historyChats = useMemo(
+    () =>
+      sessions.map((session) => ({
+        id: session.session_id,
+        title: session.title,
+        messageCount: session.message_count,
+        date: session.updated_at,
+        group: groupSessionByDate(session.updated_at),
+      })),
+    [sessions],
+  );
+  const searchChats = useMemo(
+    () =>
+      sessions.map((session) => ({
+        id: session.session_id,
+        title: session.title,
+        date: session.updated_at,
+        messageCount: session.message_count,
+        preview: '',
+      })),
+    [sessions],
+  );
+  const artifacts = useMemo(
+    () => buildArtifactsFromMessages(messages),
+    [messages],
+  );
+  const modelLabel = selectedModel
+    ? `${selectedModel.provider}/${selectedModel.model}`
+    : 'Model not selected';
+  const modelOptions = useMemo(
+    () =>
+      providerModels.flatMap((provider) =>
+        provider.models.map((model) => ({
+          value: `${provider.provider}::${model}`,
+          label: `${provider.provider}/${model}`,
+          provider: provider.provider,
+          model,
+        })),
+      ),
+    [providerModels],
+  );
+  const selectedModelValue = selectedModel
+    ? `${selectedModel.provider}::${selectedModel.model}`
+    : null;
+
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -352,23 +402,6 @@ export default function App() {
     } finally {
       setModelsLoading(false);
     }
-  };
-
-  const handleRecordUploads = (sessionId: string, uploads: UploadHistoryItem[]) => {
-    setUploadsBySession((prev) => {
-      const current = prev[sessionId] ?? [];
-      const next = [...current, ...uploads];
-      if (typeof window !== 'undefined') {
-        try {
-          window.localStorage.setItem(uploadStorageKey(sessionId), JSON.stringify(next));
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : 'Failed to save upload history.';
-          console.warn(message);
-        }
-      }
-      return { ...prev, [sessionId]: next };
-    });
   };
 
   const setSessionModel = async (
@@ -595,15 +628,6 @@ export default function App() {
         }
       }
 
-      if (typeof window !== 'undefined') {
-        window.localStorage.removeItem(uploadStorageKey(sessionId));
-      }
-      setUploadsBySession((prev) => {
-        const next = { ...prev };
-        delete next[sessionId];
-        return next;
-      });
-
       setStatusMessage(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to delete chat.';
@@ -701,58 +725,70 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-950 text-foreground">
-      <Sidebar
-        selectedConversation={selectedConversation}
-        conversations={sessions}
-        loading={sessionsLoading}
-        deletingSessionId={deletingSessionId}
-        onSelectConversation={(sessionId) => {
+      <HistorySidebar
+        chats={historyChats}
+        activeChatId={selectedConversation}
+        onSelectChat={(sessionId) => {
           void handleSelectConversation(sessionId);
         }}
-        onCreateConversation={() => {
+        onNewChat={() => {
           void handleCreateConversation();
         }}
-        onDeleteConversation={(sessionId) => {
+        onDeleteChat={(sessionId) => {
           void handleDeleteConversation(sessionId);
         }}
-        collapsed={sidebarCollapsed}
-        onToggleCollapse={() => {
-          const next = !sidebarCollapsed;
-          setSidebarCollapsed(next);
-          if (typeof window !== 'undefined') {
-            window.localStorage.setItem('slavik.sidebar.collapsed', String(next));
-          }
-        }}
+        onOpenSearch={() => setSearchOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
-      <ChatArea
-        conversationId={selectedConversation}
-        messages={messages}
-        sending={sending}
-        pendingUserMessage={
-          pendingSessionId === selectedConversation ? pendingUserMessage : null
-        }
-        statusMessage={statusMessage}
-        selectedModel={selectedModel}
-        providerModels={providerModels}
-        modelsLoading={modelsLoading}
-        savingModel={savingModel}
-        onSend={handleSend}
-        onSetModel={handleSetModel}
-        onRecordUploads={handleRecordUploads}
+      <div className="flex-1 min-w-0 relative">
+        <Canvas
+          className="h-full"
+          messages={canvasMessages}
+          pendingMessage={pendingCanvasMessage}
+          sending={sending}
+          onSendMessage={(content) => {
+            void handleSend(content);
+          }}
+          modelName={modelLabel}
+          onOpenSettings={() => setSettingsOpen(true)}
+          statusMessage={statusMessage}
+          modelOptions={modelOptions}
+          selectedModelValue={selectedModelValue}
+          onSelectModel={(provider, model) => {
+            void handleSetModel(provider, model);
+          }}
+          modelsLoading={modelsLoading}
+          savingModel={savingModel}
+        />
+
+        {!artifactPanelOpen ? (
+          <button
+            onClick={() => setArtifactPanelOpen(true)}
+            className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#222226] border border-[#333338] hover:border-[#4a4a52] hover:bg-[#2a2a30] flex items-center justify-center transition-all cursor-pointer shadow-lg shadow-black/30"
+            title="Open Artifacts"
+          >
+            <PanelRight className="w-4.5 h-4.5 text-[#888]" />
+          </button>
+        ) : null}
+      </div>
+
+      <ArtifactPanel
+        isOpen={artifactPanelOpen}
+        onClose={() => setArtifactPanelOpen(false)}
+        artifacts={artifacts}
       />
 
-      <ChatCanvas
-        messages={messages}
-        uploads={selectedConversation ? uploadsBySession[selectedConversation] ?? [] : []}
-        collapsed={chatCanvasCollapsed}
-        onToggleCollapse={() => {
-          const next = !chatCanvasCollapsed;
-          setChatCanvasCollapsed(next);
-          if (typeof window !== 'undefined') {
-            window.localStorage.setItem('slavik.chatcanvas.collapsed', String(next));
-          }
+      <SearchModal
+        isOpen={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        chats={searchChats}
+        onSelectChat={(sessionId) => {
+          void handleSelectConversation(sessionId);
+          setSearchOpen(false);
+        }}
+        onNewChat={() => {
+          void handleCreateConversation();
         }}
       />
 
