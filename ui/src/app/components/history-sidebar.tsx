@@ -11,8 +11,9 @@ import {
   Trash2,
   MoreHorizontal,
   Plus,
-  Bot,
 } from "lucide-react";
+
+import BrainLogo from "../../assets/brain.png";
 
 export interface ChatItem {
   id: string;
@@ -259,8 +260,12 @@ export function HistorySidebar({
     >
       {/* Logo */}
       <div className="flex items-center gap-2.5 px-5 py-4">
-        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] flex items-center justify-center">
-          <Bot className="w-4 h-4 text-white" />
+        <div className="w-7 h-7 flex items-center justify-center">
+          <img
+            src={BrainLogo}
+            alt="SlavikAI"
+            className="w-7 h-7 object-contain"
+          />
         </div>
         <span className="text-[15px] text-[#e0e0e0]">SlavikAI</span>
       </div>
