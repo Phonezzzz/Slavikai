@@ -621,7 +621,7 @@ export default function App() {
     return parsed || { provider, model };
   };
 
-  const loadConversation = async (sessionId: string): Promise<void> => {
+  const loadConversation = async (sessionId: string): Promise<SelectedModel | null> => {
     const [sessionResponse, historyResponse, outputResponse, filesResponse] = await Promise.all([
       fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
         headers: {
@@ -671,7 +671,9 @@ export default function App() {
     const parsedOutput = parseSessionOutput((outputPayload as { output?: unknown }).output);
     setSessionOutput(parsedOutput.content);
     setSessionFiles(parseSessionFiles((filesPayload as { files?: unknown }).files));
-    setSelectedModel(parseSelectedModel(session?.selected_model));
+    const parsedSelectedModel = parseSelectedModel(session?.selected_model);
+    setSelectedModel(parsedSelectedModel);
+    return parsedSelectedModel;
   };
 
   const createConversation = async (): Promise<{
@@ -708,19 +710,6 @@ export default function App() {
     const bootstrap = async () => {
       setSessionsLoading(true);
       try {
-        const statusResp = await fetch('/ui/api/status');
-        const statusPayload: unknown = await statusResp.json();
-        if (!statusResp.ok) {
-          throw new Error(extractErrorMessage(statusPayload, 'Failed to initialize UI session.'));
-        }
-        const fromHeader = statusResp.headers.get(SESSION_HEADER);
-        const fromPayload = extractSessionIdFromPayload(statusPayload);
-        const statusSession = (fromHeader && fromHeader.trim()) || fromPayload || null;
-        const statusSelected = parseSelectedModel(
-          (statusPayload as { selected_model?: unknown }).selected_model,
-        );
-        setSelectedModel(statusSelected);
-
         const modelsPromise = loadModels();
         const foldersPromise = loadFolders();
         const listedSessions = await loadSessions();
@@ -732,23 +721,21 @@ export default function App() {
         if (!nextSession && listedSessions.length > 0) {
           nextSession = listedSessions[0].session_id;
         }
-        if (!nextSession && statusSession) {
-          nextSession = statusSession;
-        }
         if (!nextSession) {
           const created = await createConversation();
           nextSession = created.sessionId;
         }
 
         if (!cancelled) {
+          let selectedFromSession: SelectedModel | null = null;
           if (nextSession) {
             setSelectedConversation(nextSession);
-            await loadConversation(nextSession);
+            selectedFromSession = await loadConversation(nextSession);
             saveLastSessionId(nextSession);
           }
           const models = await modelsPromise;
           await foldersPromise;
-          if (nextSession && !statusSelected && !lastModelApplied) {
+          if (nextSession && !selectedFromSession && !lastModelApplied) {
             const lastModel = loadLastModel();
             if (lastModel && isModelAvailable(lastModel, models)) {
               try {
