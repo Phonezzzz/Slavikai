@@ -5,10 +5,11 @@ import {
   ChevronDown,
   Paperclip,
   Mic,
-  Bot,
   User,
   Check,
 } from "lucide-react";
+
+import BrainLogo from "../../assets/brain.png";
 
 // ====== Types ======
 
@@ -261,7 +262,11 @@ function MessageBubble({ message }: { message: CanvasMessage }) {
         {isUser ? (
           <User className="w-4 h-4 text-[#818cf8]" />
         ) : (
-          <Bot className="w-4 h-4 text-[#888]" />
+          <img
+            src={BrainLogo}
+            alt="SlavikAI"
+            className="w-4 h-4 object-contain"
+          />
         )}
       </div>
 
@@ -391,7 +396,11 @@ export function Canvas({
           {sending ? (
             <div className="flex gap-3">
               <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center bg-[#2a2a30] border border-[#3a3a42]">
-                <Bot className="w-4 h-4 text-[#888]" />
+                <img
+                  src={BrainLogo}
+                  alt="SlavikAI"
+                  className="w-4 h-4 object-contain"
+                />
               </div>
               <div className="flex-1">
                 <div className="text-[14px] text-[#999]">Thinking…</div>
