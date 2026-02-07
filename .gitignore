@@ -24,6 +24,8 @@ logs/
 memory/memory.db
 memory/memory_companion.db
 memory/*.db
+memory/*.db-wal
+memory/*.db-shm
 
 # Sandbox generated files
 sandbox/**/*.txt

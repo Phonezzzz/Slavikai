@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -17,9 +18,11 @@ from config.tools_config import (
 from config.tools_config import (
     save_tools_config as save_tools_config_to_path,
 )
+from core.tracer import Tracer
 from server.http_api import create_app
 from server.ui_hub import UIHub
 from server.ui_session_storage import InMemoryUISessionStorage, SQLiteUISessionStorage
+from tools.tool_logger import ToolCallLogger
 
 
 class DummyAgent:
@@ -69,6 +72,33 @@ class UIReportAgent(DummyAgent):
         return (
             'ok\nMWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
         )
+
+
+class ToolCallCaptureAgent(DummyAgent):
+    def __init__(self, trace_log: Path, tool_log: Path) -> None:
+        super().__init__()
+        self._tracer = Tracer(path=trace_log)
+        self._tool_logger = ToolCallLogger(path=tool_log)
+        self._counter = 0
+        self.last_chat_interaction_id: str | None = None
+
+    def respond(self, messages) -> str:
+        del messages
+        self._counter += 1
+        interaction_id = f"interaction-{self._counter}"
+        self._tracer.log("user_input", "tool call capture")
+        self._tool_logger.log(
+            "workspace_write",
+            ok=True,
+            args={"path": "src/generated/demo.py", "content": "print('ok')"},
+        )
+        self._tracer.log(
+            "interaction_logged",
+            "tool call capture done",
+            {"interaction_id": interaction_id},
+        )
+        self.last_chat_interaction_id = interaction_id
+        return "print('ok')"
 
 
 class DecisionEchoAgent:
@@ -352,8 +382,13 @@ def test_ui_chat_send_strips_mwv_report_block() -> None:
             assert isinstance(last, dict)
             content = last.get("content")
             assert isinstance(content, str)
-            assert content == "ok"
-            assert "MWV_REPORT_JSON=" not in content
+            assert content == "Готово. Результат в Canvas."
+            output_payload = payload.get("output")
+            assert isinstance(output_payload, dict)
+            output_content = output_payload.get("content")
+            assert isinstance(output_content, str)
+            assert output_content == "ok"
+            assert "MWV_REPORT_JSON=" not in output_content
         finally:
             await client.close()
 
@@ -769,6 +804,28 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             assert isinstance(second, dict)
             assert first.get("role") == "user"
             assert second.get("role") == "assistant"
+            assert second.get("content") == "Готово. Результат в Canvas."
+
+            history_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
+            assert history_resp.status == 200
+            history_payload = await history_resp.json()
+            history_messages = history_payload.get("messages")
+            assert isinstance(history_messages, list)
+            assert len(history_messages) == len(messages)
+
+            output_resp = await client.get(f"/ui/api/sessions/{session_id}/output")
+            assert output_resp.status == 200
+            output_payload = await output_resp.json()
+            output = output_payload.get("output")
+            assert isinstance(output, dict)
+            assert output.get("content") == "ok"
+
+            files_resp = await client.get(f"/ui/api/sessions/{session_id}/files")
+            assert files_resp.status == 200
+            files_payload = await files_resp.json()
+            files = files_payload.get("files")
+            assert isinstance(files, list)
+            assert files == []
 
             list_resp = await client.get("/ui/api/sessions")
             assert list_resp.status == 200
@@ -782,6 +839,51 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             assert isinstance(selected, dict)
             assert selected.get("message_count") == len(messages)
             assert selected.get("title") == "Ping"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_stores_files_from_tool_calls(monkeypatch, tmp_path) -> None:
+    trace_log = tmp_path / "trace.log"
+    tool_log = tmp_path / "tool_calls.log"
+    monkeypatch.setattr("server.http_api.TRACE_LOG", trace_log)
+    monkeypatch.setattr("server.http_api.TOOL_CALLS_LOG", tool_log)
+
+    async def run() -> None:
+        client = await _create_client(ToolCallCaptureAgent(trace_log, tool_log))
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session = create_payload.get("session")
+            assert isinstance(session, dict)
+            session_id = session.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Generate file"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            output = send_payload.get("output")
+            assert isinstance(output, dict)
+            assert output.get("content") == "print('ok')"
+            files = send_payload.get("files")
+            assert isinstance(files, list)
+            assert "src/generated/demo.py" in files
+
+            files_resp = await client.get(f"/ui/api/sessions/{session_id}/files")
+            assert files_resp.status == 200
+            files_payload = await files_resp.json()
+            files_from_endpoint = files_payload.get("files")
+            assert isinstance(files_from_endpoint, list)
+            assert "src/generated/demo.py" in files_from_endpoint
         finally:
             await client.close()
 
@@ -905,9 +1007,18 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             assert isinstance(second, dict)
             assert first.get("role") == "user"
             assert second.get("role") == "assistant"
+            assert second.get("content") == "Готово. Результат в Canvas."
             restored_decision = session.get("decision")
             assert isinstance(restored_decision, dict)
             assert restored_decision.get("id") == f"decision-{session_id}"
+            restored_output = session.get("output")
+            assert isinstance(restored_output, dict)
+            output_content = restored_output.get("content")
+            assert isinstance(output_content, str)
+            assert f"decision-{session_id}" in output_content
+            restored_files = session.get("files")
+            assert isinstance(restored_files, list)
+            assert restored_files == []
             restored_model = session.get("selected_model")
             assert isinstance(restored_model, dict)
             assert restored_model.get("provider") == "local"

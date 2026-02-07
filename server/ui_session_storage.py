@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -23,6 +23,9 @@ class PersistedSession:
     model_id: str | None = None
     title_override: str | None = None
     folder_id: str | None = None
+    output_text: str | None = None
+    output_updated_at: str | None = None
+    files: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,9 @@ class InMemoryUISessionStorage:
             model_id=session.model_id,
             title_override=session.title_override,
             folder_id=session.folder_id,
+            output_text=session.output_text,
+            output_updated_at=session.output_updated_at,
+            files=list(session.files),
         )
 
     def _clone_folder(self, folder: PersistedFolder) -> PersistedFolder:
@@ -109,6 +115,7 @@ class SQLiteUISessionStorage:
                 """
                 SELECT session_id, created_at, updated_at, status, decision_json
                     , model_provider, model_id, title_override, folder_id
+                    , output_text, output_updated_at, files_json
                 FROM ui_sessions
                 """,
             ).fetchall()
@@ -127,6 +134,9 @@ class SQLiteUISessionStorage:
                         model_id=_optional_str(row["model_id"]),
                         title_override=_optional_str(row["title_override"]),
                         folder_id=_optional_str(row["folder_id"]),
+                        output_text=_optional_str(row["output_text"]),
+                        output_updated_at=_optional_str(row["output_updated_at"]),
+                        files=self._decode_files(row["files_json"]),
                     ),
                 )
         return sessions
@@ -144,9 +154,12 @@ class SQLiteUISessionStorage:
                     model_provider,
                     model_id,
                     title_override,
-                    folder_id
+                    folder_id,
+                    output_text,
+                    output_updated_at,
+                    files_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     created_at=excluded.created_at,
@@ -156,7 +169,10 @@ class SQLiteUISessionStorage:
                     model_provider=excluded.model_provider,
                     model_id=excluded.model_id,
                     title_override=excluded.title_override,
-                    folder_id=excluded.folder_id
+                    folder_id=excluded.folder_id,
+                    output_text=excluded.output_text,
+                    output_updated_at=excluded.output_updated_at,
+                    files_json=excluded.files_json
                 """,
                 (
                     session.session_id,
@@ -168,6 +184,9 @@ class SQLiteUISessionStorage:
                     session.model_id,
                     session.title_override,
                     session.folder_id,
+                    session.output_text,
+                    session.output_updated_at,
+                    self._encode_files(session.files),
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
@@ -279,7 +298,10 @@ class SQLiteUISessionStorage:
                     model_provider TEXT,
                     model_id TEXT,
                     title_override TEXT,
-                    folder_id TEXT
+                    folder_id TEXT,
+                    output_text TEXT,
+                    output_updated_at TEXT,
+                    files_json TEXT
                 )
                 """,
             )
@@ -344,6 +366,23 @@ class SQLiteUISessionStorage:
             return None
         return json.dumps(value, ensure_ascii=False)
 
+    def _decode_files(self, value: object) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, str):
+            return []
+        parsed = safe_json_loads(value)
+        if not isinstance(parsed, list):
+            return []
+        files: list[str] = []
+        for item in parsed:
+            if isinstance(item, str) and item.strip():
+                files.append(item.strip())
+        return files
+
+    def _encode_files(self, value: list[str]) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         existing = {
             str(row["name"])
@@ -358,6 +397,12 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN title_override TEXT")
         if "folder_id" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN folder_id TEXT")
+        if "output_text" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN output_text TEXT")
+        if "output_updated_at" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN output_updated_at TEXT")
+        if "files_json" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN files_json TEXT")
 
 
 def _optional_str(value: object) -> str | None:

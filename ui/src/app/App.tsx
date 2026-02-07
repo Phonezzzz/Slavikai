@@ -179,6 +179,23 @@ const parseFolders = (value: unknown): FolderSummary[] => {
   return folders;
 };
 
+const parseSessionOutput = (value: unknown): { content: string | null; updatedAt: string | null } => {
+  if (!value || typeof value !== 'object') {
+    return { content: null, updatedAt: null };
+  }
+  const candidate = value as { content?: unknown; updated_at?: unknown };
+  const content = typeof candidate.content === 'string' ? candidate.content : null;
+  const updatedAt = typeof candidate.updated_at === 'string' ? candidate.updated_at : null;
+  return { content, updatedAt };
+};
+
+const parseSessionFiles = (value: unknown): string[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+};
+
 const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) {
@@ -223,29 +240,71 @@ const inferArtifactType = (content: string): Artifact['type'] => {
   return 'TXT';
 };
 
+const inferArtifactTypeFromPath = (path: string): Artifact['type'] => {
+  const normalized = path.trim().toLowerCase();
+  if (normalized.endsWith('.py')) return 'PY';
+  if (normalized.endsWith('.ts') || normalized.endsWith('.tsx')) return 'TS';
+  if (normalized.endsWith('.js') || normalized.endsWith('.jsx')) return 'JS';
+  if (normalized.endsWith('.json')) return 'JSON';
+  if (normalized.endsWith('.html')) return 'HTML';
+  if (normalized.endsWith('.css')) return 'CSS';
+  if (normalized.endsWith('.md') || normalized.endsWith('.markdown')) return 'MD';
+  return 'TXT';
+};
+
 const inferArtifactCategory = (type: Artifact['type']): Artifact['category'] => {
   if (type === 'TXT' || type === 'MD') return 'Document';
   if (type === 'JSON') return 'Config';
   return 'Code';
 };
 
-const buildArtifactsFromMessages = (messages: ChatMessage[]): Artifact[] => {
-  let counter = 0;
-  return messages
-    .filter((message) => message.role === 'assistant' && message.content.trim())
-    .map((message) => {
-      counter += 1;
-      const firstLine = message.content.split('\\n').find((line) => line.trim());
-      const title = firstLine ? firstLine.trim().slice(0, 60) : `Output ${counter}`;
-      const type = inferArtifactType(message.content);
-      return {
-        id: `artifact-${counter}`,
-        name: title,
-        type,
-        category: inferArtifactCategory(type),
-        content: message.content,
-      };
+const buildArtifactsFromSources = (
+  outputText: string | null,
+  files: string[],
+): Artifact[] => {
+  const artifacts: Artifact[] = [];
+  if (outputText && outputText.trim()) {
+    const firstLine = outputText.split('\n').find((line) => line.trim());
+    const title = firstLine ? firstLine.trim().slice(0, 60) : 'Latest output';
+    const type = inferArtifactType(outputText);
+    artifacts.push({
+      id: 'output-latest',
+      name: title,
+      type,
+      category: inferArtifactCategory(type),
+      content: outputText,
     });
+  }
+
+  const seen = new Set<string>();
+  for (const rawPath of files) {
+    const path = rawPath.trim();
+    if (!path || seen.has(path)) {
+      continue;
+    }
+    seen.add(path);
+    const type = inferArtifactTypeFromPath(path);
+    artifacts.push({
+      id: `file-${path}`,
+      name: path,
+      type,
+      category: inferArtifactCategory(type),
+      content: `File path: ${path}`,
+    });
+  }
+
+  return artifacts;
+};
+
+const shouldAutoOpenCanvas = (outputText: string | null): boolean => {
+  if (!outputText) {
+    return false;
+  }
+  const normalized = outputText.trim();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes('```') || normalized.length >= 280;
 };
 
 const extractSessionIdFromPayload = (payload: unknown): string | null => {
@@ -282,6 +341,8 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionOutput, setSessionOutput] = useState<string | null>(null);
+  const [sessionFiles, setSessionFiles] = useState<string[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [folders, setFolders] = useState<FolderSummary[]>([]);
 
@@ -338,8 +399,8 @@ export default function App() {
     [sessions],
   );
   const artifacts = useMemo(
-    () => buildArtifactsFromMessages(messages),
-    [messages],
+    () => buildArtifactsFromSources(sessionOutput, sessionFiles),
+    [sessionOutput, sessionFiles],
   );
   const modelLabel = selectedModel
     ? `${selectedModel.provider}/${selectedModel.model}`
@@ -561,17 +622,55 @@ export default function App() {
   };
 
   const loadConversation = async (sessionId: string): Promise<void> => {
-    const response = await fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
-      headers: {
-        [SESSION_HEADER]: sessionId,
-      },
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to load chat history.'));
+    const [sessionResponse, historyResponse, outputResponse, filesResponse] = await Promise.all([
+      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
+        headers: {
+          [SESSION_HEADER]: sessionId,
+        },
+      }),
+      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/history`, {
+        headers: {
+          [SESSION_HEADER]: sessionId,
+        },
+      }),
+      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/output`, {
+        headers: {
+          [SESSION_HEADER]: sessionId,
+        },
+      }),
+      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/files`, {
+        headers: {
+          [SESSION_HEADER]: sessionId,
+        },
+      }),
+    ]);
+
+    const [sessionPayload, historyPayload, outputPayload, filesPayload]: unknown[] =
+      await Promise.all([
+        sessionResponse.json(),
+        historyResponse.json(),
+        outputResponse.json(),
+        filesResponse.json(),
+      ]);
+
+    if (!sessionResponse.ok) {
+      throw new Error(extractErrorMessage(sessionPayload, 'Failed to load chat session.'));
     }
-    const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
-    setMessages(parseMessages(session?.messages));
+    if (!historyResponse.ok) {
+      throw new Error(extractErrorMessage(historyPayload, 'Failed to load chat history.'));
+    }
+    if (!outputResponse.ok) {
+      throw new Error(extractErrorMessage(outputPayload, 'Failed to load canvas output.'));
+    }
+    if (!filesResponse.ok) {
+      throw new Error(extractErrorMessage(filesPayload, 'Failed to load session files.'));
+    }
+
+    const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
+    setMessages(parseMessages((historyPayload as { messages?: unknown }).messages));
+    const parsedOutput = parseSessionOutput((outputPayload as { output?: unknown }).output);
+    setSessionOutput(parsedOutput.content);
+    setSessionFiles(parseSessionFiles((filesPayload as { files?: unknown }).files));
     setSelectedModel(parseSelectedModel(session?.selected_model));
   };
 
@@ -592,6 +691,13 @@ export default function App() {
     const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
     const sessionModel = parseSelectedModel(session?.selected_model);
     setMessages(parseMessages(session?.messages));
+    const parsedOutput = parseSessionOutput(
+      (session as { output?: unknown } | undefined)?.output,
+    );
+    setSessionOutput(parsedOutput.content);
+    setSessionFiles(
+      parseSessionFiles((session as { files?: unknown } | undefined)?.files),
+    );
     setSelectedModel(sessionModel);
     return { sessionId: nextSession, selectedModel: sessionModel };
   };
@@ -821,6 +927,8 @@ export default function App() {
           } else {
             setSelectedConversation(null);
             setMessages([]);
+            setSessionOutput(null);
+            setSessionFiles([]);
             setSelectedModel(null);
             saveLastSessionId(null);
           }
@@ -893,6 +1001,13 @@ export default function App() {
       setPendingUserMessage(null);
       setPendingSessionId(null);
       setMessages(parseMessages((payload as { messages?: unknown }).messages));
+      const parsedOutput = parseSessionOutput((payload as { output?: unknown }).output);
+      setSessionOutput(parsedOutput.content);
+      const parsedFiles = parseSessionFiles((payload as { files?: unknown }).files);
+      setSessionFiles(parsedFiles);
+      if (shouldAutoOpenCanvas(parsedOutput.content)) {
+        setArtifactPanelOpen(true);
+      }
       const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
       if (parsedModel) {
         setSelectedModel(parsedModel);

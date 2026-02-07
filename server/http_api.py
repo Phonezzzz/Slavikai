@@ -101,6 +101,7 @@ DEFAULT_UI_TONE: Final[str] = "balanced"
 DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
 UI_GITHUB_REQUIRED_CATEGORIES: Final[list[ApprovalCategory]] = ["NETWORK_RISK", "EXEC_ARBITRARY"]
 UI_GITHUB_ROOT: Final[Path] = Path("sandbox/project/github").resolve()
+CANVAS_CHAT_SUMMARY: Final[str] = "Готово. Результат в Canvas."
 
 
 @dataclass(frozen=True)
@@ -628,6 +629,75 @@ def _filter_tool_calls(
     return results
 
 
+def _tool_calls_for_trace_id(trace_id: str) -> list[dict[str, JSONValue]] | None:
+    records = _parse_trace_log(TRACE_LOG)
+    groups = _build_trace_groups(records)
+    target: TraceGroup | None = None
+    for group in groups:
+        if group.interaction_id == trace_id:
+            target = group
+            break
+    if target is None:
+        return None
+    return _filter_tool_calls(
+        path=TOOL_CALLS_LOG,
+        start_ts=target.start_ts,
+        end_ts=target.end_ts,
+    )
+
+
+def _normalize_logged_path(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _extract_paths_from_tool_call(
+    *,
+    tool: str,
+    args: dict[str, JSONValue],
+) -> list[str]:
+    if tool in {"workspace_write", "workspace_patch"}:
+        path = _normalize_logged_path(args.get("path"))
+        return [path] if path is not None else []
+
+    if tool == "fs":
+        op_raw = args.get("op")
+        op = op_raw.strip().lower() if isinstance(op_raw, str) else ""
+        if op != "write":
+            return []
+        path = _normalize_logged_path(args.get("path"))
+        return [path] if path is not None else []
+
+    return []
+
+
+def _extract_files_from_tool_calls(tool_calls: list[dict[str, JSONValue]]) -> list[str]:
+    files: list[str] = []
+    seen: set[str] = set()
+    for call in tool_calls:
+        tool_raw = call.get("tool")
+        if not isinstance(tool_raw, str):
+            continue
+        ok_raw = call.get("ok")
+        if not isinstance(ok_raw, bool) or not ok_raw:
+            continue
+        args_raw = call.get("args")
+        args: dict[str, JSONValue] = {}
+        if isinstance(args_raw, dict):
+            for key, value in args_raw.items():
+                args[str(key)] = _normalize_json_value(value)
+        for path in _extract_paths_from_tool_call(tool=tool_raw, args=args):
+            if path in seen:
+                continue
+            seen.add(path)
+            files.append(path)
+    return files
+
+
 def _serialize_trace_events(
     events: list[TraceRecord],
 ) -> list[dict[str, JSONValue]]:
@@ -1043,6 +1113,30 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
     title_override = title_override_raw.strip() if isinstance(title_override_raw, str) else None
     folder_id_raw = raw.get("folder_id")
     folder_id = folder_id_raw.strip() if isinstance(folder_id_raw, str) else None
+    output_text: str | None = None
+    output_updated_at: str | None = None
+    output_raw = raw.get("output")
+    if isinstance(output_raw, dict):
+        output_content_raw = output_raw.get("content")
+        output_updated_raw = output_raw.get("updated_at")
+        if isinstance(output_content_raw, str) and output_content_raw.strip():
+            output_text = output_content_raw
+        if isinstance(output_updated_raw, str) and output_updated_raw.strip():
+            output_updated_at = output_updated_raw
+    if output_text is None:
+        output_text_raw = raw.get("output_text")
+        if isinstance(output_text_raw, str) and output_text_raw.strip():
+            output_text = output_text_raw
+    if output_updated_at is None:
+        output_updated_at_raw = raw.get("output_updated_at")
+        if isinstance(output_updated_at_raw, str) and output_updated_at_raw.strip():
+            output_updated_at = output_updated_at_raw
+    files: list[str] = []
+    files_raw = raw.get("files")
+    if isinstance(files_raw, list):
+        for item in files_raw:
+            if isinstance(item, str) and item.strip():
+                files.append(item.strip())
     return PersistedSession(
         session_id=session_id,
         created_at=created_at,
@@ -1054,6 +1148,9 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
         model_id=model_id,
         title_override=title_override,
         folder_id=folder_id,
+        output_text=output_text,
+        output_updated_at=output_updated_at,
+        files=files,
     )
 
 
@@ -1070,6 +1167,11 @@ def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONVal
         "updated_at": session.updated_at,
         "status": session.status,
         "messages": [dict(item) for item in session.messages],
+        "output": {
+            "content": session.output_text,
+            "updated_at": session.output_updated_at,
+        },
+        "files": list(session.files),
         "decision": dict(session.decision) if session.decision is not None else None,
         "selected_model": selected_model,
         "title_override": session.title_override,
@@ -1773,6 +1875,69 @@ async def handle_ui_session_get(request: web.Request) -> web.Response:
     return response
 
 
+async def handle_ui_session_history_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    messages = await hub.get_session_history(session_id)
+    if messages is None:
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    return _json_response({"session_id": session_id, "messages": messages})
+
+
+async def handle_ui_session_output_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    output = await hub.get_session_output(session_id)
+    if output is None:
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    return _json_response({"session_id": session_id, "output": output})
+
+
+async def handle_ui_session_files_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    files = await hub.get_session_files(session_id)
+    if files is None:
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    return _json_response({"session_id": session_id, "files": files})
+
+
 async def handle_ui_session_title_update(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
@@ -1972,6 +2137,8 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         )
 
         mwv_report: dict[str, JSONValue] | None = None
+        trace_id: str | None = None
+        approval_request: dict[str, JSONValue] | None = None
         async with agent_lock:
             try:
                 model_config = _build_model_config(
@@ -2014,20 +2181,32 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 detail="chat",
             )
             decision = _extract_decision_payload(response_text)
-            trace_id = getattr(agent, "last_chat_interaction_id", None)
+            trace_id_raw = getattr(agent, "last_chat_interaction_id", None)
+            trace_id = trace_id_raw.strip() if isinstance(trace_id_raw, str) else None
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
             )
 
-        await hub.append_message(session_id, "assistant", response_text)
+        await hub.set_session_output(session_id, response_text)
+        if trace_id:
+            tool_calls = _tool_calls_for_trace_id(trace_id) or []
+            files_from_tools = _extract_files_from_tool_calls(tool_calls)
+            if files_from_tools:
+                await hub.merge_session_files(session_id, files_from_tools)
+        chat_summary = response_text if approval_request is not None else CANVAS_CHAT_SUMMARY
+        await hub.append_message(session_id, "assistant", chat_summary)
         await hub.set_session_decision(session_id, decision)
         messages = await hub.get_messages(session_id)
+        output_payload = await hub.get_session_output(session_id)
+        files_payload = await hub.get_session_files(session_id)
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
         response = _json_response(
             {
                 "session_id": session_id,
                 "messages": messages,
+                "output": output_payload,
+                "files": files_payload or [],
                 "decision": current_decision,
                 "selected_model": current_model,
                 "trace_id": trace_id,
@@ -2569,26 +2748,14 @@ async def handle_tool_calls(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    records = _parse_trace_log(TRACE_LOG)
-    groups = _build_trace_groups(records)
-    target: TraceGroup | None = None
-    for group in groups:
-        if group.interaction_id == trace_id:
-            target = group
-            break
-    if target is None:
+    tool_calls = _tool_calls_for_trace_id(trace_id)
+    if tool_calls is None:
         return _error_response(
             status=404,
             message="Trace not found.",
             error_type="invalid_request_error",
             code="trace_not_found",
         )
-
-    tool_calls = _filter_tool_calls(
-        path=TOOL_CALLS_LOG,
-        start_ts=target.start_ts,
-        end_ts=target.end_ts,
-    )
     return _json_response({"trace_id": trace_id, "tool_calls": tool_calls})
 
 
@@ -2836,6 +3003,9 @@ def create_app(
     app.router.add_get("/ui/api/sessions", handle_ui_sessions_list)
     app.router.add_post("/ui/api/sessions", handle_ui_sessions_create)
     app.router.add_get("/ui/api/sessions/{session_id}", handle_ui_session_get)
+    app.router.add_get("/ui/api/sessions/{session_id}/history", handle_ui_session_history_get)
+    app.router.add_get("/ui/api/sessions/{session_id}/output", handle_ui_session_output_get)
+    app.router.add_get("/ui/api/sessions/{session_id}/files", handle_ui_session_files_get)
     app.router.add_delete("/ui/api/sessions/{session_id}", handle_ui_session_delete)
     app.router.add_patch("/ui/api/sessions/{session_id}/title", handle_ui_session_title_update)
     app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)

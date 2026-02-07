@@ -51,6 +51,9 @@ DEFAULT_MAX_MESSAGES_PER_SESSION = 500
 @dataclass
 class _SessionState:
     messages: list[dict[str, str]] = field(default_factory=list)
+    output_text: str | None = None
+    output_updated_at: str | None = None
+    files: list[str] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, JSONValue]]] = field(default_factory=set)
     last_decision_id: str | None = None
     decision_packet: dict[str, JSONValue] | None = None
@@ -125,6 +128,78 @@ class UIHub:
             if state is None:
                 return []
             return [dict(item) for item in state.messages]
+
+    async def get_session_history(self, session_id: str) -> list[dict[str, str]] | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            return [dict(item) for item in state.messages]
+
+    async def get_session_output(self, session_id: str) -> dict[str, str | None] | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            return {
+                "content": state.output_text,
+                "updated_at": state.output_updated_at,
+            }
+
+    async def set_session_output(self, session_id: str, content: str | None) -> None:
+        normalized = content.strip() if isinstance(content, str) else ""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            next_content: str | None = normalized or None
+            if state.output_text == next_content:
+                return
+            state.output_text = next_content
+            state.output_updated_at = _utc_iso_now() if next_content is not None else None
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+
+    async def get_session_files(self, session_id: str) -> list[str] | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            return list(state.files)
+
+    async def merge_session_files(self, session_id: str, paths: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in paths:
+            path = item.strip()
+            if path:
+                normalized.append(path)
+        if not normalized:
+            async with self._lock:
+                state = self._sessions.get(session_id)
+                return list(state.files) if state is not None else []
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            existing = list(state.files)
+            seen = set(existing)
+            changed = False
+            for path in normalized:
+                if path in seen:
+                    continue
+                existing.append(path)
+                seen.add(path)
+                changed = True
+            if not changed:
+                return list(state.files)
+            state.files = existing
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            return list(state.files)
 
     async def list_sessions(self) -> list[SessionListItem]:
         async with self._lock:
@@ -265,6 +340,9 @@ class UIHub:
                         model_id=state.model_id,
                         title_override=state.title_override,
                         folder_id=state.folder_id,
+                        output_text=state.output_text,
+                        output_updated_at=state.output_updated_at,
+                        files=list(state.files),
                     ),
                 )
             items.sort(
@@ -296,6 +374,9 @@ class UIHub:
                 subscribers = set(existing.subscribers) if existing is not None else set()
                 self._sessions[item.session_id] = _SessionState(
                     messages=[dict(message) for message in item.messages],
+                    output_text=item.output_text,
+                    output_updated_at=item.output_updated_at,
+                    files=list(item.files),
                     subscribers=subscribers,
                     last_decision_id=last_decision_id,
                     decision_packet=decision,
@@ -326,6 +407,11 @@ class UIHub:
                 "updated_at": state.updated_at,
                 "status": status_value,
                 "messages": [dict(item) for item in state.messages],
+                "output": {
+                    "content": state.output_text,
+                    "updated_at": state.output_updated_at,
+                },
+                "files": list(state.files),
                 "decision": decision,
                 "selected_model": selected_model,
                 "title_override": state.title_override,
@@ -548,18 +634,21 @@ class UIHub:
                 decision_id = decision.get("id")
                 if isinstance(decision_id, str):
                     last_decision_id = decision_id
-                self._sessions[item.session_id] = _SessionState(
-                    messages=[dict(message) for message in item.messages],
-                    last_decision_id=last_decision_id,
-                    decision_packet=decision,
-                    status_state=self._normalize_status(item.status),
-                    model_provider=item.model_provider,
-                    model_id=item.model_id,
-                    title_override=item.title_override,
-                    folder_id=item.folder_id,
-                    created_at=item.created_at,
-                    updated_at=item.updated_at,
-                )
+            self._sessions[item.session_id] = _SessionState(
+                messages=[dict(message) for message in item.messages],
+                output_text=item.output_text,
+                output_updated_at=item.output_updated_at,
+                files=list(item.files),
+                last_decision_id=last_decision_id,
+                decision_packet=decision,
+                status_state=self._normalize_status(item.status),
+                model_provider=item.model_provider,
+                model_id=item.model_id,
+                title_override=item.title_override,
+                folder_id=item.folder_id,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
 
     def _restore_folders(self) -> None:
         for item in self._storage.load_folders():
@@ -587,6 +676,9 @@ class UIHub:
                 model_id=state.model_id,
                 title_override=state.title_override,
                 folder_id=state.folder_id,
+                output_text=state.output_text,
+                output_updated_at=state.output_updated_at,
+                files=list(state.files),
             ),
         )
 
