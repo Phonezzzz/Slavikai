@@ -21,6 +21,16 @@ class PersistedSession:
     messages: list[dict[str, str]]
     model_provider: str | None = None
     model_id: str | None = None
+    title_override: str | None = None
+    folder_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PersistedFolder:
+    folder_id: str
+    name: str
+    created_at: str
+    updated_at: str
 
 
 class UISessionStorage(Protocol):
@@ -30,10 +40,17 @@ class UISessionStorage(Protocol):
 
     def delete_sessions(self, session_ids: Sequence[str]) -> None: ...
 
+    def load_folders(self) -> list[PersistedFolder]: ...
+
+    def save_folder(self, folder: PersistedFolder) -> None: ...
+
+    def delete_folders(self, folder_ids: Sequence[str]) -> None: ...
+
 
 class InMemoryUISessionStorage:
     def __init__(self) -> None:
         self._sessions: dict[str, PersistedSession] = {}
+        self._folders: dict[str, PersistedFolder] = {}
 
     def load_sessions(self) -> list[PersistedSession]:
         return [self._clone_session(item) for item in self._sessions.values()]
@@ -44,6 +61,16 @@ class InMemoryUISessionStorage:
     def delete_sessions(self, session_ids: Sequence[str]) -> None:
         for session_id in session_ids:
             self._sessions.pop(session_id, None)
+
+    def load_folders(self) -> list[PersistedFolder]:
+        return [self._clone_folder(item) for item in self._folders.values()]
+
+    def save_folder(self, folder: PersistedFolder) -> None:
+        self._folders[folder.folder_id] = self._clone_folder(folder)
+
+    def delete_folders(self, folder_ids: Sequence[str]) -> None:
+        for folder_id in folder_ids:
+            self._folders.pop(folder_id, None)
 
     def _clone_session(self, session: PersistedSession) -> PersistedSession:
         decision = dict(session.decision) if session.decision is not None else None
@@ -57,6 +84,16 @@ class InMemoryUISessionStorage:
             messages=messages,
             model_provider=session.model_provider,
             model_id=session.model_id,
+            title_override=session.title_override,
+            folder_id=session.folder_id,
+        )
+
+    def _clone_folder(self, folder: PersistedFolder) -> PersistedFolder:
+        return PersistedFolder(
+            folder_id=folder.folder_id,
+            name=folder.name,
+            created_at=folder.created_at,
+            updated_at=folder.updated_at,
         )
 
 
@@ -71,7 +108,7 @@ class SQLiteUISessionStorage:
             rows = conn.execute(
                 """
                 SELECT session_id, created_at, updated_at, status, decision_json
-                    , model_provider, model_id
+                    , model_provider, model_id, title_override, folder_id
                 FROM ui_sessions
                 """,
             ).fetchall()
@@ -88,6 +125,8 @@ class SQLiteUISessionStorage:
                         messages=messages,
                         model_provider=_optional_str(row["model_provider"]),
                         model_id=_optional_str(row["model_id"]),
+                        title_override=_optional_str(row["title_override"]),
+                        folder_id=_optional_str(row["folder_id"]),
                     ),
                 )
         return sessions
@@ -103,9 +142,11 @@ class SQLiteUISessionStorage:
                     status,
                     decision_json,
                     model_provider,
-                    model_id
+                    model_id,
+                    title_override,
+                    folder_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     created_at=excluded.created_at,
@@ -113,7 +154,9 @@ class SQLiteUISessionStorage:
                     status=excluded.status,
                     decision_json=excluded.decision_json,
                     model_provider=excluded.model_provider,
-                    model_id=excluded.model_id
+                    model_id=excluded.model_id,
+                    title_override=excluded.title_override,
+                    folder_id=excluded.folder_id
                 """,
                 (
                     session.session_id,
@@ -123,6 +166,8 @@ class SQLiteUISessionStorage:
                     self._encode_decision(session.decision),
                     session.model_provider,
                     session.model_id,
+                    session.title_override,
+                    session.folder_id,
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
@@ -156,6 +201,63 @@ class SQLiteUISessionStorage:
             )
             conn.commit()
 
+    def load_folders(self) -> list[PersistedFolder]:
+        folders: list[PersistedFolder] = []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT folder_id, name, created_at, updated_at
+                FROM ui_folders
+                """,
+            ).fetchall()
+            for row in rows:
+                folder_id = str(row["folder_id"])
+                folders.append(
+                    PersistedFolder(
+                        folder_id=folder_id,
+                        name=str(row["name"]),
+                        created_at=str(row["created_at"]),
+                        updated_at=str(row["updated_at"]),
+                    ),
+                )
+        return folders
+
+    def save_folder(self, folder: PersistedFolder) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ui_folders (folder_id, name, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(folder_id)
+                DO UPDATE SET
+                    name=excluded.name,
+                    created_at=excluded.created_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    folder.folder_id,
+                    folder.name,
+                    folder.created_at,
+                    folder.updated_at,
+                ),
+            )
+            conn.commit()
+
+    def delete_folders(self, folder_ids: Sequence[str]) -> None:
+        if not folder_ids:
+            return
+        placeholders = ", ".join("?" for _ in folder_ids)
+        with self._connect() as conn:
+            conn.execute(
+                f"DELETE FROM ui_folders WHERE folder_id IN ({placeholders})",
+                tuple(folder_ids),
+            )
+            conn.execute(
+                f"UPDATE ui_sessions SET folder_id = NULL WHERE folder_id IN ({placeholders})",
+                tuple(folder_ids),
+            )
+            conn.commit()
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
@@ -175,11 +277,23 @@ class SQLiteUISessionStorage:
                     status TEXT NOT NULL,
                     decision_json TEXT,
                     model_provider TEXT,
-                    model_id TEXT
+                    model_id TEXT,
+                    title_override TEXT,
+                    folder_id TEXT
                 )
                 """,
             )
             self._ensure_columns(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ui_folders (
+                    folder_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """,
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ui_messages (
@@ -240,6 +354,10 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN model_provider TEXT")
         if "model_id" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN model_id TEXT")
+        if "title_override" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN title_override TEXT")
+        if "folder_id" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN folder_id TEXT")
 
 
 def _optional_str(value: object) -> str | None:

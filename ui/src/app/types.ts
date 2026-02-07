@@ -11,6 +11,15 @@ export type SessionSummary = {
   created_at: string;
   updated_at: string;
   message_count: number;
+  title_override?: string | null;
+  folder_id?: string | null;
+};
+
+export type FolderSummary = {
+  folder_id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export type SelectedModel = {

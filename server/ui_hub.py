@@ -9,6 +9,7 @@ from typing import Literal, TypedDict
 
 from server.ui_session_storage import (
     InMemoryUISessionStorage,
+    PersistedFolder,
     PersistedSession,
     UISessionStorage,
 )
@@ -28,6 +29,8 @@ class SessionListItem(TypedDict):
     created_at: str
     updated_at: str
     message_count: int
+    title_override: str | None
+    folder_id: str | None
 
 
 class _SessionListSortableItem(TypedDict):
@@ -36,6 +39,8 @@ class _SessionListSortableItem(TypedDict):
     created_at: str
     updated_at: datetime
     message_count: int
+    title_override: str | None
+    folder_id: str | None
 
 
 DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -52,6 +57,15 @@ class _SessionState:
     status_state: SessionStatus = "ok"
     model_provider: str | None = None
     model_id: str | None = None
+    title_override: str | None = None
+    folder_id: str | None = None
+    created_at: str = field(default_factory=_utc_iso_now)
+    updated_at: str = field(default_factory=_utc_iso_now)
+
+
+@dataclass
+class _FolderState:
+    name: str
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
 
@@ -67,11 +81,13 @@ class UIHub:
     ) -> None:
         self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
         self._sessions: dict[str, _SessionState] = {}
+        self._folders: dict[str, _FolderState] = {}
         self._session_ttl_seconds = session_ttl_seconds
         self._max_sessions = max_sessions
         self._max_messages_per_session = max_messages_per_session
         self._lock = asyncio.Lock()
         self._restore_sessions()
+        self._restore_folders()
 
     async def get_or_create_session(self, session_id: str | None) -> str:
         normalized = session_id.strip() if session_id else ""
@@ -115,13 +131,16 @@ class UIHub:
             self._prune_sessions_locked()
             items: list[_SessionListSortableItem] = []
             for session_id, state in self._sessions.items():
+                title = state.title_override or self._build_session_title(state.messages)
                 items.append(
                     {
                         "session_id": session_id,
-                        "title": self._build_session_title(state.messages),
+                        "title": title,
                         "created_at": state.created_at,
                         "updated_at": datetime.fromisoformat(state.updated_at),
                         "message_count": len(state.messages),
+                        "title_override": state.title_override,
+                        "folder_id": state.folder_id,
                     },
                 )
             items.sort(key=lambda item: item["updated_at"], reverse=True)
@@ -132,9 +151,98 @@ class UIHub:
                     "created_at": item["created_at"],
                     "updated_at": item["updated_at"].isoformat(),
                     "message_count": item["message_count"],
+                    "title_override": item["title_override"],
+                    "folder_id": item["folder_id"],
                 }
                 for item in items
             ]
+
+    async def list_folders(self) -> list[dict[str, JSONValue]]:
+        async with self._lock:
+            items: list[dict[str, JSONValue]] = []
+            for folder_id, state in self._folders.items():
+                items.append(
+                    {
+                        "folder_id": folder_id,
+                        "name": state.name,
+                        "created_at": state.created_at,
+                        "updated_at": state.updated_at,
+                    },
+                )
+            items.sort(key=lambda item: str(item["updated_at"]), reverse=True)
+            return items
+
+    async def create_folder(self, name: str) -> dict[str, JSONValue]:
+        normalized = name.strip()
+        if not normalized:
+            raise ValueError("folder name required")
+        async with self._lock:
+            for folder_id, state in self._folders.items():
+                if state.name.lower() == normalized.lower():
+                    return {
+                        "folder_id": folder_id,
+                        "name": state.name,
+                        "created_at": state.created_at,
+                        "updated_at": state.updated_at,
+                    }
+            folder_id = uuid.uuid4().hex
+            now = _utc_iso_now()
+            self._folders[folder_id] = _FolderState(
+                name=normalized,
+                created_at=now,
+                updated_at=now,
+            )
+            self._storage.save_folder(
+                PersistedFolder(
+                    folder_id=folder_id,
+                    name=normalized,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+            return {
+                "folder_id": folder_id,
+                "name": normalized,
+                "created_at": now,
+                "updated_at": now,
+            }
+
+    async def set_session_title(self, session_id: str, title: str) -> dict[str, JSONValue]:
+        normalized = title.strip()
+        if not normalized:
+            raise ValueError("title required")
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError("session not found")
+            if state.title_override == normalized:
+                return {"session_id": session_id, "title": normalized}
+            state.title_override = normalized
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            return {"session_id": session_id, "title": normalized}
+
+    async def assign_session_folder(
+        self,
+        session_id: str,
+        folder_id: str | None,
+    ) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                raise KeyError("session not found")
+            normalized_folder = folder_id.strip() if folder_id else None
+            if normalized_folder:
+                if normalized_folder not in self._folders:
+                    raise KeyError("folder not found")
+            if state.folder_id == normalized_folder:
+                return {"session_id": session_id, "folder_id": normalized_folder}
+            state.folder_id = normalized_folder
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            return {"session_id": session_id, "folder_id": normalized_folder}
 
     async def export_sessions(self) -> list[PersistedSession]:
         async with self._lock:
@@ -155,6 +263,8 @@ class UIHub:
                         messages=[dict(message) for message in state.messages],
                         model_provider=state.model_provider,
                         model_id=state.model_id,
+                        title_override=state.title_override,
+                        folder_id=state.folder_id,
                     ),
                 )
             items.sort(
@@ -192,6 +302,8 @@ class UIHub:
                     status_state=self._normalize_status(item.status),
                     model_provider=item.model_provider,
                     model_id=item.model_id,
+                    title_override=item.title_override,
+                    folder_id=item.folder_id,
                     created_at=created_at,
                     updated_at=restored_updated_at,
                 )
@@ -216,6 +328,8 @@ class UIHub:
                 "messages": [dict(item) for item in state.messages],
                 "decision": decision,
                 "selected_model": selected_model,
+                "title_override": state.title_override,
+                "folder_id": state.folder_id,
             }
 
     async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
@@ -434,13 +548,23 @@ class UIHub:
                 decision_id = decision.get("id")
                 if isinstance(decision_id, str):
                     last_decision_id = decision_id
-            self._sessions[item.session_id] = _SessionState(
-                messages=[dict(message) for message in item.messages],
-                last_decision_id=last_decision_id,
-                decision_packet=decision,
-                status_state=self._normalize_status(item.status),
-                model_provider=item.model_provider,
-                model_id=item.model_id,
+                self._sessions[item.session_id] = _SessionState(
+                    messages=[dict(message) for message in item.messages],
+                    last_decision_id=last_decision_id,
+                    decision_packet=decision,
+                    status_state=self._normalize_status(item.status),
+                    model_provider=item.model_provider,
+                    model_id=item.model_id,
+                    title_override=item.title_override,
+                    folder_id=item.folder_id,
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                )
+
+    def _restore_folders(self) -> None:
+        for item in self._storage.load_folders():
+            self._folders[item.folder_id] = _FolderState(
+                name=item.name,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
@@ -461,6 +585,8 @@ class UIHub:
                 messages=[dict(message) for message in state.messages],
                 model_provider=state.model_provider,
                 model_id=state.model_id,
+                title_override=state.title_override,
+                folder_id=state.folder_id,
             ),
         )
 

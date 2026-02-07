@@ -9,6 +9,7 @@ import { SearchModal } from './components/search-modal';
 import { Settings } from './components/Settings';
 import type {
   ChatMessage,
+  FolderSummary,
   ProviderModels,
   SelectedModel,
   SessionSummary,
@@ -117,6 +118,8 @@ const parseSessions = (value: unknown): SessionSummary[] => {
       created_at?: unknown;
       updated_at?: unknown;
       message_count?: unknown;
+      title_override?: unknown;
+      folder_id?: unknown;
     };
     if (
       typeof candidate.session_id !== 'string' ||
@@ -136,9 +139,44 @@ const parseSessions = (value: unknown): SessionSummary[] => {
       created_at: candidate.created_at,
       updated_at: candidate.updated_at,
       message_count: candidate.message_count,
+      title_override: typeof candidate.title_override === 'string' ? candidate.title_override : null,
+      folder_id: typeof candidate.folder_id === 'string' ? candidate.folder_id : null,
     });
   }
   return sessions;
+};
+
+const parseFolders = (value: unknown): FolderSummary[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const folders: FolderSummary[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const candidate = item as {
+      folder_id?: unknown;
+      name?: unknown;
+      created_at?: unknown;
+      updated_at?: unknown;
+    };
+    if (
+      typeof candidate.folder_id !== 'string' ||
+      typeof candidate.name !== 'string' ||
+      typeof candidate.created_at !== 'string' ||
+      typeof candidate.updated_at !== 'string'
+    ) {
+      continue;
+    }
+    folders.push({
+      folder_id: candidate.folder_id,
+      name: candidate.name,
+      created_at: candidate.created_at,
+      updated_at: candidate.updated_at,
+    });
+  }
+  return folders;
 };
 
 const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
@@ -245,6 +283,7 @@ export default function App() {
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [folders, setFolders] = useState<FolderSummary[]>([]);
 
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -422,6 +461,68 @@ export default function App() {
     return parsed;
   };
 
+  const loadFolders = async (): Promise<FolderSummary[]> => {
+    const response = await fetch('/ui/api/folders');
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to load folders.'));
+    }
+    const parsed = parseFolders((payload as { folders?: unknown }).folders);
+    setFolders(parsed);
+    return parsed;
+  };
+
+  const createFolder = async (name: string): Promise<FolderSummary> => {
+    const response = await fetch('/ui/api/folders', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to create folder.'));
+    }
+    const folder = (payload as { folder?: unknown }).folder;
+    const parsed = parseFolders(folder ? [folder] : []);
+    if (parsed.length === 0) {
+      throw new Error('Failed to create folder.');
+    }
+    return parsed[0];
+  };
+
+  const renameSession = async (sessionId: string, title: string): Promise<void> => {
+    const response = await fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to rename chat.'));
+    }
+  };
+
+  const moveSessionToFolder = async (
+    sessionId: string,
+    folderId: string | null,
+  ): Promise<void> => {
+    const response = await fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/folder`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ folder_id: folderId }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to move chat to folder.'));
+    }
+  };
+
   const loadModels = async (): Promise<ProviderModels[]> => {
     setModelsLoading(true);
     try {
@@ -515,6 +616,7 @@ export default function App() {
         setSelectedModel(statusSelected);
 
         const modelsPromise = loadModels();
+        const foldersPromise = loadFolders();
         const listedSessions = await loadSessions();
 
         const storedSession = loadLastSessionId();
@@ -539,6 +641,7 @@ export default function App() {
             saveLastSessionId(nextSession);
           }
           const models = await modelsPromise;
+          await foldersPromise;
           if (nextSession && !statusSelected && !lastModelApplied) {
             const lastModel = loadLastModel();
             if (lastModel && isModelAvailable(lastModel, models)) {
@@ -596,6 +699,56 @@ export default function App() {
       setStatusMessage(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load selected chat.';
+      setStatusMessage(message);
+    }
+  };
+
+  const handleCreateFolder = async () => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const name = window.prompt('Folder name');
+    if (!name || !name.trim()) {
+      return;
+    }
+    try {
+      await createFolder(name.trim());
+      await loadFolders();
+      setStatusMessage(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create folder.';
+      setStatusMessage(message);
+    }
+  };
+
+  const handleRenameChat = async (sessionId: string) => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const session = sessions.find((item) => item.session_id === sessionId);
+    const currentTitle = session?.title ?? '';
+    const nextTitle = window.prompt('Rename chat', currentTitle);
+    if (!nextTitle || !nextTitle.trim()) {
+      return;
+    }
+    try {
+      await renameSession(sessionId, nextTitle.trim());
+      await loadSessions();
+      setStatusMessage(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to rename chat.';
+      setStatusMessage(message);
+    }
+  };
+
+  const handleMoveChatToFolder = async (sessionId: string, folderId: string | null) => {
+    try {
+      await moveSessionToFolder(sessionId, folderId);
+      await loadSessions();
+      setStatusMessage(null);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to move chat to folder.';
       setStatusMessage(message);
     }
   };
@@ -774,6 +927,7 @@ export default function App() {
     <div className="flex h-screen overflow-hidden bg-zinc-950 text-foreground">
       <HistorySidebar
         chats={historyChats}
+        folders={folders.map((folder) => ({ id: folder.folder_id, name: folder.name }))}
         activeChatId={selectedConversation}
         onSelectChat={(sessionId) => {
           void handleSelectConversation(sessionId);
@@ -784,8 +938,17 @@ export default function App() {
         onDeleteChat={(sessionId) => {
           void handleDeleteConversation(sessionId);
         }}
+        onRenameChat={(sessionId) => {
+          void handleRenameChat(sessionId);
+        }}
+        onMoveChatToFolder={(sessionId, folderId) => {
+          void handleMoveChatToFolder(sessionId, folderId);
+        }}
         onOpenSearch={() => setSearchOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
+        onCreateFolder={() => {
+          void handleCreateFolder();
+        }}
       />
 
       <div className="flex-1 min-w-0 relative">

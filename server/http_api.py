@@ -1039,6 +1039,10 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
             model_provider = provider_raw.strip()
         if isinstance(model_raw, str) and model_raw.strip():
             model_id = model_raw.strip()
+    title_override_raw = raw.get("title_override")
+    title_override = title_override_raw.strip() if isinstance(title_override_raw, str) else None
+    folder_id_raw = raw.get("folder_id")
+    folder_id = folder_id_raw.strip() if isinstance(folder_id_raw, str) else None
     return PersistedSession(
         session_id=session_id,
         created_at=created_at,
@@ -1048,6 +1052,8 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
         messages=messages,
         model_provider=model_provider,
         model_id=model_id,
+        title_override=title_override,
+        folder_id=folder_id,
     )
 
 
@@ -1066,6 +1072,8 @@ def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONVal
         "messages": [dict(item) for item in session.messages],
         "decision": dict(session.decision) if session.decision is not None else None,
         "selected_model": selected_model,
+        "title_override": session.title_override,
+        "folder_id": session.folder_id,
     }
     return payload
 
@@ -1674,10 +1682,56 @@ async def handle_ui_sessions_list(request: web.Request) -> web.Response:
             "created_at": item["created_at"],
             "updated_at": item["updated_at"],
             "message_count": item["message_count"],
+            "title_override": item["title_override"],
+            "folder_id": item["folder_id"],
         }
         for item in sessions
     ]
     return _json_response({"sessions": serialized_sessions})
+
+
+async def handle_ui_folders_list(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    folders = await hub.list_folders()
+    return _json_response({"folders": folders})
+
+
+async def handle_ui_folders_create(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    name_raw = payload.get("name")
+    if not isinstance(name_raw, str) or not name_raw.strip():
+        return _error_response(
+            status=400,
+            message="name должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    try:
+        folder = await hub.create_folder(name_raw)
+    except ValueError:
+        return _error_response(
+            status=400,
+            message="name должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    return _json_response({"folder": folder})
 
 
 async def handle_ui_sessions_create(request: web.Request) -> web.Response:
@@ -1717,6 +1771,117 @@ async def handle_ui_session_get(request: web.Request) -> web.Response:
     response = _json_response({"session": session})
     response.headers[UI_SESSION_HEADER] = session_id
     return response
+
+
+async def handle_ui_session_title_update(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    title_raw = payload.get("title")
+    if not isinstance(title_raw, str) or not title_raw.strip():
+        return _error_response(
+            status=400,
+            message="title должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    try:
+        result = await hub.set_session_title(session_id, title_raw)
+    except KeyError:
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    except ValueError:
+        return _error_response(
+            status=400,
+            message="title должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    return _json_response(result)
+
+
+async def handle_ui_session_folder_update(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    folder_raw = payload.get("folder_id")
+    folder_id: str | None
+    if folder_raw is None:
+        folder_id = None
+    elif isinstance(folder_raw, str):
+        folder_id = folder_raw.strip() or None
+    else:
+        return _error_response(
+            status=400,
+            message="folder_id должен быть строкой или null.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    try:
+        result = await hub.assign_session_folder(session_id, folder_id)
+    except KeyError as exc:
+        if "folder" in str(exc).lower():
+            return _error_response(
+                status=404,
+                message="Folder not found.",
+                error_type="invalid_request_error",
+                code="folder_not_found",
+            )
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    return _json_response(result)
 
 
 async def handle_ui_session_delete(request: web.Request) -> web.Response:
@@ -2666,10 +2831,14 @@ def create_app(
     app.router.add_get("/ui/api/settings/chats/export", handle_ui_chats_export)
     app.router.add_post("/ui/api/settings/chats/import", handle_ui_chats_import)
     app.router.add_get("/ui/api/models", handle_ui_models)
+    app.router.add_get("/ui/api/folders", handle_ui_folders_list)
+    app.router.add_post("/ui/api/folders", handle_ui_folders_create)
     app.router.add_get("/ui/api/sessions", handle_ui_sessions_list)
     app.router.add_post("/ui/api/sessions", handle_ui_sessions_create)
     app.router.add_get("/ui/api/sessions/{session_id}", handle_ui_session_get)
     app.router.add_delete("/ui/api/sessions/{session_id}", handle_ui_session_delete)
+    app.router.add_patch("/ui/api/sessions/{session_id}/title", handle_ui_session_title_update)
+    app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)
     app.router.add_post("/ui/api/session-model", handle_ui_session_model)
     app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
     app.router.add_post("/ui/api/tools/project", handle_ui_project_command)

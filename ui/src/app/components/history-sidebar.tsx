@@ -22,14 +22,20 @@ export interface ChatItem {
   group: "today" | "yesterday" | "older";
 }
 
+export interface FolderItem {
+  id: string;
+  name: string;
+}
+
 interface HistorySidebarProps {
   chats?: ChatItem[];
+  folders?: FolderItem[];
   activeChatId?: string | null;
   onNewChat?: () => void;
   onSelectChat?: (id: string) => void;
   onDeleteChat?: (id: string) => void;
   onRenameChat?: (id: string) => void;
-  onMoveChatToFolder?: (id: string) => void;
+  onMoveChatToFolder?: (id: string, folderId: string | null) => void;
   onOpenSearch?: () => void;
   onOpenNotes?: () => void;
   onOpenWorkspace?: () => void;
@@ -42,6 +48,7 @@ const defaultChats: ChatItem[] = [];
 
 export function HistorySidebar({
   chats = defaultChats,
+  folders = [],
   activeChatId,
   onNewChat,
   onSelectChat,
@@ -57,20 +64,23 @@ export function HistorySidebar({
 }: HistorySidebarProps) {
   const [hoveredChat, setHoveredChat] = useState<string | null>(null);
   const [menuChatId, setMenuChatId] = useState<string | null>(null);
+  const [folderPickerChatId, setFolderPickerChatId] = useState<string | null>(null);
   const hasChats = chats.length > 0;
+  const hasFolders = folders.length > 0;
 
   useEffect(() => {
-    if (!menuChatId) {
+    if (!menuChatId && !folderPickerChatId) {
       return;
     }
     const handleClick = () => {
       setMenuChatId(null);
+      setFolderPickerChatId(null);
     };
     document.addEventListener("click", handleClick);
     return () => {
       document.removeEventListener("click", handleClick);
     };
-  }, [menuChatId]);
+  }, [menuChatId, folderPickerChatId]);
 
   const todayChats = chats.filter((c) => c.group === "today");
   const yesterdayChats = chats.filter((c) => c.group === "yesterday");
@@ -121,6 +131,7 @@ export function HistorySidebar({
             onClick={() => {
               onSelectChat?.(chat.id);
               setMenuChatId(null);
+              setFolderPickerChatId(null);
             }}
             onMouseEnter={() => setHoveredChat(chat.id)}
             onMouseLeave={() => setHoveredChat(null)}
@@ -151,6 +162,7 @@ export function HistorySidebar({
                   e.stopPropagation();
                   onDeleteChat?.(chat.id);
                   setMenuChatId(null);
+                  setFolderPickerChatId(null);
                 }}
                 className="p-1 rounded text-[#555] hover:text-red-400 hover:bg-red-400/10 transition-colors cursor-pointer"
               >
@@ -159,6 +171,7 @@ export function HistorySidebar({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  setFolderPickerChatId(null);
                   setMenuChatId((prev) => (prev === chat.id ? null : chat.id));
                 }}
                 className="p-1 rounded text-[#555] hover:text-[#aaa] hover:bg-[#333] transition-colors cursor-pointer"
@@ -176,6 +189,7 @@ export function HistorySidebar({
                   onClick={() => {
                     onRenameChat?.(chat.id);
                     setMenuChatId(null);
+                    setFolderPickerChatId(null);
                   }}
                   className="w-full px-3 py-2 text-left text-[12px] text-[#ddd] hover:bg-[#1b1b20] transition-colors"
                 >
@@ -183,13 +197,54 @@ export function HistorySidebar({
                 </button>
                 <button
                   onClick={() => {
-                    onMoveChatToFolder?.(chat.id);
                     setMenuChatId(null);
+                    setFolderPickerChatId(chat.id);
                   }}
                   className="w-full px-3 py-2 text-left text-[12px] text-[#ddd] hover:bg-[#1b1b20] transition-colors"
                 >
                   Send to folder
                 </button>
+              </div>
+            ) : null}
+
+            {folderPickerChatId === chat.id ? (
+              <div
+                className="absolute right-2 top-10 z-20 w-48 rounded-lg bg-[#141418] border border-[#1f1f24] shadow-xl shadow-black/40 py-1"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  onClick={() => {
+                    onMoveChatToFolder?.(chat.id, null);
+                    setFolderPickerChatId(null);
+                  }}
+                  className="w-full px-3 py-2 text-left text-[12px] text-[#ddd] hover:bg-[#1b1b20] transition-colors"
+                >
+                  No folder
+                </button>
+                {hasFolders ? (
+                  folders.map((folder) => (
+                    <button
+                      key={folder.id}
+                      onClick={() => {
+                        onMoveChatToFolder?.(chat.id, folder.id);
+                        setFolderPickerChatId(null);
+                      }}
+                      className="w-full px-3 py-2 text-left text-[12px] text-[#ddd] hover:bg-[#1b1b20] transition-colors"
+                    >
+                      {folder.name}
+                    </button>
+                  ))
+                ) : (
+                  <button
+                    onClick={() => {
+                      onCreateFolder?.();
+                      setFolderPickerChatId(null);
+                    }}
+                    className="w-full px-3 py-2 text-left text-[12px] text-[#999] hover:bg-[#1b1b20] transition-colors"
+                  >
+                    Create folder
+                  </button>
+                )}
               </div>
             ) : null}
           </div>
@@ -263,9 +318,22 @@ export function HistorySidebar({
             <Plus className="w-3.5 h-3.5" />
           </button>
         </div>
-        <p className="px-3 py-2 text-[12px] text-[#444] italic">
-          No folders yet
-        </p>
+        {hasFolders ? (
+          <div className="space-y-1 px-1 pb-2">
+            {folders.map((folder) => (
+              <div
+                key={folder.id}
+                className="mx-2 rounded-lg px-2 py-1.5 text-[12px] text-[#bbb] hover:bg-[#141418] transition-colors"
+              >
+                {folder.name}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="px-3 py-2 text-[12px] text-[#444] italic">
+            No folders yet
+          </p>
+        )}
       </div>
 
       {/* Divider */}

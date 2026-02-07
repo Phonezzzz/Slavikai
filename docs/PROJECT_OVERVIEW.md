@@ -48,3 +48,11 @@ SlavikAI — Python-агент с двумя основными режимами
 - `ruff format --check .`
 - `mypy .`
 - `pytest` c покрытием (порог >= 80%).
+
+## UI API (папки и чаты)
+
+- `GET /ui/api/folders` → `{ folders: [{ folder_id, name, created_at, updated_at }] }`
+- `POST /ui/api/folders` (body: `{ name }`) → `{ folder: { folder_id, name, created_at, updated_at } }`
+- `PATCH /ui/api/sessions/{session_id}/title` (body: `{ title }`) → `{ session_id, title }`
+- `PUT /ui/api/sessions/{session_id}/folder` (body: `{ folder_id: string | null }`) → `{ session_id, folder_id }`
+- `GET /ui/api/sessions` → `{ sessions: [{ session_id, title, title_override, folder_id, created_at, updated_at, message_count }] }`
