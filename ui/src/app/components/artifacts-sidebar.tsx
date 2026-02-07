@@ -35,17 +35,8 @@ interface ArtifactsSidebarProps {
   className?: string;
 }
 
-const defaultArtifacts: Artifact[] = [
-  { id: "1", name: "Plan fixed", type: "MD", category: "Document" },
-  { id: "2", name: "Plan", type: "MD", category: "Document" },
-  { id: "3", name: "Hello", type: "PY", category: "Script" },
-];
-
-const defaultContentItems: ContentItem[] = [
-  { id: "c1", title: "Terminal output 1" },
-  { id: "c2", title: "Terminal output 2" },
-  { id: "c3", title: "Terminal output 3", isVideo: true },
-];
+const defaultArtifacts: Artifact[] = [];
+const defaultContentItems: ContentItem[] = [];
 
 const typeColorMap: Record<string, string> = {
   MD: "text-blue-400",
@@ -76,13 +67,14 @@ export function ArtifactsSidebar({
   className = "",
 }: ArtifactsSidebarProps) {
   const [hoveredArtifact, setHoveredArtifact] = useState<string | null>(null);
+  const previewItems = contentItems.filter((item) => Boolean(item.thumbnail));
 
   return (
     <div
-      className={`flex flex-col h-full w-[340px] bg-[#1a1a1e] border-l border-[#2a2a2e] ${className}`}
+      className={`flex flex-col h-full w-[340px] bg-[#0b0b0d] ${className}`}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-5 py-4 border-b border-[#2a2a2e]">
+      <div className="flex items-center justify-between px-5 py-4">
         <h3 className="text-[#e0e0e0] text-[15px]">Artifacts</h3>
         <div className="flex items-center gap-3">
           <button
@@ -103,82 +95,80 @@ export function ArtifactsSidebar({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto" data-scrollbar>
+      <div className="flex-1 overflow-y-auto" data-scrollbar="auto">
         <div className="p-4 space-y-2">
           {/* Artifacts List */}
           {artifacts.length === 0 ? (
-            <div className="rounded-xl border border-[#2a2a2e] bg-[#141418] p-4 text-[13px] text-[#777]">
+            <div className="rounded-xl bg-[#141418] p-4 text-[13px] text-[#777]">
               Нет артефактов.
             </div>
           ) : (
             artifacts.map((artifact) => (
-            <div
-              key={artifact.id}
-              className="group flex items-center gap-3 p-3 rounded-xl bg-[#222226] hover:bg-[#2a2a30] border border-[#2f2f35] hover:border-[#3a3a42] transition-all cursor-pointer"
-              onMouseEnter={() => setHoveredArtifact(artifact.id)}
-              onMouseLeave={() => setHoveredArtifact(null)}
-              onClick={() => onArtifactClick?.(artifact)}
-            >
-              <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-[#2a2a30] border border-[#333338]">
-                {categoryIconMap[artifact.category]}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[14px] text-[#e0e0e0] truncate">
-                  {artifact.name}
-                </div>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className="text-[12px] text-[#777]">
-                    {artifact.category}
-                  </span>
-                  <span className="text-[12px] text-[#555]">-</span>
-                  <span
-                    className={`text-[12px] ${typeColorMap[artifact.type] || "text-gray-400"}`}
-                  >
-                    {artifact.type}
-                  </span>
-                </div>
-              </div>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDownloadArtifact?.(artifact.id);
-                }}
-                className={`text-[#555] hover:text-[#ccc] transition-all ${
-                  hoveredArtifact === artifact.id
-                    ? "opacity-100"
-                    : "opacity-0 group-hover:opacity-100"
-                }`}
+              <div
+                key={artifact.id}
+                className="group flex items-center gap-3 p-3 rounded-xl bg-[#141418] hover:bg-[#1b1b20] transition-all cursor-pointer"
+                onMouseEnter={() => setHoveredArtifact(artifact.id)}
+                onMouseLeave={() => setHoveredArtifact(null)}
+                onClick={() => onArtifactClick?.(artifact)}
               >
-                <Download className="w-4 h-4" />
-              </button>
-            </div>
+                <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-[#1b1b20]">
+                  {categoryIconMap[artifact.category]}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[14px] text-[#e0e0e0] truncate">
+                    {artifact.name}
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <span className="text-[12px] text-[#777]">
+                      {artifact.category}
+                    </span>
+                    <span className="text-[12px] text-[#555]">-</span>
+                    <span
+                      className={`text-[12px] ${typeColorMap[artifact.type] || "text-gray-400"}`}
+                    >
+                      {artifact.type}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDownloadArtifact?.(artifact.id);
+                  }}
+                  className={`text-[#555] hover:text-[#ccc] transition-all ${
+                    hoveredArtifact === artifact.id
+                      ? "opacity-100"
+                      : "opacity-0 group-hover:opacity-100"
+                  }`}
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+              </div>
             ))
           )}
         </div>
 
         {/* Content Section */}
-        {contentItems.length > 0 && (
+        {previewItems.length > 0 && (
           <div className="px-4 pb-4">
             <div className="flex items-center justify-between mb-3 mt-2">
               <h4 className="text-[14px] text-[#e0e0e0]">Content</h4>
               <ChevronRight className="w-4 h-4 text-[#555]" />
             </div>
             <div className="grid grid-cols-2 gap-2">
-              {contentItems.map((item) => (
+              {previewItems.map((item) => (
                 <div
                   key={item.id}
                   onClick={() => onContentClick?.(item.id)}
-                  className="relative group rounded-lg overflow-hidden bg-[#111114] border border-[#2a2a2e] hover:border-[#3a3a42] transition-all cursor-pointer aspect-[16/10]"
+                  className="relative group rounded-lg overflow-hidden bg-[#111114] transition-all cursor-pointer aspect-[16/10]"
                 >
-                  {/* Fake terminal content */}
-                  <div className="absolute inset-0 p-2 flex flex-col gap-1">
-                    <div className="h-1 w-[60%] bg-[#2a3a2a] rounded-full" />
-                    <div className="h-1 w-[80%] bg-[#2a2a3a] rounded-full" />
-                    <div className="h-1 w-[45%] bg-[#3a2a2a] rounded-full" />
-                    <div className="h-1 w-[70%] bg-[#2a3a3a] rounded-full" />
-                    <div className="h-1 w-[55%] bg-[#2a2a3a] rounded-full" />
-                    <div className="h-1 w-[65%] bg-[#2a3a2a] rounded-full" />
-                  </div>
+                  {item.thumbnail ? (
+                    <img
+                      src={item.thumbnail}
+                      alt={item.title ?? "Preview"}
+                      className="absolute inset-0 h-full w-full object-cover"
+                    />
+                  ) : null}
 
                   {/* Video play button */}
                   {item.isVideo && (
@@ -194,13 +184,6 @@ export function ArtifactsSidebar({
             </div>
           </div>
         )}
-      </div>
-
-      {/* Bottom scrollbar indicator */}
-      <div className="px-4 pb-3 pt-1">
-        <div className="w-full h-1 rounded-full bg-[#222226] overflow-hidden">
-          <div className="h-full w-[30%] rounded-full bg-[#3a3a42]" />
-        </div>
       </div>
     </div>
   );

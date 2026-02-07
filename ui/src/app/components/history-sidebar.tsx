@@ -35,29 +35,7 @@ interface HistorySidebarProps {
   className?: string;
 }
 
-const defaultChats: ChatItem[] = [
-  {
-    id: "bf09b790",
-    title: "New chat",
-    messageCount: 0,
-    date: "2/7/2026, 1:25:16 AM",
-    group: "today",
-  },
-  {
-    id: "6d8e750f",
-    title: "napishio kusok koda v canvas",
-    messageCount: 2,
-    date: "2/6/2026, 10:14:27 PM",
-    group: "yesterday",
-  },
-  {
-    id: "46163d26",
-    title: "napishi otrezok coda v canvas xochu potestit...",
-    messageCount: 2,
-    date: "2/6/2026, 8:30:34 PM",
-    group: "yesterday",
-  },
-];
+const defaultChats: ChatItem[] = [];
 
 export function HistorySidebar({
   chats = defaultChats,
@@ -72,6 +50,7 @@ export function HistorySidebar({
   className = "",
 }: HistorySidebarProps) {
   const [hoveredChat, setHoveredChat] = useState<string | null>(null);
+  const hasChats = chats.length > 0;
 
   const todayChats = chats.filter((c) => c.group === "today");
   const yesterdayChats = chats.filter((c) => c.group === "yesterday");
@@ -116,8 +95,8 @@ export function HistorySidebar({
             key={chat.id}
             className={`group flex items-center gap-2 mx-2 px-3 py-2.5 rounded-lg cursor-pointer transition-all ${
               activeChatId === chat.id
-                ? "bg-[#2a2a30] border border-[#3a3a42]"
-                : "hover:bg-[#1e1e24] border border-transparent"
+                ? "bg-[#1b1b22]"
+                : "hover:bg-[#141418]"
             }`}
             onClick={() => onSelectChat?.(chat.id)}
             onMouseEnter={() => setHoveredChat(chat.id)}
@@ -168,7 +147,7 @@ export function HistorySidebar({
 
   return (
     <div
-      className={`flex flex-col h-full w-[260px] bg-[#141418] border-r border-[#222226] ${className}`}
+      className={`flex flex-col h-full w-[260px] bg-[#0b0b0d] ${className}`}
     >
       {/* Logo */}
       <div className="flex items-center gap-2.5 px-5 py-4">
@@ -182,7 +161,7 @@ export function HistorySidebar({
       <div className="px-3 mb-3">
         <button
           onClick={onNewChat}
-          className="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-[#222228] hover:bg-[#2a2a32] border border-[#2f2f35] hover:border-[#3a3a42] text-[13px] text-[#d0d0d0] transition-all cursor-pointer"
+          className="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-[#141418] hover:bg-[#1b1b20] text-[13px] text-[#d0d0d0] transition-all cursor-pointer"
         >
           <Plus className="w-4 h-4" />
           New Chat
@@ -193,21 +172,21 @@ export function HistorySidebar({
       <div className="px-2 mb-2 space-y-0.5">
         <button
           onClick={onOpenSearch}
-          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ccc] hover:bg-[#1e1e24] transition-all cursor-pointer"
+          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ddd] hover:bg-[#141418] transition-all cursor-pointer"
         >
           <Search className="w-4 h-4" />
           Search
         </button>
         <button
           onClick={onOpenNotes}
-          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ccc] hover:bg-[#1e1e24] transition-all cursor-pointer"
+          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ddd] hover:bg-[#141418] transition-all cursor-pointer"
         >
           <StickyNote className="w-4 h-4" />
           Notes
         </button>
         <button
           onClick={onOpenWorkspace}
-          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ccc] hover:bg-[#1e1e24] transition-all cursor-pointer"
+          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ddd] hover:bg-[#141418] transition-all cursor-pointer"
         >
           <LayoutGrid className="w-4 h-4" />
           Workspace
@@ -228,8 +207,6 @@ export function HistorySidebar({
       </div>
 
       {/* Divider */}
-      <div className="mx-3 border-t border-[#222226] mb-2" />
-
       {/* Chats */}
       <div className="px-1 mb-1">
         <div className="flex items-center gap-2 px-4 py-1.5">
@@ -240,29 +217,37 @@ export function HistorySidebar({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto" data-scrollbar>
-        <ChatGroup
-          label="Today"
-          icon={<Calendar className="w-3 h-3 text-[#555]" />}
-          items={todayChats}
-        />
-        <ChatGroup
-          label="Yesterday"
-          icon={<Clock className="w-3 h-3 text-[#555]" />}
-          items={yesterdayChats}
-        />
-        <ChatGroup
-          label="Older"
-          icon={<Clock className="w-3 h-3 text-[#555]" />}
-          items={olderChats}
-        />
+      <div className="flex-1 overflow-y-auto" data-scrollbar="always">
+        {hasChats ? (
+          <>
+            <ChatGroup
+              label="Today"
+              icon={<Calendar className="w-3 h-3 text-[#555]" />}
+              items={todayChats}
+            />
+            <ChatGroup
+              label="Yesterday"
+              icon={<Clock className="w-3 h-3 text-[#555]" />}
+              items={yesterdayChats}
+            />
+            <ChatGroup
+              label="Older"
+              icon={<Clock className="w-3 h-3 text-[#555]" />}
+              items={olderChats}
+            />
+          </>
+        ) : (
+          <div className="px-4 py-6 text-[12px] text-[#555]">
+            No chats yet
+          </div>
+        )}
       </div>
 
       {/* Bottom section */}
-      <div className="border-t border-[#222226] px-3 py-3 space-y-2">
+      <div className="px-3 py-3 space-y-2">
         <button
           onClick={onOpenSettings}
-          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ccc] hover:bg-[#1e1e24] transition-all cursor-pointer"
+          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ddd] hover:bg-[#141418] transition-all cursor-pointer"
         >
           <Settings className="w-4 h-4" />
           Settings

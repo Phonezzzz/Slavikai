@@ -16,6 +16,7 @@ import type {
 
 const SESSION_HEADER = 'X-Slavik-Session';
 const SCROLLBAR_REVEAL_DISTANCE_PX = 38;
+const LAST_SESSION_KEY = 'slavik.last.session';
 
 const isChatMessage = (value: unknown): value is ChatMessage => {
   if (!value || typeof value !== 'object') {
@@ -69,6 +70,37 @@ const parseProviderModels = (value: unknown): ProviderModels[] => {
   return providers;
 };
 
+const loadLastSessionId = (): string | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  const raw = window.localStorage.getItem(LAST_SESSION_KEY);
+  if (!raw || !raw.trim()) {
+    return null;
+  }
+  return raw.trim();
+};
+
+const saveLastSessionId = (sessionId: string | null) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  if (!sessionId) {
+    window.localStorage.removeItem(LAST_SESSION_KEY);
+    return;
+  }
+  window.localStorage.setItem(LAST_SESSION_KEY, sessionId);
+};
+
+const sortSessionsByUpdated = (value: SessionSummary[]): SessionSummary[] => {
+  return [...value].sort((a, b) => {
+    const aTime = Date.parse(a.updated_at);
+    const bTime = Date.parse(b.updated_at);
+    const aValue = Number.isNaN(aTime) ? 0 : aTime;
+    const bValue = Number.isNaN(bTime) ? 0 : bTime;
+    return bValue - aValue;
+  });
+};
 
 const parseSessions = (value: unknown): SessionSummary[] => {
   if (!Array.isArray(value)) {
@@ -296,7 +328,7 @@ export default function App() {
     }
     let raf = 0;
     const clearReveal = () => {
-      const elements = document.querySelectorAll<HTMLElement>('[data-scrollbar]');
+      const elements = document.querySelectorAll<HTMLElement>('[data-scrollbar="auto"]');
       elements.forEach((element) => element.classList.remove('scrollbar-reveal'));
     };
     const handleMove = (event: MouseEvent) => {
@@ -306,7 +338,7 @@ export default function App() {
         cancelAnimationFrame(raf);
       }
       raf = window.requestAnimationFrame(() => {
-        const elements = document.querySelectorAll<HTMLElement>('[data-scrollbar]');
+        const elements = document.querySelectorAll<HTMLElement>('[data-scrollbar="auto"]');
         elements.forEach((element) => {
           const rect = element.getBoundingClientRect();
           const hasVertical = element.scrollHeight > element.clientHeight;
@@ -383,7 +415,9 @@ export default function App() {
     if (!response.ok) {
       throw new Error(extractErrorMessage(payload, 'Failed to load chat list.'));
     }
-    const parsed = parseSessions((payload as { sessions?: unknown }).sessions);
+    const parsed = sortSessionsByUpdated(
+      parseSessions((payload as { sessions?: unknown }).sessions),
+    );
     setSessions(parsed);
     return parsed;
   };
@@ -483,9 +517,15 @@ export default function App() {
         const modelsPromise = loadModels();
         const listedSessions = await loadSessions();
 
-        let nextSession = statusSession;
+        const storedSession = loadLastSessionId();
+        const storedExists =
+          storedSession && listedSessions.some((session) => session.session_id === storedSession);
+        let nextSession = storedExists ? storedSession : null;
         if (!nextSession && listedSessions.length > 0) {
           nextSession = listedSessions[0].session_id;
+        }
+        if (!nextSession && statusSession) {
+          nextSession = statusSession;
         }
         if (!nextSession) {
           const created = await createConversation();
@@ -496,6 +536,7 @@ export default function App() {
           if (nextSession) {
             setSelectedConversation(nextSession);
             await loadConversation(nextSession);
+            saveLastSessionId(nextSession);
           }
           const models = await modelsPromise;
           if (nextSession && !statusSelected && !lastModelApplied) {
@@ -551,6 +592,7 @@ export default function App() {
     setSelectedConversation(sessionId);
     try {
       await loadConversation(sessionId);
+      saveLastSessionId(sessionId);
       setStatusMessage(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load selected chat.';
@@ -567,6 +609,7 @@ export default function App() {
         return;
       }
       setSelectedConversation(nextSession);
+      saveLastSessionId(nextSession);
       await loadSessions();
       if (!created.selectedModel && providerModels.length > 0) {
         const lastModel = loadLastModel();
@@ -615,15 +658,18 @@ export default function App() {
           const nextSession = updatedSessions[0].session_id;
           setSelectedConversation(nextSession);
           await loadConversation(nextSession);
+          saveLastSessionId(nextSession);
         } else {
           const created = await createConversation();
           if (created.sessionId) {
             setSelectedConversation(created.sessionId);
             await loadSessions();
+            saveLastSessionId(created.sessionId);
           } else {
             setSelectedConversation(null);
             setMessages([]);
             setSelectedModel(null);
+            saveLastSessionId(null);
           }
         }
       }
@@ -689,6 +735,7 @@ export default function App() {
       if (nextSession !== selectedConversation) {
         setSelectedConversation(nextSession);
       }
+      saveLastSessionId(nextSession);
 
       setPendingUserMessage(null);
       setPendingSessionId(null);
@@ -765,7 +812,7 @@ export default function App() {
         {!artifactPanelOpen ? (
           <button
             onClick={() => setArtifactPanelOpen(true)}
-            className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#222226] border border-[#333338] hover:border-[#4a4a52] hover:bg-[#2a2a30] flex items-center justify-center transition-all cursor-pointer shadow-lg shadow-black/30"
+            className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#141418] border border-[#1f1f24] hover:border-[#2a2a30] hover:bg-[#1b1b20] flex items-center justify-center transition-all cursor-pointer shadow-lg shadow-black/30"
             title="Open Artifacts"
           >
             <PanelRight className="w-4.5 h-4.5 text-[#888]" />

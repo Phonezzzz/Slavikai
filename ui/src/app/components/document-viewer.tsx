@@ -18,42 +18,6 @@ export interface DocumentViewerProps {
   className?: string;
 }
 
-const defaultContent = `## ЧЕКЛИСТ ПРАВИЛЬНОЙ РЕАЛИЗАЦИИ
-
-### Backend:
-
-- \`session.files\` — ТОЛЬКО tool-созданные файлы
-- \`session.assistant_output\` — ephemeral вывод
-- \`session.messages\` — chat history
-- Tool calls отслеживаются явно (НЕ парсинг текста)
-- 3 endpoint: \`/files\`, \`/output\`, \`/history\`
-
-### Frontend:
-
-- **PREVIEW** берёт из \`/output\` (ephemeral)
-- **FILES** берёт из \`/files\` (real files only)
-- **HISTORY** берёт из \`/history\` (chat log)
-- НЕТ смешивания источников
-- Удалены mockFiles
-
-### Тестирование:
-
-- Агент создал файл → появился в FILES
-- Агент ответил текстом → появился в PREVIEW
-- Переключение вкладок → данные не дублируются
-- После перезагрузки → files сохранились, output сбросился
-
----
-
-## РАЗНИЦА С ПРОШЛЫМ ПЛАНОМ
-
-| Старый план | Новый план |
-|-------------|------------|
-| Парсить "создал файл" | Отслеживать tool calls |
-| Один источник данных | Три различных источника |
-| Нет разделения output vs files | Жёсткое разделение ephemeral vs persistent |
-| Codex сделал бы помойку | Codex сделает правильно |`;
-
 // Formats available for document types vs code types
 const documentFormats = ["MD", "TXT", "PDF", "HTML"];
 const codeExtensions = ["PY", "JS", "TS", "JSX", "TSX", "CSS", "JSON", "HTML", "SQL", "SH", "YAML", "YML", "TOML"];
@@ -73,9 +37,9 @@ function getMimeType(format: string): string {
 }
 
 export function DocumentViewer({
-  title = "Plan fixed",
+  title = "Artifact",
   type = "MD",
-  content = defaultContent,
+  content = "",
   onBack,
   onClose,
   className = "",
@@ -134,7 +98,7 @@ export function DocumentViewer({
                   {tableHeaders.map((h, i) => (
                     <th
                       key={i}
-                      className="text-left px-3 py-2 bg-[#1e1e22] text-[#aaa] border border-[#2a2a2e]"
+                      className="text-left px-3 py-2 bg-[#141418] text-[#aaa] border border-[#1f1f24]"
                     >
                       {h.trim()}
                     </th>
@@ -147,7 +111,7 @@ export function DocumentViewer({
                     {row.map((cell, ci) => (
                       <td
                         key={ci}
-                        className="px-3 py-2 text-[#c0c0c0] border border-[#2a2a2e]"
+                        className="px-3 py-2 text-[#c0c0c0] border border-[#1f1f24]"
                       >
                         {cell.trim()}
                       </td>
@@ -255,10 +219,10 @@ export function DocumentViewer({
       // Horizontal rule
       if (line.trim() === "---") {
         elements.push(
-          <hr
-            key={`hr-${i}`}
-            className="border-[#2a2a2e] my-4"
-          />
+            <hr
+              key={`hr-${i}`}
+              className="border-[#1f1f24] my-4"
+            />
         );
         continue;
       }
@@ -311,15 +275,15 @@ export function DocumentViewer({
 
   return (
     <div
-      className={`flex flex-col h-full bg-[#131316] border-l border-[#2a2a2e] ${className}`}
+      className={`flex flex-col h-full bg-[#0b0b0d] ${className}`}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a2a2e] bg-[#18181c]">
+      <div className="flex items-center justify-between px-4 py-3 bg-[#111115]">
         <div className="flex items-center gap-3">
           {onBack && (
             <button
               onClick={onBack}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[13px] text-[#888] hover:text-[#ccc] hover:bg-[#2a2a2e] transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[13px] text-[#888] hover:text-[#ddd] hover:bg-[#1b1b20] transition-all cursor-pointer"
             >
               <ArrowLeft className="w-4 h-4" />
               Back
@@ -328,7 +292,7 @@ export function DocumentViewer({
           <div className="flex items-center gap-2">
             <FileText className="w-4 h-4 text-[#888]" />
             <span className="text-[13px] text-[#ccc]">{title}</span>
-            <span className="text-[11px] text-[#666] bg-[#2a2a2e] px-1.5 py-0.5 rounded">
+            <span className="text-[11px] text-[#666] bg-[#1b1b20] px-1.5 py-0.5 rounded">
               {type}
             </span>
           </div>
@@ -336,7 +300,7 @@ export function DocumentViewer({
         <div className="flex items-center gap-2">
           <button
             onClick={handleCopy}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-[#888] hover:text-[#ccc] hover:bg-[#2a2a2e] transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-[#888] hover:text-[#ddd] hover:bg-[#1b1b20] transition-all cursor-pointer"
           >
             {copied ? (
               <>
@@ -356,7 +320,7 @@ export function DocumentViewer({
           >
             <button
               onClick={() => setShowDownloadMenu(!showDownloadMenu)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-[#888] hover:text-[#ccc] hover:bg-[#2a2a2e] transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-[#888] hover:text-[#ddd] hover:bg-[#1b1b20] transition-all cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
               Download
@@ -364,13 +328,13 @@ export function DocumentViewer({
             </button>
             {showDownloadMenu && (
               <div
-                className="absolute right-0 top-full mt-1 rounded-lg bg-[#1e1e24] border border-[#2f2f35] shadow-xl shadow-black/40 py-1 min-w-[120px] z-10"
+                className="absolute right-0 top-full mt-1 rounded-lg bg-[#141418] border border-[#1f1f24] shadow-xl shadow-black/40 py-1 min-w-[120px] z-10"
               >
                 {downloadFormats.map((format) => (
                   <button
                     key={format}
                     onClick={() => handleDownload(format)}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-[12px] text-[#ccc] hover:bg-[#2a2a30] transition-colors cursor-pointer"
+                    className="flex items-center gap-2 w-full px-3 py-2 text-[12px] text-[#ccc] hover:bg-[#1b1b20] transition-colors cursor-pointer"
                   >
                     <Download className="w-3 h-3 text-[#666]" />
                     .{format.toLowerCase()}
@@ -391,8 +355,14 @@ export function DocumentViewer({
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto" data-scrollbar>
-        <div className="px-6 py-5">{renderMarkdown(content)}</div>
+      <div className="flex-1 overflow-y-auto" data-scrollbar="auto">
+        <div className="px-6 py-5">
+          {content ? (
+            renderMarkdown(content)
+          ) : (
+            <p className="text-[13px] text-[#555]">Нет содержимого.</p>
+          )}
+        </div>
       </div>
     </div>
   );

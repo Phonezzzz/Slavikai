@@ -187,36 +187,54 @@
 }
 
 @layer base {
-  [data-scrollbar] {
+  [data-scrollbar="auto"],
+  [data-scrollbar="always"] {
     scrollbar-width: thin;
+  }
+
+  [data-scrollbar="auto"] {
     scrollbar-color: rgba(120, 120, 120, 0) transparent;
   }
 
-  [data-scrollbar].scrollbar-reveal {
-    scrollbar-color: rgba(120, 120, 120, 0.55) transparent;
+  [data-scrollbar="auto"].scrollbar-reveal {
+    scrollbar-color: rgba(140, 140, 140, 0.45) transparent;
   }
 
-  [data-scrollbar]::-webkit-scrollbar {
+  [data-scrollbar="always"] {
+    scrollbar-color: rgba(140, 140, 140, 0.45) transparent;
+  }
+
+  [data-scrollbar="auto"]::-webkit-scrollbar,
+  [data-scrollbar="always"]::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
 
-  [data-scrollbar]::-webkit-scrollbar-track {
+  [data-scrollbar="auto"]::-webkit-scrollbar-track,
+  [data-scrollbar="always"]::-webkit-scrollbar-track {
     background: transparent;
   }
 
-  [data-scrollbar]::-webkit-scrollbar-thumb {
+  [data-scrollbar="auto"]::-webkit-scrollbar-thumb {
     background-color: rgba(120, 120, 120, 0);
     border-radius: 999px;
     border: 2px solid transparent;
     background-clip: padding-box;
   }
 
-  [data-scrollbar].scrollbar-reveal::-webkit-scrollbar-thumb {
-    background-color: rgba(120, 120, 120, 0.55);
+  [data-scrollbar="always"]::-webkit-scrollbar-thumb {
+    background-color: rgba(140, 140, 140, 0.45);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
 
-  [data-scrollbar].scrollbar-reveal::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(160, 160, 160, 0.65);
+  [data-scrollbar="auto"].scrollbar-reveal::-webkit-scrollbar-thumb {
+    background-color: rgba(140, 140, 140, 0.45);
+  }
+
+  [data-scrollbar="auto"].scrollbar-reveal::-webkit-scrollbar-thumb:hover,
+  [data-scrollbar="always"]::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(170, 170, 170, 0.65);
   }
 }

@@ -168,9 +168,9 @@ function CodeBlockRenderer({ codeBlock }: { codeBlock: CodeBlock }) {
   };
 
   return (
-    <div className="rounded-lg overflow-hidden bg-[#0d0d10] border border-[#2a2a2e] my-2">
+    <div className="rounded-lg overflow-hidden bg-[#0d0d10] border border-[#1f1f24] my-2">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 bg-[#18181c] border-b border-[#2a2a2e]">
+      <div className="flex items-center justify-between px-4 py-2 bg-[#111115] border-b border-[#1f1f24]">
         <span className="text-[12px] text-[#888]">{codeBlock.language}</span>
         <button
           onClick={handleCopy}
@@ -345,7 +345,7 @@ export function Canvas({
       className={`flex flex-col h-full bg-transparent ${className}`}
     >
       {/* Model selector header */}
-      <div className="flex items-center justify-center py-3 border-b border-[#1e1e22]">
+      <div className="flex items-center justify-center py-3 border-b border-[#141418]">
         {modelOptions.length > 0 ? (
           <div className="relative">
             <select
@@ -357,13 +357,13 @@ export function Canvas({
                 }
               }}
               disabled={modelsLoading || savingModel}
-              className="appearance-none bg-[#1e1e22] text-[#aaa] text-[13px] px-3 py-1.5 rounded-lg border border-[#2a2a2e] hover:border-[#3a3a42] transition-colors cursor-pointer pr-8"
+              className="appearance-none bg-[#141418] text-[#aaa] text-[13px] px-3 py-1.5 rounded-lg border border-[#1f1f24] hover:border-[#2a2a30] transition-colors cursor-pointer pr-8"
             >
               <option value="" disabled>
                 Select model
               </option>
               {modelOptions.map((option) => (
-                <option key={option.value} value={option.value} className="bg-[#141418] text-[#ddd]">
+                <option key={option.value} value={option.value} className="bg-[#0b0b0d] text-[#ddd]">
                   {option.label}
                 </option>
               ))}
@@ -373,7 +373,7 @@ export function Canvas({
         ) : (
           <button
             onClick={onOpenSettings}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-[#1e1e22] transition-colors cursor-pointer"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-[#141418] transition-colors cursor-pointer"
           >
             <div className="w-2 h-2 rounded-full bg-emerald-400" />
             <span className="text-[13px] text-[#aaa]">{modelName}</span>
@@ -383,7 +383,7 @@ export function Canvas({
       </div>
 
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto" data-scrollbar>
+      <div className="flex-1 overflow-y-auto" data-scrollbar="auto">
         <div className="max-w-3xl mx-auto px-6 py-6 space-y-8">
           {displayMessages.map((msg) => (
             <MessageBubble key={msg.id} message={msg} />
@@ -403,14 +403,14 @@ export function Canvas({
       </div>
 
       {/* Input area */}
-      <div className="border-t border-[#1e1e22] px-4 py-3">
+      <div className="border-t border-[#141418] px-4 py-3">
         <div className="max-w-3xl mx-auto">
           {statusMessage ? (
-            <div className="mb-2 rounded-lg border border-[#2a2a2e] bg-[#1e1e22] px-3 py-2 text-[12px] text-[#c0c0c0]">
+            <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
               {statusMessage}
             </div>
           ) : null}
-          <div className="flex items-end gap-2 bg-[#1e1e22] rounded-xl border border-[#2a2a2e] focus-within:border-[#3a3a42] transition-colors px-4 py-3">
+          <div className="flex items-end gap-2 bg-[#141418] rounded-xl border border-[#1f1f24] focus-within:border-[#2a2a30] transition-colors px-4 py-3">
             {/* Attachment button */}
             <button className="text-[#555] hover:text-[#999] transition-colors pb-0.5 cursor-pointer">
               <Paperclip className="w-4.5 h-4.5" />
@@ -440,7 +440,7 @@ export function Canvas({
               className={`p-1.5 rounded-lg transition-all cursor-pointer ${
                 inputValue.trim() && !sending
                   ? "bg-[#6366f1] hover:bg-[#5558e6] text-white"
-                  : "bg-[#2a2a2e] text-[#555]"
+                  : "bg-[#1b1b20] text-[#555]"
               }`}
             >
               <Send className="w-4 h-4" />

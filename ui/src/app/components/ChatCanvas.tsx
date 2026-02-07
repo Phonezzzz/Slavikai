@@ -263,7 +263,7 @@ export function ChatCanvas({ collapsed, onToggleCollapse, messages, uploads }: C
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 pb-6" data-scrollbar>
+            <div className="flex-1 overflow-y-auto px-4 pb-6" data-scrollbar="auto">
               {activeTab === 'output' && (
                 <div className="space-y-4">
                   {!hasOutput ? (
