@@ -102,7 +102,7 @@ DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
 UI_GITHUB_REQUIRED_CATEGORIES: Final[list[ApprovalCategory]] = ["NETWORK_RISK", "EXEC_ARBITRARY"]
 UI_GITHUB_ROOT: Final[Path] = Path("sandbox/project/github").resolve()
 CANVAS_CHAT_SUMMARY: Final[str] = "Готово. Результат в Canvas."
-CANVAS_MIN_CONTENT_LENGTH: Final[int] = 280
+CANVAS_MIN_CONTENT_LENGTH: Final[int] = 700
 
 
 @dataclass(frozen=True)
@@ -828,12 +828,13 @@ def _split_chat_summary_and_canvas_payload(
     response_text: str,
     approval_request: dict[str, JSONValue] | None,
     decision_payload: dict[str, JSONValue] | None,
+    prefer_canvas: bool,
 ) -> tuple[str, str | None]:
     if approval_request is not None:
         return response_text, None
     if decision_payload is not None:
         return response_text, None
-    if _should_store_canvas_output(response_text):
+    if prefer_canvas or _should_store_canvas_output(response_text):
         return CANVAS_CHAT_SUMMARY, response_text
     return response_text, None
 
@@ -2148,6 +2149,15 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+        prefer_canvas_raw = payload.get("prefer_canvas", False)
+        if not isinstance(prefer_canvas_raw, bool):
+            return _error_response(
+                status=400,
+                message="prefer_canvas должен быть bool.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        prefer_canvas = prefer_canvas_raw
 
         session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
         selected_model = await hub.get_session_model(session_id)
@@ -2228,6 +2238,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             response_text=response_text,
             approval_request=approval_request,
             decision_payload=decision,
+            prefer_canvas=prefer_canvas,
         )
         if canvas_payload is not None:
             await hub.set_session_output(session_id, canvas_payload)
@@ -2327,6 +2338,15 @@ async def handle_ui_chat_stream(request: web.Request) -> web.StreamResponse | we
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+        prefer_canvas_raw = payload.get("prefer_canvas", False)
+        if not isinstance(prefer_canvas_raw, bool):
+            return _error_response(
+                status=400,
+                message="prefer_canvas должен быть bool.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        prefer_canvas = prefer_canvas_raw
 
         session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
         selected_model = await hub.get_session_model(session_id)
@@ -2445,6 +2465,7 @@ async def handle_ui_chat_stream(request: web.Request) -> web.StreamResponse | we
             response_text=response_text,
             approval_request=approval_request,
             decision_payload=decision,
+            prefer_canvas=prefer_canvas,
         )
         if canvas_payload is not None:
             await hub.set_session_output(session_id, canvas_payload)

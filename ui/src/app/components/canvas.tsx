@@ -29,6 +29,10 @@ export interface CanvasMessage {
   timestamp?: string;
 }
 
+export interface SendMessageOptions {
+  preferCanvas?: boolean;
+}
+
 const parseContentSections = (content: string): MessageSection[] => {
   if (!content.includes("```")) {
     return [{ type: "text", content }];
@@ -54,7 +58,7 @@ interface CanvasProps {
   messages?: CanvasMessage[];
   pendingMessage?: CanvasMessage | null;
   sending?: boolean;
-  onSendMessage?: (message: string) => void;
+  onSendMessage?: (message: string, options?: SendMessageOptions) => void;
   className?: string;
   modelName?: string;
   onOpenSettings?: () => void;
@@ -316,6 +320,7 @@ export function Canvas({
   savingModel = false,
 }: CanvasProps) {
   const [inputValue, setInputValue] = useState("");
+  const [preferCanvas, setPreferCanvas] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const displayMessages = useMemo(() => {
     if (pendingMessage) {
@@ -333,8 +338,9 @@ export function Canvas({
       return;
     }
     if (inputValue.trim()) {
-      onSendMessage?.(inputValue.trim());
+      onSendMessage?.(inputValue.trim(), { preferCanvas });
       setInputValue("");
+      setPreferCanvas(false);
     }
   };
 
@@ -440,6 +446,20 @@ export function Canvas({
             {/* Mic button */}
             <button className="text-[#555] hover:text-[#999] transition-colors pb-0.5 cursor-pointer">
               <Mic className="w-4.5 h-4.5" />
+            </button>
+
+            {/* Canvas toggle */}
+            <button
+              type="button"
+              onClick={() => setPreferCanvas((value) => !value)}
+              disabled={sending}
+              className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
+                preferCanvas
+                  ? "bg-[#2a2f4f] text-[#c9d5ff] border border-[#3a4576]"
+                  : "bg-[#1b1b20] text-[#787887] border border-[#25252d] hover:text-[#a6a6b4]"
+              }`}
+            >
+              Canvas
             </button>
 
             {/* Send button */}

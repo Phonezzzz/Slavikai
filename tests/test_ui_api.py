@@ -434,6 +434,79 @@ def test_ui_chat_stream_endpoint() -> None:
     asyncio.run(run())
 
 
+def test_ui_chat_send_prefer_canvas_splits_summary_and_output() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Ping", "prefer_canvas": True},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            assert last.get("role") == "assistant"
+            assert last.get("content") == "Готово. Результат в Canvas."
+            output_payload = payload.get("output")
+            assert isinstance(output_payload, dict)
+            assert output_payload.get("content") == "ok"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_stream_prefer_canvas_splits_summary_and_output() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.post(
+                "/ui/api/chat/stream",
+                json={"content": "Ping", "prefer_canvas": True},
+                headers={"X-Slavik-Session": session_id},
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            events = await _read_sse_events_until_terminal(stream_resp)
+            done = next(
+                (item for item in events if item.get("type") == "done"),
+                None,
+            )
+            assert isinstance(done, dict)
+            messages = done.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            assert last.get("role") == "assistant"
+            assert last.get("content") == "Готово. Результат в Canvas."
+            output_payload = done.get("output")
+            assert isinstance(output_payload, dict)
+            assert output_payload.get("content") == "ok"
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_strips_mwv_report_block() -> None:
     async def run() -> None:
         client = await _create_client(UIReportAgent())

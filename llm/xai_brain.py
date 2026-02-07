@@ -117,10 +117,13 @@ class XAiBrain(Brain):
             stream=True,
         )
         response.raise_for_status()
-        for line_raw in response.iter_lines(decode_unicode=True):
-            if not isinstance(line_raw, str):
+        for line_raw in response.iter_lines(decode_unicode=False):
+            if isinstance(line_raw, bytes):
+                line = line_raw.decode("utf-8", errors="replace").strip()
+            elif isinstance(line_raw, str):
+                line = line_raw.strip()
+            else:
                 continue
-            line = line_raw.strip()
             if not line or not line.startswith("data:"):
                 continue
             data_raw = line.removeprefix("data:").strip()

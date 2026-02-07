@@ -2,7 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { PanelRight } from 'lucide-react';
 
 import { ArtifactPanel } from './components/artifact-panel';
-import { Canvas, type CanvasMessage } from './components/canvas';
+import {
+  Canvas,
+  type CanvasMessage,
+  type SendMessageOptions,
+} from './components/canvas';
 import type { Artifact } from './components/artifacts-sidebar';
 import { HistorySidebar } from './components/history-sidebar';
 import { SearchModal } from './components/search-modal';
@@ -965,7 +969,10 @@ export default function App() {
     }
   };
 
-  const handleSend = async (content: string): Promise<boolean> => {
+  const handleSend = async (
+    content: string,
+    options?: SendMessageOptions,
+  ): Promise<boolean> => {
     if (!selectedConversation || sending) {
       return false;
     }
@@ -973,6 +980,7 @@ export default function App() {
     if (!trimmed) {
       return false;
     }
+    const preferCanvas = Boolean(options?.preferCanvas);
     setPendingUserMessage({ role: 'user', content: trimmed });
     setPendingSessionId(selectedConversation);
     setStreamingSessionId(selectedConversation);
@@ -985,7 +993,7 @@ export default function App() {
           'Content-Type': 'application/json',
           [SESSION_HEADER]: selectedConversation,
         },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, prefer_canvas: preferCanvas }),
       });
       if (!response.ok) {
         const payload: unknown = await response.json();
@@ -1154,8 +1162,8 @@ export default function App() {
           messages={canvasMessages}
           pendingMessage={pendingCanvasMessage}
           sending={sending}
-          onSendMessage={(content) => {
-            void handleSend(content);
+          onSendMessage={(content, options) => {
+            void handleSend(content, options);
           }}
           modelName={modelLabel}
           onOpenSettings={() => setSettingsOpen(true)}
