@@ -7,6 +7,7 @@ import {
   Mic,
   User,
   Check,
+  PanelRight,
 } from "lucide-react";
 
 import BrainLogo from "../../assets/brain.png";
@@ -69,6 +70,8 @@ interface CanvasProps {
   onSelectModel?: (provider: string, model: string) => void;
   modelsLoading?: boolean;
   savingModel?: boolean;
+  forceCanvasNext?: boolean;
+  onToggleForceCanvasNext?: () => void;
 }
 
 // ====== Sub Components ======
@@ -314,6 +317,8 @@ export function Canvas({
   onSelectModel,
   modelsLoading = false,
   savingModel = false,
+  forceCanvasNext = false,
+  onToggleForceCanvasNext,
 }: CanvasProps) {
   const [inputValue, setInputValue] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -350,7 +355,7 @@ export function Canvas({
       className={`flex flex-col h-full bg-transparent ${className}`}
     >
       {/* Model selector header */}
-      <div className="flex items-center justify-center py-3 border-b border-[#141418]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[#141418]">
         {modelOptions.length > 0 ? (
           <div className="relative">
             <select
@@ -385,6 +390,18 @@ export function Canvas({
             <ChevronDown className="w-3.5 h-3.5 text-[#666]" />
           </button>
         )}
+        <button
+          onClick={onToggleForceCanvasNext}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[12px] transition-colors cursor-pointer ${
+            forceCanvasNext
+              ? "border-[#2f6a49] bg-[#173124] text-[#9fe3b8]"
+              : "border-[#1f1f24] bg-[#141418] text-[#8f8f95] hover:border-[#2a2a30] hover:text-[#c6c6cb]"
+          }`}
+          title="Принудительно открыть Canvas для следующего ответа"
+        >
+          <PanelRight className="h-3.5 w-3.5" />
+          {forceCanvasNext ? "Canvas: next ON" : "Canvas next"}
+        </button>
       </div>
 
       {/* Messages area */}

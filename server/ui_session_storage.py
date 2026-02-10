@@ -26,6 +26,7 @@ class PersistedSession:
     output_text: str | None = None
     output_updated_at: str | None = None
     files: list[str] = field(default_factory=list)
+    artifacts: list[dict[str, JSONValue]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ class InMemoryUISessionStorage:
             output_text=session.output_text,
             output_updated_at=session.output_updated_at,
             files=list(session.files),
+            artifacts=[dict(item) for item in session.artifacts],
         )
 
     def _clone_folder(self, folder: PersistedFolder) -> PersistedFolder:
@@ -115,7 +117,7 @@ class SQLiteUISessionStorage:
                 """
                 SELECT session_id, created_at, updated_at, status, decision_json
                     , model_provider, model_id, title_override, folder_id
-                    , output_text, output_updated_at, files_json
+                    , output_text, output_updated_at, files_json, artifacts_json
                 FROM ui_sessions
                 """,
             ).fetchall()
@@ -137,6 +139,7 @@ class SQLiteUISessionStorage:
                         output_text=_optional_str(row["output_text"]),
                         output_updated_at=_optional_str(row["output_updated_at"]),
                         files=self._decode_files(row["files_json"]),
+                        artifacts=self._decode_artifacts(row["artifacts_json"]),
                     ),
                 )
         return sessions
@@ -157,9 +160,10 @@ class SQLiteUISessionStorage:
                     folder_id,
                     output_text,
                     output_updated_at,
-                    files_json
+                    files_json,
+                    artifacts_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     created_at=excluded.created_at,
@@ -172,7 +176,8 @@ class SQLiteUISessionStorage:
                     folder_id=excluded.folder_id,
                     output_text=excluded.output_text,
                     output_updated_at=excluded.output_updated_at,
-                    files_json=excluded.files_json
+                    files_json=excluded.files_json,
+                    artifacts_json=excluded.artifacts_json
                 """,
                 (
                     session.session_id,
@@ -187,6 +192,7 @@ class SQLiteUISessionStorage:
                     session.output_text,
                     session.output_updated_at,
                     self._encode_files(session.files),
+                    self._encode_artifacts(session.artifacts),
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
@@ -301,7 +307,8 @@ class SQLiteUISessionStorage:
                     folder_id TEXT,
                     output_text TEXT,
                     output_updated_at TEXT,
-                    files_json TEXT
+                    files_json TEXT,
+                    artifacts_json TEXT
                 )
                 """,
             )
@@ -383,6 +390,27 @@ class SQLiteUISessionStorage:
     def _encode_files(self, value: list[str]) -> str:
         return json.dumps(value, ensure_ascii=False)
 
+    def _decode_artifacts(self, value: object) -> list[dict[str, JSONValue]]:
+        if value is None:
+            return []
+        if not isinstance(value, str):
+            return []
+        parsed = safe_json_loads(value)
+        if not isinstance(parsed, list):
+            return []
+        artifacts: list[dict[str, JSONValue]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            normalized: dict[str, JSONValue] = {}
+            for key, entry in item.items():
+                normalized[str(key)] = entry
+            artifacts.append(normalized)
+        return artifacts
+
+    def _encode_artifacts(self, value: list[dict[str, JSONValue]]) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         existing = {
             str(row["name"])
@@ -403,6 +431,8 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN output_updated_at TEXT")
         if "files_json" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN files_json TEXT")
+        if "artifacts_json" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN artifacts_json TEXT")
 
 
 def _optional_str(value: object) -> str | None:

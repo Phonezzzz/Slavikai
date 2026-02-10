@@ -54,6 +54,7 @@ class _SessionState:
     output_text: str | None = None
     output_updated_at: str | None = None
     files: list[str] = field(default_factory=list)
+    artifacts: list[dict[str, JSONValue]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, JSONValue]]] = field(default_factory=set)
     last_decision_id: str | None = None
     decision_packet: dict[str, JSONValue] | None = None
@@ -201,6 +202,29 @@ class UIHub:
             self._prune_sessions_locked(keep_session_id=session_id)
             return list(state.files)
 
+    async def get_session_artifacts(self, session_id: str) -> list[dict[str, JSONValue]] | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            return [dict(item) for item in state.artifacts]
+
+    async def append_session_artifact(
+        self,
+        session_id: str,
+        artifact: dict[str, JSONValue],
+    ) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            state.artifacts.append(dict(artifact))
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            return dict(artifact)
+
     async def list_sessions(self) -> list[SessionListItem]:
         async with self._lock:
             self._prune_sessions_locked()
@@ -343,6 +367,7 @@ class UIHub:
                         output_text=state.output_text,
                         output_updated_at=state.output_updated_at,
                         files=list(state.files),
+                        artifacts=[dict(item) for item in state.artifacts],
                     ),
                 )
             items.sort(
@@ -377,6 +402,7 @@ class UIHub:
                     output_text=item.output_text,
                     output_updated_at=item.output_updated_at,
                     files=list(item.files),
+                    artifacts=[dict(entry) for entry in item.artifacts],
                     subscribers=subscribers,
                     last_decision_id=last_decision_id,
                     decision_packet=decision,
@@ -412,6 +438,7 @@ class UIHub:
                     "updated_at": state.output_updated_at,
                 },
                 "files": list(state.files),
+                "artifacts": [dict(item) for item in state.artifacts],
                 "decision": decision,
                 "selected_model": selected_model,
                 "title_override": state.title_override,
@@ -639,6 +666,7 @@ class UIHub:
                 output_text=item.output_text,
                 output_updated_at=item.output_updated_at,
                 files=list(item.files),
+                artifacts=[dict(entry) for entry in item.artifacts],
                 last_decision_id=last_decision_id,
                 decision_packet=decision,
                 status_state=self._normalize_status(item.status),
@@ -679,6 +707,7 @@ class UIHub:
                 output_text=state.output_text,
                 output_updated_at=state.output_updated_at,
                 files=list(state.files),
+                artifacts=[dict(entry) for entry in state.artifacts],
             ),
         )
 

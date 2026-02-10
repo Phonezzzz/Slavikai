@@ -101,7 +101,10 @@ DEFAULT_UI_TONE: Final[str] = "balanced"
 DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
 UI_GITHUB_REQUIRED_CATEGORIES: Final[list[ApprovalCategory]] = ["NETWORK_RISK", "EXEC_ARBITRARY"]
 UI_GITHUB_ROOT: Final[Path] = Path("sandbox/project/github").resolve()
-CANVAS_CHAT_SUMMARY: Final[str] = "Готово. Результат в Canvas."
+CANVAS_LINE_THRESHOLD: Final[int] = 40
+CANVAS_CHAR_THRESHOLD: Final[int] = 1800
+CANVAS_CODE_LINE_THRESHOLD: Final[int] = 28
+CANVAS_DOCUMENT_LINE_THRESHOLD: Final[int] = 24
 
 
 @dataclass(frozen=True)
@@ -811,6 +814,169 @@ def _split_response_and_report(response_text: str) -> tuple[str, dict[str, JSONV
     if not clean_text:
         return response_text, normalized_report
     return clean_text, normalized_report
+
+
+def _normalize_trace_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _is_document_like_output(normalized: str) -> bool:
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if len(lines) < CANVAS_DOCUMENT_LINE_THRESHOLD:
+        return False
+    heading_like = sum(
+        1
+        for line in lines[: min(len(lines), 20)]
+        if line.startswith("#") or line.lower().startswith(("section ", "chapter ", "## "))
+    )
+    return heading_like >= 2
+
+
+def _should_render_result_in_canvas(
+    *,
+    response_text: str,
+    files_from_tools: list[str],
+    force_canvas: bool,
+) -> bool:
+    if force_canvas:
+        return True
+    if len(files_from_tools) >= 2:
+        return True
+    normalized = response_text.strip()
+    if not normalized:
+        return False
+    lines = normalized.splitlines()
+    line_count = len(lines)
+    if line_count >= CANVAS_LINE_THRESHOLD:
+        return True
+    if len(normalized) >= CANVAS_CHAR_THRESHOLD:
+        return True
+    has_code_block = "```" in normalized
+    if len(files_from_tools) == 1 and has_code_block and line_count >= 12:
+        return True
+    if has_code_block and line_count >= CANVAS_CODE_LINE_THRESHOLD:
+        return True
+    if _is_document_like_output(normalized):
+        return True
+    return False
+
+
+def _build_output_artifact(
+    *,
+    response_text: str,
+    display_target: Literal["chat", "canvas"],
+) -> dict[str, JSONValue] | None:
+    normalized = response_text.strip()
+    if not normalized:
+        return None
+    first_line = next((line.strip() for line in normalized.splitlines() if line.strip()), "Result")
+    title = first_line[:80]
+    return {
+        "id": uuid.uuid4().hex,
+        "kind": "output",
+        "title": title,
+        "content": response_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+        "display_target": display_target,
+    }
+
+
+def _should_register_output_artifact(
+    *,
+    response_text: str,
+    display_target: Literal["chat", "canvas"],
+    files_from_tools: list[str],
+) -> bool:
+    normalized = response_text.strip()
+    if not normalized:
+        return False
+    if display_target == "canvas":
+        return True
+    if files_from_tools:
+        return True
+    if "```" in normalized:
+        return True
+    return False
+
+
+def _build_canvas_chat_summary(*, artifact_title: str | None) -> str:
+    if isinstance(artifact_title, str):
+        normalized = artifact_title.strip()
+        if normalized:
+            return f"Статус: результат сформирован в Canvas ({normalized})"
+    return "Статус: результат сформирован в Canvas."
+
+
+def _split_canvas_stream_chunks(content: str) -> list[str]:
+    if not content:
+        return []
+    lines = content.splitlines(keepends=True)
+    if len(lines) <= 2:
+        chunk_size = 120
+        return [content[idx : idx + chunk_size] for idx in range(0, len(content), chunk_size)]
+    chunks: list[str] = []
+    lines_per_chunk = 4
+    for start in range(0, len(lines), lines_per_chunk):
+        chunks.append("".join(lines[start : start + lines_per_chunk]))
+    return [chunk for chunk in chunks if chunk]
+
+
+async def _publish_canvas_stream(
+    hub: UIHub,
+    *,
+    session_id: str,
+    artifact_id: str,
+    content: str,
+) -> None:
+    await hub.publish(
+        session_id,
+        {
+            "type": "canvas.stream.start",
+            "payload": {
+                "session_id": session_id,
+                "artifact_id": artifact_id,
+            },
+        },
+    )
+    chunks = _split_canvas_stream_chunks(content)
+    if not chunks:
+        await hub.publish(
+            session_id,
+            {
+                "type": "canvas.stream.done",
+                "payload": {
+                    "session_id": session_id,
+                    "artifact_id": artifact_id,
+                },
+            },
+        )
+        return
+    for delta in chunks:
+        await hub.publish(
+            session_id,
+            {
+                "type": "canvas.stream.delta",
+                "payload": {
+                    "session_id": session_id,
+                    "artifact_id": artifact_id,
+                    "delta": delta,
+                },
+            },
+        )
+        await asyncio.sleep(0.02)
+    await hub.publish(
+        session_id,
+        {
+            "type": "canvas.stream.done",
+            "payload": {
+                "session_id": session_id,
+                "artifact_id": artifact_id,
+            },
+        },
+    )
 
 
 def _load_ui_settings_blob() -> dict[str, object]:
@@ -2111,6 +2277,18 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+        force_canvas_raw = payload.get("force_canvas")
+        if force_canvas_raw is None:
+            force_canvas = False
+        elif isinstance(force_canvas_raw, bool):
+            force_canvas = force_canvas_raw
+        else:
+            return _error_response(
+                status=400,
+                message="force_canvas должен быть boolean.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
 
         session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
         selected_model = await hub.get_session_model(session_id)
@@ -2140,6 +2318,9 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         trace_id: str | None = None
         approval_request: dict[str, JSONValue] | None = None
         async with agent_lock:
+            previous_trace_id = _normalize_trace_id(
+                getattr(agent, "last_chat_interaction_id", None)
+            )
             try:
                 model_config = _build_model_config(
                     selected_model["provider"],
@@ -2181,24 +2362,70 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 detail="chat",
             )
             decision = _extract_decision_payload(response_text)
-            trace_id_raw = getattr(agent, "last_chat_interaction_id", None)
-            trace_id = trace_id_raw.strip() if isinstance(trace_id_raw, str) else None
+            trace_id = _normalize_trace_id(getattr(agent, "last_chat_interaction_id", None))
+            if trace_id == previous_trace_id:
+                # Не используем trace предыдущего ответа для вывода файлов текущего ответа.
+                trace_id = None
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
             )
 
         await hub.set_session_output(session_id, response_text)
+        files_from_tools: list[str] = []
         if trace_id:
             tool_calls = _tool_calls_for_trace_id(trace_id) or []
             files_from_tools = _extract_files_from_tool_calls(tool_calls)
             if files_from_tools:
                 await hub.merge_session_files(session_id, files_from_tools)
-        chat_summary = response_text if approval_request is not None else CANVAS_CHAT_SUMMARY
+        display_target: Literal["chat", "canvas"]
+        if approval_request is not None:
+            display_target = "chat"
+        else:
+            display_target = (
+                "canvas"
+                if _should_render_result_in_canvas(
+                    response_text=response_text,
+                    files_from_tools=files_from_tools,
+                    force_canvas=force_canvas,
+                )
+                else "chat"
+            )
+        artifact_payload: dict[str, JSONValue] | None = None
+        if _should_register_output_artifact(
+            response_text=response_text,
+            display_target=display_target,
+            files_from_tools=files_from_tools,
+        ):
+            artifact_payload = _build_output_artifact(
+                response_text=response_text,
+                display_target=display_target,
+            )
+        if artifact_payload is not None:
+            await hub.append_session_artifact(session_id, artifact_payload)
+        artifact_id_raw = artifact_payload.get("id") if artifact_payload is not None else None
+        artifact_id = artifact_id_raw if isinstance(artifact_id_raw, str) else None
+        artifact_title_raw = artifact_payload.get("title") if artifact_payload is not None else None
+        artifact_title = artifact_title_raw if isinstance(artifact_title_raw, str) else None
+        if display_target == "canvas" and artifact_id is not None:
+            asyncio.create_task(
+                _publish_canvas_stream(
+                    hub,
+                    session_id=session_id,
+                    artifact_id=artifact_id,
+                    content=response_text,
+                )
+            )
+        chat_summary = (
+            response_text
+            if approval_request is not None or display_target == "chat"
+            else _build_canvas_chat_summary(artifact_title=artifact_title)
+        )
         await hub.append_message(session_id, "assistant", chat_summary)
         await hub.set_session_decision(session_id, decision)
         messages = await hub.get_messages(session_id)
         output_payload = await hub.get_session_output(session_id)
         files_payload = await hub.get_session_files(session_id)
+        artifacts_payload = await hub.get_session_artifacts(session_id)
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
         response = _json_response(
@@ -2207,6 +2434,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 "messages": messages,
                 "output": output_payload,
                 "files": files_payload or [],
+                "artifacts": artifacts_payload or [],
+                "display": {
+                    "target": display_target,
+                    "artifact_id": artifact_id,
+                    "forced": force_canvas,
+                },
                 "decision": current_decision,
                 "selected_model": current_model,
                 "trace_id": trace_id,

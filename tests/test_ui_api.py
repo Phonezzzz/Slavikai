@@ -41,6 +41,20 @@ class DummyAgent:
         del main_config, main_api_key, persist
 
 
+class LongCodeAgent(DummyAgent):
+    def respond(self, messages) -> str:
+        del messages
+        lines = [f"def step_{idx}() -> int:\n    return {idx}" for idx in range(1, 26)]
+        return "```python\n" + "\n\n".join(lines) + "\n```"
+
+
+class ShortCodeAgent(DummyAgent):
+    def respond(self, messages) -> str:
+        del messages
+        lines = [f"const item{idx} = {idx};" for idx in range(1, 16)]
+        return "```ts\n" + "\n".join(lines) + "\n```"
+
+
 class CaptureConfigAgent(DummyAgent):
     def __init__(self) -> None:
         super().__init__()
@@ -99,6 +113,16 @@ class ToolCallCaptureAgent(DummyAgent):
         )
         self.last_chat_interaction_id = interaction_id
         return "print('ok')"
+
+
+class StaleTraceIdAgent(DummyAgent):
+    def __init__(self, trace_id: str) -> None:
+        super().__init__()
+        self.last_chat_interaction_id = trace_id
+
+    def respond(self, messages) -> str:
+        del messages
+        return "plain short answer"
 
 
 class DecisionEchoAgent:
@@ -349,6 +373,13 @@ def test_ui_chat_send_endpoint() -> None:
             assert isinstance(selected, dict)
             assert selected.get("provider") == "local"
             assert selected.get("model") == selected_model
+            display = payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "chat"
+            assert display.get("forced") is False
+            artifacts = payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts == []
         finally:
             await client.close()
 
@@ -382,13 +413,134 @@ def test_ui_chat_send_strips_mwv_report_block() -> None:
             assert isinstance(last, dict)
             content = last.get("content")
             assert isinstance(content, str)
-            assert content == "Готово. Результат в Canvas."
+            assert content == "ok"
             output_payload = payload.get("output")
             assert isinstance(output_payload, dict)
             output_content = output_payload.get("content")
             assert isinstance(output_content, str)
             assert output_content == "ok"
             assert "MWV_REPORT_JSON=" not in output_content
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_auto_routes_long_output_to_canvas() -> None:
+    async def run() -> None:
+        client = await _create_client(LongCodeAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Generate long module"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            last_content = last.get("content")
+            assert isinstance(last_content, str)
+            assert last_content.startswith("Статус: результат сформирован в Canvas")
+            display = payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "canvas"
+            assert display.get("forced") is False
+            output_payload = payload.get("output")
+            assert isinstance(output_payload, dict)
+            output_content = output_payload.get("content")
+            assert isinstance(output_content, str)
+            assert output_content.startswith("```python")
+            artifacts = payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_short_code_stays_in_chat_and_registers_artifact() -> None:
+    async def run() -> None:
+        client = await _create_client(ShortCodeAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "React button sample"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            display = payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "chat"
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            last_content = last.get("content")
+            assert isinstance(last_content, str)
+            assert last_content.startswith("```ts")
+            artifacts = payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_force_canvas_override() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Short response", "force_canvas": True},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            last_content = last.get("content")
+            assert isinstance(last_content, str)
+            assert last_content.startswith("Статус: результат сформирован в Canvas")
+            display = payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "canvas"
+            assert display.get("forced") is True
+            output_payload = payload.get("output")
+            assert isinstance(output_payload, dict)
+            assert output_payload.get("content") == "ok"
+            artifacts = payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts
         finally:
             await client.close()
 
@@ -769,6 +921,42 @@ def test_ui_events_stream_includes_agent_activity() -> None:
     asyncio.run(run())
 
 
+def test_ui_events_stream_includes_canvas_stream_events() -> None:
+    async def run() -> None:
+        client = await _create_client(LongCodeAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Stream this long output"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+
+            event_types = await _read_sse_event_types(stream_resp, max_events=64)
+            assert "canvas.stream.start" in event_types
+            assert "canvas.stream.delta" in event_types
+            assert "canvas.stream.done" in event_types
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_sessions_api_create_send_get_history() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -804,7 +992,7 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             assert isinstance(second, dict)
             assert first.get("role") == "user"
             assert second.get("role") == "assistant"
-            assert second.get("content") == "Готово. Результат в Canvas."
+            assert second.get("content") == "ok"
 
             history_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
             assert history_resp.status == 200
@@ -819,6 +1007,9 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             output = output_payload.get("output")
             assert isinstance(output, dict)
             assert output.get("content") == "ok"
+            session_artifacts = session.get("artifacts")
+            assert isinstance(session_artifacts, list)
+            assert session_artifacts == []
 
             files_resp = await client.get(f"/ui/api/sessions/{session_id}/files")
             assert files_resp.status == 200
@@ -874,9 +1065,15 @@ def test_ui_chat_send_stores_files_from_tool_calls(monkeypatch, tmp_path) -> Non
             output = send_payload.get("output")
             assert isinstance(output, dict)
             assert output.get("content") == "print('ok')"
+            display = send_payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "chat"
             files = send_payload.get("files")
             assert isinstance(files, list)
             assert "src/generated/demo.py" in files
+            artifacts = send_payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts
 
             files_resp = await client.get(f"/ui/api/sessions/{session_id}/files")
             assert files_resp.status == 200
@@ -884,6 +1081,61 @@ def test_ui_chat_send_stores_files_from_tool_calls(monkeypatch, tmp_path) -> Non
             files_from_endpoint = files_payload.get("files")
             assert isinstance(files_from_endpoint, list)
             assert "src/generated/demo.py" in files_from_endpoint
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_ignores_stale_trace_id(monkeypatch, tmp_path) -> None:
+    trace_log = tmp_path / "trace.log"
+    tool_log = tmp_path / "tool_calls.log"
+    stale_trace_id = "stale-interaction"
+    tracer = Tracer(path=trace_log)
+    tool_logger = ToolCallLogger(path=tool_log)
+    tracer.log("user_input", "old input")
+    tool_logger.log(
+        "workspace_write",
+        ok=True,
+        args={"path": "src/generated/old.py", "content": "print('old')"},
+    )
+    tracer.log(
+        "interaction_logged",
+        "old interaction done",
+        {"interaction_id": stale_trace_id},
+    )
+    monkeypatch.setattr("server.http_api.TRACE_LOG", trace_log)
+    monkeypatch.setattr("server.http_api.TOOL_CALLS_LOG", tool_log)
+
+    async def run() -> None:
+        client = await _create_client(StaleTraceIdAgent(stale_trace_id))
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session = create_payload.get("session")
+            assert isinstance(session, dict)
+            session_id = session.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Simple reply please"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            display = send_payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "chat"
+            files = send_payload.get("files")
+            assert isinstance(files, list)
+            assert files == []
+            artifacts = send_payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts == []
         finally:
             await client.close()
 
@@ -1007,7 +1259,9 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             assert isinstance(second, dict)
             assert first.get("role") == "user"
             assert second.get("role") == "assistant"
-            assert second.get("content") == "Готово. Результат в Canvas."
+            second_content = second.get("content")
+            assert isinstance(second_content, str)
+            assert f"decision-{session_id}" in second_content
             restored_decision = session.get("decision")
             assert isinstance(restored_decision, dict)
             assert restored_decision.get("id") == f"decision-{session_id}"
@@ -1019,6 +1273,9 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             restored_files = session.get("files")
             assert isinstance(restored_files, list)
             assert restored_files == []
+            restored_artifacts = session.get("artifacts")
+            assert isinstance(restored_artifacts, list)
+            assert restored_artifacts == []
             restored_model = session.get("selected_model")
             assert isinstance(restored_model, dict)
             assert restored_model.get("provider") == "local"

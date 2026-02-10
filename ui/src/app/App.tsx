@@ -19,6 +19,23 @@ const SESSION_HEADER = 'X-Slavik-Session';
 const SCROLLBAR_REVEAL_DISTANCE_PX = 38;
 const LAST_SESSION_KEY = 'slavik.last.session';
 
+type SessionArtifactRecord = {
+  id: string;
+  kind: 'output';
+  title: string;
+  content: string;
+  createdAt: string | null;
+  displayTarget: 'chat' | 'canvas';
+};
+
+type DisplayDecision = {
+  target: 'chat' | 'canvas';
+  artifactId: string | null;
+  forced: boolean;
+};
+
+const toOutputArtifactUiId = (artifactId: string): string => `output-${artifactId}`;
+
 const isChatMessage = (value: unknown): value is ChatMessage => {
   if (!value || typeof value !== 'object') {
     return false;
@@ -196,6 +213,63 @@ const parseSessionFiles = (value: unknown): string[] => {
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 };
 
+const parseSessionArtifacts = (value: unknown): SessionArtifactRecord[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const artifacts: SessionArtifactRecord[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const candidate = item as {
+      id?: unknown;
+      kind?: unknown;
+      title?: unknown;
+      content?: unknown;
+      created_at?: unknown;
+      display_target?: unknown;
+    };
+    if (typeof candidate.id !== 'string' || !candidate.id.trim()) {
+      continue;
+    }
+    if (candidate.kind !== 'output') {
+      continue;
+    }
+    if (typeof candidate.content !== 'string' || !candidate.content.trim()) {
+      continue;
+    }
+    const title =
+      typeof candidate.title === 'string' && candidate.title.trim()
+        ? candidate.title.trim()
+        : candidate.content.split('\n').find((line) => line.trim())?.trim().slice(0, 80) || 'Result';
+    artifacts.push({
+      id: candidate.id.trim(),
+      kind: 'output',
+      title,
+      content: candidate.content,
+      createdAt: typeof candidate.created_at === 'string' ? candidate.created_at : null,
+      displayTarget: candidate.display_target === 'canvas' ? 'canvas' : 'chat',
+    });
+  }
+  return artifacts;
+};
+
+const parseDisplayDecision = (value: unknown): DisplayDecision | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as { target?: unknown; artifact_id?: unknown; forced?: unknown };
+  if (candidate.target !== 'chat' && candidate.target !== 'canvas') {
+    return null;
+  }
+  return {
+    target: candidate.target,
+    artifactId: typeof candidate.artifact_id === 'string' ? candidate.artifact_id : null,
+    forced: candidate.forced === true,
+  };
+};
+
 const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) {
@@ -259,33 +333,44 @@ const inferArtifactCategory = (type: Artifact['type']): Artifact['category'] => 
 };
 
 const buildArtifactsFromSources = (
-  outputText: string | null,
+  artifactsHistory: SessionArtifactRecord[],
   files: string[],
+  streamingContentByArtifactId: Record<string, string>,
 ): Artifact[] => {
   const artifacts: Artifact[] = [];
-  if (outputText && outputText.trim()) {
-    const firstLine = outputText.split('\n').find((line) => line.trim());
-    const title = firstLine ? firstLine.trim().slice(0, 60) : 'Latest output';
-    const type = inferArtifactType(outputText);
+  const seen = new Set<string>();
+
+  for (const item of artifactsHistory) {
+    if (!item.content.trim()) {
+      continue;
+    }
+    const id = `output-${item.id}`;
+    const hasStreamOverride = Object.prototype.hasOwnProperty.call(streamingContentByArtifactId, id);
+    const content = hasStreamOverride ? streamingContentByArtifactId[id] : item.content;
+    const type = inferArtifactType(item.content);
+    if (seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
     artifacts.push({
-      id: 'output-latest',
-      name: title,
+      id,
+      name: item.title,
       type,
       category: inferArtifactCategory(type),
-      content: outputText,
+      content,
     });
   }
 
-  const seen = new Set<string>();
   for (const rawPath of files) {
     const path = rawPath.trim();
-    if (!path || seen.has(path)) {
+    const fileId = `file-${path}`;
+    if (!path || seen.has(fileId)) {
       continue;
     }
-    seen.add(path);
+    seen.add(fileId);
     const type = inferArtifactTypeFromPath(path);
     artifacts.push({
-      id: `file-${path}`,
+      id: fileId,
       name: path,
       type,
       category: inferArtifactCategory(type),
@@ -294,17 +379,6 @@ const buildArtifactsFromSources = (
   }
 
   return artifacts;
-};
-
-const shouldAutoOpenCanvas = (outputText: string | null): boolean => {
-  if (!outputText) {
-    return false;
-  }
-  const normalized = outputText.trim();
-  if (!normalized) {
-    return false;
-  }
-  return normalized.includes('```') || normalized.length >= 280;
 };
 
 const extractSessionIdFromPayload = (payload: unknown): string | null => {
@@ -341,8 +415,10 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [sessionOutput, setSessionOutput] = useState<string | null>(null);
+  const [, setSessionOutput] = useState<string | null>(null);
   const [sessionFiles, setSessionFiles] = useState<string[]>([]);
+  const [sessionArtifacts, setSessionArtifacts] = useState<SessionArtifactRecord[]>([]);
+  const [streamingContentByArtifactId, setStreamingContentByArtifactId] = useState<Record<string, string>>({});
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [folders, setFolders] = useState<FolderSummary[]>([]);
 
@@ -355,6 +431,8 @@ export default function App() {
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
+  const [artifactViewerArtifactId, setArtifactViewerArtifactId] = useState<string | null>(null);
+  const [forceCanvasNext, setForceCanvasNext] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -399,8 +477,13 @@ export default function App() {
     [sessions],
   );
   const artifacts = useMemo(
-    () => buildArtifactsFromSources(sessionOutput, sessionFiles),
-    [sessionOutput, sessionFiles],
+    () =>
+      buildArtifactsFromSources(
+        sessionArtifacts,
+        sessionFiles,
+        streamingContentByArtifactId,
+      ),
+    [sessionArtifacts, sessionFiles, streamingContentByArtifactId],
   );
   const modelLabel = selectedModel
     ? `${selectedModel.provider}/${selectedModel.model}`
@@ -671,6 +754,9 @@ export default function App() {
     const parsedOutput = parseSessionOutput((outputPayload as { output?: unknown }).output);
     setSessionOutput(parsedOutput.content);
     setSessionFiles(parseSessionFiles((filesPayload as { files?: unknown }).files));
+    setSessionArtifacts(
+      parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
+    );
     const parsedSelectedModel = parseSelectedModel(session?.selected_model);
     setSelectedModel(parsedSelectedModel);
     return parsedSelectedModel;
@@ -699,6 +785,9 @@ export default function App() {
     setSessionOutput(parsedOutput.content);
     setSessionFiles(
       parseSessionFiles((session as { files?: unknown } | undefined)?.files),
+    );
+    setSessionArtifacts(
+      parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
     );
     setSelectedModel(sessionModel);
     return { sessionId: nextSession, selectedModel: sessionModel };
@@ -781,11 +870,70 @@ export default function App() {
     }
   }, [selectedModel]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || !selectedConversation) {
+      return;
+    }
+    const streamUrl = `/ui/api/events/stream?session_id=${encodeURIComponent(selectedConversation)}`;
+    const eventSource = new EventSource(streamUrl);
+    eventSource.onmessage = (event) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event.data) as unknown;
+      } catch {
+        return;
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        return;
+      }
+      const envelope = parsed as { type?: unknown; payload?: unknown };
+      if (typeof envelope.type !== 'string' || !envelope.payload || typeof envelope.payload !== 'object') {
+        return;
+      }
+      const payload = envelope.payload as { artifact_id?: unknown; delta?: unknown };
+      const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
+      if (!artifactId) {
+        return;
+      }
+      const uiArtifactId = toOutputArtifactUiId(artifactId);
+      if (envelope.type === 'canvas.stream.start') {
+        setArtifactPanelOpen(true);
+        setArtifactViewerArtifactId(uiArtifactId);
+        setStreamingContentByArtifactId((prev) => ({ ...prev, [uiArtifactId]: '' }));
+        return;
+      }
+      if (envelope.type === 'canvas.stream.delta') {
+        const delta = typeof payload.delta === 'string' ? payload.delta : '';
+        if (!delta) {
+          return;
+        }
+        setStreamingContentByArtifactId((prev) => {
+          const nextChunk = `${prev[uiArtifactId] ?? ''}${delta}`;
+          return { ...prev, [uiArtifactId]: nextChunk };
+        });
+        return;
+      }
+      if (envelope.type === 'canvas.stream.done') {
+        setStreamingContentByArtifactId((prev) => {
+          const next = { ...prev };
+          delete next[uiArtifactId];
+          return next;
+        });
+      }
+    };
+    eventSource.onerror = () => {};
+    return () => {
+      eventSource.close();
+    };
+  }, [selectedConversation]);
+
   const handleSelectConversation = async (sessionId: string) => {
     if (!sessionId || sessionId === selectedConversation) {
       return;
     }
     setSelectedConversation(sessionId);
+    setArtifactViewerArtifactId(null);
+    setStreamingContentByArtifactId({});
     try {
       await loadConversation(sessionId);
       saveLastSessionId(sessionId);
@@ -855,6 +1003,8 @@ export default function App() {
         return;
       }
       setSelectedConversation(nextSession);
+      setArtifactViewerArtifactId(null);
+      setStreamingContentByArtifactId({});
       saveLastSessionId(nextSession);
       await loadSessions();
       if (!created.selectedModel && providerModels.length > 0) {
@@ -916,6 +1066,8 @@ export default function App() {
             setMessages([]);
             setSessionOutput(null);
             setSessionFiles([]);
+            setSessionArtifacts([]);
+            setStreamingContentByArtifactId({});
             setSelectedModel(null);
             saveLastSessionId(null);
           }
@@ -961,6 +1113,10 @@ export default function App() {
     }
     setPendingUserMessage({ role: 'user', content: trimmed });
     setPendingSessionId(selectedConversation);
+    const forceCanvasForRequest = forceCanvasNext;
+    if (forceCanvasForRequest) {
+      setForceCanvasNext(false);
+    }
     setSending(true);
     try {
       const response = await fetch('/ui/api/chat/send', {
@@ -969,7 +1125,7 @@ export default function App() {
           'Content-Type': 'application/json',
           [SESSION_HEADER]: selectedConversation,
         },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, force_canvas: forceCanvasForRequest }),
       });
       const payload: unknown = await response.json();
       if (!response.ok) {
@@ -992,8 +1148,15 @@ export default function App() {
       setSessionOutput(parsedOutput.content);
       const parsedFiles = parseSessionFiles((payload as { files?: unknown }).files);
       setSessionFiles(parsedFiles);
-      if (shouldAutoOpenCanvas(parsedOutput.content)) {
+      setSessionArtifacts(parseSessionArtifacts((payload as { artifacts?: unknown }).artifacts));
+      const displayDecision = parseDisplayDecision((payload as { display?: unknown }).display);
+      if (displayDecision?.target === 'canvas') {
         setArtifactPanelOpen(true);
+        if (displayDecision.artifactId) {
+          setArtifactViewerArtifactId(`output-${displayDecision.artifactId}`);
+        }
+      } else {
+        setArtifactViewerArtifactId(null);
       }
       const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
       if (parsedModel) {
@@ -1008,6 +1171,9 @@ export default function App() {
       setStatusMessage(message);
       setPendingUserMessage(null);
       setPendingSessionId(null);
+      if (forceCanvasForRequest) {
+        setForceCanvasNext(true);
+      }
       return false;
     } finally {
       setSending(false);
@@ -1072,11 +1238,18 @@ export default function App() {
           }}
           modelsLoading={modelsLoading}
           savingModel={savingModel}
+          forceCanvasNext={forceCanvasNext}
+          onToggleForceCanvasNext={() => {
+            setForceCanvasNext((prev) => !prev);
+          }}
         />
 
         {!artifactPanelOpen ? (
           <button
-            onClick={() => setArtifactPanelOpen(true)}
+            onClick={() => {
+              setArtifactViewerArtifactId(null);
+              setArtifactPanelOpen(true);
+            }}
             className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#141418] border border-[#1f1f24] hover:border-[#2a2a30] hover:bg-[#1b1b20] flex items-center justify-center transition-all cursor-pointer shadow-lg shadow-black/30"
             title="Open Artifacts"
           >
@@ -1087,8 +1260,12 @@ export default function App() {
 
       <ArtifactPanel
         isOpen={artifactPanelOpen}
-        onClose={() => setArtifactPanelOpen(false)}
+        onClose={() => {
+          setArtifactPanelOpen(false);
+          setArtifactViewerArtifactId(null);
+        }}
         artifacts={artifacts}
+        autoOpenArtifactId={artifactViewerArtifactId}
       />
 
       <SearchModal

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArtifactsSidebar, type Artifact } from "./artifacts-sidebar";
 import { DocumentViewer } from "./document-viewer";
 
@@ -8,6 +8,7 @@ interface ArtifactPanelProps {
   isOpen: boolean;
   onClose: () => void;
   artifacts: Artifact[];
+  autoOpenArtifactId?: string | null;
   className?: string;
 }
 
@@ -15,10 +16,34 @@ export function ArtifactPanel({
   isOpen,
   onClose,
   artifacts,
+  autoOpenArtifactId = null,
   className = "",
 }: ArtifactPanelProps) {
   const [view, setView] = useState<PanelView>("sidebar");
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
+
+  useEffect(() => {
+    if (!autoOpenArtifactId) {
+      return;
+    }
+    const target = artifacts.find((artifact) => artifact.id === autoOpenArtifactId);
+    if (!target) {
+      return;
+    }
+    setSelectedArtifact(target);
+    setView("viewer");
+  }, [autoOpenArtifactId, artifacts]);
+
+  useEffect(() => {
+    if (!selectedArtifact) {
+      return;
+    }
+    const stillExists = artifacts.some((artifact) => artifact.id === selectedArtifact.id);
+    if (!stillExists) {
+      setSelectedArtifact(null);
+      setView("sidebar");
+    }
+  }, [artifacts, selectedArtifact]);
 
   if (!isOpen) return null;
 
