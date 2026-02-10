@@ -13,6 +13,10 @@ export interface DocumentViewerProps {
   title?: string;
   type?: string;
   content?: string;
+  artifactKind?: "text" | "file";
+  fileName?: string | null;
+  language?: string | null;
+  onDownload?: () => void;
   onBack?: () => void;
   onClose?: () => void;
   className?: string;
@@ -20,7 +24,21 @@ export interface DocumentViewerProps {
 
 // Formats available for document types vs code types
 const documentFormats = ["MD", "TXT", "PDF", "HTML"];
-const codeExtensions = ["PY", "JS", "TS", "JSX", "TSX", "CSS", "JSON", "HTML", "SQL", "SH", "YAML", "YML", "TOML"];
+const codeExtensions = [
+  "PY",
+  "JS",
+  "TS",
+  "JSX",
+  "TSX",
+  "CSS",
+  "JSON",
+  "HTML",
+  "SQL",
+  "SH",
+  "YAML",
+  "YML",
+  "TOML",
+];
 
 function isCodeFile(type: string): boolean {
   return codeExtensions.includes(type.toUpperCase());
@@ -146,6 +164,10 @@ export function DocumentViewer({
   title = "Artifact",
   type = "MD",
   content = "",
+  artifactKind = "text",
+  fileName = null,
+  language = null,
+  onDownload,
   onBack,
   onClose,
   className = "",
@@ -172,21 +194,33 @@ export function DocumentViewer({
   };
 
   const handleDownload = (format: string) => {
+    if (artifactKind === "file" && onDownload) {
+      onDownload();
+      setShowDownloadMenu(false);
+      return;
+    }
     const blob = new Blob([content], { type: getMimeType(format) });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${title}.${format.toLowerCase()}`;
+    const fallbackName = `${title}.${format.toLowerCase()}`;
+    a.download = fileName?.trim() || fallbackName;
     a.click();
     URL.revokeObjectURL(url);
     setShowDownloadMenu(false);
   };
 
-  const downloadFormats = isCodeFile(type) ? [type.toUpperCase()] : documentFormats;
+  const downloadFormats = artifactKind === "file"
+    ? [type.toUpperCase()]
+    : (isCodeFile(type) ? [type.toUpperCase()] : documentFormats);
 
   // Simple markdown renderer
   const renderMarkdown = (md: string) => {
-    const lines = md.split("\n");
+    const normalizedMd =
+      md.includes("\\n") && md.includes("```") && /```[a-zA-Z0-9_-]*\\n/.test(md)
+        ? md.replace(/\\n/g, "\n")
+        : md;
+    const lines = normalizedMd.split("\n");
     const elements: React.ReactNode[] = [];
     let inTable = false;
     let tableHeaders: string[] = [];
@@ -482,7 +516,7 @@ export function DocumentViewer({
                     className="flex items-center gap-2 w-full px-3 py-2 text-[12px] text-[#ccc] hover:bg-[#1b1b20] transition-colors cursor-pointer"
                   >
                     <Download className="w-3 h-3 text-[#666]" />
-                    .{format.toLowerCase()}
+                    {artifactKind === "file" && fileName ? fileName : `.${format.toLowerCase()}`}
                   </button>
                 ))}
               </div>
@@ -504,7 +538,7 @@ export function DocumentViewer({
         <div className="px-6 py-5">
           {content ? (
             isCodeFile(type) && !content.includes("```")
-              ? renderHighlightedCodeBlock(content, type, "raw-code")
+              ? renderHighlightedCodeBlock(content, language || type, "raw-code")
               : renderMarkdown(content)
           ) : (
             <p className="text-[13px] text-[#555]">Нет содержимого.</p>

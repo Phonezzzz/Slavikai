@@ -9,6 +9,8 @@ interface ArtifactPanelProps {
   onClose: () => void;
   artifacts: Artifact[];
   autoOpenArtifactId?: string | null;
+  onDownloadArtifact?: (artifact: Artifact) => void;
+  onDownloadAll?: () => void;
   className?: string;
 }
 
@@ -17,6 +19,8 @@ export function ArtifactPanel({
   onClose,
   artifacts,
   autoOpenArtifactId = null,
+  onDownloadArtifact,
+  onDownloadAll,
   className = "",
 }: ArtifactPanelProps) {
   const [view, setView] = useState<PanelView>("sidebar");
@@ -65,11 +69,17 @@ export function ArtifactPanel({
 
   if (view === "viewer" && selectedArtifact) {
     return (
-      <div className={`w-[50vw] max-w-[700px] min-w-[400px] flex-shrink-0 h-full ${className}`}>
+      <div
+        className={`h-full w-[40vw] min-w-[360px] max-w-[720px] flex-shrink-0 max-md:w-[88vw] max-md:min-w-0 ${className}`}
+      >
         <DocumentViewer
           title={selectedArtifact.name}
           type={selectedArtifact.type}
           content={selectedArtifact.content || ""}
+          artifactKind={selectedArtifact.artifactKind}
+          fileName={selectedArtifact.fileName}
+          language={selectedArtifact.language}
+          onDownload={() => onDownloadArtifact?.(selectedArtifact)}
           onBack={handleBack}
           onClose={handleClose}
         />
@@ -78,10 +88,20 @@ export function ArtifactPanel({
   }
 
   return (
-    <div className={`flex-shrink-0 h-full ${className}`}>
+    <div
+      className={`h-full w-[20vw] min-w-[280px] max-w-[420px] flex-shrink-0 max-md:w-[88vw] max-md:min-w-0 ${className}`}
+    >
       <ArtifactsSidebar
         artifacts={artifacts}
         onArtifactClick={handleArtifactClick}
+        onDownloadArtifact={(artifactId) => {
+          const target = artifacts.find((artifact) => artifact.id === artifactId);
+          if (!target) {
+            return;
+          }
+          onDownloadArtifact?.(target);
+        }}
+        onDownloadAll={onDownloadAll}
         onClose={handleClose}
       />
     </div>

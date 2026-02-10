@@ -2,6 +2,8 @@ from __future__ import annotations
 
 # ruff: noqa: F401
 # mypy: ignore-errors
+from collections.abc import Iterator
+
 from core.approval_policy import ApprovalRequired
 from core.decision.handler import DecisionContext, DecisionRequired
 from core.mwv.models import StopReasonCode
@@ -13,6 +15,7 @@ from shared.models import LLMMessage
 class AgentRoutingMixin:
     _last_user_input: str | None
     last_reasoning: str | None
+    last_stream_response_raw: str | None
 
     def respond(self, messages: list[LLMMessage]) -> str:
         if not messages:
@@ -105,6 +108,110 @@ class AgentRoutingMixin:
                 self._append_short_term([LLMMessage(role="assistant", content=error_text)])
             return error_text
 
+    def respond_stream(self, messages: list[LLMMessage]) -> Iterator[str]:
+        if not messages:
+            self.last_stream_response_raw = "[Пустое сообщение]"
+            yield "[Пустое сообщение]"
+            return
+
+        last_content = messages[-1].content.strip()
+        self._last_user_input = last_content
+        record_in_history = self._should_record_in_history(last_content)
+        self.last_stream_response_raw = None
+        try:
+            if record_in_history:
+                self._append_short_term(messages)
+            self.tracer.log("user_input", last_content)
+            self._reset_approval_state()
+            self.last_reasoning = None
+            self._reset_workspace_diffs()
+
+            if last_content.lower().startswith("авто") or last_content.startswith("/auto"):
+                result = self.handle_auto_command(last_content.replace("/auto", "").strip())
+                self.last_stream_response_raw = result
+                yield result
+                return
+
+            if last_content.startswith("/"):
+                result = self.handle_tool_command(last_content)
+                self.last_stream_response_raw = result
+                yield result
+                return
+
+            decision = classify_request(
+                messages,
+                last_content,
+                context={"safe_mode": bool(self.tools_enabled.get("safe_mode", False))},
+                skill_index=self.skill_index,
+            )
+            self._apply_skill_decision(decision.skill_decision)
+            self.tracer.log(
+                "routing_decision",
+                decision.route,
+                {"reason": decision.reason, "flags": decision.risk_flags},
+            )
+            if decision.skill_decision and decision.skill_decision.status == "deprecated":
+                response = self._format_skill_block(decision.skill_decision)
+                self.last_stream_response_raw = response
+                yield response
+                return
+
+            decision_packet = self.decision_handler.evaluate(
+                DecisionContext(
+                    user_input=last_content,
+                    route=decision.route,
+                    reason=decision.reason,
+                    risk_flags=list(decision.risk_flags),
+                    skill_decision=decision.skill_decision,
+                ),
+            )
+            if decision_packet is not None:
+                response = self._handle_decision_packet(
+                    decision_packet,
+                    raw_input=last_content,
+                    record_in_history=record_in_history,
+                )
+                self.last_stream_response_raw = response
+                yield response
+                return
+
+            if decision.route == "mwv":
+                if decision.skill_decision and decision.skill_decision.status == "no_match":
+                    self._record_unknown_inbox(last_content, decision)
+                    self._record_unknown_skill_candidate(last_content, decision)
+                response = self._run_mwv_flow(messages, last_content, decision, record_in_history)
+                self.last_stream_response_raw = response
+                yield response
+                return
+
+            yield from self._run_chat_response_stream(
+                messages,
+                last_content,
+                record_in_history,
+            )
+        except ApprovalRequired as exc:
+            response = self._handle_approval_required(
+                exc.request,
+                raw_input=last_content,
+                record_in_history=record_in_history,
+            )
+            self.last_stream_response_raw = response
+            yield response
+        except DecisionRequired as exc:
+            response = self._handle_decision_packet(
+                exc.packet,
+                raw_input=last_content,
+                record_in_history=record_in_history,
+            )
+            self.last_stream_response_raw = response
+            yield response
+        except Exception as exc:
+            self.logger.exception("Agent.respond_stream error: %s", exc)
+            self.tracer.log("error", f"Ошибка Agent.respond_stream: {exc}")
+            error_text = f"[Ошибка ответа: {exc}]"
+            self.last_stream_response_raw = error_text
+            yield error_text
+
     def _run_chat_response(
         self,
         messages: list[LLMMessage],
@@ -153,6 +260,56 @@ class AgentRoutingMixin:
             if record_in_history:
                 self._append_short_term([LLMMessage(role="assistant", content=error_text)])
             return error_text
+
+    def _run_chat_response_stream(
+        self,
+        messages: list[LLMMessage],
+        last_content: str,
+        record_in_history: bool,
+    ) -> Iterator[str]:
+        try:
+            self.tracer.log("reasoning_start", "Потоковая генерация ответа моделью")
+            policy_application = self._apply_policies(last_content)
+            messages_with_context = self._build_context_messages(self.short_term, last_content)
+            messages_with_context = self._append_policy_instructions(
+                messages_with_context,
+                policy_application,
+            )
+            del messages
+            collected_chunks: list[str] = []
+            for delta in self._get_main_brain().generate_stream(messages_with_context):
+                if not isinstance(delta, str) or not delta:
+                    continue
+                collected_chunks.append(delta)
+                yield delta
+            reviewed = self._review_answer("".join(collected_chunks))
+            self.tracer.log("reasoning_end", "Ответ получен", {"reply_preview": reviewed[:120]})
+            response_text = self._append_report_block(
+                reviewed,
+                route="chat",
+                trace_id=None,
+                attempts=None,
+                verifier=None,
+                next_steps=None,
+                stop_reason_code=None,
+                plan_summary="План не требуется для chat-маршрута.",
+                execution_summary="Ответ сформирован моделью.",
+            )
+            self.last_stream_response_raw = response_text
+            if self.memory_config.auto_save_dialogue:
+                self.save_to_memory(last_content, response_text)
+            self._log_chat_interaction(
+                raw_input=last_content,
+                response_text=response_text,
+                applied_policy_ids=policy_application.applied_policy_ids,
+            )
+            if record_in_history:
+                self._append_short_term([LLMMessage(role="assistant", content=response_text)])
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error("Stream LLM error: %s", exc)
+            self.tracer.log("error", f"Ошибка потоковой модели: {exc}")
+            raise
 
     def _apply_skill_decision(self, decision: SkillMatchDecision | None) -> None:
         self._last_skill_match = None

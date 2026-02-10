@@ -30,30 +30,77 @@ export interface CanvasMessage {
   timestamp?: string;
 }
 
+const CODE_FENCE_PATTERN = /(?:^|\n|\\n)```([a-zA-Z0-9_-]{0,32})(?:\n|\\n)([\s\S]*?)```(?=\n|\\n|$)/g;
+
+const normalizeEscapedMarkdown = (value: string): string => {
+  if (!value.includes("\\n") || !value.includes("```")) {
+    return value;
+  }
+  if (!/```[a-zA-Z0-9_-]*\\n/.test(value)) {
+    return value;
+  }
+  return value.replace(/\\n/g, "\n");
+};
+
+const parseFencedSections = (source: string): MessageSection[] => {
+  const sections: MessageSection[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null = CODE_FENCE_PATTERN.exec(source);
+
+  while (match) {
+    const fullMatch = match[0];
+    let prefixLen = 0;
+    if (fullMatch.startsWith("\n")) {
+      prefixLen = 1;
+    } else if (fullMatch.startsWith("\\n")) {
+      prefixLen = 2;
+    }
+    const matchStart = match.index + prefixLen;
+    const before = source.slice(lastIndex, matchStart);
+    if (before.trim()) {
+      sections.push({ type: "text", content: before.trim() });
+    }
+
+    const rawLanguage = (match[1] || "").trim().toLowerCase();
+    const language = /^[a-z0-9_-]{1,32}$/.test(rawLanguage) ? rawLanguage : "text";
+    const codeRaw = match[2] || "";
+    const code = codeRaw.replace(/\\n/g, "\n").replace(/\r\n/g, "\n").trimEnd();
+    sections.push({ type: "code", codeBlock: { language, code } });
+
+    lastIndex = match.index + fullMatch.length;
+    match = CODE_FENCE_PATTERN.exec(source);
+  }
+
+  const tail = source.slice(lastIndex);
+  if (tail.trim()) {
+    sections.push({ type: "text", content: tail.trim() });
+  }
+  return sections;
+};
+
 const parseContentSections = (content: string): MessageSection[] => {
   if (!content.includes("```")) {
     return [{ type: "text", content }];
   }
-  const parts = content.split("```");
-  const sections: MessageSection[] = [];
-  parts.forEach((part, index) => {
-    if (index % 2 === 0) {
-      if (part.trim()) {
-        sections.push({ type: "text", content: part.trim() });
-      }
-      return;
+  const direct = parseFencedSections(content);
+  if (direct.some((section) => section.type === "code")) {
+    return direct;
+  }
+  const normalized = normalizeEscapedMarkdown(content);
+  if (normalized !== content) {
+    const normalizedSections = parseFencedSections(normalized);
+    if (normalizedSections.some((section) => section.type === "code")) {
+      return normalizedSections;
     }
-    const lines = part.split("\n");
-    const language = lines[0]?.trim() || "text";
-    const code = lines.slice(1).join("\n").trimEnd();
-    sections.push({ type: "code", codeBlock: { language, code } });
-  });
-  return sections.length > 0 ? sections : [{ type: "text", content }];
+    return [{ type: "text", content: normalized }];
+  }
+  return direct.length > 0 ? direct : [{ type: "text", content }];
 };
 
 interface CanvasProps {
   messages?: CanvasMessage[];
   pendingMessage?: CanvasMessage | null;
+  streamingAssistantMessage?: CanvasMessage | null;
   sending?: boolean;
   onSendMessage?: (message: string) => void;
   className?: string;
@@ -306,6 +353,7 @@ function MessageBubble({ message }: { message: CanvasMessage }) {
 export function Canvas({
   messages = [],
   pendingMessage = null,
+  streamingAssistantMessage = null,
   sending = false,
   onSendMessage,
   className = "",
@@ -323,11 +371,15 @@ export function Canvas({
   const [inputValue, setInputValue] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const displayMessages = useMemo(() => {
+    const items = [...messages];
     if (pendingMessage) {
-      return [...messages, pendingMessage];
+      items.push(pendingMessage);
     }
-    return messages;
-  }, [messages, pendingMessage]);
+    if (streamingAssistantMessage) {
+      items.push(streamingAssistantMessage);
+    }
+    return items;
+  }, [messages, pendingMessage, streamingAssistantMessage]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -410,20 +462,6 @@ export function Canvas({
           {displayMessages.map((msg) => (
             <MessageBubble key={msg.id} message={msg} />
           ))}
-          {sending ? (
-            <div className="flex gap-3">
-              <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center bg-[#2a2a30] border border-[#3a3a42]">
-                <img
-                  src={BrainLogo}
-                  alt="SlavikAI"
-                  className="w-4 h-4 object-contain"
-                />
-              </div>
-              <div className="flex-1">
-                <div className="text-[14px] text-[#999]">Thinking…</div>
-              </div>
-            </div>
-          ) : null}
           <div ref={messagesEndRef} />
         </div>
       </div>

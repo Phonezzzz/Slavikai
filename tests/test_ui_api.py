@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import zipfile
 from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -53,6 +55,83 @@ class ShortCodeAgent(DummyAgent):
         del messages
         lines = [f"const item{idx} = {idx};" for idx in range(1, 16)]
         return "```ts\n" + "\n".join(lines) + "\n```"
+
+
+class StreamingAgent(DummyAgent):
+    def respond_stream(self, messages):
+        del messages
+        yield "Hello"
+        yield " "
+        yield "stream"
+
+    def respond(self, messages) -> str:
+        del messages
+        return "Hello stream"
+
+
+class NamedFileArtifactsAgent(DummyAgent):
+    def respond(self, messages) -> str:
+        del messages
+        return (
+            "Код (`clock.py`):\n"
+            "```python\n"
+            "import time\n"
+            "print(time.strftime('%H:%M:%S'))\n"
+            "```\n\n"
+            "Скрипт (`clock.sh`):\n"
+            "```sh\n"
+            "#!/bin/bash\n"
+            "date '+%H:%M:%S'\n"
+            "```\n"
+        )
+
+
+class StreamNamedFileArtifactsAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_stream_response_raw: str | None = None
+
+    def respond_stream(self, messages):
+        del messages
+        parts = [
+            "Вот мини-приложение.\n\n",
+            "Код (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n",
+        ]
+        yield from parts
+        self.last_stream_response_raw = "".join(parts)
+
+    def respond(self, messages) -> str:
+        del messages
+        return (
+            "Вот мини-приложение.\n\n"
+            "Код (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n"
+        )
+
+
+class LateNamedFileStreamAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_stream_response_raw: str | None = None
+
+    def respond_stream(self, messages):
+        del messages
+        intro = "Это подготовка результата для пользователя. " * 8
+        tail = "\nКод (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n"
+        yield intro
+        yield tail
+        self.last_stream_response_raw = f"{intro}{tail}"
+
+    def respond(self, messages) -> str:
+        del messages
+        intro = "Это подготовка результата для пользователя. " * 8
+        tail = "\nКод (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n"
+        return f"{intro}{tail}"
+
+
+class EscapedFenceNamedFileAgent(DummyAgent):
+    def respond(self, messages) -> str:
+        del messages
+        return "Код (`clock.py`):\\n```python\\nimport time\\nprint(time.time())\\n```\\n"
 
 
 class CaptureConfigAgent(DummyAgent):
@@ -288,6 +367,24 @@ async def _read_sse_event_types(response, *, max_events: int = 20) -> list[str]:
     return types
 
 
+async def _read_sse_events(response, *, max_events: int = 20) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    while len(events) < max_events:
+        try:
+            line = await asyncio.wait_for(response.content.readline(), timeout=2)
+        except TimeoutError:
+            break
+        if not line:
+            break
+        if not line.startswith(b"data: "):
+            continue
+        raw = line.removeprefix(b"data: ").decode("utf-8").strip()
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            events.append(parsed)
+    return events
+
+
 async def _select_local_model(client: TestClient, session_id: str) -> str:
     models_response = await client.get("/ui/api/models?provider=local")
     assert models_response.status == 200
@@ -450,7 +547,7 @@ def test_ui_chat_send_auto_routes_long_output_to_canvas() -> None:
             assert isinstance(last, dict)
             last_content = last.get("content")
             assert isinstance(last_content, str)
-            assert last_content.startswith("Статус: результат сформирован в Canvas")
+            assert last_content == "Статус: результат сформирован в Canvas."
             display = payload.get("display")
             assert isinstance(display, dict)
             assert display.get("target") == "canvas"
@@ -469,7 +566,7 @@ def test_ui_chat_send_auto_routes_long_output_to_canvas() -> None:
     asyncio.run(run())
 
 
-def test_ui_chat_send_short_code_stays_in_chat_and_registers_artifact() -> None:
+def test_ui_chat_send_short_code_stays_in_chat_without_artifact() -> None:
     async def run() -> None:
         client = await _create_client(ShortCodeAgent())
         try:
@@ -499,7 +596,236 @@ def test_ui_chat_send_short_code_stays_in_chat_and_registers_artifact() -> None:
             assert last_content.startswith("```ts")
             artifacts = payload.get("artifacts")
             assert isinstance(artifacts, list)
+            assert artifacts == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_named_files_create_file_artifacts_and_canvas() -> None:
+    async def run() -> None:
+        client = await _create_client(NamedFileArtifactsAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Напиши clock.py и clock.sh"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            display = send_payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "canvas"
+            artifacts = send_payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert len(artifacts) == 2
+            names: set[str] = set()
+            artifact_ids: list[str] = []
+            for item in artifacts:
+                assert isinstance(item, dict)
+                assert item.get("artifact_kind") == "file"
+                artifact_id = item.get("id")
+                file_name = item.get("file_name")
+                file_content = item.get("file_content")
+                assert isinstance(artifact_id, str)
+                assert isinstance(file_name, str)
+                assert isinstance(file_content, str)
+                artifact_ids.append(artifact_id)
+                names.add(file_name)
+            assert names == {"clock.py", "clock.sh"}
+
+            messages = send_payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last_message = messages[-1]
+            assert isinstance(last_message, dict)
+            assistant_text = last_message.get("content")
+            assert isinstance(assistant_text, str)
+            assert assistant_text.startswith("Статус: результат сформирован в Canvas")
+
+            download_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/artifacts/{artifact_ids[0]}/download",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert download_resp.status == 200
+            first_download_text = await download_resp.text()
+            assert "Код (`clock.py`)" not in first_download_text
+            assert "```" not in first_download_text
+            assert "import time" in first_download_text or "#!/bin/bash" in first_download_text
+            content_disposition = download_resp.headers.get("Content-Disposition")
+            assert isinstance(content_disposition, str)
+            assert "attachment" in content_disposition
+
+            download_all_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/artifacts/download-all",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert download_all_resp.status == 200
+            assert "application/zip" in download_all_resp.headers.get("Content-Type", "")
+            archive_bytes = await download_all_resp.read()
+            with zipfile.ZipFile(io.BytesIO(archive_bytes), mode="r") as archive:
+                archive_names = set(archive.namelist())
+                assert archive_names == {"clock.py", "clock.sh"}
+                clock_py = archive.read("clock.py").decode("utf-8")
+                clock_sh = archive.read("clock.sh").decode("utf-8")
+                assert "import time" in clock_py
+                assert "#!/bin/bash" in clock_sh
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_escaped_fence_named_file_artifact() -> None:
+    async def run() -> None:
+        client = await _create_client(EscapedFenceNamedFileAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Напиши файл clock.py целиком"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            display = send_payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "canvas"
+            artifacts = send_payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert len(artifacts) == 1
+            artifact = artifacts[0]
+            assert isinstance(artifact, dict)
+            assert artifact.get("artifact_kind") == "file"
+            assert artifact.get("file_name") == "clock.py"
+            file_content = artifact.get("file_content")
+            assert isinstance(file_content, str)
+            assert "import time" in file_content
+            assert "\\n" not in file_content
+
+            artifact_id = artifact.get("id")
+            assert isinstance(artifact_id, str)
+            download_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/artifacts/{artifact_id}/download",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert download_resp.status == 200
+            downloaded = await download_resp.text()
+            assert "import time" in downloaded
+            assert "```" not in downloaded
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_canvas_stream_emits_chat_status_and_canvas_stream() -> None:
+    async def run() -> None:
+        client = await _create_client(StreamNamedFileArtifactsAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "napiši mini app clock.py celikom"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            display = send_payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "canvas"
+
+            events = await _read_sse_events(stream_resp, max_events=64)
+            event_types = [
+                event.get("type") for event in events if isinstance(event.get("type"), str)
+            ]
+            assert "canvas.stream.start" in event_types
+            assert "canvas.stream.delta" in event_types
+            assert "canvas.stream.done" in event_types
+            assert "chat.stream.start" in event_types
+            assert "chat.stream.delta" in event_types
+            assert "chat.stream.done" in event_types
+            chat_deltas: list[str] = []
+            for event in events:
+                if event.get("type") != "chat.stream.delta":
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                delta = payload.get("delta")
+                if isinstance(delta, str):
+                    chat_deltas.append(delta)
+            assert chat_deltas
+            assert all("import time" not in delta for delta in chat_deltas)
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_canvas_keeps_status_when_stream_started_before_canvas_detection() -> None:
+    async def run() -> None:
+        client = await _create_client(LateNamedFileStreamAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Сделай пример"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            display = send_payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "canvas"
+            messages = send_payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last_message = messages[-1]
+            assert isinstance(last_message, dict)
+            assistant_text = last_message.get("content")
+            assert isinstance(assistant_text, str)
+            assert assistant_text.startswith("Статус: результат сформирован в Canvas")
+            assert "import time" not in assistant_text
+            artifacts = send_payload.get("artifacts")
+            assert isinstance(artifacts, list)
             assert artifacts
+            first = artifacts[0]
+            assert isinstance(first, dict)
+            assert first.get("artifact_kind") == "file"
+            assert first.get("file_name") == "clock.py"
         finally:
             await client.close()
 
@@ -957,6 +1283,56 @@ def test_ui_events_stream_includes_canvas_stream_events() -> None:
     asyncio.run(run())
 
 
+def test_ui_events_stream_includes_chat_stream_events() -> None:
+    async def run() -> None:
+        client = await _create_client(StreamingAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Stream this chat output"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            messages = send_payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            assert len(messages) == 2
+            last = messages[-1]
+            assert isinstance(last, dict)
+            assert last.get("content") == "Hello stream"
+            assistant_messages = [
+                item
+                for item in messages
+                if isinstance(item, dict) and item.get("role") == "assistant"
+            ]
+            assert len(assistant_messages) == 1
+
+            event_types = await _read_sse_event_types(stream_resp, max_events=64)
+            assert "chat.stream.start" in event_types
+            assert "chat.stream.delta" in event_types
+            assert "chat.stream.done" in event_types
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_sessions_api_create_send_get_history() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -1073,7 +1449,7 @@ def test_ui_chat_send_stores_files_from_tool_calls(monkeypatch, tmp_path) -> Non
             assert "src/generated/demo.py" in files
             artifacts = send_payload.get("artifacts")
             assert isinstance(artifacts, list)
-            assert artifacts
+            assert artifacts == []
 
             files_resp = await client.get(f"/ui/api/sessions/{session_id}/files")
             assert files_resp.status == 200

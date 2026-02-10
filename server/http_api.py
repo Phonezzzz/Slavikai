@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import difflib
 import importlib
+import io
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +108,95 @@ CANVAS_LINE_THRESHOLD: Final[int] = 40
 CANVAS_CHAR_THRESHOLD: Final[int] = 1800
 CANVAS_CODE_LINE_THRESHOLD: Final[int] = 28
 CANVAS_DOCUMENT_LINE_THRESHOLD: Final[int] = 24
+CHAT_STREAM_CHUNK_SIZE: Final[int] = 80
+CHAT_STREAM_WARMUP_CHARS: Final[int] = 220
+CANVAS_STATUS_CHARS_STEP: Final[int] = 640
+WORKSPACE_ROOT: Final[Path] = Path("sandbox/project").resolve()
+MAX_DOWNLOAD_BYTES: Final[int] = 5_000_000
+_REQUEST_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?P<name>[A-Za-z0-9._/\-]+\.[A-Za-z0-9]{1,12})"
+)
+_CODE_FENCE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"```(?P<lang>[a-zA-Z0-9_-]*)(?P<sep>\n|\\n)(?P<code>.*?)```",
+    re.DOTALL,
+)
+_ARTIFACT_FILE_EXTENSIONS: Final[set[str]] = {
+    "bash",
+    "c",
+    "cfg",
+    "conf",
+    "cpp",
+    "css",
+    "csv",
+    "env",
+    "go",
+    "h",
+    "hpp",
+    "html",
+    "ini",
+    "java",
+    "js",
+    "json",
+    "jsx",
+    "kt",
+    "md",
+    "php",
+    "py",
+    "rb",
+    "rs",
+    "sh",
+    "sql",
+    "swift",
+    "toml",
+    "ts",
+    "tsx",
+    "txt",
+    "xml",
+    "yaml",
+    "yml",
+}
+_EXT_TO_TYPE: Final[dict[str, str]] = {
+    "bash": "SH",
+    "c": "TXT",
+    "cpp": "TXT",
+    "py": "PY",
+    "js": "JS",
+    "jsx": "JS",
+    "ts": "TS",
+    "tsx": "TS",
+    "json": "JSON",
+    "html": "HTML",
+    "css": "CSS",
+    "md": "MD",
+    "txt": "TXT",
+    "sh": "SH",
+    "yaml": "TXT",
+    "yml": "TXT",
+    "toml": "TXT",
+    "xml": "TXT",
+    "sql": "TXT",
+}
+_EXT_TO_MIME: Final[dict[str, str]] = {
+    "bash": "text/x-shellscript",
+    "c": "text/plain",
+    "cpp": "text/plain",
+    "py": "text/x-python",
+    "js": "text/javascript",
+    "jsx": "text/javascript",
+    "ts": "text/typescript",
+    "tsx": "text/typescript",
+    "json": "application/json",
+    "html": "text/html",
+    "css": "text/css",
+    "md": "text/markdown",
+    "txt": "text/plain",
+    "sh": "text/x-shellscript",
+    "yaml": "text/plain",
+    "yml": "text/plain",
+    "toml": "text/plain",
+    "xml": "application/xml",
+    "sql": "text/plain",
+}
 
 
 @dataclass(frozen=True)
@@ -701,6 +793,42 @@ def _extract_files_from_tool_calls(tool_calls: list[dict[str, JSONValue]]) -> li
     return files
 
 
+def _resolve_workspace_file(path_raw: str) -> Path:
+    normalized = path_raw.strip()
+    if not normalized:
+        raise ValueError("path required")
+    candidate = (WORKSPACE_ROOT / normalized).resolve()
+    try:
+        candidate.relative_to(WORKSPACE_ROOT)
+    except ValueError as exc:
+        raise ValueError("path outside workspace") from exc
+    if not candidate.exists() or not candidate.is_file():
+        raise FileNotFoundError("file not found")
+    if candidate.stat().st_size > MAX_DOWNLOAD_BYTES:
+        raise ValueError("file too large")
+    return candidate
+
+
+def _artifact_file_payload(
+    artifact: dict[str, JSONValue],
+) -> tuple[str, str, str]:
+    artifact_kind = artifact.get("artifact_kind")
+    if artifact_kind != "file":
+        raise ValueError("artifact is not file")
+    file_name_raw = artifact.get("file_name")
+    file_content_raw = artifact.get("file_content")
+    file_ext_raw = artifact.get("file_ext")
+    if not isinstance(file_name_raw, str) or not file_name_raw.strip():
+        raise ValueError("artifact file_name missing")
+    if not isinstance(file_content_raw, str):
+        raise ValueError("artifact file_content missing")
+    ext = file_ext_raw.strip().lower() if isinstance(file_ext_raw, str) else ""
+    file_name = _sanitize_download_filename(file_name_raw)
+    inferred_ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    mime = _artifact_mime_from_ext(ext or inferred_ext)
+    return file_name, file_content_raw, mime
+
+
 def _serialize_trace_events(
     events: list[TraceRecord],
 ) -> list[dict[str, JSONValue]]:
@@ -835,13 +963,53 @@ def _is_document_like_output(normalized: str) -> bool:
     return heading_like >= 2
 
 
+def _request_likely_canvas(user_input: str) -> bool:
+    normalized = user_input.strip().lower()
+    if not normalized:
+        return False
+    if _extract_named_file_markers(normalized):
+        return True
+    if re.search(r"\b\d+\s*(files?|файл(а|ов)?)\b", normalized):
+        return True
+    keywords = (
+        "файл",
+        "files",
+        "project",
+        "readme",
+        "документ",
+        "module",
+        "класс",
+        "config",
+        "конфиг",
+        "целиком",
+        "полностью",
+        "mini app",
+        "mini ap",
+        "мини приложение",
+        "скрипт",
+        "script",
+        "напиши файл",
+        "создай файл",
+        "сгенерируй файл",
+        "prilozhen",
+        "skript",
+        "fail",
+        "celikom",
+        "polnost",
+    )
+    return any(token in normalized for token in keywords)
+
+
 def _should_render_result_in_canvas(
     *,
     response_text: str,
     files_from_tools: list[str],
+    named_files_count: int,
     force_canvas: bool,
 ) -> bool:
     if force_canvas:
+        return True
+    if named_files_count > 0:
         return True
     if len(files_from_tools) >= 2:
         return True
@@ -864,42 +1032,175 @@ def _should_render_result_in_canvas(
     return False
 
 
-def _build_output_artifact(
-    *,
-    response_text: str,
-    display_target: Literal["chat", "canvas"],
-) -> dict[str, JSONValue] | None:
-    normalized = response_text.strip()
+def _sanitize_download_filename(file_name: str) -> str:
+    normalized = file_name.replace("\\", "/").strip().split("/")[-1]
     if not normalized:
-        return None
-    first_line = next((line.strip() for line in normalized.splitlines() if line.strip()), "Result")
-    title = first_line[:80]
-    return {
-        "id": uuid.uuid4().hex,
-        "kind": "output",
-        "title": title,
-        "content": response_text,
-        "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
-        "display_target": display_target,
-    }
+        return "artifact.txt"
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in normalized)
+    if safe.startswith("."):
+        safe = f"file{safe}"
+    return safe or "artifact.txt"
 
 
-def _should_register_output_artifact(
+def _safe_zip_entry_name(file_name: str) -> str:
+    normalized = file_name.replace("\\", "/").strip()
+    parts = [part for part in normalized.split("/") if part and part not in {".", ".."}]
+    if not parts:
+        return "artifact.txt"
+    safe_parts: list[str] = []
+    for part in parts:
+        safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in part)
+        if safe.startswith("."):
+            safe = f"file{safe}"
+        safe_parts.append(safe or "file")
+    return "/".join(safe_parts)
+
+
+def _artifact_type_from_ext(ext: str | None) -> str:
+    if not ext:
+        return "TXT"
+    return _EXT_TO_TYPE.get(ext.lower(), "TXT")
+
+
+def _artifact_mime_from_ext(ext: str | None) -> str:
+    if not ext:
+        return "text/plain"
+    return _EXT_TO_MIME.get(ext.lower(), "text/plain")
+
+
+def _normalize_candidate_file_name(raw_name: str) -> str:
+    return raw_name.strip().strip("`\"'()[]{}<>.,;:!?")
+
+
+def _is_probable_named_file(candidate: str) -> bool:
+    normalized = _normalize_candidate_file_name(candidate)
+    if not normalized:
+        return False
+    if normalized.startswith("//") or "://" in normalized:
+        return False
+    if "/" in normalized:
+        head = normalized.split("/", 1)[0]
+        if "." in head and not head.startswith("."):
+            return False
+    if "." not in normalized:
+        return False
+    ext = normalized.rsplit(".", 1)[-1].lower()
+    if ext not in _ARTIFACT_FILE_EXTENSIONS:
+        return False
+    return True
+
+
+def _extract_named_file_markers(marker_chunk: str) -> list[str]:
+    names: list[str] = []
+    for match in _REQUEST_FILENAME_PATTERN.finditer(marker_chunk):
+        raw_name = match.group("name")
+        if not _is_probable_named_file(raw_name):
+            continue
+        normalized = _normalize_candidate_file_name(raw_name)
+        if normalized:
+            names.append(normalized)
+    return names
+
+
+def _normalize_code_fence_content(code_raw: str, sep: str) -> str:
+    normalized = code_raw
+    if sep == "\\n" and "\n" not in normalized and "\\n" in normalized:
+        normalized = normalized.replace("\\n", "\n")
+    return normalized.rstrip("\n")
+
+
+def _extract_named_files_from_output(response_text: str) -> list[dict[str, str]]:
+    if not response_text.strip():
+        return []
+    files: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for match in _CODE_FENCE_PATTERN.finditer(response_text):
+        code = _normalize_code_fence_content(match.group("code"), match.group("sep"))
+        if not code.strip():
+            continue
+        lang = match.group("lang").strip().lower()
+        marker_start = max(0, match.start() - 220)
+        marker_chunk = response_text[marker_start : match.start()]
+        marker_matches = _extract_named_file_markers(marker_chunk)
+        if not marker_matches:
+            continue
+        file_name_raw = marker_matches[-1]
+        file_name = _safe_zip_entry_name(file_name_raw)
+        if file_name in seen:
+            continue
+        seen.add(file_name)
+        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+        if ext not in _ARTIFACT_FILE_EXTENSIONS:
+            continue
+        files.append(
+            {
+                "file_name": file_name,
+                "file_ext": ext,
+                "language": lang or ext,
+                "file_content": code,
+            }
+        )
+    return files
+
+
+def _build_output_artifacts(
     *,
     response_text: str,
     display_target: Literal["chat", "canvas"],
     files_from_tools: list[str],
-) -> bool:
+) -> list[dict[str, JSONValue]]:
     normalized = response_text.strip()
     if not normalized:
-        return False
-    if display_target == "canvas":
-        return True
-    if files_from_tools:
-        return True
-    if "```" in normalized:
-        return True
-    return False
+        return []
+
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    artifacts: list[dict[str, JSONValue]] = []
+    named_files = _extract_named_files_from_output(response_text)
+    for named_file in named_files:
+        file_name = named_file["file_name"]
+        file_ext = named_file["file_ext"] or None
+        language = named_file["language"] or None
+        file_content = named_file["file_content"]
+        artifacts.append(
+            {
+                "id": uuid.uuid4().hex,
+                "kind": "output",
+                "artifact_kind": "file",
+                "title": file_name,
+                "content": file_content,
+                "file_name": file_name,
+                "file_ext": file_ext,
+                "language": language,
+                "file_content": file_content,
+                "created_at": now,
+                "display_target": display_target,
+            }
+        )
+
+    del files_from_tools
+    should_include_text = display_target == "canvas"
+    if should_include_text and not named_files:
+        first_line = next(
+            (line.strip() for line in normalized.splitlines() if line.strip()),
+            "Result",
+        )
+        artifacts.append(
+            {
+                "id": uuid.uuid4().hex,
+                "kind": "output",
+                "artifact_kind": "text",
+                "title": first_line[:80],
+                "content": response_text,
+                "file_name": None,
+                "file_ext": None,
+                "language": None,
+                "file_content": None,
+                "created_at": now,
+                "display_target": display_target,
+            }
+        )
+
+    return artifacts
 
 
 def _build_canvas_chat_summary(*, artifact_title: str | None) -> str:
@@ -908,6 +1209,139 @@ def _build_canvas_chat_summary(*, artifact_title: str | None) -> str:
         if normalized:
             return f"Статус: результат сформирован в Canvas ({normalized})"
     return "Статус: результат сформирован в Canvas."
+
+
+def _canvas_summary_title_from_artifact(
+    artifact: dict[str, JSONValue] | None,
+) -> str | None:
+    if artifact is None:
+        return None
+    artifact_kind = artifact.get("artifact_kind")
+    if artifact_kind != "file":
+        return None
+    file_name_raw = artifact.get("file_name")
+    if isinstance(file_name_raw, str) and file_name_raw.strip():
+        return _sanitize_download_filename(file_name_raw)
+    title_raw = artifact.get("title")
+    if not isinstance(title_raw, str):
+        return None
+    normalized = " ".join(title_raw.replace("`", " ").split())
+    if not normalized:
+        return None
+    return normalized[:80]
+
+
+def _split_chat_stream_chunks(content: str) -> list[str]:
+    if not content:
+        return []
+    return [
+        content[idx : idx + CHAT_STREAM_CHUNK_SIZE]
+        for idx in range(0, len(content), CHAT_STREAM_CHUNK_SIZE)
+    ]
+
+
+def _stream_preview_indicates_canvas(preview_text: str) -> bool:
+    normalized = preview_text.strip()
+    if not normalized:
+        return False
+    if len(normalized) >= CANVAS_CHAR_THRESHOLD:
+        return True
+    if len(normalized.splitlines()) >= CANVAS_CODE_LINE_THRESHOLD:
+        return True
+    if _extract_named_files_from_output(normalized):
+        return True
+    tail = normalized[-320:]
+    if "```" in tail and _extract_named_file_markers(tail):
+        return True
+    return False
+
+
+def _stream_preview_ready_for_chat(preview_text: str) -> bool:
+    normalized = preview_text.strip()
+    if not normalized:
+        return False
+    if len(normalized) >= CHAT_STREAM_WARMUP_CHARS:
+        return True
+    if len(normalized) >= 96 and "```" not in normalized and normalized.count("\n") <= 1:
+        return True
+    return False
+
+
+async def _publish_chat_stream_start(
+    hub: UIHub,
+    *,
+    session_id: str,
+    stream_id: str,
+) -> None:
+    await hub.publish(
+        session_id,
+        {
+            "type": "chat.stream.start",
+            "payload": {
+                "session_id": session_id,
+                "stream_id": stream_id,
+            },
+        },
+    )
+
+
+async def _publish_chat_stream_delta(
+    hub: UIHub,
+    *,
+    session_id: str,
+    stream_id: str,
+    delta: str,
+) -> None:
+    if not delta:
+        return
+    await hub.publish(
+        session_id,
+        {
+            "type": "chat.stream.delta",
+            "payload": {
+                "session_id": session_id,
+                "stream_id": stream_id,
+                "delta": delta,
+            },
+        },
+    )
+
+
+async def _publish_chat_stream_done(
+    hub: UIHub,
+    *,
+    session_id: str,
+    stream_id: str,
+) -> None:
+    await hub.publish(
+        session_id,
+        {
+            "type": "chat.stream.done",
+            "payload": {
+                "session_id": session_id,
+                "stream_id": stream_id,
+            },
+        },
+    )
+
+
+async def _publish_chat_stream_from_text(
+    hub: UIHub,
+    *,
+    session_id: str,
+    stream_id: str,
+    content: str,
+) -> None:
+    await _publish_chat_stream_start(hub, session_id=session_id, stream_id=stream_id)
+    for chunk in _split_chat_stream_chunks(content):
+        await _publish_chat_stream_delta(
+            hub,
+            session_id=session_id,
+            stream_id=stream_id,
+            delta=chunk,
+        )
+        await asyncio.sleep(0.01)
+    await _publish_chat_stream_done(hub, session_id=session_id, stream_id=stream_id)
 
 
 def _split_canvas_stream_chunks(content: str) -> list[str]:
@@ -2104,6 +2538,180 @@ async def handle_ui_session_files_get(request: web.Request) -> web.Response:
     return _json_response({"session_id": session_id, "files": files})
 
 
+async def handle_ui_session_file_download(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    files = await hub.get_session_files(session_id)
+    if files is None:
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    path_raw = request.query.get("path", "").strip()
+    if not path_raw:
+        return _error_response(
+            status=400,
+            message="path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if path_raw not in files:
+        return _error_response(
+            status=404,
+            message="File not found in session.",
+            error_type="invalid_request_error",
+            code="session_file_not_found",
+        )
+    try:
+        file_path = _resolve_workspace_file(path_raw)
+        content = file_path.read_bytes()
+    except FileNotFoundError:
+        return _error_response(
+            status=404,
+            message="File not found.",
+            error_type="invalid_request_error",
+            code="session_file_not_found",
+        )
+    except ValueError as exc:
+        return _error_response(
+            status=400,
+            message=f"Invalid path: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    safe_name = _sanitize_download_filename(path_raw)
+    ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
+    mime = _artifact_mime_from_ext(ext)
+    response = web.Response(body=content, content_type=mime)
+    response.headers["Content-Disposition"] = f'attachment; filename="{safe_name}"'
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_session_artifact_download(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    artifact_id = request.match_info.get("artifact_id", "").strip()
+    if not session_id or not artifact_id:
+        return _error_response(
+            status=400,
+            message="session_id и artifact_id обязательны.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    artifacts = await hub.get_session_artifacts(session_id)
+    if artifacts is None:
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    target = next(
+        (
+            artifact
+            for artifact in artifacts
+            if isinstance(artifact.get("id"), str) and str(artifact.get("id")) == artifact_id
+        ),
+        None,
+    )
+    if target is None:
+        return _error_response(
+            status=404,
+            message="Artifact not found.",
+            error_type="invalid_request_error",
+            code="artifact_not_found",
+        )
+    try:
+        file_name, file_content, mime = _artifact_file_payload(target)
+    except ValueError as exc:
+        return _error_response(
+            status=400,
+            message=f"Artifact is not downloadable file: {exc}",
+            error_type="invalid_request_error",
+            code="artifact_not_file",
+        )
+
+    response = web.Response(body=file_content.encode("utf-8"), content_type=mime)
+    response.headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_session_artifacts_download_all(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    artifacts = await hub.get_session_artifacts(session_id)
+    if artifacts is None:
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+
+    file_items: list[tuple[str, str, str]] = []
+    for artifact in artifacts:
+        try:
+            file_items.append(_artifact_file_payload(artifact))
+        except ValueError:
+            continue
+    if not file_items:
+        return _error_response(
+            status=404,
+            message="No file artifacts for download.",
+            error_type="invalid_request_error",
+            code="artifact_not_file",
+        )
+
+    force_zip = request.query.get("format", "").strip().lower() == "zip"
+    if len(file_items) == 1 and not force_zip:
+        file_name, file_content, mime = file_items[0]
+        response = web.Response(body=file_content.encode("utf-8"), content_type=mime)
+        response.headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        used_names: set[str] = set()
+        for file_name, file_content, _ in file_items:
+            entry_name = _safe_zip_entry_name(file_name)
+            base_name = entry_name
+            suffix = 1
+            while entry_name in used_names:
+                stem, dot, ext = base_name.partition(".")
+                if dot:
+                    entry_name = f"{stem}_{suffix}.{ext}"
+                else:
+                    entry_name = f"{base_name}_{suffix}"
+                suffix += 1
+            used_names.add(entry_name)
+            archive.writestr(entry_name, file_content)
+    zip_bytes = zip_buffer.getvalue()
+    response = web.Response(body=zip_bytes, content_type="application/zip")
+    response.headers["Content-Disposition"] = 'attachment; filename="artifacts.zip"'
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
 async def handle_ui_session_title_update(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
@@ -2317,6 +2925,8 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         mwv_report: dict[str, JSONValue] | None = None
         trace_id: str | None = None
         approval_request: dict[str, JSONValue] | None = None
+        chat_stream_id = uuid.uuid4().hex
+        live_stream_sent = False
         async with agent_lock:
             previous_trace_id = _normalize_trace_id(
                 getattr(agent, "last_chat_interaction_id", None)
@@ -2353,7 +2963,128 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 phase="agent.respond.start",
                 detail="chat",
             )
-            response_raw = agent.respond(llm_messages)
+            request_prefers_canvas = force_canvas or _request_likely_canvas(content_raw)
+            response_raw: str
+            respond_stream_method = getattr(agent, "respond_stream", None)
+            if callable(respond_stream_method):
+                stream_chunks: list[str] = []
+                pending_chat_chunks: list[str] = []
+                chat_stream_mode: Literal["pending", "chat", "canvas"] = (
+                    "canvas" if request_prefers_canvas else "pending"
+                )
+                chat_content_stream_open = False
+                canvas_status_stream_open = False
+                canvas_status_chars = 0
+                next_canvas_status_at = CANVAS_STATUS_CHARS_STEP
+                try:
+                    for delta in respond_stream_method(llm_messages):
+                        if not isinstance(delta, str) or not delta:
+                            continue
+                        stream_chunks.append(delta)
+                        if chat_stream_mode == "canvas":
+                            canvas_status_chars += len(delta)
+                            if not canvas_status_stream_open:
+                                await _publish_chat_stream_start(
+                                    hub,
+                                    session_id=session_id,
+                                    stream_id=chat_stream_id,
+                                )
+                                await _publish_chat_stream_delta(
+                                    hub,
+                                    session_id=session_id,
+                                    stream_id=chat_stream_id,
+                                    delta="Статус: формирую результат в Canvas...",
+                                )
+                                live_stream_sent = True
+                                canvas_status_stream_open = True
+                                continue
+                            if canvas_status_chars >= next_canvas_status_at:
+                                await _publish_chat_stream_delta(
+                                    hub,
+                                    session_id=session_id,
+                                    stream_id=chat_stream_id,
+                                    delta="\nСтатус: обновляю содержимое Canvas...",
+                                )
+                                live_stream_sent = True
+                                next_canvas_status_at += CANVAS_STATUS_CHARS_STEP
+                            continue
+                        if chat_stream_mode == "chat":
+                            for chunk in _split_chat_stream_chunks(delta):
+                                await _publish_chat_stream_delta(
+                                    hub,
+                                    session_id=session_id,
+                                    stream_id=chat_stream_id,
+                                    delta=chunk,
+                                )
+                                live_stream_sent = True
+                                await asyncio.sleep(0.005)
+                            continue
+                        pending_chat_chunks.append(delta)
+                        pending_preview = "".join(pending_chat_chunks)
+                        if _stream_preview_indicates_canvas(pending_preview):
+                            chat_stream_mode = "canvas"
+                            continue
+                        if not _stream_preview_ready_for_chat(pending_preview):
+                            continue
+                        chat_stream_mode = "chat"
+                        await _publish_chat_stream_start(
+                            hub,
+                            session_id=session_id,
+                            stream_id=chat_stream_id,
+                        )
+                        chat_content_stream_open = True
+                        for chunk in _split_chat_stream_chunks(pending_preview):
+                            await _publish_chat_stream_delta(
+                                hub,
+                                session_id=session_id,
+                                stream_id=chat_stream_id,
+                                delta=chunk,
+                            )
+                            live_stream_sent = True
+                            await asyncio.sleep(0.005)
+                        pending_chat_chunks = []
+                    if chat_content_stream_open:
+                        await _publish_chat_stream_done(
+                            hub,
+                            session_id=session_id,
+                            stream_id=chat_stream_id,
+                        )
+                        chat_content_stream_open = False
+                    if canvas_status_stream_open:
+                        await _publish_chat_stream_done(
+                            hub,
+                            session_id=session_id,
+                            stream_id=chat_stream_id,
+                        )
+                        canvas_status_stream_open = False
+                    response_raw_candidate = getattr(agent, "last_stream_response_raw", None)
+                    if isinstance(response_raw_candidate, str) and response_raw_candidate.strip():
+                        response_raw = response_raw_candidate
+                    else:
+                        response_raw = "".join(stream_chunks)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Live stream failed; fallback to regular respond",
+                        exc_info=True,
+                        extra={"session_id": session_id, "error": str(exc)},
+                    )
+                    if chat_content_stream_open:
+                        await _publish_chat_stream_done(
+                            hub,
+                            session_id=session_id,
+                            stream_id=chat_stream_id,
+                        )
+                        chat_content_stream_open = False
+                    if canvas_status_stream_open:
+                        await _publish_chat_stream_done(
+                            hub,
+                            session_id=session_id,
+                            stream_id=chat_stream_id,
+                        )
+                        canvas_status_stream_open = False
+                    response_raw = agent.respond(llm_messages)
+            else:
+                response_raw = agent.respond(llm_messages)
             response_text, mwv_report = _split_response_and_report(response_raw)
             await _publish_agent_activity(
                 hub,
@@ -2377,6 +3108,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             files_from_tools = _extract_files_from_tool_calls(tool_calls)
             if files_from_tools:
                 await hub.merge_session_files(session_id, files_from_tools)
+        named_files_count = len(_extract_named_files_from_output(response_text))
         display_target: Literal["chat", "canvas"]
         if approval_request is not None:
             display_target = "chat"
@@ -2386,34 +3118,43 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 if _should_render_result_in_canvas(
                     response_text=response_text,
                     files_from_tools=files_from_tools,
+                    named_files_count=named_files_count,
                     force_canvas=force_canvas,
                 )
                 else "chat"
             )
-        artifact_payload: dict[str, JSONValue] | None = None
-        if _should_register_output_artifact(
+        artifact_payloads = _build_output_artifacts(
             response_text=response_text,
             display_target=display_target,
             files_from_tools=files_from_tools,
-        ):
-            artifact_payload = _build_output_artifact(
-                response_text=response_text,
-                display_target=display_target,
-            )
-        if artifact_payload is not None:
-            await hub.append_session_artifact(session_id, artifact_payload)
-        artifact_id_raw = artifact_payload.get("id") if artifact_payload is not None else None
+        )
+        for artifact in artifact_payloads:
+            await hub.append_session_artifact(session_id, artifact)
+        first_artifact = artifact_payloads[0] if artifact_payloads else None
+        artifact_id_raw = first_artifact.get("id") if first_artifact is not None else None
         artifact_id = artifact_id_raw if isinstance(artifact_id_raw, str) else None
-        artifact_title_raw = artifact_payload.get("title") if artifact_payload is not None else None
-        artifact_title = artifact_title_raw if isinstance(artifact_title_raw, str) else None
+        artifact_title = _canvas_summary_title_from_artifact(first_artifact)
         if display_target == "canvas" and artifact_id is not None:
+            stream_source_raw = (
+                first_artifact.get("content") if first_artifact is not None else response_text
+            )
+            stream_source = (
+                stream_source_raw if isinstance(stream_source_raw, str) else response_text
+            )
             asyncio.create_task(
                 _publish_canvas_stream(
                     hub,
                     session_id=session_id,
                     artifact_id=artifact_id,
-                    content=response_text,
+                    content=stream_source,
                 )
+            )
+        if display_target == "chat" and not live_stream_sent:
+            await _publish_chat_stream_from_text(
+                hub,
+                session_id=session_id,
+                stream_id=chat_stream_id,
+                content=response_text,
             )
         chat_summary = (
             response_text
@@ -3239,6 +3980,18 @@ def create_app(
     app.router.add_get("/ui/api/sessions/{session_id}/history", handle_ui_session_history_get)
     app.router.add_get("/ui/api/sessions/{session_id}/output", handle_ui_session_output_get)
     app.router.add_get("/ui/api/sessions/{session_id}/files", handle_ui_session_files_get)
+    app.router.add_get(
+        "/ui/api/sessions/{session_id}/files/download",
+        handle_ui_session_file_download,
+    )
+    app.router.add_get(
+        "/ui/api/sessions/{session_id}/artifacts/download-all",
+        handle_ui_session_artifacts_download_all,
+    )
+    app.router.add_get(
+        "/ui/api/sessions/{session_id}/artifacts/{artifact_id}/download",
+        handle_ui_session_artifact_download,
+    )
     app.router.add_delete("/ui/api/sessions/{session_id}", handle_ui_session_delete)
     app.router.add_patch("/ui/api/sessions/{session_id}/title", handle_ui_session_title_update)
     app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)

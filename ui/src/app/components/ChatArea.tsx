@@ -614,7 +614,7 @@ export function ChatArea({
                 : recording
                   ? 'Recording...'
                   : sending
-                    ? 'Assistant thinking...'
+                    ? 'Assistant typing...'
                     : '')}
       </div>
     </>
@@ -752,7 +752,7 @@ export function ChatArea({
                       <div className="mb-1 text-[10px] uppercase tracking-[0.2em] opacity-60">
                         Assistant
                       </div>
-                      <p className="text-sm leading-relaxed">Thinking…</p>
+                      <p className="text-sm leading-relaxed">...</p>
                     </div>
                   </div>
                 </motion.div>

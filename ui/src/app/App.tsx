@@ -26,12 +26,22 @@ type SessionArtifactRecord = {
   content: string;
   createdAt: string | null;
   displayTarget: 'chat' | 'canvas';
+  artifactKind: 'text' | 'file';
+  fileName: string | null;
+  fileExt: string | null;
+  language: string | null;
+  fileContent: string | null;
 };
 
 type DisplayDecision = {
   target: 'chat' | 'canvas';
   artifactId: string | null;
   forced: boolean;
+};
+
+type ChatStreamState = {
+  streamId: string;
+  content: string;
 };
 
 const toOutputArtifactUiId = (artifactId: string): string => `output-${artifactId}`;
@@ -229,6 +239,11 @@ const parseSessionArtifacts = (value: unknown): SessionArtifactRecord[] => {
       content?: unknown;
       created_at?: unknown;
       display_target?: unknown;
+      artifact_kind?: unknown;
+      file_name?: unknown;
+      file_ext?: unknown;
+      language?: unknown;
+      file_content?: unknown;
     };
     if (typeof candidate.id !== 'string' || !candidate.id.trim()) {
       continue;
@@ -250,6 +265,11 @@ const parseSessionArtifacts = (value: unknown): SessionArtifactRecord[] => {
       content: candidate.content,
       createdAt: typeof candidate.created_at === 'string' ? candidate.created_at : null,
       displayTarget: candidate.display_target === 'canvas' ? 'canvas' : 'chat',
+      artifactKind: candidate.artifact_kind === 'file' ? 'file' : 'text',
+      fileName: typeof candidate.file_name === 'string' ? candidate.file_name : null,
+      fileExt: typeof candidate.file_ext === 'string' ? candidate.file_ext : null,
+      language: typeof candidate.language === 'string' ? candidate.language : null,
+      fileContent: typeof candidate.file_content === 'string' ? candidate.file_content : null,
     });
   }
   return artifacts;
@@ -301,7 +321,7 @@ const buildCanvasMessages = (messages: ChatMessage[]): CanvasMessage[] => {
 
 const inferArtifactType = (content: string): Artifact['type'] => {
   if (content.includes('```')) {
-    const match = content.match(/```\\s*([a-zA-Z0-9_-]+)/);
+    const match = content.match(/```\s*([a-zA-Z0-9_-]+)/);
     const lang = match ? match[1].toLowerCase() : '';
     if (lang === 'python' || lang === 'py') return 'PY';
     if (lang === 'javascript' || lang === 'js') return 'JS';
@@ -309,6 +329,7 @@ const inferArtifactType = (content: string): Artifact['type'] => {
     if (lang === 'json') return 'JSON';
     if (lang === 'html') return 'HTML';
     if (lang === 'css') return 'CSS';
+    if (lang === 'sh' || lang === 'shell' || lang === 'bash') return 'SH';
     return 'MD';
   }
   return 'TXT';
@@ -322,13 +343,31 @@ const inferArtifactTypeFromPath = (path: string): Artifact['type'] => {
   if (normalized.endsWith('.json')) return 'JSON';
   if (normalized.endsWith('.html')) return 'HTML';
   if (normalized.endsWith('.css')) return 'CSS';
+  if (normalized.endsWith('.sh')) return 'SH';
   if (normalized.endsWith('.md') || normalized.endsWith('.markdown')) return 'MD';
+  return 'TXT';
+};
+
+const inferArtifactTypeFromLanguage = (languageRaw: string): Artifact['type'] => {
+  const language = languageRaw.trim().toLowerCase();
+  if (!language) {
+    return 'TXT';
+  }
+  if (language === 'python' || language === 'py') return 'PY';
+  if (language === 'typescript' || language === 'ts' || language === 'tsx') return 'TS';
+  if (language === 'javascript' || language === 'js' || language === 'jsx') return 'JS';
+  if (language === 'json') return 'JSON';
+  if (language === 'html') return 'HTML';
+  if (language === 'css') return 'CSS';
+  if (language === 'shell' || language === 'bash' || language === 'sh') return 'SH';
+  if (language === 'md' || language === 'markdown') return 'MD';
   return 'TXT';
 };
 
 const inferArtifactCategory = (type: Artifact['type']): Artifact['category'] => {
   if (type === 'TXT' || type === 'MD') return 'Document';
   if (type === 'JSON') return 'Config';
+  if (type === 'SH') return 'Script';
   return 'Code';
 };
 
@@ -339,6 +378,7 @@ const buildArtifactsFromSources = (
 ): Artifact[] => {
   const artifacts: Artifact[] = [];
   const seen = new Set<string>();
+  const seenFileNames = new Set<string>();
 
   for (const item of artifactsHistory) {
     if (!item.content.trim()) {
@@ -347,17 +387,36 @@ const buildArtifactsFromSources = (
     const id = `output-${item.id}`;
     const hasStreamOverride = Object.prototype.hasOwnProperty.call(streamingContentByArtifactId, id);
     const content = hasStreamOverride ? streamingContentByArtifactId[id] : item.content;
-    const type = inferArtifactType(item.content);
+    let type: Artifact['type'];
+    if (item.fileExt) {
+      type = inferArtifactTypeFromPath(`file.${item.fileExt}`);
+    } else if (item.fileName) {
+      type = inferArtifactTypeFromPath(item.fileName);
+    } else if (item.language) {
+      type = inferArtifactTypeFromLanguage(item.language);
+    } else {
+      type = inferArtifactType(item.content);
+    }
     if (seen.has(id)) {
       continue;
     }
     seen.add(id);
+    const normalizedFileName = item.fileName?.trim().toLowerCase() ?? '';
+    if (normalizedFileName) {
+      seenFileNames.add(normalizedFileName);
+    }
     artifacts.push({
       id,
-      name: item.title,
+      name: item.fileName || item.title,
       type,
       category: inferArtifactCategory(type),
       content,
+      artifactKind: item.artifactKind,
+      sourceArtifactId: item.id,
+      fileName: item.fileName,
+      fileExt: item.fileExt,
+      language: item.language,
+      fileContent: item.fileContent,
     });
   }
 
@@ -365,6 +424,10 @@ const buildArtifactsFromSources = (
     const path = rawPath.trim();
     const fileId = `file-${path}`;
     if (!path || seen.has(fileId)) {
+      continue;
+    }
+    const pathBaseName = path.split('/').pop()?.toLowerCase() ?? '';
+    if (pathBaseName && seenFileNames.has(pathBaseName)) {
       continue;
     }
     seen.add(fileId);
@@ -375,10 +438,47 @@ const buildArtifactsFromSources = (
       type,
       category: inferArtifactCategory(type),
       content: `File path: ${path}`,
+      artifactKind: 'file',
+      sessionFilePath: path,
+      fileName: path.split('/').pop() ?? path,
     });
   }
 
   return artifacts;
+};
+
+const extractFilenameFromDisposition = (
+  disposition: string | null,
+  fallbackName: string,
+): string => {
+  if (!disposition) {
+    return fallbackName;
+  }
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match && utf8Match[1]) {
+    try {
+      const decoded = decodeURIComponent(utf8Match[1].trim());
+      return decoded || fallbackName;
+    } catch {
+      return utf8Match[1].trim() || fallbackName;
+    }
+  }
+  const basicMatch = disposition.match(/filename="?([^";]+)"?/i);
+  if (basicMatch && basicMatch[1]) {
+    return basicMatch[1].trim() || fallbackName;
+  }
+  return fallbackName;
+};
+
+const triggerBrowserDownload = (blob: Blob, filename: string) => {
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
 };
 
 const extractSessionIdFromPayload = (payload: unknown): string | null => {
@@ -437,6 +537,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
+  const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
 
   const pendingForCanvas =
     pendingSessionId === selectedConversation ? pendingUserMessage : null;
@@ -454,6 +555,16 @@ export default function App() {
       content: pendingForCanvas.content,
     };
   }, [pendingForCanvas]);
+  const streamingAssistantCanvasMessage = useMemo(() => {
+    if (!chatStreamingState || !chatStreamingState.content.trim()) {
+      return null;
+    }
+    return {
+      id: `stream-${chatStreamingState.streamId}`,
+      role: 'assistant' as const,
+      content: chatStreamingState.content,
+    };
+  }, [chatStreamingState]);
   const historyChats = useMemo(
     () =>
       sessions.map((session) => ({
@@ -591,6 +702,18 @@ export default function App() {
 
   const isModelAvailable = (model: SelectedModel, providers: ProviderModels[]) =>
     providers.some((provider) => provider.provider === model.provider && provider.models.includes(model.model));
+
+  const extractErrorFromResponse = async (
+    response: Response,
+    fallback: string,
+  ): Promise<string> => {
+    try {
+      const payload: unknown = await response.json();
+      return extractErrorMessage(payload, fallback);
+    } catch {
+      return fallback;
+    }
+  };
 
   const loadSessions = async (): Promise<SessionSummary[]> => {
     const response = await fetch('/ui/api/sessions');
@@ -751,6 +874,7 @@ export default function App() {
 
     const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
     setMessages(parseMessages((historyPayload as { messages?: unknown }).messages));
+    setChatStreamingState(null);
     const parsedOutput = parseSessionOutput((outputPayload as { output?: unknown }).output);
     setSessionOutput(parsedOutput.content);
     setSessionFiles(parseSessionFiles((filesPayload as { files?: unknown }).files));
@@ -779,6 +903,7 @@ export default function App() {
     const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
     const sessionModel = parseSelectedModel(session?.selected_model);
     setMessages(parseMessages(session?.messages));
+    setChatStreamingState(null);
     const parsedOutput = parseSessionOutput(
       (session as { output?: unknown } | undefined)?.output,
     );
@@ -874,6 +999,7 @@ export default function App() {
     if (typeof window === 'undefined' || !selectedConversation) {
       return;
     }
+    setChatStreamingState(null);
     const streamUrl = `/ui/api/events/stream?session_id=${encodeURIComponent(selectedConversation)}`;
     const eventSource = new EventSource(streamUrl);
     eventSource.onmessage = (event) => {
@@ -890,7 +1016,38 @@ export default function App() {
       if (typeof envelope.type !== 'string' || !envelope.payload || typeof envelope.payload !== 'object') {
         return;
       }
-      const payload = envelope.payload as { artifact_id?: unknown; delta?: unknown };
+      const payload = envelope.payload as {
+        artifact_id?: unknown;
+        stream_id?: unknown;
+        delta?: unknown;
+      };
+      if (envelope.type === 'chat.stream.start') {
+        const streamId =
+          typeof payload.stream_id === 'string' ? payload.stream_id.trim() : '';
+        if (!streamId) {
+          return;
+        }
+        setChatStreamingState({ streamId, content: '' });
+        return;
+      }
+      if (envelope.type === 'chat.stream.delta') {
+        const streamId =
+          typeof payload.stream_id === 'string' ? payload.stream_id.trim() : '';
+        const delta = typeof payload.delta === 'string' ? payload.delta : '';
+        if (!streamId || !delta) {
+          return;
+        }
+        setChatStreamingState((prev) => {
+          if (!prev || prev.streamId !== streamId) {
+            return { streamId, content: delta };
+          }
+          return { streamId, content: `${prev.content}${delta}` };
+        });
+        return;
+      }
+      if (envelope.type === 'chat.stream.done') {
+        return;
+      }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
       if (!artifactId) {
         return;
@@ -924,6 +1081,7 @@ export default function App() {
     eventSource.onerror = () => {};
     return () => {
       eventSource.close();
+      setChatStreamingState(null);
     };
   }, [selectedConversation]);
 
@@ -934,6 +1092,7 @@ export default function App() {
     setSelectedConversation(sessionId);
     setArtifactViewerArtifactId(null);
     setStreamingContentByArtifactId({});
+    setChatStreamingState(null);
     try {
       await loadConversation(sessionId);
       saveLastSessionId(sessionId);
@@ -1005,6 +1164,7 @@ export default function App() {
       setSelectedConversation(nextSession);
       setArtifactViewerArtifactId(null);
       setStreamingContentByArtifactId({});
+      setChatStreamingState(null);
       saveLastSessionId(nextSession);
       await loadSessions();
       if (!created.selectedModel && providerModels.length > 0) {
@@ -1068,6 +1228,7 @@ export default function App() {
             setSessionFiles([]);
             setSessionArtifacts([]);
             setStreamingContentByArtifactId({});
+            setChatStreamingState(null);
             setSelectedModel(null);
             saveLastSessionId(null);
           }
@@ -1113,6 +1274,7 @@ export default function App() {
     }
     setPendingUserMessage({ role: 'user', content: trimmed });
     setPendingSessionId(selectedConversation);
+    setChatStreamingState(null);
     const forceCanvasForRequest = forceCanvasNext;
     if (forceCanvasForRequest) {
       setForceCanvasNext(false);
@@ -1143,6 +1305,7 @@ export default function App() {
 
       setPendingUserMessage(null);
       setPendingSessionId(null);
+      setChatStreamingState(null);
       setMessages(parseMessages((payload as { messages?: unknown }).messages));
       const parsedOutput = parseSessionOutput((payload as { output?: unknown }).output);
       setSessionOutput(parsedOutput.content);
@@ -1171,12 +1334,119 @@ export default function App() {
       setStatusMessage(message);
       setPendingUserMessage(null);
       setPendingSessionId(null);
+      setChatStreamingState(null);
       if (forceCanvasForRequest) {
         setForceCanvasNext(true);
       }
       return false;
     } finally {
       setSending(false);
+    }
+  };
+
+  const handleDownloadArtifact = async (artifact: Artifact) => {
+    if (!selectedConversation) {
+      return;
+    }
+    try {
+      if (artifact.sourceArtifactId) {
+        const response = await fetch(
+          `/ui/api/sessions/${encodeURIComponent(selectedConversation)}/artifacts/${encodeURIComponent(
+            artifact.sourceArtifactId,
+          )}/download`,
+          {
+            headers: {
+              [SESSION_HEADER]: selectedConversation,
+            },
+          },
+        );
+        if (!response.ok) {
+          const errorMessage = await extractErrorFromResponse(
+            response,
+            'Failed to download artifact.',
+          );
+          throw new Error(errorMessage);
+        }
+        const blob = await response.blob();
+        const fallbackName = artifact.fileName?.trim() || `${artifact.name}.${artifact.type.toLowerCase()}`;
+        const fileName = extractFilenameFromDisposition(
+          response.headers.get('Content-Disposition'),
+          fallbackName,
+        );
+        triggerBrowserDownload(blob, fileName);
+        setStatusMessage(null);
+        return;
+      }
+      if (artifact.sessionFilePath) {
+        const response = await fetch(
+          `/ui/api/sessions/${encodeURIComponent(selectedConversation)}/files/download?path=${encodeURIComponent(
+            artifact.sessionFilePath,
+          )}`,
+          {
+            headers: {
+              [SESSION_HEADER]: selectedConversation,
+            },
+          },
+        );
+        if (!response.ok) {
+          const errorMessage = await extractErrorFromResponse(
+            response,
+            'Failed to download file.',
+          );
+          throw new Error(errorMessage);
+        }
+        const blob = await response.blob();
+        const fallbackName = artifact.sessionFilePath.split('/').pop() || artifact.name;
+        const fileName = extractFilenameFromDisposition(
+          response.headers.get('Content-Disposition'),
+          fallbackName,
+        );
+        triggerBrowserDownload(blob, fileName);
+        setStatusMessage(null);
+        return;
+      }
+      const fallbackName = artifact.fileName?.trim() || `${artifact.name}.${artifact.type.toLowerCase()}`;
+      triggerBrowserDownload(
+        new Blob([artifact.content ?? ''], { type: 'text/plain' }),
+        fallbackName,
+      );
+      setStatusMessage(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to download artifact.';
+      setStatusMessage(message);
+    }
+  };
+
+  const handleDownloadAllArtifacts = async () => {
+    if (!selectedConversation) {
+      return;
+    }
+    try {
+      const response = await fetch(
+        `/ui/api/sessions/${encodeURIComponent(selectedConversation)}/artifacts/download-all`,
+        {
+          headers: {
+            [SESSION_HEADER]: selectedConversation,
+          },
+        },
+      );
+      if (!response.ok) {
+        const message = await extractErrorFromResponse(
+          response,
+          'No downloadable file artifacts.',
+        );
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const fileName = extractFilenameFromDisposition(
+        response.headers.get('Content-Disposition'),
+        'artifacts.zip',
+      );
+      triggerBrowserDownload(blob, fileName);
+      setStatusMessage(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to download artifacts.';
+      setStatusMessage(message);
     }
   };
 
@@ -1224,6 +1494,7 @@ export default function App() {
           className="h-full"
           messages={canvasMessages}
           pendingMessage={pendingCanvasMessage}
+          streamingAssistantMessage={streamingAssistantCanvasMessage}
           sending={sending}
           onSendMessage={(content) => {
             void handleSend(content);
@@ -1266,6 +1537,12 @@ export default function App() {
         }}
         artifacts={artifacts}
         autoOpenArtifactId={artifactViewerArtifactId}
+        onDownloadArtifact={(artifact) => {
+          void handleDownloadArtifact(artifact);
+        }}
+        onDownloadAll={() => {
+          void handleDownloadAllArtifacts();
+        }}
       />
 
       <SearchModal

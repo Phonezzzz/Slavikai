@@ -19,12 +19,12 @@ class SttConfig:
     def resolve_api_key(self) -> str | None:
         if self.api_key and self.api_key.strip():
             return self.api_key.strip()
-        ui_key = _load_ui_openai_api_key()
-        if ui_key:
-            return ui_key
         env_key = os.getenv("OPENAI_API_KEY", "").strip()
         if env_key:
             return env_key
+        ui_key = _load_ui_openai_api_key()
+        if ui_key:
+            return ui_key
         legacy_key = os.getenv("STT_API_KEY", "").strip()
         return legacy_key or None
 

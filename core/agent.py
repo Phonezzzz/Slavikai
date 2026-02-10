@@ -203,6 +203,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         self.last_approval_request: ApprovalRequest | None = None
         self.last_decision_packet: DecisionPacket | None = None
         self.last_reasoning: str | None = None
+        self.last_stream_response_raw: str | None = None
         self.last_plan_summary: str | None = None
         self.last_execution_summary: str | None = None
         self._pending_decision_packet: DecisionPacket | None = None

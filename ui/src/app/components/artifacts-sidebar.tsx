@@ -12,9 +12,16 @@ import {
 export interface Artifact {
   id: string;
   name: string;
-  type: "MD" | "PY" | "JS" | "TS" | "JSON" | "TXT" | "HTML" | "CSS";
+  type: "MD" | "PY" | "JS" | "TS" | "JSON" | "TXT" | "HTML" | "CSS" | "SH";
   category: "Document" | "Code" | "Config" | "Script";
   content?: string;
+  artifactKind?: "text" | "file";
+  sourceArtifactId?: string | null;
+  fileName?: string | null;
+  fileExt?: string | null;
+  language?: string | null;
+  fileContent?: string | null;
+  sessionFilePath?: string | null;
 }
 
 export interface ContentItem {
@@ -47,6 +54,7 @@ const typeColorMap: Record<string, string> = {
   TXT: "text-gray-400",
   HTML: "text-orange-400",
   CSS: "text-purple-400",
+  SH: "text-emerald-400",
 };
 
 const categoryIconMap: Record<string, React.ReactNode> = {
@@ -71,7 +79,7 @@ export function ArtifactsSidebar({
 
   return (
     <div
-      className={`flex flex-col h-full w-[340px] bg-[#0b0b0d] ${className}`}
+      className={`flex h-full w-full flex-col bg-[#0b0b0d] ${className}`}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4">

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Iterator
 from typing import Final
 
 import requests
@@ -12,6 +14,31 @@ from shared.models import JSONValue, LLMMessage
 
 DEFAULT_LOCAL_ENDPOINT: Final[str] = "http://localhost:11434/v1/chat/completions"
 DEFAULT_TIMEOUT: Final[int] = 30
+
+
+def _extract_stream_delta(data: dict[str, JSONValue]) -> str:
+    choices_raw = data.get("choices")
+    if not isinstance(choices_raw, list) or not choices_raw:
+        return ""
+    first_choice = choices_raw[0]
+    if not isinstance(first_choice, dict):
+        return ""
+    delta_raw = first_choice.get("delta")
+    if not isinstance(delta_raw, dict):
+        return ""
+    content_raw = delta_raw.get("content")
+    if isinstance(content_raw, str):
+        return content_raw
+    if isinstance(content_raw, list):
+        parts: list[str] = []
+        for item in content_raw:
+            if not isinstance(item, dict):
+                continue
+            text_raw = item.get("text")
+            if isinstance(text_raw, str):
+                parts.append(text_raw)
+        return "".join(parts)
+    return ""
 
 
 class LocalHttpBrain(Brain):
@@ -95,6 +122,53 @@ class LocalHttpBrain(Brain):
             )
 
         return LLMResult(text=content, reasoning=reasoning, usage=usage, raw=data)
+
+    def generate_stream(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None = None,
+    ) -> Iterator[str]:
+        cfg = self._resolve_config(config)
+        headers = self._build_headers(cfg)
+        payload = {
+            "model": cfg.model,
+            "messages": [message.__dict__ for message in self._inject_system(messages, cfg)],
+            "temperature": cfg.temperature,
+            "stream": True,
+        }
+        if cfg.max_tokens is not None:
+            payload["max_tokens"] = cfg.max_tokens
+        if cfg.top_p is not None:
+            payload["top_p"] = cfg.top_p
+
+        response = requests.post(
+            self.base_url,
+            json=payload,
+            headers=headers,
+            timeout=DEFAULT_TIMEOUT,
+            stream=True,
+        )
+        response.raise_for_status()
+        response.encoding = "utf-8"
+
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if raw_line is None:
+                continue
+            line = raw_line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data_part = line.removeprefix("data:").strip()
+            if not data_part or data_part == "[DONE]":
+                continue
+            try:
+                parsed = json.loads(data_part)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            delta = _extract_stream_delta(parsed)
+            if delta:
+                yield delta
 
     def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
         system_messages: list[LLMMessage] = []
