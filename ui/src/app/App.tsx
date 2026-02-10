@@ -538,6 +538,7 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
+  const [awaitingFirstAssistantChunk, setAwaitingFirstAssistantChunk] = useState(false);
 
   const pendingForCanvas =
     pendingSessionId === selectedConversation ? pendingUserMessage : null;
@@ -565,6 +566,13 @@ export default function App() {
       content: chatStreamingState.content,
     };
   }, [chatStreamingState]);
+  const showAssistantLoading = useMemo(
+    () =>
+      sending &&
+      awaitingFirstAssistantChunk &&
+      (!chatStreamingState || !chatStreamingState.content.trim()),
+    [awaitingFirstAssistantChunk, chatStreamingState, sending],
+  );
   const historyChats = useMemo(
     () =>
       sessions.map((session) => ({
@@ -996,6 +1004,12 @@ export default function App() {
   }, [selectedModel]);
 
   useEffect(() => {
+    if (!sending) {
+      setAwaitingFirstAssistantChunk(false);
+    }
+  }, [sending]);
+
+  useEffect(() => {
     if (typeof window === 'undefined' || !selectedConversation) {
       return;
     }
@@ -1027,6 +1041,7 @@ export default function App() {
         if (!streamId) {
           return;
         }
+        setAwaitingFirstAssistantChunk(false);
         setChatStreamingState({ streamId, content: '' });
         return;
       }
@@ -1037,6 +1052,7 @@ export default function App() {
         if (!streamId || !delta) {
           return;
         }
+        setAwaitingFirstAssistantChunk(false);
         setChatStreamingState((prev) => {
           if (!prev || prev.streamId !== streamId) {
             return { streamId, content: delta };
@@ -1054,6 +1070,7 @@ export default function App() {
       }
       const uiArtifactId = toOutputArtifactUiId(artifactId);
       if (envelope.type === 'canvas.stream.start') {
+        setAwaitingFirstAssistantChunk(false);
         setArtifactPanelOpen(true);
         setArtifactViewerArtifactId(uiArtifactId);
         setStreamingContentByArtifactId((prev) => ({ ...prev, [uiArtifactId]: '' }));
@@ -1064,6 +1081,7 @@ export default function App() {
         if (!delta) {
           return;
         }
+        setAwaitingFirstAssistantChunk(false);
         setStreamingContentByArtifactId((prev) => {
           const nextChunk = `${prev[uiArtifactId] ?? ''}${delta}`;
           return { ...prev, [uiArtifactId]: nextChunk };
@@ -1275,6 +1293,7 @@ export default function App() {
     setPendingUserMessage({ role: 'user', content: trimmed });
     setPendingSessionId(selectedConversation);
     setChatStreamingState(null);
+    setAwaitingFirstAssistantChunk(true);
     const forceCanvasForRequest = forceCanvasNext;
     if (forceCanvasForRequest) {
       setForceCanvasNext(false);
@@ -1495,6 +1514,7 @@ export default function App() {
           messages={canvasMessages}
           pendingMessage={pendingCanvasMessage}
           streamingAssistantMessage={streamingAssistantCanvasMessage}
+          showAssistantLoading={showAssistantLoading}
           sending={sending}
           onSendMessage={(content) => {
             void handleSend(content);

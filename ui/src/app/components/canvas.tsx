@@ -8,6 +8,7 @@ import {
   User,
   Check,
   PanelRight,
+  LoaderCircle,
 } from "lucide-react";
 
 import BrainLogo from "../../assets/brain.png";
@@ -101,6 +102,7 @@ interface CanvasProps {
   messages?: CanvasMessage[];
   pendingMessage?: CanvasMessage | null;
   streamingAssistantMessage?: CanvasMessage | null;
+  showAssistantLoading?: boolean;
   sending?: boolean;
   onSendMessage?: (message: string) => void;
   className?: string;
@@ -348,12 +350,33 @@ function MessageBubble({ message }: { message: CanvasMessage }) {
   );
 }
 
+function LoadingBubble() {
+  return (
+    <div className="flex gap-3">
+      <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center bg-[#2a2a30] border border-[#3a3a42]">
+        <img
+          src={BrainLogo}
+          alt="SlavikAI"
+          className="w-4 h-4 object-contain"
+        />
+      </div>
+      <div className="flex-1 max-w-[calc(100%-50px)]">
+        <div className="inline-flex items-center gap-2 rounded-lg border border-[#1f1f24] bg-[#111115] px-3 py-2">
+          <LoaderCircle className="h-4 w-4 animate-spin text-[#8a8a90]" />
+          <span className="text-[13px] text-[#b8b8be]">Подключаюсь к модели...</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ====== Main Canvas Component ======
 
 export function Canvas({
   messages = [],
   pendingMessage = null,
   streamingAssistantMessage = null,
+  showAssistantLoading = false,
   sending = false,
   onSendMessage,
   className = "",
@@ -462,6 +485,7 @@ export function Canvas({
           {displayMessages.map((msg) => (
             <MessageBubble key={msg.id} message={msg} />
           ))}
+          {showAssistantLoading ? <LoadingBubble /> : null}
           <div ref={messagesEndRef} />
         </div>
       </div>
