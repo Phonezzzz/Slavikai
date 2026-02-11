@@ -21,11 +21,12 @@ from config.tools_config import (
 from config.tools_config import (
     save_tools_config as save_tools_config_to_path,
 )
+from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
 from core.tracer import Tracer
 from server.http_api import create_app
 from server.ui_hub import UIHub
 from server.ui_session_storage import InMemoryUISessionStorage, SQLiteUISessionStorage
-from shared.models import JSONValue
+from shared.models import JSONValue, ToolResult
 from tools.tool_logger import ToolCallLogger
 
 
@@ -47,6 +48,59 @@ class DummyAgent:
 
     def update_tools_enabled(self, state: dict[str, bool]) -> None:
         self.tools_enabled.update(state)
+
+    def call_tool(
+        self,
+        name: str,
+        args: dict[str, JSONValue] | None = None,
+        raw_input: str | None = None,
+    ) -> ToolResult:
+        del args, raw_input
+        return ToolResult.failure(f"Инструмент {name} не поддерживается в тестовом агенте")
+
+
+class WorkspaceDecisionAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tool_calls: list[tuple[str, dict[str, JSONValue]]] = []
+
+    def call_tool(
+        self,
+        name: str,
+        args: dict[str, JSONValue] | None = None,
+        raw_input: str | None = None,
+    ) -> ToolResult:
+        del raw_input
+        if name == "workspace_list":
+            return ToolResult.success({"tree": []})
+        if name == "workspace_read":
+            path_raw = args.get("path") if isinstance(args, dict) else ""
+            path = path_raw if isinstance(path_raw, str) else "main.py"
+            return ToolResult.success({"output": f"# file: {path}\n"})
+        if name in {"workspace_write", "workspace_run"}:
+            if "EXEC_ARBITRARY" not in self._approved_categories:
+                request = ApprovalRequest(
+                    category="EXEC_ARBITRARY",
+                    required_categories=["EXEC_ARBITRARY"],
+                    prompt=ApprovalPrompt(
+                        what=f"Разрешить {name} в workspace.",
+                        why="Нужно выполнить потенциально рискованное действие.",
+                        risk="Выполнение/запись может изменить проект.",
+                        changes=["workspace files"],
+                    ),
+                    tool=name,
+                    details={"args": dict(args or {})},
+                    session_id=self._session_id,
+                )
+                raise ApprovalRequired(request)
+            call_args = dict(args or {})
+            self.tool_calls.append((name, call_args))
+            if name == "workspace_write":
+                path_raw = call_args.get("path")
+                path = path_raw if isinstance(path_raw, str) else "main.py"
+                return ToolResult.success({"output": "saved", "path": path})
+            return ToolResult.success({"output": "ran", "stderr": "", "exit_code": 0})
+        return ToolResult.failure(f"unsupported tool {name}")
 
 
 class LongCodeAgent(DummyAgent):
@@ -1206,6 +1260,167 @@ def test_ui_project_github_import_runs_after_approval(monkeypatch, tmp_path) -> 
             assert isinstance(content, str)
             assert "GitHub import completed" in content
             assert "Code=1, Docs=1" in content
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_write_requires_approval_and_emits_decision_packet() -> None:
+    async def run() -> None:
+        client = await _create_client(WorkspaceDecisionAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            assert status_resp.status == 200
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            events_response = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert events_response.status == 200
+            try:
+                write_resp = await client.put(
+                    "/ui/api/workspace/file",
+                    headers={"X-Slavik-Session": session_id},
+                    json={"path": "main.py", "content": "print('ok')\n"},
+                )
+                assert write_resp.status == 202
+                write_payload = await write_resp.json()
+                decision = write_payload.get("decision")
+                assert isinstance(decision, dict)
+                assert decision.get("status") == "pending"
+                context = decision.get("context")
+                assert isinstance(context, dict)
+                assert context.get("source_endpoint") == "workspace.tool"
+                resume_payload = context.get("resume_payload")
+                assert isinstance(resume_payload, dict)
+                assert resume_payload.get("tool_name") == "workspace_write"
+
+                events = await _read_sse_events(events_response, max_events=10)
+                decision_events = [
+                    event for event in events if event.get("type") == "decision.packet"
+                ]
+                assert decision_events
+            finally:
+                events_response.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_approve_resumes_workspace_tool_and_is_idempotent() -> None:
+    async def run() -> None:
+        agent = WorkspaceDecisionAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            write_resp = await client.put(
+                "/ui/api/workspace/file",
+                headers={"X-Slavik-Session": session_id},
+                json={"path": "main.py", "content": "print('ok')\n"},
+            )
+            assert write_resp.status == 202
+            write_payload = await write_resp.json()
+            decision = write_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+            assert decision_id
+
+            approve_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve",
+                    "edited_action": None,
+                },
+            )
+            assert approve_resp.status == 200
+            approve_payload = await approve_resp.json()
+            resolved = approve_payload.get("decision")
+            assert isinstance(resolved, dict)
+            assert resolved.get("status") == "resolved"
+            resume = approve_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("kind") == "tool_result"
+            assert resume.get("source_endpoint") == "workspace.tool"
+            assert resume.get("tool_name") == "workspace_write"
+            assert resume.get("ok") is True
+            assert len(agent.tool_calls) == 1
+
+            approve_again_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve",
+                    "edited_action": None,
+                },
+            )
+            assert approve_again_resp.status == 200
+            approve_again_payload = await approve_again_resp.json()
+            assert approve_again_payload.get("already_resolved") is True
+            assert len(agent.tool_calls) == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_reject_does_not_execute_workspace_tool() -> None:
+    async def run() -> None:
+        agent = WorkspaceDecisionAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            run_resp = await client.post(
+                "/ui/api/workspace/run",
+                headers={"X-Slavik-Session": session_id},
+                json={"path": "main.py"},
+            )
+            assert run_resp.status == 202
+            run_payload = await run_resp.json()
+            decision = run_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+            assert decision_id
+
+            reject_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "reject",
+                    "edited_action": None,
+                },
+            )
+            assert reject_resp.status == 200
+            reject_payload = await reject_resp.json()
+            assert reject_payload.get("status") == "rejected"
+            assert len(agent.tool_calls) == 0
         finally:
             await client.close()
 

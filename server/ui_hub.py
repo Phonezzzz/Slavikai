@@ -722,6 +722,50 @@ class UIHub:
         )
         self._publish_to_subscribers(subscribers, event)
 
+    async def transition_session_decision(
+        self,
+        session_id: str,
+        *,
+        expected_id: str,
+        expected_status: str,
+        next_decision: dict[str, JSONValue],
+    ) -> tuple[bool, dict[str, JSONValue] | None]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or state.decision_packet is None:
+                return False, None
+            current = dict(state.decision_packet)
+            current_id_raw = current.get("id")
+            current_status_raw = current.get("status")
+            current_id = current_id_raw if isinstance(current_id_raw, str) else None
+            current_status = current_status_raw if isinstance(current_status_raw, str) else None
+            if current_id != expected_id or current_status != expected_status:
+                return False, current
+
+            previous_decision = dict(state.decision_packet)
+            candidate = dict(next_decision)
+            if previous_decision == candidate:
+                return True, candidate
+
+            state.decision_packet = candidate
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            decision_id_raw = candidate.get("id")
+            if isinstance(decision_id_raw, str):
+                state.last_decision_id = decision_id_raw
+            else:
+                state.last_decision_id = None
+            subscribers = list(state.subscribers)
+            decision_payload = dict(candidate)
+
+        event = self._build_event(
+            "decision.packet",
+            {"session_id": session_id, "decision": decision_payload},
+        )
+        self._publish_to_subscribers(subscribers, event)
+        return True, decision_payload
+
     def _ensure_event_fields(self, event: dict[str, JSONValue]) -> dict[str, JSONValue]:
         if "id" not in event:
             event = {**event, "id": uuid.uuid4().hex}

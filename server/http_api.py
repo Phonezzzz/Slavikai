@@ -42,6 +42,7 @@ from core.approval_policy import (
     ApprovalCategory,
     ApprovalPrompt,
     ApprovalRequest,
+    ApprovalRequired,
 )
 from core.mwv.models import MWV_REPORT_PREFIX
 from core.tracer import TRACE_LOG, TraceRecord
@@ -51,7 +52,7 @@ from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession, SQLiteUISessionStorage, UISessionStorage
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
-from shared.models import JSONValue, LLMMessage, ToolRequest
+from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from shared.sanitize import safe_json_loads
 from tools.project_tool import handle_project_request
 from tools.tool_logger import DEFAULT_LOG_PATH as TOOL_CALLS_LOG
@@ -299,6 +300,13 @@ class AgentProtocol(Protocol):
     def respond(self, messages: list[LLMMessage]) -> str: ...
 
     def update_tools_enabled(self, state: dict[str, bool]) -> None: ...
+
+    def call_tool(
+        self,
+        name: str,
+        args: dict[str, JSONValue] | None = None,
+        raw_input: str | None = None,
+    ) -> ToolResult: ...
 
     def record_feedback_event(
         self,
@@ -2397,6 +2405,292 @@ async def handle_ui_index(request: web.Request) -> web.FileResponse:
     return web.FileResponse(path=index_path)
 
 
+async def handle_workspace_index(request: web.Request) -> web.FileResponse:
+    return await handle_ui_index(request)
+
+
+async def _resolve_workspace_session(
+    request: web.Request,
+) -> tuple[AgentProtocol | None, str, set[ApprovalCategory]]:
+    hub: UIHub = request.app["ui_hub"]
+    session_store: SessionApprovalStore = request.app["session_store"]
+    agent = await _resolve_agent(request)
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    approved_categories = await session_store.get_categories(session_id)
+    return agent, session_id, approved_categories
+
+
+async def _call_workspace_tool(
+    *,
+    request: web.Request,
+    agent: AgentProtocol,
+    session_id: str,
+    approved_categories: set[ApprovalCategory],
+    tool_name: str,
+    args: dict[str, JSONValue] | None = None,
+    raw_input: str,
+) -> ToolResult | web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    agent_lock = request.app["agent_lock"]
+    async with agent_lock:
+        try:
+            agent.set_session_context(session_id, approved_categories)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to set session context for workspace tool call", exc_info=True)
+        try:
+            return agent.call_tool(
+                tool_name,
+                args=args or {},
+                raw_input=raw_input,
+            )
+        except ApprovalRequired as exc:
+            approval_payload = _serialize_approval_request(exc.request)
+            decision = _build_ui_approval_decision(
+                approval_request=approval_payload or {},
+                session_id=session_id,
+                source_endpoint="workspace.tool",
+                resume_payload={
+                    "tool_name": tool_name,
+                    "args": dict(args or {}),
+                    "raw_input": raw_input,
+                    "session_id": session_id,
+                },
+            )
+            await hub.set_session_decision(session_id, decision)
+            normalized_decision = _normalize_ui_decision(decision, session_id=session_id)
+            response = _json_response(
+                {
+                    "session_id": session_id,
+                    "decision": normalized_decision,
+                    "approval_request": approval_payload,
+                },
+                status=202,
+            )
+            response.headers[UI_SESSION_HEADER] = session_id
+            return response
+
+
+async def handle_ui_workspace_tree(request: web.Request) -> web.Response:
+    try:
+        agent, session_id, approved_categories = await _resolve_workspace_session(request)
+    except ModelNotAllowedError as exc:
+        return _model_not_allowed_response(exc.model_id)
+    if agent is None:
+        return _model_not_selected_response()
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_list",
+        raw_input="ui:workspace_list",
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
+        return _error_response(
+            status=400,
+            message=tool_result.error or "Не удалось получить структуру workspace.",
+            error_type="invalid_request_error",
+            code="workspace_list_failed",
+        )
+    tree_raw = tool_result.data.get("tree")
+    tree: list[JSONValue] = tree_raw if isinstance(tree_raw, list) else []
+    response = _json_response({"session_id": session_id, "tree": tree})
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_file_get(request: web.Request) -> web.Response:
+    try:
+        agent, session_id, approved_categories = await _resolve_workspace_session(request)
+    except ModelNotAllowedError as exc:
+        return _model_not_allowed_response(exc.model_id)
+    if agent is None:
+        return _model_not_selected_response()
+    path_raw = request.query.get("path", "")
+    path_value = path_raw.strip()
+    if not path_value:
+        return _error_response(
+            status=400,
+            message="path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_read",
+        args={"path": path_value},
+        raw_input=f"ui:workspace_read {path_value}",
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
+        return _error_response(
+            status=400,
+            message=tool_result.error or "Не удалось прочитать файл.",
+            error_type="invalid_request_error",
+            code="workspace_read_failed",
+        )
+    content_raw = tool_result.data.get("output")
+    if not isinstance(content_raw, str):
+        content_raw = ""
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "path": path_value,
+            "content": content_raw,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
+    try:
+        agent, session_id, approved_categories = await _resolve_workspace_session(request)
+    except ModelNotAllowedError as exc:
+        return _model_not_allowed_response(exc.model_id)
+    if agent is None:
+        return _model_not_selected_response()
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    path_raw = payload.get("path")
+    content_raw = payload.get("content")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return _error_response(
+            status=400,
+            message="path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if not isinstance(content_raw, str):
+        return _error_response(
+            status=400,
+            message="content должен быть строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    path_value = path_raw.strip()
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_write",
+        args={"path": path_value, "content": content_raw},
+        raw_input=f"ui:workspace_write {path_value}",
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
+        return _error_response(
+            status=400,
+            message=tool_result.error or "Не удалось сохранить файл.",
+            error_type="invalid_request_error",
+            code="workspace_write_failed",
+        )
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "path": path_value,
+            "saved": True,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_run(request: web.Request) -> web.Response:
+    try:
+        agent, session_id, approved_categories = await _resolve_workspace_session(request)
+    except ModelNotAllowedError as exc:
+        return _model_not_allowed_response(exc.model_id)
+    if agent is None:
+        return _model_not_selected_response()
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    path_raw = payload.get("path")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return _error_response(
+            status=400,
+            message="path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    path_value = path_raw.strip()
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_run",
+        args={"path": path_value},
+        raw_input=f"ui:workspace_run {path_value}",
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
+        return _error_response(
+            status=400,
+            message=tool_result.error or "Не удалось выполнить файл.",
+            error_type="invalid_request_error",
+            code="workspace_run_failed",
+        )
+    stdout_raw = tool_result.data.get("output")
+    stderr_raw = tool_result.data.get("stderr")
+    exit_code_raw = tool_result.data.get("exit_code")
+    stdout = stdout_raw if isinstance(stdout_raw, str) else ""
+    stderr = stderr_raw if isinstance(stderr_raw, str) else ""
+    exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 0
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "path": path_value,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
 async def handle_ui_status(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
@@ -3627,11 +3921,16 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         )
     current_status = current_decision.get("status")
     if current_status != "pending":
-        return _error_response(
-            status=409,
-            message="Decision is not pending.",
-            error_type="invalid_request_error",
-            code="decision_not_pending",
+        status_value = current_status if isinstance(current_status, str) else "unknown"
+        return _json_response(
+            {
+                "ok": True,
+                "decision": current_decision,
+                "status": status_value,
+                "resume_started": False,
+                "already_resolved": status_value in {"resolved", "rejected"},
+                "resume": None,
+            }
         )
 
     if choice == "edit":
@@ -3652,38 +3951,146 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         edited_decision = dict(current_decision)
         edited_decision["proposed_action"] = proposed_action
         edited_decision["updated_at"] = _utc_now_iso()
-        await hub.set_session_decision(session_id, edited_decision)
-        normalized = _normalize_ui_decision(edited_decision, session_id=session_id)
+        updated, latest = await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="pending",
+            next_decision=edited_decision,
+        )
+        normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
+        if not updated:
+            if normalized_latest is not None:
+                latest_status_raw = normalized_latest.get("status")
+                latest_status = (
+                    latest_status_raw if isinstance(latest_status_raw, str) else "unknown"
+                )
+                return _json_response(
+                    {
+                        "ok": True,
+                        "decision": normalized_latest,
+                        "status": latest_status,
+                        "resume_started": False,
+                        "already_resolved": latest_status in {"resolved", "rejected"},
+                        "resume": None,
+                    }
+                )
+            return _error_response(
+                status=409,
+                message="Decision is not pending.",
+                error_type="invalid_request_error",
+                code="decision_not_pending",
+            )
+        normalized = (
+            normalized_latest
+            if normalized_latest is not None
+            else _normalize_ui_decision(edited_decision, session_id=session_id)
+        )
         return _json_response(
             {
                 "ok": True,
                 "decision": normalized,
                 "status": "pending",
                 "resume_started": False,
+                "resume": None,
             }
         )
 
     if choice == "reject":
         rejected = _decision_with_status(current_decision, status="rejected", resolved=True)
-        await hub.set_session_decision(session_id, rejected)
-        normalized = _normalize_ui_decision(rejected, session_id=session_id)
+        updated, latest = await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="pending",
+            next_decision=rejected,
+        )
+        normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
+        if not updated:
+            if normalized_latest is not None:
+                latest_status_raw = normalized_latest.get("status")
+                latest_status = (
+                    latest_status_raw if isinstance(latest_status_raw, str) else "unknown"
+                )
+                return _json_response(
+                    {
+                        "ok": True,
+                        "decision": normalized_latest,
+                        "status": latest_status,
+                        "resume_started": False,
+                        "already_resolved": latest_status in {"resolved", "rejected"},
+                        "resume": None,
+                    }
+                )
+            return _error_response(
+                status=409,
+                message="Decision is not pending.",
+                error_type="invalid_request_error",
+                code="decision_not_pending",
+            )
+        normalized = (
+            normalized_latest
+            if normalized_latest is not None
+            else _normalize_ui_decision(rejected, session_id=session_id)
+        )
+        resolved_status_raw = normalized.get("status") if isinstance(normalized, dict) else None
+        resolved_status = (
+            resolved_status_raw if isinstance(resolved_status_raw, str) else "rejected"
+        )
         return _json_response(
             {
                 "ok": True,
                 "decision": normalized,
-                "status": "rejected",
+                "status": resolved_status,
                 "resume_started": False,
+                "already_resolved": resolved_status in {"resolved", "rejected"},
+                "resume": None,
             }
         )
 
     # choice == "approve"
-    approved = _decision_with_status(current_decision, status="approved")
-    await hub.set_session_decision(session_id, approved)
-    executing = _decision_with_status(approved, status="executing")
-    await hub.set_session_decision(session_id, executing)
+    executing_candidate = _decision_with_status(current_decision, status="executing")
+    updated, executing_latest = await hub.transition_session_decision(
+        session_id,
+        expected_id=decision_id,
+        expected_status="pending",
+        next_decision=executing_candidate,
+    )
+    normalized_executing = _normalize_ui_decision(executing_latest, session_id=session_id)
+    if not updated:
+        if normalized_executing is not None:
+            status_raw = normalized_executing.get("status")
+            status_value = status_raw if isinstance(status_raw, str) else "unknown"
+            return _json_response(
+                {
+                    "ok": True,
+                    "decision": normalized_executing,
+                    "status": status_value,
+                    "resume_started": False,
+                    "already_resolved": status_value in {"resolved", "rejected"},
+                    "resume": None,
+                }
+            )
+        return _error_response(
+            status=409,
+            message="Decision is not pending.",
+            error_type="invalid_request_error",
+            code="decision_not_pending",
+        )
+    executing = (
+        normalized_executing
+        if normalized_executing is not None
+        else _normalize_ui_decision(executing_candidate, session_id=session_id)
+    )
+    if executing is None:
+        return _error_response(
+            status=500,
+            message="Decision execution state is invalid.",
+            error_type="internal_error",
+            code="decision_invalid",
+        )
     await hub.set_session_status(session_id, "busy")
 
     resume_started = False
+    resume: dict[str, JSONValue] | None = None
     trace_id: str | None = None
     mwv_report: dict[str, JSONValue] | None = None
     approval_request: dict[str, JSONValue] | None = None
@@ -3799,6 +4206,87 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     parent_user_message_id=user_message_id,
                 ),
             )
+            resume = {
+                "ok": True,
+                "kind": "tool_result",
+                "source_endpoint": "project.command",
+                "tool_name": "project",
+                "data": {"output": response_text, "command": command},
+                "error": None,
+            }
+        elif source_endpoint == "workspace.tool":
+            tool_name_raw = resume_payload.get("tool_name")
+            args_raw = resume_payload.get("args")
+            raw_input_raw = resume_payload.get("raw_input")
+            tool_name = tool_name_raw.strip() if isinstance(tool_name_raw, str) else ""
+            if not tool_name:
+                raise ValueError("decision resume payload missing tool_name")
+            tool_args: dict[str, JSONValue] = {}
+            if isinstance(args_raw, dict):
+                for key, value in args_raw.items():
+                    tool_args[str(key)] = _normalize_json_value(value)
+            raw_input = (
+                raw_input_raw.strip()
+                if isinstance(raw_input_raw, str) and raw_input_raw.strip()
+                else f"ui:{tool_name}"
+            )
+            approved_categories = await session_store.get_categories(session_id)
+            async with agent_lock:
+                try:
+                    agent.set_session_context(session_id, approved_categories)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "Failed to set session context in workspace decision resume",
+                        exc_info=True,
+                    )
+                try:
+                    tool_result = agent.call_tool(
+                        tool_name,
+                        args=tool_args,
+                        raw_input=raw_input,
+                    )
+                except ApprovalRequired as exc:
+                    approval_request = _serialize_approval_request(exc.request)
+                    replacement = _build_ui_approval_decision(
+                        approval_request=approval_request or {},
+                        session_id=session_id,
+                        source_endpoint="workspace.tool",
+                        resume_payload={
+                            "tool_name": tool_name,
+                            "args": tool_args,
+                            "raw_input": raw_input,
+                            "session_id": session_id,
+                        },
+                    )
+                    await hub.set_session_decision(session_id, replacement)
+                    await hub.set_session_status(session_id, "ok")
+                    return _json_response(
+                        {
+                            "ok": True,
+                            "decision": _normalize_ui_decision(replacement, session_id=session_id),
+                            "status": "pending",
+                            "resume_started": False,
+                            "resume": {
+                                "ok": False,
+                                "kind": "approval_required",
+                                "source_endpoint": "workspace.tool",
+                                "tool_name": tool_name,
+                                "data": {
+                                    "approval_request": approval_request or {},
+                                },
+                                "error": "Требуется подтверждение действия.",
+                            },
+                        }
+                    )
+            resume_started = True
+            resume = {
+                "ok": tool_result.ok,
+                "kind": "tool_result",
+                "source_endpoint": "workspace.tool",
+                "tool_name": tool_name,
+                "data": tool_result.data,
+                "error": tool_result.error,
+            }
         else:
             selected_model = await hub.get_session_model(session_id)
             if selected_model is None:
@@ -3840,6 +4328,16 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                         "decision": _normalize_ui_decision(replacement, session_id=session_id),
                         "status": "pending",
                         "resume_started": False,
+                        "resume": {
+                            "ok": False,
+                            "kind": "approval_required",
+                            "source_endpoint": source_endpoint or "chat.send",
+                            "tool_name": None,
+                            "data": {
+                                "approval_request": approval_request,
+                            },
+                            "error": "Требуется подтверждение действия.",
+                        },
                     }
                 )
 
@@ -3909,6 +4407,17 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     parent_user_message_id=user_message_id,
                 ),
             )
+            resume = {
+                "ok": True,
+                "kind": "chat_response",
+                "source_endpoint": source_endpoint or "chat.send",
+                "tool_name": None,
+                "data": {
+                    "trace_id": trace_id,
+                    "display_target": display_target,
+                },
+                "error": None,
+            }
 
         resolved = _decision_with_status(executing, status="resolved", resolved=True)
         await hub.set_session_decision(session_id, resolved)
@@ -3932,6 +4441,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "selected_model": current_model,
                 "approval_request": approval_request,
                 "mwv_report": mwv_report,
+                "resume": resume,
             }
         )
     except Exception as exc:  # noqa: BLE001
@@ -5485,8 +5995,10 @@ def create_app(
     app.router.add_post("/slavik/feedback", handle_feedback)
     app.router.add_post("/slavik/approve-session", handle_approve_session)
     app.router.add_get("/", handle_ui_index)
+    app.router.add_get("/workspace", handle_workspace_index)
     app.router.add_get("/ui", handle_ui_redirect)
     app.router.add_get("/ui/", handle_ui_index)
+    app.router.add_get("/ui/workspace", handle_workspace_index)
     app.router.add_get("/ui/api/status", handle_ui_status)
     app.router.add_get("/ui/api/settings", handle_ui_settings)
     app.router.add_post("/ui/api/settings", handle_ui_settings_update)
@@ -5521,6 +6033,10 @@ def create_app(
     app.router.add_patch("/ui/api/sessions/{session_id}/title", handle_ui_session_title_update)
     app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)
     app.router.add_post("/ui/api/session-model", handle_ui_session_model)
+    app.router.add_get("/ui/api/workspace/tree", handle_ui_workspace_tree)
+    app.router.add_get("/ui/api/workspace/file", handle_ui_workspace_file_get)
+    app.router.add_put("/ui/api/workspace/file", handle_ui_workspace_file_put)
+    app.router.add_post("/ui/api/workspace/run", handle_ui_workspace_run)
     app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
     app.router.add_post("/ui/api/tools/project", handle_ui_project_command)
     app.router.add_get("/ui/api/events/stream", handle_ui_events_stream)

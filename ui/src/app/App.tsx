@@ -12,6 +12,7 @@ import type { Artifact } from './components/artifacts-sidebar';
 import { HistorySidebar } from './components/history-sidebar';
 import { SearchModal } from './components/search-modal';
 import { Settings } from './components/Settings';
+import { WorkspaceIde } from './components/workspace-ide';
 import type {
   ChatAttachment,
   ChatMessage,
@@ -25,6 +26,7 @@ import type {
 const SESSION_HEADER = 'X-Slavik-Session';
 const SCROLLBAR_REVEAL_DISTANCE_PX = 38;
 const LAST_SESSION_KEY = 'slavik.last.session';
+const WORKSPACE_PATHS = new Set(['/workspace', '/ui/workspace']);
 
 type SessionArtifactRecord = {
   id: string;
@@ -55,6 +57,8 @@ type PendingUserMessage = {
   content: string;
   attachments: ChatAttachment[];
 };
+
+type AppView = 'chat' | 'workspace';
 
 const toOutputArtifactUiId = (artifactId: string): string => `output-${artifactId}`;
 const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
@@ -233,6 +237,20 @@ const saveLastSessionId = (sessionId: string | null) => {
     return;
   }
   window.localStorage.setItem(LAST_SESSION_KEY, sessionId);
+};
+
+const viewFromPathname = (pathname: string): AppView => {
+  if (WORKSPACE_PATHS.has(pathname)) {
+    return 'workspace';
+  }
+  return 'chat';
+};
+
+const pathForView = (view: AppView): string => {
+  if (view === 'workspace') {
+    return '/workspace';
+  }
+  return '/ui/';
 };
 
 const sortSessionsByUpdated = (value: SessionSummary[]): SessionSummary[] => {
@@ -718,6 +736,12 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
 };
 
 export default function App() {
+  const [activeView, setActiveView] = useState<AppView>(() => {
+    if (typeof window === 'undefined') {
+      return 'chat';
+    }
+    return viewFromPathname(window.location.pathname);
+  });
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
@@ -792,6 +816,16 @@ export default function App() {
       transient: true,
     };
   }, [chatStreamingState]);
+  const workspaceMessages = useMemo(() => {
+    const next = [...canvasMessages];
+    if (pendingCanvasMessage) {
+      next.push(pendingCanvasMessage);
+    }
+    if (streamingAssistantCanvasMessage) {
+      next.push(streamingAssistantCanvasMessage);
+    }
+    return next;
+  }, [canvasMessages, pendingCanvasMessage, streamingAssistantCanvasMessage]);
   const showAssistantLoading = useMemo(
     () =>
       sending &&
@@ -934,8 +968,41 @@ export default function App() {
     window.localStorage.setItem('slavik.last.model', JSON.stringify(model));
   };
 
+  const syncViewFromLocation = () => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    setActiveView(viewFromPathname(window.location.pathname));
+  };
+
+  const setView = (view: AppView) => {
+    setActiveView(view);
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const nextPath = pathForView(view);
+    if (window.location.pathname === nextPath) {
+      return;
+    }
+    window.history.pushState({ view }, '', nextPath);
+  };
+
   const isModelAvailable = (model: SelectedModel, providers: ProviderModels[]) =>
     providers.some((provider) => provider.provider === model.provider && provider.models.includes(model.model));
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+    syncViewFromLocation();
+    const handlePopState = () => {
+      syncViewFromLocation();
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
 
   const extractErrorFromResponse = async (
     response: Response,
@@ -1838,7 +1905,31 @@ export default function App() {
         setSelectedModel(parsedModel);
         saveLastModel(parsedModel);
       }
-      setStatusMessage(null);
+      const resumeRaw = (payload as { resume?: unknown }).resume;
+      if (resumeRaw && typeof resumeRaw === 'object') {
+        const resume = resumeRaw as {
+          ok?: unknown;
+          source_endpoint?: unknown;
+          tool_name?: unknown;
+          error?: unknown;
+        };
+        if (resume.source_endpoint === 'workspace.tool') {
+          const toolName = typeof resume.tool_name === 'string' ? resume.tool_name : 'workspace tool';
+          if (resume.ok === true) {
+            setStatusMessage(`Workspace: ${toolName} completed.`);
+          } else {
+            const errorText =
+              typeof resume.error === 'string' && resume.error.trim()
+                ? resume.error
+                : `Workspace: ${toolName} failed.`;
+            setStatusMessage(errorText);
+          }
+        } else {
+          setStatusMessage(null);
+        }
+      } else {
+        setStatusMessage(null);
+      }
       await loadSessions();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to resolve decision.';
@@ -1855,9 +1946,11 @@ export default function App() {
         folders={folders.map((folder) => ({ id: folder.folder_id, name: folder.name }))}
         activeChatId={selectedConversation}
         onSelectChat={(sessionId) => {
+          setView('chat');
           void handleSelectConversation(sessionId);
         }}
         onNewChat={() => {
+          setView('chat');
           void handleCreateConversation();
         }}
         onDeleteChat={(sessionId) => {
@@ -1870,6 +1963,7 @@ export default function App() {
           void handleMoveChatToFolder(sessionId, folderId);
         }}
         onOpenSearch={() => setSearchOpen(true)}
+        onOpenWorkspace={() => setView('workspace')}
         onOpenSettings={() => setSettingsOpen(true)}
         onCreateFolder={() => {
           void handleCreateFolder();
@@ -1877,78 +1971,104 @@ export default function App() {
       />
 
       <div className="flex-1 min-w-0 relative">
-        <Canvas
-          className="h-full"
-          messages={canvasMessages}
-          pendingMessage={pendingCanvasMessage}
-          streamingAssistantMessage={streamingAssistantCanvasMessage}
-          showAssistantLoading={showAssistantLoading}
-          sending={sending}
-          onSendMessage={(payload) => handleSend(payload)}
-          onSendFeedback={(interactionId, rating) => handleSendFeedback(interactionId, rating)}
-          modelName={modelLabel}
-          onOpenSettings={() => setSettingsOpen(true)}
-          statusMessage={statusMessage}
-          longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
-          longPasteThresholdChars={composerSettings.longPasteThresholdChars}
-          modelOptions={modelOptions}
-          selectedModelValue={selectedModelValue}
-          onSelectModel={(provider, model) => {
-            void handleSetModel(provider, model);
-          }}
-          modelsLoading={modelsLoading}
-          savingModel={savingModel}
-          forceCanvasNext={forceCanvasNext}
-          onToggleForceCanvasNext={() => {
-            setForceCanvasNext((prev) => !prev);
-          }}
-          decision={pendingDecision}
-          decisionBusy={decisionBusy}
-          decisionError={decisionError}
-          onDecisionRespond={(choice, editedAction) => {
-            void handleDecisionRespond(choice, editedAction);
-          }}
-        />
-
-        {!artifactPanelOpen ? (
-          <button
-            onClick={() => {
-              setArtifactViewerArtifactId(null);
-              setArtifactPanelOpen(true);
+        {activeView === 'workspace' ? (
+          <WorkspaceIde
+            sessionId={selectedConversation}
+            sessionHeader={SESSION_HEADER}
+            modelLabel={modelLabel}
+            messages={workspaceMessages}
+            sending={sending}
+            statusMessage={statusMessage}
+            onBackToChat={() => setView('chat')}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onSendAgentMessage={(payload) => handleSend(payload)}
+            decision={pendingDecision}
+            decisionBusy={decisionBusy}
+            decisionError={decisionError}
+            onDecisionRespond={(choice, editedAction) => {
+              void handleDecisionRespond(choice, editedAction);
             }}
-            className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#141418] border border-[#1f1f24] hover:border-[#2a2a30] hover:bg-[#1b1b20] flex items-center justify-center transition-all cursor-pointer shadow-lg shadow-black/30"
-            title="Open Artifacts"
-          >
-            <PanelRight className="w-4.5 h-4.5 text-[#888]" />
-          </button>
-        ) : null}
+          />
+        ) : (
+          <>
+            <Canvas
+              className="h-full"
+              messages={canvasMessages}
+              pendingMessage={pendingCanvasMessage}
+              streamingAssistantMessage={streamingAssistantCanvasMessage}
+              showAssistantLoading={showAssistantLoading}
+              sending={sending}
+              onSendMessage={(payload) => handleSend(payload)}
+              onSendFeedback={(interactionId, rating) => handleSendFeedback(interactionId, rating)}
+              modelName={modelLabel}
+              onOpenSettings={() => setSettingsOpen(true)}
+              statusMessage={statusMessage}
+              longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
+              longPasteThresholdChars={composerSettings.longPasteThresholdChars}
+              modelOptions={modelOptions}
+              selectedModelValue={selectedModelValue}
+              onSelectModel={(provider, model) => {
+                void handleSetModel(provider, model);
+              }}
+              modelsLoading={modelsLoading}
+              savingModel={savingModel}
+              forceCanvasNext={forceCanvasNext}
+              onToggleForceCanvasNext={() => {
+                setForceCanvasNext((prev) => !prev);
+              }}
+              decision={pendingDecision}
+              decisionBusy={decisionBusy}
+              decisionError={decisionError}
+              onDecisionRespond={(choice, editedAction) => {
+                void handleDecisionRespond(choice, editedAction);
+              }}
+            />
+
+            {!artifactPanelOpen ? (
+              <button
+                onClick={() => {
+                  setArtifactViewerArtifactId(null);
+                  setArtifactPanelOpen(true);
+                }}
+                className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#141418] border border-[#1f1f24] hover:border-[#2a2a30] hover:bg-[#1b1b20] flex items-center justify-center transition-all cursor-pointer shadow-lg shadow-black/30"
+                title="Open Artifacts"
+              >
+                <PanelRight className="w-4.5 h-4.5 text-[#888]" />
+              </button>
+            ) : null}
+          </>
+        )}
       </div>
 
-      <ArtifactPanel
-        isOpen={artifactPanelOpen}
-        onClose={() => {
-          setArtifactPanelOpen(false);
-          setArtifactViewerArtifactId(null);
-        }}
-        artifacts={artifacts}
-        autoOpenArtifactId={artifactViewerArtifactId}
-        onDownloadArtifact={(artifact) => {
-          void handleDownloadArtifact(artifact);
-        }}
-        onDownloadAll={() => {
-          void handleDownloadAllArtifacts();
-        }}
-      />
+      {activeView === 'chat' ? (
+        <ArtifactPanel
+          isOpen={artifactPanelOpen}
+          onClose={() => {
+            setArtifactPanelOpen(false);
+            setArtifactViewerArtifactId(null);
+          }}
+          artifacts={artifacts}
+          autoOpenArtifactId={artifactViewerArtifactId}
+          onDownloadArtifact={(artifact) => {
+            void handleDownloadArtifact(artifact);
+          }}
+          onDownloadAll={() => {
+            void handleDownloadAllArtifacts();
+          }}
+        />
+      ) : null}
 
       <SearchModal
         isOpen={searchOpen}
         onClose={() => setSearchOpen(false)}
         chats={searchChats}
         onSelectChat={(sessionId) => {
+          setView('chat');
           void handleSelectConversation(sessionId);
           setSearchOpen(false);
         }}
         onNewChat={() => {
+          setView('chat');
           void handleCreateConversation();
         }}
       />
