@@ -20,6 +20,8 @@ import {
 } from "lucide-react";
 
 import BrainLogo from "../../assets/brain.png";
+import type { UiDecision } from "../types";
+import { DecisionPanel } from "./decision-panel";
 
 // ====== Types ======
 
@@ -148,6 +150,13 @@ interface CanvasProps {
   onToggleForceCanvasNext?: () => void;
   longPasteToFileEnabled?: boolean;
   longPasteThresholdChars?: number;
+  decision?: UiDecision | null;
+  decisionBusy?: boolean;
+  decisionError?: string | null;
+  onDecisionRespond?: (
+    choice: "approve" | "reject" | "edit",
+    editedAction?: Record<string, unknown> | null,
+  ) => Promise<void> | void;
 }
 
 // ====== Sub Components ======
@@ -541,6 +550,10 @@ export function Canvas({
   onToggleForceCanvasNext,
   longPasteToFileEnabled = true,
   longPasteThresholdChars = 12000,
+  decision = null,
+  decisionBusy = false,
+  decisionError = null,
+  onDecisionRespond,
 }: CanvasProps) {
   const [inputValue, setInputValue] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<
@@ -624,6 +637,7 @@ export function Canvas({
       : 12000;
     return Math.max(1000, Math.min(80000, normalized));
   }, [longPasteThresholdChars]);
+  const composerBlocked = decision?.status === "pending" && decision.blocking;
 
   const toComposerAttachments = (
     items: Array<{ name: string; mime: string; content: string }> | undefined,
@@ -1061,6 +1075,20 @@ export function Canvas({
         </div>
       </div>
 
+      {decision && decision.status === "pending" ? (
+        <DecisionPanel
+          decision={decision}
+          busy={decisionBusy}
+          error={decisionError}
+          onRespond={(choice, editedAction) => {
+            if (!onDecisionRespond) {
+              return;
+            }
+            void onDecisionRespond(choice, editedAction);
+          }}
+        />
+      ) : null}
+
       {/* Input area */}
       <div className="border-t border-[#141418] px-4 py-3">
         <div className="max-w-3xl mx-auto">
@@ -1155,11 +1183,15 @@ export function Canvas({
               }}
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
-              placeholder="Type your message... (Shift+Enter for new line)"
+              placeholder={
+                composerBlocked
+                  ? "Нужно решить запрос разрешения перед отправкой."
+                  : "Type your message... (Shift+Enter for new line)"
+              }
               rows={1}
               className="composer-textarea flex-1 bg-transparent text-[14px] text-[#d4d4d8] placeholder-[#555] resize-none outline-none min-h-[24px] max-h-[120px]"
               style={{ lineHeight: "24px" }}
-              disabled={sending || isTranscribing}
+              disabled={sending || isTranscribing || composerBlocked}
               data-scrollbar="always"
             />
 
@@ -1169,7 +1201,7 @@ export function Canvas({
               onClick={() => {
                 void handleToggleRecording();
               }}
-              disabled={!canUseMediaRecorder || sending || isTranscribing}
+              disabled={!canUseMediaRecorder || sending || isTranscribing || composerBlocked}
               className={`transition-colors pb-0.5 cursor-pointer ${
                 !canUseMediaRecorder
                   ? "text-[#444]"
@@ -1197,9 +1229,17 @@ export function Canvas({
               onClick={() => {
                 void handleSend();
               }}
-              disabled={(!inputValue.trim() && composerAttachments.length === 0) || sending || isTranscribing}
+              disabled={
+                (!inputValue.trim() && composerAttachments.length === 0)
+                || sending
+                || isTranscribing
+                || composerBlocked
+              }
               className={`p-1.5 rounded-lg transition-all cursor-pointer ${
-                (inputValue.trim() || composerAttachments.length > 0) && !sending && !isTranscribing
+                (inputValue.trim() || composerAttachments.length > 0)
+                && !sending
+                && !isTranscribing
+                && !composerBlocked
                   ? "bg-[#6366f1] hover:bg-[#5558e6] text-white"
                   : "bg-[#1b1b20] text-[#555]"
               }`}

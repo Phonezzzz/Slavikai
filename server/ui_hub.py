@@ -696,7 +696,13 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-            state.decision_packet = dict(decision) if decision is not None else None
+            previous_decision = (
+                dict(state.decision_packet) if state.decision_packet is not None else None
+            )
+            next_decision = dict(decision) if decision is not None else None
+            if previous_decision == next_decision:
+                return
+            state.decision_packet = next_decision
             state.updated_at = _utc_iso_now()
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
@@ -705,8 +711,6 @@ class UIHub:
                 return
             decision_id = state.decision_packet.get("id")
             if isinstance(decision_id, str):
-                if decision_id == state.last_decision_id:
-                    return
                 state.last_decision_id = decision_id
             else:
                 state.last_decision_id = None

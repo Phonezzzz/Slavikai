@@ -16,6 +16,32 @@ export type ChatMessage = {
   attachments: ChatAttachment[];
 };
 
+export type UiDecisionStatus = 'pending' | 'approved' | 'rejected' | 'executing' | 'resolved';
+
+export type UiDecisionOption = {
+  id: string;
+  title: string;
+  action: string;
+  payload: Record<string, unknown>;
+  risk: string;
+};
+
+export type UiDecision = {
+  id: string;
+  kind: 'approval' | 'decision';
+  status: UiDecisionStatus;
+  blocking: boolean;
+  reason: string;
+  summary: string;
+  proposed_action: Record<string, unknown>;
+  options: UiDecisionOption[];
+  default_option_id: string | null;
+  context: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+};
+
 export type SessionSummary = {
   session_id: string;
   title: string;

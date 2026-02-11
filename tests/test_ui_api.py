@@ -1740,24 +1740,17 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             assert session.get("session_id") == session_id
             messages = session.get("messages")
             assert isinstance(messages, list)
-            assert len(messages) >= 2
+            assert len(messages) == 1
             first = messages[0]
-            second = messages[1]
             assert isinstance(first, dict)
-            assert isinstance(second, dict)
             assert first.get("role") == "user"
-            assert second.get("role") == "assistant"
-            second_content = second.get("content")
-            assert isinstance(second_content, str)
-            assert f"decision-{session_id}" in second_content
+            assert first.get("content") == "Persist me"
             restored_decision = session.get("decision")
             assert isinstance(restored_decision, dict)
             assert restored_decision.get("id") == f"decision-{session_id}"
             restored_output = session.get("output")
             assert isinstance(restored_output, dict)
-            output_content = restored_output.get("content")
-            assert isinstance(output_content, str)
-            assert f"decision-{session_id}" in output_content
+            assert restored_output.get("content") is None
             restored_files = session.get("files")
             assert isinstance(restored_files, list)
             assert restored_files == []

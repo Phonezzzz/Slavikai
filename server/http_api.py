@@ -15,7 +15,7 @@ import time
 import uuid
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 from urllib.parse import urlparse
@@ -208,6 +208,16 @@ _EXT_TO_MIME: Final[dict[str, str]] = {
     "xml": "application/xml",
     "sql": "text/plain",
 }
+UI_DECISION_KINDS: Final[set[str]] = {"approval", "decision"}
+UI_DECISION_STATUSES: Final[set[str]] = {
+    "pending",
+    "approved",
+    "rejected",
+    "executing",
+    "resolved",
+}
+UI_DECISION_RESPONSES: Final[set[str]] = {"approve", "reject", "edit"}
+UI_DECISION_EDITABLE_FIELDS: Final[set[str]] = {"details", "args", "query", "branch", "repo_url"}
 
 
 @dataclass(frozen=True)
@@ -998,6 +1008,253 @@ def _serialize_approval_request(
     }
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _normalize_ui_decision_options(raw: object) -> list[dict[str, JSONValue]]:
+    if not isinstance(raw, list):
+        return []
+    options: list[dict[str, JSONValue]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        option_id = item.get("id")
+        title = item.get("title")
+        action = item.get("action")
+        if not isinstance(option_id, str) or not option_id.strip():
+            continue
+        if not isinstance(title, str) or not title.strip():
+            continue
+        if not isinstance(action, str) or not action.strip():
+            continue
+        payload_raw = item.get("payload")
+        risk_raw = item.get("risk")
+        payload_normalized = (
+            _normalize_json_value(payload_raw) if isinstance(payload_raw, dict) else {}
+        )
+        risk = risk_raw if isinstance(risk_raw, str) and risk_raw.strip() else "low"
+        options.append(
+            {
+                "id": option_id.strip(),
+                "title": title.strip(),
+                "action": action.strip(),
+                "payload": payload_normalized,
+                "risk": risk,
+            }
+        )
+    return options
+
+
+def _normalize_ui_decision(
+    raw: object,
+    *,
+    session_id: str | None = None,
+    trace_id: str | None = None,
+) -> dict[str, JSONValue] | None:
+    if not isinstance(raw, dict):
+        return None
+    if not raw:
+        return None
+
+    decision_id_raw = raw.get("id")
+    if not isinstance(decision_id_raw, str) or not decision_id_raw.strip():
+        return None
+    decision_id = decision_id_raw.strip()
+    now = _utc_now_iso()
+
+    kind_raw = raw.get("kind")
+    status_raw = raw.get("status")
+    reason_raw = raw.get("reason")
+    summary_raw = raw.get("summary")
+    context_raw = raw.get("context")
+    options_raw = raw.get("options")
+    default_option_id_raw = raw.get("default_option_id")
+    created_at_raw = raw.get("created_at")
+    updated_at_raw = raw.get("updated_at")
+    resolved_at_raw = raw.get("resolved_at")
+
+    context: dict[str, JSONValue] = {}
+    if isinstance(context_raw, dict):
+        for key, value in context_raw.items():
+            context[str(key)] = _normalize_json_value(value)
+    if session_id and "session_id" not in context:
+        context["session_id"] = session_id
+    if trace_id and "trace_id" not in context:
+        context["trace_id"] = trace_id
+
+    options = _normalize_ui_decision_options(options_raw)
+    default_option_id: str | None = None
+    if isinstance(default_option_id_raw, str) and default_option_id_raw.strip():
+        default_option_id = default_option_id_raw.strip()
+    elif options:
+        first_id = options[0].get("id")
+        default_option_id = first_id if isinstance(first_id, str) else None
+
+    if (
+        isinstance(kind_raw, str)
+        and kind_raw in UI_DECISION_KINDS
+        and isinstance(status_raw, str)
+        and status_raw in UI_DECISION_STATUSES
+    ):
+        kind = kind_raw
+        status = status_raw
+        blocking = raw.get("blocking") is True
+        reason = reason_raw if isinstance(reason_raw, str) and reason_raw.strip() else "decision"
+        summary = summary_raw if isinstance(summary_raw, str) and summary_raw.strip() else reason
+        proposed_action_raw = raw.get("proposed_action")
+        proposed_action = (
+            _normalize_json_value(proposed_action_raw)
+            if isinstance(proposed_action_raw, dict)
+            else {}
+        )
+        created_at = (
+            created_at_raw if isinstance(created_at_raw, str) and created_at_raw.strip() else now
+        )
+        updated_at = (
+            updated_at_raw if isinstance(updated_at_raw, str) and updated_at_raw.strip() else now
+        )
+        resolved_at = (
+            resolved_at_raw
+            if isinstance(resolved_at_raw, str) and resolved_at_raw.strip()
+            else None
+        )
+        return {
+            "id": decision_id,
+            "kind": kind,
+            "status": status,
+            "blocking": blocking,
+            "reason": reason,
+            "summary": summary,
+            "proposed_action": proposed_action,
+            "options": options,
+            "default_option_id": default_option_id,
+            "context": context,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "resolved_at": resolved_at,
+        }
+
+    # Legacy DecisionPacket -> UiDecision
+    reason = reason_raw if isinstance(reason_raw, str) and reason_raw.strip() else "decision"
+    summary = summary_raw if isinstance(summary_raw, str) and summary_raw.strip() else reason
+    created_at = (
+        created_at_raw if isinstance(created_at_raw, str) and created_at_raw.strip() else now
+    )
+    return {
+        "id": decision_id,
+        "kind": "decision",
+        "status": "pending",
+        "blocking": True,
+        "reason": reason,
+        "summary": summary,
+        "proposed_action": {},
+        "options": options,
+        "default_option_id": default_option_id,
+        "context": context,
+        "created_at": created_at,
+        "updated_at": now,
+        "resolved_at": None,
+    }
+
+
+def _build_ui_approval_decision(
+    *,
+    approval_request: dict[str, JSONValue],
+    session_id: str,
+    source_endpoint: str,
+    resume_payload: dict[str, JSONValue],
+    trace_id: str | None = None,
+) -> dict[str, JSONValue]:
+    prompt_raw = approval_request.get("prompt")
+    prompt = prompt_raw if isinstance(prompt_raw, dict) else {}
+    what_raw = prompt.get("what")
+    why_raw = prompt.get("why")
+    category_raw = approval_request.get("category")
+    tool_raw = approval_request.get("tool")
+    details_raw = approval_request.get("details")
+    required_raw = approval_request.get("required_categories")
+    required_categories: list[str] = []
+    if isinstance(required_raw, list):
+        for item in required_raw:
+            if isinstance(item, str) and item in ALL_CATEGORIES:
+                required_categories.append(item)
+
+    summary = (
+        what_raw.strip()
+        if isinstance(what_raw, str) and what_raw.strip()
+        else "Требуется подтверждение действия."
+    )
+    reason = (
+        why_raw.strip() if isinstance(why_raw, str) and why_raw.strip() else "approval_required"
+    )
+    proposed_action: dict[str, JSONValue] = {
+        "category": category_raw if isinstance(category_raw, str) else "",
+        "required_categories": required_categories,
+        "tool": tool_raw if isinstance(tool_raw, str) else "",
+        "details": _normalize_json_value(details_raw) if isinstance(details_raw, dict) else {},
+    }
+    now = _utc_now_iso()
+    return {
+        "id": f"decision-{uuid.uuid4().hex}",
+        "kind": "approval",
+        "status": "pending",
+        "blocking": True,
+        "reason": reason,
+        "summary": summary,
+        "proposed_action": proposed_action,
+        "options": [
+            {
+                "id": "approve",
+                "title": "Approve",
+                "action": "approve",
+                "payload": {},
+                "risk": "medium",
+            },
+            {
+                "id": "reject",
+                "title": "Reject",
+                "action": "reject",
+                "payload": {},
+                "risk": "low",
+            },
+        ],
+        "default_option_id": "approve",
+        "context": {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "source_endpoint": source_endpoint,
+            "resume_payload": resume_payload,
+        },
+        "created_at": now,
+        "updated_at": now,
+        "resolved_at": None,
+    }
+
+
+def _decision_is_pending_blocking(decision: dict[str, JSONValue] | None) -> bool:
+    if not isinstance(decision, dict):
+        return False
+    status = decision.get("status")
+    blocking = decision.get("blocking")
+    return status == "pending" and blocking is True
+
+
+def _decision_with_status(
+    decision: dict[str, JSONValue],
+    *,
+    status: str,
+    resolved: bool = False,
+) -> dict[str, JSONValue]:
+    updated = dict(decision)
+    updated["status"] = status
+    updated["updated_at"] = _utc_now_iso()
+    if resolved:
+        updated["resolved_at"] = _utc_now_iso()
+        updated["blocking"] = False
+    return updated
+
+
 def _normalize_json_value(value: object) -> JSONValue:
     if value is None:
         return None
@@ -1245,7 +1502,7 @@ def _build_output_artifacts(
     if not normalized:
         return []
 
-    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    now = datetime.now(UTC).isoformat()
     artifacts: list[dict[str, JSONValue]] = []
     named_files = _extract_named_files_from_output(response_text)
     for named_file in named_files:
@@ -1966,7 +2223,7 @@ def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONVal
 
 
 def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    return datetime.now(UTC).isoformat()
 
 
 async def _publish_agent_activity(
@@ -2135,7 +2392,10 @@ async def handle_ui_index(request: web.Request) -> web.FileResponse:
 async def handle_ui_status(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
-    decision = await hub.get_session_decision(session_id)
+    decision = _normalize_ui_decision(
+        await hub.get_session_decision(session_id),
+        session_id=session_id,
+    )
     selected_model = await hub.get_session_model(session_id)
     response = _json_response(
         {
@@ -2860,6 +3120,8 @@ async def handle_ui_session_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="session_not_found",
         )
+    raw_decision = session.get("decision")
+    session["decision"] = _normalize_ui_decision(raw_decision, session_id=session_id)
     response = _json_response({"session": session})
     response.headers[UI_SESSION_HEADER] = session_id
     return response
@@ -3234,6 +3496,332 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
     return _json_response({"session_id": session_id, "deleted": True})
 
 
+async def handle_ui_decision_respond(request: web.Request) -> web.Response:
+    agent_lock = request.app["agent_lock"]
+    session_store = request.app["session_store"]
+    hub: UIHub = request.app["ui_hub"]
+
+    try:
+        agent = await _resolve_agent(request)
+    except ModelNotAllowedError as exc:
+        return _model_not_allowed_response(exc.model_id)
+    if agent is None:
+        return _model_not_selected_response()
+
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+
+    session_id_raw = payload.get("session_id")
+    decision_id_raw = payload.get("decision_id")
+    choice_raw = payload.get("choice")
+    edited_action_raw = payload.get("edited_action")
+    if not isinstance(session_id_raw, str) or not session_id_raw.strip():
+        return _error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if not isinstance(decision_id_raw, str) or not decision_id_raw.strip():
+        return _error_response(
+            status=400,
+            message="decision_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if not isinstance(choice_raw, str) or choice_raw not in UI_DECISION_RESPONSES:
+        return _error_response(
+            status=400,
+            message="choice должен быть approve|reject|edit.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    session_id = session_id_raw.strip()
+    decision_id = decision_id_raw.strip()
+    choice = choice_raw
+
+    current_decision = _normalize_ui_decision(
+        await hub.get_session_decision(session_id),
+        session_id=session_id,
+    )
+    if current_decision is None:
+        return _error_response(
+            status=404,
+            message="Pending decision not found.",
+            error_type="invalid_request_error",
+            code="decision_not_found",
+        )
+    current_id = current_decision.get("id")
+    if not isinstance(current_id, str) or current_id != decision_id:
+        return _error_response(
+            status=409,
+            message="Decision id mismatch.",
+            error_type="invalid_request_error",
+            code="decision_id_mismatch",
+        )
+    current_status = current_decision.get("status")
+    if current_status != "pending":
+        return _error_response(
+            status=409,
+            message="Decision is not pending.",
+            error_type="invalid_request_error",
+            code="decision_not_pending",
+        )
+
+    if choice == "edit":
+        if not isinstance(edited_action_raw, dict):
+            return _error_response(
+                status=400,
+                message="edited_action должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        proposed_raw = current_decision.get("proposed_action")
+        proposed_action = dict(proposed_raw) if isinstance(proposed_raw, dict) else {}
+        for key, value in edited_action_raw.items():
+            normalized_key = str(key)
+            if normalized_key not in UI_DECISION_EDITABLE_FIELDS:
+                continue
+            proposed_action[normalized_key] = _normalize_json_value(value)
+        edited_decision = dict(current_decision)
+        edited_decision["proposed_action"] = proposed_action
+        edited_decision["updated_at"] = _utc_now_iso()
+        await hub.set_session_decision(session_id, edited_decision)
+        normalized = _normalize_ui_decision(edited_decision, session_id=session_id)
+        return _json_response(
+            {
+                "ok": True,
+                "decision": normalized,
+                "status": "pending",
+                "resume_started": False,
+            }
+        )
+
+    if choice == "reject":
+        rejected = _decision_with_status(current_decision, status="rejected", resolved=True)
+        await hub.set_session_decision(session_id, rejected)
+        normalized = _normalize_ui_decision(rejected, session_id=session_id)
+        return _json_response(
+            {
+                "ok": True,
+                "decision": normalized,
+                "status": "rejected",
+                "resume_started": False,
+            }
+        )
+
+    # choice == "approve"
+    approved = _decision_with_status(current_decision, status="approved")
+    await hub.set_session_decision(session_id, approved)
+    executing = _decision_with_status(approved, status="executing")
+    await hub.set_session_decision(session_id, executing)
+    await hub.set_session_status(session_id, "busy")
+
+    resume_started = False
+    trace_id: str | None = None
+    mwv_report: dict[str, JSONValue] | None = None
+    approval_request: dict[str, JSONValue] | None = None
+    try:
+        context_raw = executing.get("context")
+        context = context_raw if isinstance(context_raw, dict) else {}
+        source_endpoint_raw = context.get("source_endpoint")
+        source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
+        resume_payload_raw = context.get("resume_payload")
+        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+
+        kind_raw = executing.get("kind")
+        if kind_raw == "approval":
+            proposed_raw = executing.get("proposed_action")
+            proposed = proposed_raw if isinstance(proposed_raw, dict) else {}
+            required_raw = proposed.get("required_categories")
+            categories: set[ApprovalCategory] = set()
+            if isinstance(required_raw, list):
+                for item in required_raw:
+                    if isinstance(item, str) and item in ALL_CATEGORIES:
+                        categories.add(cast(ApprovalCategory, item))
+            if categories:
+                await session_store.approve(session_id, categories)
+
+        selected_model = await hub.get_session_model(session_id)
+        if selected_model is None:
+            return _model_not_selected_response()
+        approved_categories = await session_store.get_categories(session_id)
+        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+        async with agent_lock:
+            model_config = _build_model_config(
+                selected_model["provider"],
+                selected_model["model"],
+            )
+            api_key = _resolve_provider_api_key(selected_model["provider"])
+            agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
+            try:
+                agent.set_session_context(session_id, approved_categories)
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to set session context in decision resume", exc_info=True)
+            response_raw = agent.respond(llm_messages)
+            response_text, mwv_report = _split_response_and_report(response_raw)
+            trace_id = _normalize_trace_id(getattr(agent, "last_chat_interaction_id", None))
+            approval_request = _serialize_approval_request(
+                getattr(agent, "last_approval_request", None),
+            )
+
+        resume_started = source_endpoint in {"chat.send", "project.command"}
+        user_message_id_raw = resume_payload.get("user_message_id")
+        user_message_id = (
+            user_message_id_raw
+            if isinstance(user_message_id_raw, str) and user_message_id_raw
+            else None
+        )
+        source_request_raw = resume_payload.get("source_request")
+        source_request = source_request_raw if isinstance(source_request_raw, dict) else {}
+
+        if approval_request is not None:
+            replacement = _build_ui_approval_decision(
+                approval_request=approval_request,
+                session_id=session_id,
+                source_endpoint=source_endpoint or "chat.send",
+                resume_payload=resume_payload,
+                trace_id=trace_id,
+            )
+            await hub.set_session_decision(session_id, replacement)
+            await hub.set_session_status(session_id, "ok")
+            return _json_response(
+                {
+                    "ok": True,
+                    "decision": _normalize_ui_decision(replacement, session_id=session_id),
+                    "status": "pending",
+                    "resume_started": False,
+                }
+            )
+
+        if source_endpoint == "project.command":
+            await hub.append_message(
+                session_id,
+                hub.create_message(
+                    role="assistant",
+                    content=response_text,
+                    trace_id=trace_id,
+                    parent_user_message_id=user_message_id,
+                ),
+            )
+        else:
+            force_canvas = source_request.get("force_canvas") is True
+            await hub.set_session_output(session_id, response_text)
+            files_from_tools: list[str] = []
+            if trace_id:
+                tool_calls = _tool_calls_for_trace_id(trace_id) or []
+                files_from_tools = _extract_files_from_tool_calls(tool_calls)
+                if files_from_tools:
+                    await hub.merge_session_files(session_id, files_from_tools)
+            named_files_count = len(_extract_named_files_from_output(response_text))
+            display_target: Literal["chat", "canvas"] = (
+                "canvas"
+                if _should_render_result_in_canvas(
+                    response_text=response_text,
+                    files_from_tools=files_from_tools,
+                    named_files_count=named_files_count,
+                    force_canvas=force_canvas,
+                )
+                else "chat"
+            )
+            artifact_payloads = _build_output_artifacts(
+                response_text=response_text,
+                display_target=display_target,
+                files_from_tools=files_from_tools,
+            )
+            for artifact in artifact_payloads:
+                await hub.append_session_artifact(session_id, artifact)
+            first_artifact = artifact_payloads[0] if artifact_payloads else None
+            artifact_id_raw = first_artifact.get("id") if first_artifact is not None else None
+            artifact_id = artifact_id_raw if isinstance(artifact_id_raw, str) else None
+            artifact_title = _canvas_summary_title_from_artifact(first_artifact)
+            if display_target == "canvas" and artifact_id is not None:
+                stream_source_raw = (
+                    first_artifact.get("content") if first_artifact is not None else response_text
+                )
+                stream_source = (
+                    stream_source_raw if isinstance(stream_source_raw, str) else response_text
+                )
+                asyncio.create_task(
+                    _publish_canvas_stream(
+                        hub,
+                        session_id=session_id,
+                        artifact_id=artifact_id,
+                        content=stream_source,
+                    )
+                )
+            if display_target == "chat":
+                await _publish_chat_stream_from_text(
+                    hub,
+                    session_id=session_id,
+                    stream_id=uuid.uuid4().hex,
+                    content=response_text,
+                )
+            chat_summary = (
+                response_text
+                if display_target == "chat"
+                else _build_canvas_chat_summary(artifact_title=artifact_title)
+            )
+            await hub.append_message(
+                session_id,
+                hub.create_message(
+                    role="assistant",
+                    content=chat_summary,
+                    trace_id=trace_id,
+                    parent_user_message_id=user_message_id,
+                ),
+            )
+
+        resolved = _decision_with_status(executing, status="resolved", resolved=True)
+        await hub.set_session_decision(session_id, resolved)
+        await hub.set_session_status(session_id, "ok")
+        messages = await hub.get_messages(session_id)
+        output_payload = await hub.get_session_output(session_id)
+        files_payload = await hub.get_session_files(session_id)
+        artifacts_payload = await hub.get_session_artifacts(session_id)
+        current_model = await hub.get_session_model(session_id)
+        return _json_response(
+            {
+                "ok": True,
+                "status": "resolved",
+                "resume_started": resume_started,
+                "decision": _normalize_ui_decision(resolved, session_id=session_id),
+                "messages": messages,
+                "output": output_payload,
+                "files": files_payload or [],
+                "artifacts": artifacts_payload or [],
+                "trace_id": trace_id,
+                "selected_model": current_model,
+                "approval_request": approval_request,
+                "mwv_report": mwv_report,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        failed = _decision_with_status(executing, status="rejected", resolved=True)
+        await hub.set_session_decision(session_id, failed)
+        await hub.set_session_status(session_id, "error")
+        return _error_response(
+            status=500,
+            message=f"Decision resume error: {exc}",
+            error_type="internal_error",
+            code="decision_resume_error",
+        )
+
+
 async def handle_ui_chat_send(request: web.Request) -> web.Response:
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
@@ -3365,6 +3953,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         mwv_report: dict[str, JSONValue] | None = None
         trace_id: str | None = None
         approval_request: dict[str, JSONValue] | None = None
+        ui_decision: dict[str, JSONValue] | None = None
         chat_stream_id = uuid.uuid4().hex
         live_stream_sent = False
         async with agent_lock:
@@ -3540,6 +4129,72 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
             )
+            ui_decision = _normalize_ui_decision(
+                decision,
+                session_id=session_id,
+                trace_id=trace_id,
+            )
+            if approval_request is not None:
+                ui_decision = _build_ui_approval_decision(
+                    approval_request=approval_request,
+                    session_id=session_id,
+                    source_endpoint="chat.send",
+                    resume_payload={
+                        "source_request": {
+                            "content": content_raw,
+                            "force_canvas": force_canvas,
+                            "attachments": attachments,
+                        },
+                        "user_message_id": user_message_id,
+                        "selected_model_snapshot": {
+                            "provider": selected_model["provider"],
+                            "model": selected_model["model"],
+                        },
+                    },
+                    trace_id=trace_id,
+                )
+
+        if _decision_is_pending_blocking(ui_decision):
+            await hub.set_session_decision(session_id, ui_decision)
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="approval.required",
+                detail="chat",
+            )
+            messages = await hub.get_messages(session_id)
+            output_payload = await hub.get_session_output(session_id)
+            files_payload = await hub.get_session_files(session_id)
+            artifacts_payload = await hub.get_session_artifacts(session_id)
+            current_decision = await hub.get_session_decision(session_id)
+            current_model = await hub.get_session_model(session_id)
+            response = _json_response(
+                {
+                    "session_id": session_id,
+                    "messages": messages,
+                    "output": output_payload,
+                    "files": files_payload or [],
+                    "artifacts": artifacts_payload or [],
+                    "display": {
+                        "target": "chat",
+                        "artifact_id": None,
+                        "forced": force_canvas,
+                    },
+                    "decision": _normalize_ui_decision(current_decision, session_id=session_id),
+                    "selected_model": current_model,
+                    "trace_id": trace_id,
+                    "approval_request": approval_request,
+                    "mwv_report": mwv_report,
+                }
+            )
+            response.headers[UI_SESSION_HEADER] = session_id
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="response.ready",
+                detail="chat",
+            )
+            return response
 
         await hub.set_session_output(session_id, response_text)
         files_from_tools: list[str] = []
@@ -3608,7 +4263,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             parent_user_message_id=user_message_id,
         )
         await hub.append_message(session_id, assistant_message)
-        await hub.set_session_decision(session_id, decision)
+        await hub.set_session_decision(session_id, ui_decision)
         messages = await hub.get_messages(session_id)
         output_payload = await hub.get_session_output(session_id)
         files_payload = await hub.get_session_files(session_id)
@@ -3627,7 +4282,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                     "artifact_id": artifact_id,
                     "forced": force_canvas,
                 },
-                "decision": current_decision,
+                "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                 "selected_model": current_model,
                 "trace_id": trace_id,
                 "approval_request": approval_request,
@@ -3761,14 +4416,23 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     required_categories=missing_categories,
                 )
                 approval_payload = _serialize_approval_request(approval_request_obj)
-                await hub.append_message(
-                    session_id,
-                    hub.create_message(
-                        role="assistant",
-                        content="Approval required for GitHub import.",
-                        parent_user_message_id=user_message_id,
-                    ),
+                approval_decision = _build_ui_approval_decision(
+                    approval_request=approval_payload or {},
+                    session_id=session_id,
+                    source_endpoint="project.command",
+                    resume_payload={
+                        "source_request": {
+                            "command": command,
+                            "args": args_raw,
+                        },
+                        "user_message_id": user_message_id,
+                        "selected_model_snapshot": {
+                            "provider": selected_model["provider"],
+                            "model": selected_model["model"],
+                        },
+                    },
                 )
+                await hub.set_session_decision(session_id, approval_decision)
                 messages = await hub.get_messages(session_id)
                 current_decision = await hub.get_session_decision(session_id)
                 current_model = await hub.get_session_model(session_id)
@@ -3776,7 +4440,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     {
                         "session_id": session_id,
                         "messages": messages,
-                        "decision": current_decision,
+                        "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                         "selected_model": current_model,
                         "trace_id": None,
                         "approval_request": approval_payload,
@@ -3849,6 +4513,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     parent_user_message_id=user_message_id,
                 ),
             )
+            await hub.set_session_decision(session_id, None)
             messages = await hub.get_messages(session_id)
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
@@ -3856,7 +4521,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 {
                     "session_id": session_id,
                     "messages": messages,
-                    "decision": current_decision,
+                    "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                     "selected_model": current_model,
                     "trace_id": None,
                     "approval_request": None,
@@ -3874,6 +4539,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
 
         mwv_report: dict[str, JSONValue] | None = None
+        ui_decision: dict[str, JSONValue] | None = None
         async with agent_lock:
             try:
                 model_config = _build_model_config(
@@ -3919,6 +4585,61 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
             )
+            decision_raw = _extract_decision_payload(response_text)
+            ui_decision = _normalize_ui_decision(
+                decision_raw,
+                session_id=session_id,
+                trace_id=_normalize_trace_id(trace_id),
+            )
+            if approval_request is not None:
+                ui_decision = _build_ui_approval_decision(
+                    approval_request=approval_request,
+                    session_id=session_id,
+                    source_endpoint="project.command",
+                    resume_payload={
+                        "source_request": {
+                            "command": command,
+                            "args": args_raw,
+                        },
+                        "user_message_id": user_message_id,
+                        "selected_model_snapshot": {
+                            "provider": selected_model["provider"],
+                            "model": selected_model["model"],
+                        },
+                    },
+                    trace_id=_normalize_trace_id(trace_id),
+                )
+
+        if _decision_is_pending_blocking(ui_decision):
+            await hub.set_session_decision(session_id, ui_decision)
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="approval.required",
+                detail="project",
+            )
+            messages = await hub.get_messages(session_id)
+            current_decision = await hub.get_session_decision(session_id)
+            current_model = await hub.get_session_model(session_id)
+            response = _json_response(
+                {
+                    "session_id": session_id,
+                    "messages": messages,
+                    "decision": _normalize_ui_decision(current_decision, session_id=session_id),
+                    "selected_model": current_model,
+                    "trace_id": trace_id,
+                    "approval_request": approval_request,
+                    "mwv_report": mwv_report,
+                }
+            )
+            response.headers[UI_SESSION_HEADER] = session_id
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="response.ready",
+                detail="project",
+            )
+            return response
 
         await hub.append_message(
             session_id,
@@ -3929,6 +4650,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 parent_user_message_id=user_message_id,
             ),
         )
+        await hub.set_session_decision(session_id, ui_decision)
         messages = await hub.get_messages(session_id)
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
@@ -3936,7 +4658,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             {
                 "session_id": session_id,
                 "messages": messages,
-                "decision": current_decision,
+                "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                 "selected_model": current_model,
                 "trace_id": trace_id,
                 "approval_request": approval_request,
@@ -4452,6 +5174,7 @@ def create_app(
     app.router.add_get("/ui/api/sessions/{session_id}/history", handle_ui_session_history_get)
     app.router.add_get("/ui/api/sessions/{session_id}/output", handle_ui_session_output_get)
     app.router.add_get("/ui/api/sessions/{session_id}/files", handle_ui_session_files_get)
+    app.router.add_post("/ui/api/decision/respond", handle_ui_decision_respond)
     app.router.add_get(
         "/ui/api/sessions/{session_id}/files/download",
         handle_ui_session_file_download,

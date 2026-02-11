@@ -19,6 +19,7 @@ import type {
   ProviderModels,
   SelectedModel,
   SessionSummary,
+  UiDecision,
 } from './types';
 
 const SESSION_HEADER = 'X-Slavik-Session';
@@ -404,6 +405,92 @@ const parseDisplayDecision = (value: unknown): DisplayDecision | null => {
   };
 };
 
+const parseUiDecision = (value: unknown): UiDecision | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as {
+    id?: unknown;
+    kind?: unknown;
+    status?: unknown;
+    blocking?: unknown;
+    reason?: unknown;
+    summary?: unknown;
+    proposed_action?: unknown;
+    options?: unknown;
+    default_option_id?: unknown;
+    context?: unknown;
+    created_at?: unknown;
+    updated_at?: unknown;
+    resolved_at?: unknown;
+  };
+  if (typeof candidate.id !== 'string' || !candidate.id.trim()) {
+    return null;
+  }
+  if (candidate.kind !== 'approval' && candidate.kind !== 'decision') {
+    return null;
+  }
+  if (
+    candidate.status !== 'pending'
+    && candidate.status !== 'approved'
+    && candidate.status !== 'rejected'
+    && candidate.status !== 'executing'
+    && candidate.status !== 'resolved'
+  ) {
+    return null;
+  }
+  if (typeof candidate.reason !== 'string' || typeof candidate.summary !== 'string') {
+    return null;
+  }
+  if (typeof candidate.created_at !== 'string' || typeof candidate.updated_at !== 'string') {
+    return null;
+  }
+  const optionsRaw = candidate.options;
+  const options = Array.isArray(optionsRaw)
+    ? optionsRaw
+        .filter((item): item is { id: string; title: string; action: string; payload?: unknown; risk?: unknown } => {
+          return (
+            !!item
+            && typeof item === 'object'
+            && typeof (item as { id?: unknown }).id === 'string'
+            && typeof (item as { title?: unknown }).title === 'string'
+            && typeof (item as { action?: unknown }).action === 'string'
+          );
+        })
+        .map((item) => ({
+          id: item.id,
+          title: item.title,
+          action: item.action,
+          payload: item.payload && typeof item.payload === 'object' ? (item.payload as Record<string, unknown>) : {},
+          risk: typeof item.risk === 'string' ? item.risk : 'low',
+        }))
+    : [];
+  const proposedAction =
+    candidate.proposed_action && typeof candidate.proposed_action === 'object'
+      ? (candidate.proposed_action as Record<string, unknown>)
+      : {};
+  const context =
+    candidate.context && typeof candidate.context === 'object'
+      ? (candidate.context as Record<string, unknown>)
+      : {};
+  return {
+    id: candidate.id.trim(),
+    kind: candidate.kind,
+    status: candidate.status,
+    blocking: candidate.blocking === true,
+    reason: candidate.reason,
+    summary: candidate.summary,
+    proposed_action: proposedAction,
+    options,
+    default_option_id:
+      typeof candidate.default_option_id === 'string' ? candidate.default_option_id : null,
+    context,
+    created_at: candidate.created_at,
+    updated_at: candidate.updated_at,
+    resolved_at: typeof candidate.resolved_at === 'string' ? candidate.resolved_at : null,
+  };
+};
+
 const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) {
@@ -662,6 +749,9 @@ export default function App() {
   const [composerSettings, setComposerSettings] = useState<ComposerUiSettings>(
     DEFAULT_COMPOSER_SETTINGS,
   );
+  const [pendingDecision, setPendingDecision] = useState<UiDecision | null>(null);
+  const [decisionBusy, setDecisionBusy] = useState(false);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
 
   const pendingForCanvas =
     pendingSessionId === selectedConversation ? pendingUserMessage : null;
@@ -1030,6 +1120,8 @@ export default function App() {
     const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
     setMessages(parseMessages((historyPayload as { messages?: unknown }).messages));
     setChatStreamingState(null);
+    setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
+    setDecisionError(null);
     const parsedOutput = parseSessionOutput((outputPayload as { output?: unknown }).output);
     setSessionOutput(parsedOutput.content);
     setSessionFiles(parseSessionFiles((filesPayload as { files?: unknown }).files));
@@ -1059,6 +1151,8 @@ export default function App() {
     const sessionModel = parseSelectedModel(session?.selected_model);
     setMessages(parseMessages(session?.messages));
     setChatStreamingState(null);
+    setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
+    setDecisionError(null);
     const parsedOutput = parseSessionOutput(
       (session as { output?: unknown } | undefined)?.output,
     );
@@ -1183,6 +1277,7 @@ export default function App() {
         artifact_id?: unknown;
         stream_id?: unknown;
         delta?: unknown;
+        decision?: unknown;
       };
       if (envelope.type === 'chat.stream.start') {
         const streamId =
@@ -1211,6 +1306,11 @@ export default function App() {
         return;
       }
       if (envelope.type === 'chat.stream.done') {
+        return;
+      }
+      if (envelope.type === 'decision.packet') {
+        setPendingDecision(parseUiDecision(payload.decision));
+        setDecisionError(null);
         return;
       }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
@@ -1260,6 +1360,8 @@ export default function App() {
     setArtifactViewerArtifactId(null);
     setStreamingContentByArtifactId({});
     setChatStreamingState(null);
+    setPendingDecision(null);
+    setDecisionError(null);
     try {
       await loadConversation(sessionId);
       saveLastSessionId(sessionId);
@@ -1329,9 +1431,11 @@ export default function App() {
         return;
       }
       setSelectedConversation(nextSession);
-      setArtifactViewerArtifactId(null);
-      setStreamingContentByArtifactId({});
-      setChatStreamingState(null);
+    setArtifactViewerArtifactId(null);
+    setStreamingContentByArtifactId({});
+    setChatStreamingState(null);
+    setPendingDecision(null);
+    setDecisionError(null);
       saveLastSessionId(nextSession);
       await loadSessions();
       if (!created.selectedModel && providerModels.length > 0) {
@@ -1497,6 +1601,8 @@ export default function App() {
       setPendingSessionId(null);
       setChatStreamingState(null);
       setMessages(parseMessages((payload as { messages?: unknown }).messages));
+      setPendingDecision(parseUiDecision((payload as { decision?: unknown }).decision));
+      setDecisionError(null);
       const parsedOutput = parseSessionOutput((payload as { output?: unknown }).output);
       setSessionOutput(parsedOutput.content);
       const parsedFiles = parseSessionFiles((payload as { files?: unknown }).files);
@@ -1681,6 +1787,67 @@ export default function App() {
     }
   };
 
+  const handleDecisionRespond = async (
+    choice: 'approve' | 'reject' | 'edit',
+    editedAction?: Record<string, unknown> | null,
+  ) => {
+    if (!selectedConversation || !pendingDecision) {
+      return;
+    }
+    setDecisionBusy(true);
+    setDecisionError(null);
+    try {
+      const response = await fetch('/ui/api/decision/respond', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [SESSION_HEADER]: selectedConversation,
+        },
+        body: JSON.stringify({
+          session_id: selectedConversation,
+          decision_id: pendingDecision.id,
+          choice,
+          edited_action: choice === 'edit' ? (editedAction ?? {}) : null,
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to resolve decision.'));
+      }
+      const parsedDecision = parseUiDecision((payload as { decision?: unknown }).decision);
+      setPendingDecision(parsedDecision);
+      const maybeMessages = (payload as { messages?: unknown }).messages;
+      if (Array.isArray(maybeMessages)) {
+        setMessages(parseMessages(maybeMessages));
+      }
+      const maybeOutput = (payload as { output?: unknown }).output;
+      if (maybeOutput !== undefined) {
+        const parsedOutput = parseSessionOutput(maybeOutput);
+        setSessionOutput(parsedOutput.content);
+      }
+      const maybeFiles = (payload as { files?: unknown }).files;
+      if (maybeFiles !== undefined) {
+        setSessionFiles(parseSessionFiles(maybeFiles));
+      }
+      const maybeArtifacts = (payload as { artifacts?: unknown }).artifacts;
+      if (maybeArtifacts !== undefined) {
+        setSessionArtifacts(parseSessionArtifacts(maybeArtifacts));
+      }
+      const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
+      if (parsedModel) {
+        setSelectedModel(parsedModel);
+        saveLastModel(parsedModel);
+      }
+      setStatusMessage(null);
+      await loadSessions();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to resolve decision.';
+      setDecisionError(message);
+    } finally {
+      setDecisionBusy(false);
+    }
+  };
+
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-950 text-foreground">
       <HistorySidebar
@@ -1734,6 +1901,12 @@ export default function App() {
           forceCanvasNext={forceCanvasNext}
           onToggleForceCanvasNext={() => {
             setForceCanvasNext((prev) => !prev);
+          }}
+          decision={pendingDecision}
+          decisionBusy={decisionBusy}
+          decisionError={decisionError}
+          onDecisionRespond={(choice, editedAction) => {
+            void handleDecisionRespond(choice, editedAction);
           }}
         />
 
