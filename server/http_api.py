@@ -131,6 +131,11 @@ _CODE_FENCE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"```(?P<lang>[a-zA-Z0-9_-]*)(?P<sep>\n|\\n)(?P<code>.*?)```",
     re.DOTALL,
 )
+_CHAT_WEB_INTENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(проверь( в интернете)?|поищи|найди в интернете|поиск(ай)? в интернете|"
+    r"search( the)? web|check( in| on)?( the)? internet|look up|google)",
+    re.IGNORECASE,
+)
 _ARTIFACT_FILE_EXTENSIONS: Final[set[str]] = {
     "bash",
     "c",
@@ -292,6 +297,8 @@ class AgentProtocol(Protocol):
     ) -> None: ...
 
     def respond(self, messages: list[LLMMessage]) -> str: ...
+
+    def update_tools_enabled(self, state: dict[str, bool]) -> None: ...
 
     def record_feedback_event(
         self,
@@ -1349,6 +1356,15 @@ def _request_likely_canvas(user_input: str) -> bool:
     return any(token in normalized for token in keywords)
 
 
+def _request_likely_web_intent(user_input: str) -> bool:
+    normalized = user_input.strip()
+    if not normalized:
+        return False
+    if normalized.startswith("/"):
+        return False
+    return bool(_CHAT_WEB_INTENT_PATTERN.search(normalized))
+
+
 def _should_render_result_in_canvas(
     *,
     response_text: str,
@@ -1950,10 +1966,6 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
         os.getenv("LOCAL_LLM_URL", DEFAULT_LOCAL_ENDPOINT).strip() or DEFAULT_LOCAL_ENDPOINT
     )
     saved_api_keys = _load_provider_api_keys()
-    xai_saved_key = saved_api_keys.get("xai", "").strip()
-    openrouter_saved_key = saved_api_keys.get("openrouter", "").strip()
-    local_saved_key = saved_api_keys.get("local", "").strip()
-    openai_saved_key = saved_api_keys.get("openai", "").strip()
     return [
         {
             "provider": "xai",
@@ -1961,7 +1973,6 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
             "api_key_set": _resolve_provider_api_key("xai", settings_api_keys=saved_api_keys)
             is not None,
             "api_key_source": _provider_api_key_source("xai", settings_api_keys=saved_api_keys),
-            "api_key_value": xai_saved_key or None,
             "endpoint": XAI_MODELS_ENDPOINT,
         },
         {
@@ -1976,7 +1987,6 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
                 "openrouter",
                 settings_api_keys=saved_api_keys,
             ),
-            "api_key_value": openrouter_saved_key or None,
             "endpoint": OPENROUTER_MODELS_ENDPOINT,
         },
         {
@@ -1988,7 +1998,6 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
                 "local",
                 settings_api_keys=saved_api_keys,
             ),
-            "api_key_value": local_saved_key or None,
             "endpoint": local_endpoint,
         },
         {
@@ -2000,7 +2009,6 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
                 "openai",
                 settings_api_keys=saved_api_keys,
             ),
-            "api_key_value": openai_saved_key or None,
             "endpoint": OPENAI_STT_ENDPOINT,
         },
     ]
@@ -2609,6 +2617,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             ),
         )
 
+    next_tools_state: dict[str, bool] | None = None
     tools_raw = payload.get("tools")
     if tools_raw is not None:
         if not isinstance(tools_raw, dict):
@@ -2645,6 +2654,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 )
             next_state[key] = raw_value
         _save_tools_state(next_state)
+        next_tools_state = dict(next_state)
 
     providers_raw = payload.get("providers")
     if providers_raw is not None:
@@ -2695,6 +2705,23 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             else:
                 next_api_keys.pop(provider, None)
         _save_provider_api_keys(next_api_keys)
+
+    if next_tools_state is not None:
+        agent_lock: asyncio.Lock = request.app["agent_lock"]
+        try:
+            agent = await _resolve_agent(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to resolve agent for live tools update",
+                exc_info=True,
+                extra={"error": str(exc)},
+            )
+            agent = None
+        if agent is not None:
+            update_tools_enabled = getattr(agent, "update_tools_enabled", None)
+            if callable(update_tools_enabled):
+                async with agent_lock:
+                    update_tools_enabled(next_tools_state)
 
     return _json_response(_build_settings_payload())
 
@@ -4014,6 +4041,61 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             if isinstance(user_message_id_raw, str) and user_message_id_raw
             else None
         )
+
+        if not attachments and _request_likely_web_intent(content_raw):
+            guidance_text = (
+                "Для веб-поиска используй команду `/web <запрос>` в чате. "
+                "После этого подтвердите approval, если он потребуется."
+            )
+            chat_stream_id = uuid.uuid4().hex
+            await _publish_chat_stream_from_text(
+                hub,
+                session_id=session_id,
+                stream_id=chat_stream_id,
+                content=guidance_text,
+            )
+            await hub.set_session_output(session_id, guidance_text)
+            assistant_message = hub.create_message(
+                role="assistant",
+                content=guidance_text,
+                trace_id=None,
+                parent_user_message_id=user_message_id,
+            )
+            await hub.append_message(session_id, assistant_message)
+            messages = await hub.get_messages(session_id)
+            output_payload = await hub.get_session_output(session_id)
+            files_payload = await hub.get_session_files(session_id)
+            artifacts_payload = await hub.get_session_artifacts(session_id)
+            current_decision = await hub.get_session_decision(session_id)
+            current_model = await hub.get_session_model(session_id)
+            response = _json_response(
+                {
+                    "session_id": session_id,
+                    "messages": messages,
+                    "output": output_payload,
+                    "files": files_payload or [],
+                    "artifacts": artifacts_payload or [],
+                    "display": {
+                        "target": "chat",
+                        "artifact_id": None,
+                        "forced": force_canvas,
+                    },
+                    "decision": _normalize_ui_decision(current_decision, session_id=session_id),
+                    "selected_model": current_model,
+                    "trace_id": None,
+                    "approval_request": None,
+                    "mwv_report": None,
+                }
+            )
+            response.headers[UI_SESSION_HEADER] = session_id
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="response.ready",
+                detail="chat",
+            )
+            return response
+
         llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
         await _publish_agent_activity(
             hub,

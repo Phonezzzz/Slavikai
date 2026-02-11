@@ -33,6 +33,7 @@ class DummyAgent:
     def __init__(self) -> None:
         self._session_id: str | None = None
         self._approved_categories: set[str] = set()
+        self.tools_enabled: dict[str, bool] = {}
 
     def set_session_context(self, session_id: str | None, approved_categories: set[str]) -> None:
         self._session_id = session_id
@@ -43,6 +44,9 @@ class DummyAgent:
 
     def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
         del main_config, main_api_key, persist
+
+    def update_tools_enabled(self, state: dict[str, bool]) -> None:
+        self.tools_enabled.update(state)
 
 
 class LongCodeAgent(DummyAgent):
@@ -183,6 +187,28 @@ class ProjectCommandAgent(DummyAgent):
         content = getattr(last, "content", "")
         if isinstance(content, str) and content.startswith("/project "):
             return f"Командный режим (без MWV)\n{content}"
+        return "ok"
+
+
+class LiveToolsAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tools_enabled = {"web": False, "safe_mode": True}
+        self.update_calls: list[dict[str, bool]] = []
+
+    def update_tools_enabled(self, state: dict[str, bool]) -> None:
+        self.update_calls.append(dict(state))
+        super().update_tools_enabled(state)
+
+    def respond(self, messages) -> str:
+        if not messages:
+            return "ok"
+        last = messages[-1]
+        content = getattr(last, "content", "")
+        if isinstance(content, str) and content.startswith("/web "):
+            if not self.tools_enabled.get("web", False):
+                return "Инструмент web отключён"
+            return "WEB_OK"
         return "ok"
 
 
@@ -521,6 +547,38 @@ def test_ui_chat_send_endpoint() -> None:
             artifacts = payload.get("artifacts")
             assert isinstance(artifacts, list)
             assert artifacts == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_web_intent_returns_command_guidance() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "проверь в интернете курс биткоина"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            content = last.get("content")
+            assert isinstance(content, str)
+            assert "/web <запрос>" in content
+            assert "После этого подтвердите approval" in content
         finally:
             await client.close()
 
@@ -1812,6 +1870,9 @@ def test_ui_settings_endpoint() -> None:
             assert isinstance(providers, list)
             provider_names = {item.get("provider") for item in providers if isinstance(item, dict)}
             assert provider_names == {"local", "openrouter", "xai", "openai"}
+            for provider in providers:
+                assert isinstance(provider, dict)
+                assert "api_key_value" not in provider
         finally:
             await client.close()
 
@@ -1911,12 +1972,12 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert isinstance(xai_provider, dict)
             assert xai_provider.get("api_key_set") is True
             assert xai_provider.get("api_key_source") == "settings"
-            assert xai_provider.get("api_key_value") == "xai-test-key"
+            assert "api_key_value" not in xai_provider
             openrouter_provider = provider_by_name.get("openrouter")
             assert isinstance(openrouter_provider, dict)
             assert openrouter_provider.get("api_key_set") is True
             assert openrouter_provider.get("api_key_source") == "settings"
-            assert openrouter_provider.get("api_key_value") == "or-test-key"
+            assert "api_key_value" not in openrouter_provider
 
             saved_payload = json.loads(ui_settings_path.read_text(encoding="utf-8"))
             assert isinstance(saved_payload, dict)
@@ -1932,10 +1993,122 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert isinstance(openai_provider, dict)
             assert openai_provider.get("api_key_set") is True
             assert openai_provider.get("api_key_source") == "settings"
-            assert openai_provider.get("api_key_value") == "openai-test-key"
+            assert "api_key_value" not in openai_provider
             openai_saved = providers_blob.get("openai")
             assert isinstance(openai_saved, dict)
             assert openai_saved.get("api_key") == "openai-test-key"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_settings_no_api_key_leak(monkeypatch, tmp_path) -> None:
+    ui_settings_path = tmp_path / "ui_settings.json"
+    ui_settings_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "xai": {"api_key": "xai-secret-key"},
+                    "openrouter": {"api_key": "or-secret-key"},
+                    "openai": {"api_key": "openai-secret-key"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.get("/ui/api/settings")
+            assert response.status == 200
+            payload = await response.json()
+            settings = payload.get("settings")
+            assert isinstance(settings, dict)
+            providers = settings.get("providers")
+            assert isinstance(providers, list)
+            for provider in providers:
+                assert isinstance(provider, dict)
+                assert "api_key_value" not in provider
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_settings_update_applies_tools_live(monkeypatch, tmp_path) -> None:
+    tools_path = tmp_path / "tools.json"
+    monkeypatch.setattr(
+        "server.http_api.load_tools_config",
+        lambda: load_tools_config_from_path(path=tools_path),
+    )
+    monkeypatch.setattr(
+        "server.http_api.save_tools_config",
+        lambda config: save_tools_config_to_path(config, path=tools_path),
+    )
+
+    async def run() -> None:
+        agent = LiveToolsAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            assert status_resp.status == 200
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            disabled_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "/web btc price"},
+            )
+            assert disabled_resp.status == 200
+            disabled_payload = await disabled_resp.json()
+            disabled_messages = disabled_payload.get("messages")
+            assert isinstance(disabled_messages, list)
+            assert disabled_messages
+            disabled_last = disabled_messages[-1]
+            assert isinstance(disabled_last, dict)
+            disabled_text = disabled_last.get("content")
+            assert isinstance(disabled_text, str)
+            assert "Инструмент web отключён" in disabled_text
+
+            settings_resp = await client.post(
+                "/ui/api/settings",
+                json={"tools": {"state": {"web": True}}},
+            )
+            assert settings_resp.status == 200
+            settings_payload = await settings_resp.json()
+            settings = settings_payload.get("settings")
+            assert isinstance(settings, dict)
+            tools = settings.get("tools")
+            assert isinstance(tools, dict)
+            state = tools.get("state")
+            assert isinstance(state, dict)
+            assert state.get("web") is True
+            assert agent.tools_enabled.get("web") is True
+            assert agent.update_calls
+            assert agent.update_calls[-1].get("web") is True
+
+            enabled_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "/web btc price"},
+            )
+            assert enabled_resp.status == 200
+            enabled_payload = await enabled_resp.json()
+            enabled_messages = enabled_payload.get("messages")
+            assert isinstance(enabled_messages, list)
+            assert enabled_messages
+            enabled_last = enabled_messages[-1]
+            assert isinstance(enabled_last, dict)
+            enabled_text = enabled_last.get("content")
+            assert isinstance(enabled_text, str)
+            assert enabled_text == "WEB_OK"
         finally:
             await client.close()
 

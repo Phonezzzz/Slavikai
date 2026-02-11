@@ -12,19 +12,20 @@ type SettingsTab = 'api' | 'personalization' | 'memory' | 'tools' | 'import';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'openai';
 type ModelProvider = 'xai' | 'openrouter' | 'local';
 type ApiKeySource = 'settings' | 'env' | 'missing';
+type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt' | 'safe_mode';
 
 type ProviderSettings = {
   provider: ApiKeyProvider;
   api_key_env: string;
   api_key_set: boolean;
   api_key_source: ApiKeySource;
-  api_key_value: string;
   endpoint: string;
 };
 
 type ParsedSettings = {
   providers: ProviderSettings[];
   apiKeys: Record<ApiKeyProvider, string>;
+  toolsState: Record<ToolKey, boolean>;
   tone: string;
   systemPrompt: string;
   longPasteToFileEnabled: boolean;
@@ -36,6 +37,18 @@ const DEFAULT_SYSTEM_PROMPT =
 
 const API_KEY_PROVIDERS: ApiKeyProvider[] = ['xai', 'openrouter', 'local', 'openai'];
 const MODEL_PROVIDERS: ModelProvider[] = ['xai', 'openrouter', 'local'];
+const TOOL_TOGGLE_KEYS: ToolKey[] = ['web', 'fs', 'project', 'shell', 'tts', 'stt', 'img', 'safe_mode'];
+const SAFE_MODE_BLOCKED_TOOLS = new Set<ToolKey>(['web', 'shell', 'project', 'tts', 'stt']);
+const TOOL_LABELS: Record<ToolKey, string> = {
+  fs: 'Filesystem',
+  shell: 'Shell',
+  web: 'Web',
+  project: 'Project',
+  img: 'Images',
+  tts: 'Text to speech',
+  stt: 'Speech to text',
+  safe_mode: 'Safe mode',
+};
 
 const PROVIDER_LABELS: Record<ApiKeyProvider, string> = {
   xai: 'xAI',
@@ -59,7 +72,6 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     api_key_env: 'XAI_API_KEY',
     api_key_set: false,
     api_key_source: 'missing',
-    api_key_value: '',
     endpoint: 'https://api.x.ai/v1/models',
   },
   {
@@ -67,7 +79,6 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     api_key_env: 'OPENROUTER_API_KEY',
     api_key_set: false,
     api_key_source: 'missing',
-    api_key_value: '',
     endpoint: 'https://openrouter.ai/api/v1/models',
   },
   {
@@ -75,7 +86,6 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     api_key_env: 'LOCAL_LLM_API_KEY',
     api_key_set: false,
     api_key_source: 'missing',
-    api_key_value: '',
     endpoint: 'http://localhost:11434/v1/models',
   },
   {
@@ -83,16 +93,35 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     api_key_env: 'OPENAI_API_KEY',
     api_key_set: false,
     api_key_source: 'missing',
-    api_key_value: '',
     endpoint: 'https://api.openai.com/v1/audio/transcriptions',
   },
 ];
+const DEFAULT_TOOLS_STATE: Record<ToolKey, boolean> = {
+  fs: true,
+  shell: false,
+  web: false,
+  project: true,
+  img: false,
+  tts: false,
+  stt: false,
+  safe_mode: true,
+};
 
 const isApiKeyProvider = (value: unknown): value is ApiKeyProvider =>
   value === 'xai' || value === 'openrouter' || value === 'local' || value === 'openai';
 
 const isApiKeySource = (value: unknown): value is ApiKeySource =>
   value === 'settings' || value === 'env' || value === 'missing';
+
+const isToolKey = (value: unknown): value is ToolKey =>
+  value === 'fs'
+  || value === 'shell'
+  || value === 'web'
+  || value === 'project'
+  || value === 'img'
+  || value === 'tts'
+  || value === 'stt'
+  || value === 'safe_mode';
 
 const extractErrorMessage = (payload: unknown, fallback: string): string => {
   if (!payload || typeof payload !== 'object') {
@@ -109,6 +138,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   const defaults: ParsedSettings = {
     providers: DEFAULT_PROVIDER_SETTINGS,
     apiKeys: DEFAULT_API_KEYS,
+    toolsState: DEFAULT_TOOLS_STATE,
     tone: 'balanced',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     longPasteToFileEnabled: DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
@@ -173,7 +203,6 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
       const endpoint = (item as { endpoint?: unknown }).endpoint;
       const apiKeySet = (item as { api_key_set?: unknown }).api_key_set;
       const sourceRaw = (item as { api_key_source?: unknown }).api_key_source;
-      const apiKeyValueRaw = (item as { api_key_value?: unknown }).api_key_value;
       const current = providersMap.get(providerRaw);
       providersMap.set(providerRaw, {
         provider: providerRaw,
@@ -183,10 +212,6 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
         api_key_source: isApiKeySource(sourceRaw)
           ? sourceRaw
           : current?.api_key_source || 'missing',
-        api_key_value:
-          typeof apiKeyValueRaw === 'string'
-            ? apiKeyValueRaw
-            : current?.api_key_value || '',
       });
     }
   }
@@ -203,13 +228,26 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     local: '',
     openai: '',
   };
-  for (const item of providers) {
-    parsedApiKeys[item.provider] = item.api_key_value;
+  const tools = (settings as { tools?: unknown }).tools;
+  let toolsState: Record<ToolKey, boolean> = { ...defaults.toolsState };
+  if (tools && typeof tools === 'object') {
+    const stateRaw = (tools as { state?: unknown }).state;
+    if (stateRaw && typeof stateRaw === 'object') {
+      const nextToolsState: Record<ToolKey, boolean> = { ...defaults.toolsState };
+      for (const [key, value] of Object.entries(stateRaw as Record<string, unknown>)) {
+        if (!isToolKey(key) || typeof value !== 'boolean') {
+          continue;
+        }
+        nextToolsState[key] = value;
+      }
+      toolsState = nextToolsState;
+    }
   }
 
   return {
     providers,
     apiKeys: parsedApiKeys,
+    toolsState,
     tone,
     systemPrompt,
     longPasteToFileEnabled,
@@ -237,10 +275,37 @@ const sourceLabel = (source: ApiKeySource): string => {
   return 'missing';
 };
 
+const isToolEffectivelyEnabled = (tool: ToolKey, state: Record<ToolKey, boolean>): boolean => {
+  if (tool === 'safe_mode') {
+    return state.safe_mode;
+  }
+  if (!state[tool]) {
+    return false;
+  }
+  if (state.safe_mode && SAFE_MODE_BLOCKED_TOOLS.has(tool)) {
+    return false;
+  }
+  return true;
+};
+
+const toolStatusLabel = (tool: ToolKey, state: Record<ToolKey, boolean>): string => {
+  if (tool === 'safe_mode') {
+    return state.safe_mode ? 'enabled' : 'disabled';
+  }
+  if (!state[tool]) {
+    return 'disabled in settings';
+  }
+  if (state.safe_mode && SAFE_MODE_BLOCKED_TOOLS.has(tool)) {
+    return 'blocked by safe mode';
+  }
+  return 'enabled';
+};
+
 export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('api');
   const [selectedProvider, setSelectedProvider] = useState<ModelProvider>('local');
   const [apiKeys, setApiKeys] = useState<Record<ApiKeyProvider, string>>(DEFAULT_API_KEYS);
+  const [toolsState, setToolsState] = useState<Record<ToolKey, boolean>>(DEFAULT_TOOLS_STATE);
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [tone, setTone] = useState('balanced');
@@ -252,7 +317,18 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
   );
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [savingTools, setSavingTools] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+
+  const applyParsedSettings = (parsed: ParsedSettings): void => {
+    setProviders(parsed.providers);
+    setApiKeys(parsed.apiKeys);
+    setToolsState(parsed.toolsState);
+    setSystemPrompt(parsed.systemPrompt);
+    setTone(parsed.tone);
+    setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
+    setLongPasteThresholdChars(parsed.longPasteThresholdChars);
+  };
 
   const loadSettings = async () => {
     setLoading(true);
@@ -264,12 +340,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
         throw new Error(extractErrorMessage(payload, 'Failed to load settings.'));
       }
       const parsed = parseSettingsPayload(payload);
-      setProviders(parsed.providers);
-      setApiKeys(parsed.apiKeys);
-      setSystemPrompt(parsed.systemPrompt);
-      setTone(parsed.tone);
-      setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
-      setLongPasteThresholdChars(parsed.longPasteThresholdChars);
+      applyParsedSettings(parsed);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load settings.';
       setStatus(message);
@@ -309,6 +380,9 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
           long_paste_to_file_enabled: longPasteToFileEnabled,
           long_paste_threshold_chars: Math.max(1000, Math.min(80000, longPasteThresholdChars)),
         },
+        tools: {
+          state: toolsState,
+        },
       };
       if (Object.keys(providersPayload).length > 0) {
         payload.providers = providersPayload;
@@ -326,12 +400,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
         throw new Error(extractErrorMessage(body, 'Failed to save settings.'));
       }
       const parsed = parseSettingsPayload(body);
-      setProviders(parsed.providers);
-      setApiKeys(parsed.apiKeys);
-      setSystemPrompt(parsed.systemPrompt);
-      setTone(parsed.tone);
-      setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
-      setLongPasteThresholdChars(parsed.longPasteThresholdChars);
+      applyParsedSettings(parsed);
       setStatus('Saved');
       onSaved?.();
     } catch (error) {
@@ -339,6 +408,51 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
       setStatus(message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleToolToggle = async (tool: ToolKey) => {
+    if (loading || saving || savingTools) {
+      return;
+    }
+    const previousState = toolsState;
+    const nextValue = !previousState[tool];
+    const nextState: Record<ToolKey, boolean> = {
+      ...previousState,
+      [tool]: nextValue,
+    };
+    setToolsState(nextState);
+    setSavingTools(true);
+    setStatus(null);
+    try {
+      const response = await fetch('/ui/api/settings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          tools: {
+            state: {
+              [tool]: nextValue,
+            },
+          },
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to update tools settings.'));
+      }
+      const parsed = parseSettingsPayload(payload);
+      applyParsedSettings(parsed);
+      setStatus(`Tool "${TOOL_LABELS[tool]}" updated.`);
+      onSaved?.();
+    } catch (error) {
+      setToolsState(previousState);
+      const message =
+        error instanceof Error ? error.message : 'Failed to update tools settings.';
+      setStatus(message);
+    } finally {
+      setSavingTools(false);
     }
   };
 
@@ -381,7 +495,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                     onClick={() => {
                       void handleSave();
                     }}
-                    disabled={saving || loading}
+                    disabled={saving || loading || savingTools}
                     className="rounded-lg border border-zinc-600 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {saving ? 'Saving...' : 'Save changes'}
@@ -576,8 +690,48 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                   {!loading && activeTab === 'tools' ? (
                     <div className="space-y-4">
                       <p className="text-sm text-zinc-400">
-                        Tools controls are available from backend settings API and will be wired here next.
+                        Tools are applied live to the active agent. Safe mode can still block risky tools.
                       </p>
+                      <div className="space-y-3">
+                        {TOOL_TOGGLE_KEYS.map((tool) => {
+                          const checked = toolsState[tool];
+                          const effectiveEnabled = isToolEffectivelyEnabled(tool, toolsState);
+                          const statusLabel = toolStatusLabel(tool, toolsState);
+                          return (
+                            <div
+                              key={tool}
+                              className="flex items-center justify-between gap-4 rounded-xl border border-zinc-800 bg-zinc-900/50 p-4"
+                              title={statusLabel}
+                            >
+                              <div>
+                                <div className="text-sm font-medium text-zinc-100">{TOOL_LABELS[tool]}</div>
+                                <div className="mt-1 text-xs text-zinc-400">
+                                  Requested: {checked ? 'on' : 'off'} | Effective: {effectiveEnabled ? 'on' : 'off'} ({statusLabel})
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={checked}
+                                aria-label={`Toggle ${TOOL_LABELS[tool]}`}
+                                disabled={savingTools || saving || loading}
+                                onClick={() => {
+                                  void handleToolToggle(tool);
+                                }}
+                                className={`relative h-6 w-11 rounded-full transition-colors ${
+                                  checked ? 'bg-emerald-500/70' : 'bg-zinc-700'
+                                } disabled:cursor-not-allowed disabled:opacity-40`}
+                              >
+                                <span
+                                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
+                                    checked ? 'translate-x-5' : 'translate-x-0.5'
+                                  }`}
+                                />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   ) : null}
 
