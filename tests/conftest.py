@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from memory.canonical_atom_store import CanonicalAtomStore
 from memory.categorized_memory_store import CategorizedMemoryStore
 from memory.feedback_manager import FeedbackManager
 from memory.memory_companion_store import MemoryCompanionStore
@@ -49,6 +50,7 @@ def _close_sqlite_stores(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for store_cls in (
         CategorizedMemoryStore,
+        CanonicalAtomStore,
         FeedbackManager,
         MemoryCompanionStore,
         MemoryManager,

@@ -91,6 +91,16 @@ class VectorIndex:
             self._prune_namespace(namespace)
             self._prune_total()
 
+    def upsert_text(
+        self,
+        path: str,
+        content: str,
+        namespace: str = "default",
+        meta: dict[str, JSONValue] | None = None,
+    ) -> None:
+        self.delete_path(path, namespace=namespace)
+        self.index_text(path, content, namespace=namespace, meta=meta)
+
     def index_batch(
         self,
         items: list[tuple[str, str]],
@@ -154,6 +164,19 @@ class VectorIndex:
                 to_delete,
             )
             self.conn.commit()
+
+    def delete_path(self, path: str, namespace: str = "default") -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM vectors WHERE namespace = ? AND path = ?",
+                (namespace, path),
+            )
+        return int(cur.rowcount)
+
+    def clear_namespace(self, namespace: str = "default") -> int:
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM vectors WHERE namespace = ?", (namespace,))
+        return int(cur.rowcount)
 
     def search(
         self, query: str, namespace: str = "default", top_k: int = 5

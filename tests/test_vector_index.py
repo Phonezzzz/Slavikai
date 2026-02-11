@@ -107,3 +107,28 @@ def test_vector_index_first_search_loads_then_reuses_model(tmp_path, monkeypatch
     assert calls == 1
     assert first_duration >= 0.045
     assert second_duration < first_duration
+
+
+def test_vector_index_upsert_delete_and_clear_namespace(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "vec.db"
+    monkeypatch.setattr(
+        "memory.vector_index.VectorIndex._get_model", lambda _self, _name: DummyModel()
+    )
+    index = VectorIndex(str(db_path))
+
+    index.upsert_text("a", "one", namespace="atoms")
+    index.upsert_text("a", "two", namespace="atoms")
+    results = index.search("query", namespace="atoms", top_k=5)
+    assert len(results) == 1
+    assert results[0].path == "a"
+    assert results[0].snippet.startswith("two")
+
+    deleted = index.delete_path("a", namespace="atoms")
+    assert deleted == 1
+    assert index.search("query", namespace="atoms", top_k=5) == []
+
+    index.index_text("x", "1", namespace="atoms")
+    index.index_text("y", "2", namespace="atoms")
+    cleared = index.clear_namespace("atoms")
+    assert cleared == 2
+    assert index.search("query", namespace="atoms", top_k=5) == []

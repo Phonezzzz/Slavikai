@@ -32,6 +32,18 @@ type ParsedSettings = {
   longPasteThresholdChars: number;
 };
 
+type MemoryConflict = {
+  atom_id: string;
+  stable_key: string;
+  claim_type: string;
+  summary_text: string;
+  confidence: number;
+  support_count: number;
+  contradict_count: number;
+  status: string;
+  last_seen_at: string;
+};
+
 const DEFAULT_SYSTEM_PROMPT =
   'You are SlavikAI, a helpful AI assistant with MWV architecture.';
 
@@ -255,6 +267,39 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   };
 };
 
+const parseMemoryConflictsPayload = (payload: unknown): MemoryConflict[] => {
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+  const conflictsRaw = (payload as { conflicts?: unknown }).conflicts;
+  if (!Array.isArray(conflictsRaw)) {
+    return [];
+  }
+  const conflicts: MemoryConflict[] = [];
+  for (const item of conflictsRaw) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const stableKey = row.stable_key;
+    if (typeof stableKey !== 'string' || !stableKey.trim()) {
+      continue;
+    }
+    conflicts.push({
+      atom_id: typeof row.atom_id === 'string' ? row.atom_id : stableKey,
+      stable_key: stableKey,
+      claim_type: typeof row.claim_type === 'string' ? row.claim_type : 'unknown',
+      summary_text: typeof row.summary_text === 'string' ? row.summary_text : stableKey,
+      confidence: typeof row.confidence === 'number' ? row.confidence : 0,
+      support_count: typeof row.support_count === 'number' ? row.support_count : 0,
+      contradict_count: typeof row.contradict_count === 'number' ? row.contradict_count : 0,
+      status: typeof row.status === 'string' ? row.status : 'conflict',
+      last_seen_at: typeof row.last_seen_at === 'string' ? row.last_seen_at : '',
+    });
+  }
+  return conflicts;
+};
+
 const providerPlaceholder = (provider: ProviderSettings): string => {
   if (provider.api_key_source === 'settings') {
     return `Stored in settings. Paste new ${provider.provider} key to replace.`;
@@ -318,6 +363,9 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingTools, setSavingTools] = useState(false);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryResolvingKey, setMemoryResolvingKey] = useState<string | null>(null);
+  const [memoryConflicts, setMemoryConflicts] = useState<MemoryConflict[]>([]);
   const [status, setStatus] = useState<string | null>(null);
 
   const applyParsedSettings = (parsed: ParsedSettings): void => {
@@ -349,12 +397,37 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
     }
   };
 
+  const loadMemoryConflicts = async () => {
+    setMemoryLoading(true);
+    try {
+      const response = await fetch('/ui/api/memory/conflicts?limit=100');
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to load memory conflicts.'));
+      }
+      setMemoryConflicts(parseMemoryConflictsPayload(payload));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to load memory conflicts.';
+      setStatus(message);
+    } finally {
+      setMemoryLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!isOpen) {
       return;
     }
     void loadSettings();
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'memory') {
+      return;
+    }
+    void loadMemoryConflicts();
+  }, [activeTab, isOpen]);
 
   const handleSave = async () => {
     if (saving) {
@@ -453,6 +526,41 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
       setStatus(message);
     } finally {
       setSavingTools(false);
+    }
+  };
+
+  const handleResolveMemoryConflict = async (
+    stableKey: string,
+    action: 'activate' | 'deprecate',
+  ) => {
+    if (memoryResolvingKey) {
+      return;
+    }
+    setMemoryResolvingKey(stableKey);
+    setStatus(null);
+    try {
+      const response = await fetch('/ui/api/memory/conflicts/resolve', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          stable_key: stableKey,
+          action,
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to resolve memory conflict.'));
+      }
+      setStatus(`Conflict ${action === 'activate' ? 'activated' : 'deprecated'}: ${stableKey}`);
+      await loadMemoryConflicts();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to resolve memory conflict.';
+      setStatus(message);
+    } finally {
+      setMemoryResolvingKey(null);
     }
   };
 
@@ -681,9 +789,71 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
 
                   {!loading && activeTab === 'memory' ? (
                     <div className="space-y-4">
-                      <p className="text-sm text-zinc-400">
-                        Memory controls are managed in backend settings API and will be expanded in this panel.
-                      </p>
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm text-zinc-400">
+                          Conflict atoms require manual resolve. Choose activate or deprecate.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void loadMemoryConflicts();
+                          }}
+                          className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800"
+                        >
+                          Refresh conflicts
+                        </button>
+                      </div>
+                      {memoryLoading ? (
+                        <div className="text-sm text-zinc-400">Loading memory conflicts...</div>
+                      ) : null}
+                      {!memoryLoading && memoryConflicts.length === 0 ? (
+                        <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 text-sm text-zinc-400">
+                          No memory conflicts.
+                        </div>
+                      ) : null}
+                      {!memoryLoading && memoryConflicts.length > 0 ? (
+                        <div className="space-y-3">
+                          {memoryConflicts.map((conflict) => (
+                            <div
+                              key={conflict.atom_id}
+                              className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4"
+                            >
+                              <div className="text-sm font-medium text-zinc-100">
+                                {conflict.stable_key}
+                              </div>
+                              <div className="mt-1 text-xs text-zinc-400">
+                                type={conflict.claim_type} | confidence={conflict.confidence.toFixed(2)} | support=
+                                {conflict.support_count} | contradict={conflict.contradict_count}
+                              </div>
+                              <div className="mt-2 text-xs text-zinc-300">
+                                {conflict.summary_text}
+                              </div>
+                              <div className="mt-3 flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  disabled={memoryResolvingKey === conflict.stable_key}
+                                  onClick={() => {
+                                    void handleResolveMemoryConflict(conflict.stable_key, 'activate');
+                                  }}
+                                  className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  Activate
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={memoryResolvingKey === conflict.stable_key}
+                                  onClick={() => {
+                                    void handleResolveMemoryConflict(conflict.stable_key, 'deprecate');
+                                  }}
+                                  className="rounded-md border border-zinc-600 bg-zinc-800 px-3 py-1 text-xs text-zinc-300 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  Deprecate
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
 

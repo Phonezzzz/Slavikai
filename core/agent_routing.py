@@ -242,6 +242,19 @@ class AgentRoutingMixin:
                 plan_summary="План не требуется для chat-маршрута.",
                 execution_summary="Ответ сформирован моделью.",
             )
+            capture_claims = getattr(self, "capture_memory_claims_from_text", None)
+            if callable(capture_claims):
+                try:
+                    source_id = getattr(self, "session_id", None) or "local"
+                    capture_claims(
+                        last_content,
+                        source_kind="chat.user_input",
+                        source_id=source_id,
+                        lang_hint="ru",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning("Memory claim capture failed: %s", exc)
+                    self.tracer.log("memory_claims_error", str(exc))
             if self.memory_config.auto_save_dialogue:
                 self.save_to_memory(last_content, response_text)
             self._log_chat_interaction(
@@ -296,6 +309,19 @@ class AgentRoutingMixin:
                 execution_summary="Ответ сформирован моделью.",
             )
             self.last_stream_response_raw = response_text
+            capture_claims = getattr(self, "capture_memory_claims_from_text", None)
+            if callable(capture_claims):
+                try:
+                    source_id = getattr(self, "session_id", None) or "local"
+                    capture_claims(
+                        last_content,
+                        source_kind="chat.user_input",
+                        source_id=source_id,
+                        lang_hint="ru",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning("Memory claim capture failed: %s", exc)
+                    self.tracer.log("memory_claims_error", str(exc))
             if self.memory_config.auto_save_dialogue:
                 self.save_to_memory(last_content, response_text)
             self._log_chat_interaction(

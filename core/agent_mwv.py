@@ -158,6 +158,14 @@ class AgentMWVMixin:
                     "skill_id": self._last_skill_match.entry.id,
                     "skill_pattern": self._last_skill_match.pattern,
                 }
+            build_capsule = getattr(self, "build_memory_capsule", None)
+            if callable(build_capsule):
+                try:
+                    memory_capsule = build_capsule(goal, for_mwv=True)
+                    if isinstance(memory_capsule, dict):
+                        skill_context["memory_capsule"] = memory_capsule
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning("MWV memory capsule build failed: %s", exc)
             return TaskPacket(
                 task_id=str(uuid.uuid4()),
                 session_id=context.session_id,

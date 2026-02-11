@@ -212,6 +212,63 @@ class LiveToolsAgent(DummyAgent):
         return "ok"
 
 
+class LiveEmbeddingsAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embeddings_model = "all-MiniLM-L6-v2"
+        self.set_calls: list[str] = []
+
+    def set_embeddings_model(self, model_name: str) -> None:
+        self.embeddings_model = model_name
+        self.set_calls.append(model_name)
+
+
+class MemoryConflictAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self._conflicts: dict[str, dict[str, JSONValue]] = {
+            "policy:avoid_emoji": {
+                "atom_id": "atom-1",
+                "stable_key": "policy:avoid_emoji",
+                "claim_type": "policy",
+                "value_json": {"rule": "avoid emoji"},
+                "confidence": 0.7,
+                "support_count": 1,
+                "contradict_count": 2,
+                "last_seen_at": "2026-01-01T00:00:00+00:00",
+                "status": "conflict",
+                "summary_text": 'policy:avoid_emoji={"rule":"avoid emoji"}',
+            }
+        }
+
+    def list_memory_conflicts(self, limit: int = 50) -> list[dict[str, JSONValue]]:
+        items = list(self._conflicts.values())
+        return [dict(item) for item in items[:limit]]
+
+    def resolve_memory_conflict(
+        self,
+        *,
+        stable_key: str,
+        action: str,
+        value_json: JSONValue | None = None,
+    ) -> dict[str, JSONValue] | None:
+        current = self._conflicts.get(stable_key)
+        if current is None:
+            return None
+        next_item = dict(current)
+        if action == "activate":
+            next_item["status"] = "active"
+        elif action == "deprecate":
+            next_item["status"] = "deprecated"
+        elif action == "set_value":
+            next_item["status"] = "active"
+            next_item["value_json"] = value_json
+        else:
+            raise ValueError("invalid action")
+        self._conflicts[stable_key] = next_item
+        return dict(next_item)
+
+
 class UIReportAgent(DummyAgent):
     def respond(self, messages) -> str:
         del messages
@@ -2128,6 +2185,59 @@ def test_ui_settings_update_rejects_invalid_composer_threshold() -> None:
             error = payload.get("error")
             assert isinstance(error, dict)
             assert error.get("code") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_settings_update_applies_embeddings_model_live() -> None:
+    async def run() -> None:
+        agent = LiveEmbeddingsAgent()
+        client = await _create_client(agent)
+        try:
+            response = await client.post(
+                "/ui/api/settings",
+                json={"memory": {"embeddings_model": "e5-small-v2"}},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            settings = payload.get("settings")
+            assert isinstance(settings, dict)
+            memory = settings.get("memory")
+            assert isinstance(memory, dict)
+            assert memory.get("embeddings_model") == "e5-small-v2"
+            assert agent.embeddings_model == "e5-small-v2"
+            assert agent.set_calls == ["e5-small-v2"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_memory_conflicts_endpoints() -> None:
+    async def run() -> None:
+        client = await _create_client(MemoryConflictAgent())
+        try:
+            list_resp = await client.get("/ui/api/memory/conflicts")
+            assert list_resp.status == 200
+            list_payload = await list_resp.json()
+            conflicts = list_payload.get("conflicts")
+            assert isinstance(conflicts, list)
+            assert len(conflicts) == 1
+            first = conflicts[0]
+            assert isinstance(first, dict)
+            assert first.get("stable_key") == "policy:avoid_emoji"
+
+            resolve_resp = await client.post(
+                "/ui/api/memory/conflicts/resolve",
+                json={"stable_key": "policy:avoid_emoji", "action": "activate"},
+            )
+            assert resolve_resp.status == 200
+            resolve_payload = await resolve_resp.json()
+            resolved = resolve_payload.get("resolved")
+            assert isinstance(resolved, dict)
+            assert resolved.get("status") == "active"
         finally:
             await client.close()
 

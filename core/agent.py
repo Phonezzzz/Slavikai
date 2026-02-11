@@ -29,16 +29,27 @@ from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.brain_manager import BrainManager
 from llm.types import ModelConfig
+from memory.atom_embedding_index import AtomEmbeddingIndex
+from memory.canonical_aggregator import CanonicalAggregator
+from memory.canonical_atom_store import CanonicalAtomStore
 from memory.categorized_memory_store import CategorizedMemoryStore
+from memory.claim_extractor import ClaimExtractor
 from memory.memory_companion_store import MemoryCompanionStore
 from memory.memory_inbox_writer import MemoryInboxWriter
 from memory.memory_manager import MemoryManager
+from memory.memory_retrieval import (
+    RetrievalConfig,
+)
+from memory.memory_retrieval import (
+    build_memory_capsule as build_memory_capsule_payload,
+)
 from memory.vector_index import VectorIndex
 from shared.batch_review_models import (
     BatchReviewRun,
     CandidateStatus,
     PolicyRuleCandidate,
 )
+from shared.canonical_atom_models import CanonicalAtom, Claim, ClaimExtractionInput, ClaimType
 from shared.memory_companion_models import (
     FeedbackEvent,
     FeedbackLabel,
@@ -133,6 +144,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         user_id: str = "local",
         memory_companion_db_path: str | None = None,
         memory_inbox_db_path: str | None = None,
+        canonical_atoms_db_path: str | None = None,
     ) -> None:
         saved_main = load_model_configs()
         self.main_config = main_config or saved_main
@@ -177,6 +189,15 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         )
         self._memory_inbox_writer = MemoryInboxWriter(self._memory_inbox_store, self.memory_config)
         self.vectors = VectorIndex("memory/vectors.db")
+        self._canonical_store = (
+            CanonicalAtomStore(canonical_atoms_db_path)
+            if canonical_atoms_db_path
+            else CanonicalAtomStore()
+        )
+        self._claim_extractor = ClaimExtractor()
+        self._canonical_aggregator = CanonicalAggregator(self._canonical_store)
+        self._atom_embedding_index = AtomEmbeddingIndex(self.vectors)
+        self._retrieval_config = RetrievalConfig()
         self.skill_index = SkillIndex.load_default()
         self._skill_candidate_writer = SkillCandidateWriter()
         self.short_term: list[LLMMessage] = []
@@ -330,6 +351,24 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
                 self.tool_registry.set_enabled(name, enabled)
         if state.get("safe_mode") is not None:
             self._apply_safe_mode(state["safe_mode"])
+
+    def get_embeddings_model(self) -> str:
+        return self.vectors.model_name
+
+    def set_embeddings_model(self, model_name: str) -> None:
+        normalized = model_name.strip()
+        if not normalized:
+            raise ValueError("embeddings model не должен быть пустым")
+        if self.vectors.model_name == normalized:
+            return
+        self.vectors.close()
+        self.vectors = VectorIndex("memory/vectors.db", model_name=normalized)
+        self._atom_embedding_index = AtomEmbeddingIndex(self.vectors)
+        self.tracer.log(
+            "embeddings_model_updated",
+            "Embeddings model updated",
+            {"model_name": normalized},
+        )
 
     def _apply_safe_mode(self, enabled: bool) -> None:
         self.tool_registry.apply_safe_mode(enabled)
@@ -516,6 +555,102 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         )
         self.tracer.log("policy_candidate_rejected", candidate_id)
 
+    def capture_memory_claims_from_text(
+        self,
+        text: str,
+        *,
+        source_kind: str,
+        source_id: str,
+        lang_hint: str | None = None,
+    ) -> list[dict[str, JSONValue]]:
+        payload = ClaimExtractionInput(
+            text=text,
+            source_kind=source_kind,
+            source_id=source_id,
+            lang_hint=lang_hint,
+            created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+        )
+        claims = self._claim_extractor.extract(payload)
+        applied: list[dict[str, JSONValue]] = []
+        for claim in claims:
+            if not self._should_promote_claim(claim):
+                continue
+            atom = self._canonical_aggregator.upsert_claim(claim)
+            self._atom_embedding_index.sync_atom(atom)
+            applied.append(
+                {
+                    "stable_key": atom.stable_key,
+                    "status": atom.status.value,
+                    "claim_type": atom.claim_type.value,
+                    "confidence": atom.confidence,
+                }
+            )
+        if applied:
+            self.tracer.log(
+                "memory_claims_applied",
+                f"Applied {len(applied)} claims",
+                {"claims": applied, "source_kind": source_kind, "source_id": source_id},
+            )
+        return applied
+
+    def build_memory_capsule(self, query: str, *, for_mwv: bool = False) -> dict[str, JSONValue]:
+        return build_memory_capsule_payload(
+            query=query,
+            store=self._canonical_store,
+            vector_index=self.vectors,
+            for_mwv=for_mwv,
+            config=self._retrieval_config,
+        )
+
+    def list_memory_conflicts(self, limit: int = 50) -> list[dict[str, JSONValue]]:
+        atoms = self._canonical_store.list_conflicts(limit=limit)
+        return [self._atom_to_payload(atom) for atom in atoms]
+
+    def resolve_memory_conflict(
+        self,
+        *,
+        stable_key: str,
+        action: str,
+        value_json: JSONValue | None = None,
+    ) -> dict[str, JSONValue] | None:
+        atom = self._canonical_aggregator.resolve_conflict(
+            stable_key=stable_key,
+            action=action,
+            value_json=value_json,
+        )
+        if atom is None:
+            return None
+        self._atom_embedding_index.sync_atom(atom)
+        self.tracer.log(
+            "memory_conflict_resolved",
+            stable_key,
+            {"action": action, "status": atom.status.value},
+        )
+        return self._atom_to_payload(atom)
+
+    def _should_promote_claim(self, claim: Claim) -> bool:
+        if claim.is_explicit:
+            return True
+        return claim.claim_type in {
+            ClaimType.PREFERENCE,
+            ClaimType.ENVIRONMENT,
+            ClaimType.FACT,
+        }
+
+    def _atom_to_payload(self, atom: CanonicalAtom) -> dict[str, JSONValue]:
+        return {
+            "atom_id": atom.atom_id,
+            "stable_key": atom.stable_key,
+            "claim_type": atom.claim_type.value,
+            "value_json": atom.value_json,
+            "confidence": atom.confidence,
+            "support_count": atom.support_count,
+            "contradict_count": atom.contradict_count,
+            "last_seen_at": atom.last_seen_at,
+            "status": atom.status.value,
+            "summary_text": atom.summary_text,
+        }
+
     def _build_context_messages(self, messages: list[LLMMessage], query: str) -> list[LLMMessage]:
         context_parts: list[str] = []
 
@@ -543,6 +678,15 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             for pref in prefs:
                 meta = pref.meta or {}
                 context_parts.append(f"- {meta.get('key')}: {meta.get('value')}")
+
+        try:
+            memory_capsule = self.build_memory_capsule(query, for_mwv=False)
+            capsule_text = memory_capsule.get("text")
+            if isinstance(capsule_text, str) and capsule_text.strip():
+                context_parts.append("Каноническая память:")
+                context_parts.extend(capsule_text.splitlines())
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Canonical memory retrieval failed: %s", exc)
 
         # Векторный поиск по проектному индексу (code + docs)
         try:
