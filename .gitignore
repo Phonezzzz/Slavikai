@@ -35,6 +35,10 @@ sandbox/**/*.wav
 # UI/local artifacts
 .anima/
 config/model_config.json
+config/memory.json
+config/tools.json
+Agent_IDE UI/
+Agent_IDE_UI/
 
 # Vector model cache
 *.bin
