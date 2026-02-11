@@ -1,8 +1,19 @@
 export type ChatRole = 'user' | 'assistant' | 'system';
 
+export type ChatAttachment = {
+  name: string;
+  mime: string;
+  content: string;
+};
+
 export type ChatMessage = {
+  message_id: string;
   role: ChatRole;
   content: string;
+  created_at: string;
+  trace_id: string | null;
+  parent_user_message_id: string | null;
+  attachments: ChatAttachment[];
 };
 
 export type SessionSummary = {

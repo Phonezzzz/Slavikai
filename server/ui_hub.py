@@ -47,10 +47,120 @@ DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_MAX_SESSIONS = 200
 DEFAULT_MAX_MESSAGES_PER_SESSION = 500
 
+_MESSAGE_ROLES = {"user", "assistant", "system"}
+
+
+def _normalize_message_attachments(value: JSONValue) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("attachments must be array")
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("attachments item must be object")
+        name_raw = item.get("name")
+        mime_raw = item.get("mime")
+        content_raw = item.get("content")
+        if not isinstance(name_raw, str) or not name_raw.strip():
+            raise ValueError("attachments.name required")
+        if not isinstance(mime_raw, str) or not mime_raw.strip():
+            raise ValueError("attachments.mime required")
+        if not isinstance(content_raw, str):
+            raise ValueError("attachments.content required")
+        normalized.append(
+            {
+                "name": name_raw.strip(),
+                "mime": mime_raw.strip(),
+                "content": content_raw,
+            }
+        )
+    return normalized
+
+
+def _build_message(
+    *,
+    role: str,
+    content: str,
+    trace_id: str | None = None,
+    parent_user_message_id: str | None = None,
+    attachments: list[dict[str, str]] | None = None,
+    message_id: str | None = None,
+    created_at: str | None = None,
+) -> dict[str, JSONValue]:
+    normalized_role = role.strip()
+    if normalized_role not in _MESSAGE_ROLES:
+        raise ValueError(f"unsupported message role: {role}")
+    return {
+        "message_id": (message_id or uuid.uuid4().hex).strip(),
+        "role": normalized_role,
+        "content": content,
+        "created_at": (created_at or _utc_iso_now()).strip(),
+        "trace_id": trace_id.strip() if isinstance(trace_id, str) and trace_id.strip() else None,
+        "parent_user_message_id": (
+            parent_user_message_id.strip()
+            if isinstance(parent_user_message_id, str) and parent_user_message_id.strip()
+            else None
+        ),
+        "attachments": list(attachments or []),
+    }
+
+
+def _normalize_message_payload(message: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    message_id = message.get("message_id")
+    role = message.get("role")
+    content = message.get("content")
+    created_at = message.get("created_at")
+    trace_id = message.get("trace_id")
+    parent_user_message_id = message.get("parent_user_message_id")
+    attachments = message.get("attachments")
+
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise ValueError("message_id required")
+    if not isinstance(role, str) or role.strip() not in _MESSAGE_ROLES:
+        raise ValueError("role required")
+    if not isinstance(content, str):
+        raise ValueError("content required")
+    if not isinstance(created_at, str) or not created_at.strip():
+        raise ValueError("created_at required")
+    if trace_id is not None and (not isinstance(trace_id, str) or not trace_id.strip()):
+        raise ValueError("trace_id must be string or null")
+    if parent_user_message_id is not None and (
+        not isinstance(parent_user_message_id, str) or not parent_user_message_id.strip()
+    ):
+        raise ValueError("parent_user_message_id must be string or null")
+
+    normalized_role = role.strip()
+    normalized_trace = trace_id.strip() if isinstance(trace_id, str) and trace_id.strip() else None
+    normalized_parent = (
+        parent_user_message_id.strip()
+        if isinstance(parent_user_message_id, str) and parent_user_message_id.strip()
+        else None
+    )
+    normalized_attachments = _normalize_message_attachments(attachments)
+    if normalized_role != "assistant":
+        normalized_trace = None
+        normalized_parent = None
+    if normalized_role != "user":
+        normalized_attachments = []
+
+    return {
+        "message_id": message_id.strip(),
+        "role": normalized_role,
+        "content": content,
+        "created_at": created_at.strip(),
+        "trace_id": normalized_trace,
+        "parent_user_message_id": normalized_parent,
+        "attachments": [
+            {"name": item["name"], "mime": item["mime"], "content": item["content"]}
+            for item in normalized_attachments
+        ],
+    }
+
 
 @dataclass
 class _SessionState:
-    messages: list[dict[str, str]] = field(default_factory=list)
+    messages: list[dict[str, JSONValue]] = field(default_factory=list)
     output_text: str | None = None
     output_updated_at: str | None = None
     files: list[str] = field(default_factory=list)
@@ -123,14 +233,14 @@ class UIHub:
             self._drop_sessions_locked([normalized])
             return True
 
-    async def get_messages(self, session_id: str) -> list[dict[str, str]]:
+    async def get_messages(self, session_id: str) -> list[dict[str, JSONValue]]:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 return []
             return [dict(item) for item in state.messages]
 
-    async def get_session_history(self, session_id: str) -> list[dict[str, str]] | None:
+    async def get_session_history(self, session_id: str) -> list[dict[str, JSONValue]] | None:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -517,14 +627,18 @@ class UIHub:
             payload = self._status_payload(session_id, state.status_state)
         return self._build_event("status", payload)
 
-    async def append_message(self, session_id: str, role: str, content: str) -> dict[str, str]:
-        message = {"role": role, "content": content}
+    async def append_message(
+        self,
+        session_id: str,
+        message: dict[str, JSONValue],
+    ) -> dict[str, JSONValue]:
+        normalized_message = _normalize_message_payload(message)
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-            state.messages.append(message)
+            state.messages.append(normalized_message)
             if (
                 self._max_messages_per_session > 0
                 and len(state.messages) > self._max_messages_per_session
@@ -536,10 +650,10 @@ class UIHub:
             subscribers = list(state.subscribers)
         event = self._build_event(
             "message.append",
-            {"session_id": session_id, "message": message},
+            {"session_id": session_id, "message": dict(normalized_message)},
         )
         self._publish_to_subscribers(subscribers, event)
-        return message
+        return dict(normalized_message)
 
     async def subscribe(self, session_id: str) -> asyncio.Queue[dict[str, JSONValue]]:
         queue: asyncio.Queue[dict[str, JSONValue]] = asyncio.Queue()
@@ -753,12 +867,14 @@ class UIHub:
         except ValueError:
             return datetime.fromtimestamp(0, tz=timezone.utc)  # noqa: UP017
 
-    def _build_session_title(self, messages: list[dict[str, str]]) -> str:
+    def _build_session_title(self, messages: list[dict[str, JSONValue]]) -> str:
         for message in messages:
-            role = message.get("role", "")
+            role_raw = message.get("role")
+            role = role_raw if isinstance(role_raw, str) else ""
             if role != "user":
                 continue
-            raw_content = message.get("content", "").strip()
+            content_raw = message.get("content")
+            raw_content = content_raw.strip() if isinstance(content_raw, str) else ""
             if not raw_content:
                 continue
             first_line = raw_content.splitlines()[0].strip()
@@ -769,3 +885,24 @@ class UIHub:
                 return compact
             return f"{compact[:45].rstrip()}..."
         return "New chat"
+
+    def create_message(
+        self,
+        *,
+        role: str,
+        content: str,
+        trace_id: str | None = None,
+        parent_user_message_id: str | None = None,
+        attachments: list[dict[str, str]] | None = None,
+        message_id: str | None = None,
+        created_at: str | None = None,
+    ) -> dict[str, JSONValue]:
+        return _build_message(
+            role=role,
+            content=content,
+            trace_id=trace_id,
+            parent_user_message_id=parent_user_message_id,
+            attachments=attachments,
+            message_id=message_id,
+            created_at=created_at,
+        )

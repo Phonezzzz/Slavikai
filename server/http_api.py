@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import requests
 from aiohttp import web
+from aiohttp.multipart import BodyPartReader
 
 from config.http_server_config import (
     DEFAULT_MAX_REQUEST_BYTES,
@@ -102,6 +103,10 @@ UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index", "github_import"}
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parent.parent / ".run" / "ui_settings.json"
 DEFAULT_UI_TONE: Final[str] = "balanced"
 DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
+DEFAULT_LONG_PASTE_TO_FILE_ENABLED: Final[bool] = True
+DEFAULT_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 12_000
+MIN_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 1_000
+MAX_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 80_000
 UI_GITHUB_REQUIRED_CATEGORIES: Final[list[ApprovalCategory]] = ["NETWORK_RISK", "EXEC_ARBITRARY"]
 UI_GITHUB_ROOT: Final[Path] = Path("sandbox/project/github").resolve()
 CANVAS_LINE_THRESHOLD: Final[int] = 40
@@ -113,6 +118,12 @@ CHAT_STREAM_WARMUP_CHARS: Final[int] = 220
 CANVAS_STATUS_CHARS_STEP: Final[int] = 640
 WORKSPACE_ROOT: Final[Path] = Path("sandbox/project").resolve()
 MAX_DOWNLOAD_BYTES: Final[int] = 5_000_000
+MAX_ATTACHMENTS_PER_MESSAGE: Final[int] = 8
+MAX_ATTACHMENT_CHARS: Final[int] = 80_000
+MAX_TOTAL_ATTACHMENTS_CHARS: Final[int] = 160_000
+MAX_CONTENT_CHARS: Final[int] = 120_000
+MAX_TOTAL_PAYLOAD_CHARS: Final[int] = 220_000
+MAX_STT_AUDIO_BYTES: Final[int] = 10_000_000
 _REQUEST_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?P<name>[A-Za-z0-9._/\-]+\.[A-Za-z0-9]{1,12})"
 )
@@ -853,18 +864,99 @@ async def handle_models(request: web.Request) -> web.Response:
     return _json_response({"object": "list", "data": models})
 
 
-def _ui_messages_to_llm(messages: list[dict[str, str]]) -> list[LLMMessage]:
+def _ui_messages_to_llm(messages: list[dict[str, JSONValue]]) -> list[LLMMessage]:
+    def _message_attachments(raw: object) -> list[dict[str, str]]:
+        if not isinstance(raw, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name_raw = item.get("name")
+            mime_raw = item.get("mime")
+            content_raw = item.get("content")
+            if (
+                isinstance(name_raw, str)
+                and name_raw.strip()
+                and isinstance(mime_raw, str)
+                and mime_raw.strip()
+                and isinstance(content_raw, str)
+            ):
+                normalized.append(
+                    {
+                        "name": name_raw.strip(),
+                        "mime": mime_raw.strip(),
+                        "content": content_raw,
+                    },
+                )
+        return normalized
+
+    def _serialize_attachments_for_llm(attachments: list[dict[str, str]]) -> str:
+        if not attachments:
+            return ""
+        encoded = json.dumps(attachments, ensure_ascii=False)
+        return f"\n\n<slavik-attachments-json>\n{encoded}\n</slavik-attachments-json>"
+
     parsed: list[LLMMessage] = []
     for item in messages:
-        role = item.get("role")
-        content = item.get("content", "")
+        role_raw = item.get("role")
+        content_raw = item.get("content")
+        attachments_raw = item.get("attachments")
+        role = role_raw if isinstance(role_raw, str) else None
+        content = content_raw if isinstance(content_raw, str) else ""
+        attachments = _message_attachments(attachments_raw)
+        llm_content = content + _serialize_attachments_for_llm(attachments)
         if role == "user":
-            parsed.append(LLMMessage(role="user", content=content))
+            parsed.append(LLMMessage(role="user", content=llm_content))
         elif role == "assistant":
-            parsed.append(LLMMessage(role="assistant", content=content))
+            parsed.append(LLMMessage(role="assistant", content=llm_content))
         elif role == "system":
-            parsed.append(LLMMessage(role="system", content=content))
+            parsed.append(LLMMessage(role="system", content=llm_content))
     return parsed
+
+
+def _parse_ui_chat_attachments(raw: object) -> tuple[list[dict[str, str]], int]:
+    if raw is None:
+        return [], 0
+    if not isinstance(raw, list):
+        raise ValueError("attachments должен быть списком.")
+    if len(raw) > MAX_ATTACHMENTS_PER_MESSAGE:
+        raise OverflowError(f"attachments превышает лимит: {MAX_ATTACHMENTS_PER_MESSAGE} файлов.")
+    attachments: list[dict[str, str]] = []
+    total_chars = 0
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("attachments содержит не-объект.")
+        name_raw = item.get("name")
+        mime_raw = item.get("mime")
+        content_raw = item.get("content")
+        if not isinstance(name_raw, str) or not name_raw.strip():
+            raise ValueError("attachments[].name должен быть непустой строкой.")
+        if not isinstance(mime_raw, str) or not mime_raw.strip():
+            raise ValueError("attachments[].mime должен быть непустой строкой.")
+        if not isinstance(content_raw, str):
+            raise ValueError("attachments[].content должен быть строкой.")
+        normalized_name = name_raw.strip()
+        normalized_mime = mime_raw.strip()
+        if len(normalized_name) > 255:
+            raise ValueError("attachments[].name слишком длинный (max 255).")
+        if len(normalized_mime) > 128:
+            raise ValueError("attachments[].mime слишком длинный (max 128).")
+        if len(content_raw) > MAX_ATTACHMENT_CHARS:
+            raise OverflowError(
+                f"attachments[].content превышает лимит {MAX_ATTACHMENT_CHARS} символов."
+            )
+        total_chars += len(content_raw)
+        attachments.append(
+            {
+                "name": normalized_name,
+                "mime": normalized_mime,
+                "content": content_raw,
+            },
+        )
+    if total_chars > MAX_TOTAL_ATTACHMENTS_CHARS:
+        raise OverflowError("Суммарный размер attachments превышает допустимый лимит.")
+    return attachments, total_chars
 
 
 def _extract_decision_payload(response_text: str) -> dict[str, JSONValue] | None:
@@ -1479,6 +1571,39 @@ def _save_embeddings_model_setting(model_name: str) -> None:
     _save_ui_settings_blob(payload)
 
 
+def _load_composer_settings() -> tuple[bool, int]:
+    payload = _load_ui_settings_blob()
+    composer_raw = payload.get("composer")
+    if not isinstance(composer_raw, dict):
+        return DEFAULT_LONG_PASTE_TO_FILE_ENABLED, DEFAULT_LONG_PASTE_THRESHOLD_CHARS
+    enabled_raw = composer_raw.get("long_paste_to_file_enabled")
+    threshold_raw = composer_raw.get("long_paste_threshold_chars")
+    enabled = enabled_raw if isinstance(enabled_raw, bool) else DEFAULT_LONG_PASTE_TO_FILE_ENABLED
+    threshold = (
+        threshold_raw
+        if isinstance(threshold_raw, int) and not isinstance(threshold_raw, bool)
+        else DEFAULT_LONG_PASTE_THRESHOLD_CHARS
+    )
+    if threshold < MIN_LONG_PASTE_THRESHOLD_CHARS:
+        threshold = MIN_LONG_PASTE_THRESHOLD_CHARS
+    if threshold > MAX_LONG_PASTE_THRESHOLD_CHARS:
+        threshold = MAX_LONG_PASTE_THRESHOLD_CHARS
+    return enabled, threshold
+
+
+def _save_composer_settings(
+    *,
+    long_paste_to_file_enabled: bool,
+    long_paste_threshold_chars: int,
+) -> None:
+    payload = _load_ui_settings_blob()
+    payload["composer"] = {
+        "long_paste_to_file_enabled": long_paste_to_file_enabled,
+        "long_paste_threshold_chars": long_paste_threshold_chars,
+    }
+    _save_ui_settings_blob(payload)
+
+
 def _load_tools_state() -> dict[str, bool]:
     try:
         return load_tools_config().to_dict()
@@ -1626,12 +1751,17 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
 
 def _build_settings_payload() -> dict[str, JSONValue]:
     tone, system_prompt = _load_personalization_settings()
+    long_paste_to_file_enabled, long_paste_threshold_chars = _load_composer_settings()
     memory_config = load_memory_config()
     tools_state = _load_tools_state()
     tools_registry = {key: value for key, value in tools_state.items() if key != "safe_mode"}
     return {
         "settings": {
             "personalization": {"tone": tone, "system_prompt": system_prompt},
+            "composer": {
+                "long_paste_to_file_enabled": long_paste_to_file_enabled,
+                "long_paste_threshold_chars": long_paste_threshold_chars,
+            },
             "memory": {
                 "auto_save_dialogue": memory_config.auto_save_dialogue,
                 "inbox_max_items": memory_config.inbox_max_items,
@@ -1656,16 +1786,71 @@ def _normalize_import_status(raw: object) -> str:
     return "ok"
 
 
-def _parse_imported_message(raw: object) -> dict[str, str] | None:
+def _parse_imported_message(raw: object) -> dict[str, JSONValue] | None:
     if not isinstance(raw, dict):
         return None
+    message_id_raw = raw.get("message_id")
     role_raw = raw.get("role")
     content_raw = raw.get("content")
+    created_at_raw = raw.get("created_at")
+    trace_id_raw = raw.get("trace_id")
+    parent_raw = raw.get("parent_user_message_id")
+    attachments_raw = raw.get("attachments")
+    if not isinstance(message_id_raw, str) or not message_id_raw.strip():
+        return None
     if not isinstance(role_raw, str) or role_raw not in {"user", "assistant", "system"}:
         return None
     if not isinstance(content_raw, str):
         return None
-    return {"role": role_raw, "content": content_raw}
+    if not isinstance(created_at_raw, str) or not created_at_raw.strip():
+        return None
+    if trace_id_raw is not None and (not isinstance(trace_id_raw, str) or not trace_id_raw.strip()):
+        return None
+    if parent_raw is not None and (not isinstance(parent_raw, str) or not parent_raw.strip()):
+        return None
+    trace_id: str | None = trace_id_raw.strip() if isinstance(trace_id_raw, str) else None
+    parent_user_message_id: str | None = parent_raw.strip() if isinstance(parent_raw, str) else None
+    attachments: list[dict[str, str]] = []
+    if attachments_raw is None:
+        attachments = []
+    elif isinstance(attachments_raw, list):
+        for item in attachments_raw:
+            if not isinstance(item, dict):
+                return None
+            name_raw = item.get("name")
+            mime_raw = item.get("mime")
+            content_item_raw = item.get("content")
+            if (
+                not isinstance(name_raw, str)
+                or not name_raw.strip()
+                or not isinstance(mime_raw, str)
+                or not mime_raw.strip()
+                or not isinstance(content_item_raw, str)
+            ):
+                return None
+            attachments.append(
+                {
+                    "name": name_raw.strip(),
+                    "mime": mime_raw.strip(),
+                    "content": content_item_raw,
+                },
+            )
+    else:
+        return None
+    if role_raw != "assistant":
+        trace_id = None
+        parent_user_message_id = None
+    if role_raw != "user":
+        attachments = []
+    return {
+        "message_id": message_id_raw.strip(),
+        "role": role_raw,
+        "content": content_raw,
+        "created_at": created_at_raw.strip(),
+        "trace_id": trace_id,
+        "parent_user_message_id": parent_user_message_id,
+        "attachments": attachments,
+    }
 
 
 def _parse_imported_session(raw: object) -> PersistedSession | None:
@@ -1686,7 +1871,7 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
     messages_raw = raw.get("messages")
     if not isinstance(messages_raw, list):
         return None
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, JSONValue]] = []
     for item in messages_raw:
         parsed_message = _parse_imported_message(item)
         if parsed_message is None:
@@ -2035,6 +2220,54 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             system_prompt = prompt_raw
         _save_personalization_settings(tone=tone, system_prompt=system_prompt)
 
+    composer_raw = payload.get("composer")
+    if composer_raw is not None:
+        if not isinstance(composer_raw, dict):
+            return _error_response(
+                status=400,
+                message="composer должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        long_paste_to_file_enabled, long_paste_threshold_chars = _load_composer_settings()
+        if "long_paste_to_file_enabled" in composer_raw:
+            enabled_raw = composer_raw.get("long_paste_to_file_enabled")
+            if not isinstance(enabled_raw, bool):
+                return _error_response(
+                    status=400,
+                    message="composer.long_paste_to_file_enabled должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            long_paste_to_file_enabled = enabled_raw
+        if "long_paste_threshold_chars" in composer_raw:
+            threshold_raw = composer_raw.get("long_paste_threshold_chars")
+            if isinstance(threshold_raw, bool) or not isinstance(threshold_raw, int):
+                return _error_response(
+                    status=400,
+                    message="composer.long_paste_threshold_chars должен быть int.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if (
+                threshold_raw < MIN_LONG_PASTE_THRESHOLD_CHARS
+                or threshold_raw > MAX_LONG_PASTE_THRESHOLD_CHARS
+            ):
+                return _error_response(
+                    status=400,
+                    message=(
+                        "composer.long_paste_threshold_chars вне диапазона "
+                        f"{MIN_LONG_PASTE_THRESHOLD_CHARS}..{MAX_LONG_PASTE_THRESHOLD_CHARS}."
+                    ),
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            long_paste_threshold_chars = threshold_raw
+        _save_composer_settings(
+            long_paste_to_file_enabled=long_paste_to_file_enabled,
+            long_paste_threshold_chars=long_paste_threshold_chars,
+        )
+
     memory_raw = payload.get("memory")
     if memory_raw is not None:
         if not isinstance(memory_raw, dict):
@@ -2204,6 +2437,163 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
         _save_provider_api_keys(next_api_keys)
 
     return _json_response(_build_settings_payload())
+
+
+def _openai_error_message(response: requests.Response) -> str | None:
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error_raw = payload.get("error")
+    if not isinstance(error_raw, dict):
+        return None
+    message_raw = error_raw.get("message")
+    if not isinstance(message_raw, str):
+        return None
+    normalized = message_raw.strip()
+    return normalized or None
+
+
+async def handle_ui_stt_transcribe(request: web.Request) -> web.Response:
+    api_key = _resolve_provider_api_key("openai")
+    if not api_key:
+        return _error_response(
+            status=409,
+            message="Не задан OpenAI API key для STT (settings.providers.openai.api_key).",
+            error_type="configuration_error",
+            code="stt_api_key_missing",
+        )
+
+    try:
+        reader = await request.multipart()
+    except Exception:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message="Ожидался multipart/form-data с полем audio.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    audio_bytes: bytes | None = None
+    audio_filename = "recording.webm"
+    audio_content_type = "application/octet-stream"
+    language = "ru"
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if not isinstance(part, BodyPartReader):
+            continue
+        name = str(getattr(part, "name", "") or "").strip()
+        if not name:
+            continue
+        if name == "language":
+            try:
+                language_raw = await part.text()
+            except Exception:  # noqa: BLE001
+                language_raw = ""
+            normalized_language = language_raw.strip()
+            if normalized_language:
+                language = normalized_language
+            continue
+        if name != "audio":
+            continue
+        audio_filename_raw = getattr(part, "filename", None)
+        if isinstance(audio_filename_raw, str) and audio_filename_raw.strip():
+            audio_filename = audio_filename_raw.strip()
+        part_content_type = part.headers.get("Content-Type")
+        if isinstance(part_content_type, str) and part_content_type.strip():
+            audio_content_type = part_content_type.strip()
+        chunks: list[bytes] = []
+        total_size = 0
+        while True:
+            chunk = await part.read_chunk()
+            if not chunk:
+                break
+            total_size += len(chunk)
+            if total_size > MAX_STT_AUDIO_BYTES:
+                return _error_response(
+                    status=413,
+                    message="Аудиофайл слишком большой.",
+                    error_type="invalid_request_error",
+                    code="payload_too_large",
+                )
+            chunks.append(chunk)
+        if chunks:
+            audio_bytes = b"".join(chunks)
+
+    if audio_bytes is None:
+        return _error_response(
+            status=400,
+            message="Поле audio обязательно.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    try:
+        response = requests.post(
+            OPENAI_STT_ENDPOINT,
+            headers={"Authorization": f"Bearer {api_key}"},
+            data={
+                "model": "whisper-1",
+                "language": language,
+                "response_format": "json",
+            },
+            files={"file": (audio_filename, audio_bytes, audio_content_type)},
+            timeout=MODEL_FETCH_TIMEOUT,
+        )
+    except Exception:  # noqa: BLE001
+        return _error_response(
+            status=502,
+            message="Не удалось связаться с STT-провайдером.",
+            error_type="upstream_error",
+            code="upstream_error",
+        )
+
+    if response.status_code >= 400:
+        upstream_message = _openai_error_message(response)
+        if response.status_code in {400, 415, 422}:
+            return _error_response(
+                status=400,
+                message=upstream_message or "Неподдерживаемый формат аудио.",
+                error_type="invalid_request_error",
+                code="unsupported_audio_format",
+            )
+        return _error_response(
+            status=502,
+            message=upstream_message or "STT-провайдер вернул ошибку.",
+            error_type="upstream_error",
+            code="upstream_error",
+        )
+
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        payload = None
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=502,
+            message="STT-провайдер вернул неожиданный ответ.",
+            error_type="upstream_error",
+            code="upstream_error",
+        )
+    text_raw = payload.get("text")
+    if not isinstance(text_raw, str) or not text_raw.strip():
+        return _error_response(
+            status=502,
+            message="STT-провайдер не вернул текст распознавания.",
+            error_type="upstream_error",
+            code="upstream_error",
+        )
+    return _json_response(
+        {
+            "text": text_raw.strip(),
+            "model": "whisper-1",
+            "language": language,
+        }
+    )
 
 
 async def handle_ui_chats_export(request: web.Request) -> web.Response:
@@ -2878,12 +3268,19 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             )
 
         content_raw = payload.get("content")
-        if not isinstance(content_raw, str) or not content_raw.strip():
+        if not isinstance(content_raw, str):
             return _error_response(
                 status=400,
-                message="content должен быть непустой строкой.",
+                message="content должен быть строкой.",
                 error_type="invalid_request_error",
                 code="invalid_request_error",
+            )
+        if len(content_raw) > MAX_CONTENT_CHARS:
+            return _error_response(
+                status=413,
+                message="content слишком длинный.",
+                error_type="invalid_request_error",
+                code="payload_too_large",
             )
         force_canvas_raw = payload.get("force_canvas")
         if force_canvas_raw is None:
@@ -2896,6 +3293,38 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 message="force_canvas должен быть boolean.",
                 error_type="invalid_request_error",
                 code="invalid_request_error",
+            )
+        attachments_raw = payload.get("attachments")
+        try:
+            attachments, attachments_chars = _parse_ui_chat_attachments(attachments_raw)
+        except ValueError as exc:
+            return _error_response(
+                status=400,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        except OverflowError as exc:
+            return _error_response(
+                status=413,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="payload_too_large",
+            )
+        if not content_raw.strip() and not attachments:
+            return _error_response(
+                status=400,
+                message="Нужно передать content или attachments.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        total_payload_chars = len(content_raw) + attachments_chars
+        if total_payload_chars > MAX_TOTAL_PAYLOAD_CHARS:
+            return _error_response(
+                status=413,
+                message="Запрос слишком большой.",
+                error_type="invalid_request_error",
+                code="payload_too_large",
             )
 
         session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
@@ -2913,7 +3342,18 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         )
 
         approved_categories = await session_store.get_categories(session_id)
-        await hub.append_message(session_id, "user", content_raw.strip())
+        user_message = hub.create_message(
+            role="user",
+            content=content_raw.strip(),
+            attachments=attachments,
+        )
+        await hub.append_message(session_id, user_message)
+        user_message_id_raw = user_message.get("message_id")
+        user_message_id = (
+            user_message_id_raw
+            if isinstance(user_message_id_raw, str) and user_message_id_raw
+            else None
+        )
         llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
         await _publish_agent_activity(
             hub,
@@ -3161,7 +3601,13 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             if approval_request is not None or display_target == "chat"
             else _build_canvas_chat_summary(artifact_title=artifact_title)
         )
-        await hub.append_message(session_id, "assistant", chat_summary)
+        assistant_message = hub.create_message(
+            role="assistant",
+            content=chat_summary,
+            trace_id=trace_id,
+            parent_user_message_id=user_message_id,
+        )
+        await hub.append_message(session_id, assistant_message)
         await hub.set_session_decision(session_id, decision)
         messages = await hub.get_messages(session_id)
         output_payload = await hub.get_session_output(session_id)
@@ -3277,7 +3723,14 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         )
 
         approved_categories = await session_store.get_categories(session_id)
-        await hub.append_message(session_id, "user", user_command)
+        user_message = hub.create_message(role="user", content=user_command)
+        await hub.append_message(session_id, user_message)
+        user_message_id_raw = user_message.get("message_id")
+        user_message_id = (
+            user_message_id_raw
+            if isinstance(user_message_id_raw, str) and user_message_id_raw
+            else None
+        )
         await _publish_agent_activity(
             hub,
             session_id=session_id,
@@ -3310,8 +3763,11 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 approval_payload = _serialize_approval_request(approval_request_obj)
                 await hub.append_message(
                     session_id,
-                    "assistant",
-                    "Approval required for GitHub import.",
+                    hub.create_message(
+                        role="assistant",
+                        content="Approval required for GitHub import.",
+                        parent_user_message_id=user_message_id,
+                    ),
                 )
                 messages = await hub.get_messages(session_id)
                 current_decision = await hub.get_session_decision(session_id)
@@ -3385,7 +3841,14 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                         f"Path: {relative_target}\n"
                         f"Index error: {index_result}"
                     )
-            await hub.append_message(session_id, "assistant", response_text)
+            await hub.append_message(
+                session_id,
+                hub.create_message(
+                    role="assistant",
+                    content=response_text,
+                    parent_user_message_id=user_message_id,
+                ),
+            )
             messages = await hub.get_messages(session_id)
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
@@ -3457,7 +3920,15 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 getattr(agent, "last_approval_request", None),
             )
 
-        await hub.append_message(session_id, "assistant", response_text)
+        await hub.append_message(
+            session_id,
+            hub.create_message(
+                role="assistant",
+                content=response_text,
+                trace_id=trace_id if isinstance(trace_id, str) else None,
+                parent_user_message_id=user_message_id,
+            ),
+        )
         messages = await hub.get_messages(session_id)
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
@@ -3969,6 +4440,7 @@ def create_app(
     app.router.add_get("/ui/api/status", handle_ui_status)
     app.router.add_get("/ui/api/settings", handle_ui_settings)
     app.router.add_post("/ui/api/settings", handle_ui_settings_update)
+    app.router.add_post("/ui/api/stt/transcribe", handle_ui_stt_transcribe)
     app.router.add_get("/ui/api/settings/chats/export", handle_ui_chats_export)
     app.router.add_post("/ui/api/settings/chats/import", handle_ui_chats_import)
     app.router.add_get("/ui/api/models", handle_ui_models)

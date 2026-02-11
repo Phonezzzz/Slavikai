@@ -18,7 +18,7 @@ class PersistedSession:
     updated_at: str
     status: str
     decision: dict[str, JSONValue] | None
-    messages: list[dict[str, str]]
+    messages: list[dict[str, JSONValue]]
     model_provider: str | None = None
     model_id: str | None = None
     title_override: str | None = None
@@ -196,17 +196,31 @@ class SQLiteUISessionStorage:
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
-            for index, message in enumerate(session.messages):
+            for message in session.messages:
+                prepared = self._message_for_write(message)
                 conn.execute(
                     """
-                    INSERT INTO ui_messages (session_id, message_index, role, content)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO ui_messages (
+                        message_id,
+                        session_id,
+                        role,
+                        content,
+                        created_at,
+                        trace_id,
+                        parent_user_message_id,
+                        attachments_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        prepared["message_id"],
                         session.session_id,
-                        index,
-                        message["role"],
-                        message["content"],
+                        prepared["role"],
+                        prepared["content"],
+                        prepared["created_at"],
+                        prepared["trace_id"],
+                        prepared["parent_user_message_id"],
+                        prepared["attachments_json"],
                     ),
                 )
             conn.commit()
@@ -326,34 +340,56 @@ class SQLiteUISessionStorage:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ui_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
-                    message_index INTEGER NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    trace_id TEXT,
+                    parent_user_message_id TEXT,
+                    attachments_json TEXT NOT NULL DEFAULT '[]',
                     FOREIGN KEY(session_id) REFERENCES ui_sessions(session_id) ON DELETE CASCADE
                 )
                 """,
             )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_ui_messages_session_idx
-                ON ui_messages (session_id, message_index)
-                """,
-            )
+            self._ensure_ui_messages_table(conn)
             conn.commit()
 
-    def _load_messages(self, conn: sqlite3.Connection, session_id: str) -> list[dict[str, str]]:
+    def _load_messages(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+    ) -> list[dict[str, JSONValue]]:
         rows = conn.execute(
             """
-            SELECT role, content
+            SELECT
+                message_id,
+                role,
+                content,
+                created_at,
+                trace_id,
+                parent_user_message_id,
+                attachments_json
             FROM ui_messages
             WHERE session_id = ?
-            ORDER BY message_index ASC
+            ORDER BY rowid ASC
             """,
             (session_id,),
         ).fetchall()
-        return [{"role": str(row["role"]), "content": str(row["content"])} for row in rows]
+        messages: list[dict[str, JSONValue]] = []
+        for row in rows:
+            messages.append(
+                {
+                    "message_id": str(row["message_id"]),
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "created_at": str(row["created_at"]),
+                    "trace_id": _optional_str(row["trace_id"]),
+                    "parent_user_message_id": _optional_str(row["parent_user_message_id"]),
+                    "attachments": self._decode_attachments(row["attachments_json"]),
+                },
+            )
+        return messages
 
     def _decode_decision(self, value: object) -> dict[str, JSONValue] | None:
         if value is None:
@@ -433,6 +469,138 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN files_json TEXT")
         if "artifacts_json" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN artifacts_json TEXT")
+
+    def _ensure_ui_messages_table(self, conn: sqlite3.Connection) -> None:
+        expected_columns = [
+            "message_id",
+            "session_id",
+            "role",
+            "content",
+            "created_at",
+            "trace_id",
+            "parent_user_message_id",
+            "attachments_json",
+        ]
+        existing = conn.execute("PRAGMA table_info(ui_messages)").fetchall()
+        existing_names = [str(row["name"]) for row in existing if isinstance(row, sqlite3.Row)]
+        if existing_names != expected_columns:
+            conn.execute("DROP TABLE IF EXISTS ui_messages")
+            conn.execute(
+                """
+                CREATE TABLE ui_messages (
+                    message_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    trace_id TEXT,
+                    parent_user_message_id TEXT,
+                    attachments_json TEXT NOT NULL DEFAULT '[]',
+                    FOREIGN KEY(session_id) REFERENCES ui_sessions(session_id) ON DELETE CASCADE
+                )
+                """,
+            )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ui_messages_session_created
+            ON ui_messages (session_id, created_at)
+            """,
+        )
+
+    def _message_for_write(self, message: dict[str, JSONValue]) -> dict[str, str | None]:
+        message_id = message.get("message_id")
+        role = message.get("role")
+        content = message.get("content")
+        created_at = message.get("created_at")
+        trace_id_raw = message.get("trace_id")
+        parent_raw = message.get("parent_user_message_id")
+        attachments_raw = message.get("attachments")
+        if not isinstance(message_id, str) or not message_id.strip():
+            raise ValueError("message_id required")
+        if not isinstance(role, str) or not role.strip():
+            raise ValueError("role required")
+        if not isinstance(content, str):
+            raise ValueError("content required")
+        if not isinstance(created_at, str) or not created_at.strip():
+            raise ValueError("created_at required")
+        trace_id = trace_id_raw if isinstance(trace_id_raw, str) and trace_id_raw.strip() else None
+        parent_user_message_id = (
+            parent_raw if isinstance(parent_raw, str) and parent_raw.strip() else None
+        )
+        attachments = self._normalize_attachments_for_write(attachments_raw, role.strip())
+        return {
+            "message_id": message_id.strip(),
+            "role": role.strip(),
+            "content": content,
+            "created_at": created_at.strip(),
+            "trace_id": trace_id,
+            "parent_user_message_id": parent_user_message_id,
+            "attachments_json": json.dumps(attachments, ensure_ascii=False),
+        }
+
+    def _decode_attachments(self, value: object) -> list[dict[str, str]]:
+        if value is None:
+            return []
+        if not isinstance(value, str):
+            return []
+        parsed = safe_json_loads(value)
+        if not isinstance(parsed, list):
+            return []
+        normalized: list[dict[str, str]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            name_raw = item.get("name")
+            mime_raw = item.get("mime")
+            content_raw = item.get("content")
+            if (
+                isinstance(name_raw, str)
+                and name_raw.strip()
+                and isinstance(mime_raw, str)
+                and mime_raw.strip()
+                and isinstance(content_raw, str)
+            ):
+                normalized.append(
+                    {
+                        "name": name_raw.strip(),
+                        "mime": mime_raw.strip(),
+                        "content": content_raw,
+                    },
+                )
+        return normalized
+
+    def _normalize_attachments_for_write(
+        self,
+        value: JSONValue,
+        role: str,
+    ) -> list[dict[str, str]]:
+        if role != "user":
+            return []
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("attachments must be array")
+        normalized: list[dict[str, str]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError("attachments item must be object")
+            name_raw = item.get("name")
+            mime_raw = item.get("mime")
+            content_raw = item.get("content")
+            if not isinstance(name_raw, str) or not name_raw.strip():
+                raise ValueError("attachments.name required")
+            if not isinstance(mime_raw, str) or not mime_raw.strip():
+                raise ValueError("attachments.mime required")
+            if not isinstance(content_raw, str):
+                raise ValueError("attachments.content required")
+            normalized.append(
+                {
+                    "name": name_raw.strip(),
+                    "mime": mime_raw.strip(),
+                    "content": content_raw,
+                },
+            )
+        return normalized
 
 
 def _optional_str(value: object) -> str | None:

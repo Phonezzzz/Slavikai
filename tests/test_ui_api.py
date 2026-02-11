@@ -6,6 +6,7 @@ import json
 import zipfile
 from pathlib import Path
 
+from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 from config.memory_config import (
@@ -24,6 +25,7 @@ from core.tracer import Tracer
 from server.http_api import create_app
 from server.ui_hub import UIHub
 from server.ui_session_storage import InMemoryUISessionStorage, SQLiteUISessionStorage
+from shared.models import JSONValue
 from tools.tool_logger import ToolCallLogger
 
 
@@ -66,6 +68,31 @@ class StreamingAgent(DummyAgent):
 
     def respond(self, messages) -> str:
         del messages
+        return "Hello stream"
+
+
+class TracedStreamingAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self._counter = 0
+        self.last_chat_interaction_id: str | None = None
+
+    def _next_trace_id(self) -> str:
+        self._counter += 1
+        trace_id = f"stream-trace-{self._counter}"
+        self.last_chat_interaction_id = trace_id
+        return trace_id
+
+    def respond_stream(self, messages):
+        del messages
+        self._next_trace_id()
+        yield "Hello"
+        yield " "
+        yield "stream"
+
+    def respond(self, messages) -> str:
+        del messages
+        self._next_trace_id()
         return "Hello stream"
 
 
@@ -314,11 +341,28 @@ class DelayedFirstUserMessageHub(UIHub):
         self._delayed_session_id = delayed_session_id
         self._delay_done = False
 
-    async def append_message(self, session_id: str, role: str, content: str) -> dict[str, str]:
+    async def append_message(
+        self,
+        session_id: str,
+        message: dict[str, JSONValue],
+    ) -> dict[str, JSONValue]:
+        role_raw = message.get("role")
+        role = role_raw if isinstance(role_raw, str) else ""
         if not self._delay_done and session_id == self._delayed_session_id and role == "user":
             self._delay_done = True
             await asyncio.sleep(0.05)
-        return await super().append_message(session_id, role, content)
+        return await super().append_message(session_id, dict(message))
+
+
+class FakeSttResponse:
+    def __init__(self, status_code: int, payload: object) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> object:
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
 
 
 async def _create_client(agent: DummyAgent) -> TestClient:
@@ -1285,7 +1329,7 @@ def test_ui_events_stream_includes_canvas_stream_events() -> None:
 
 def test_ui_events_stream_includes_chat_stream_events() -> None:
     async def run() -> None:
-        client = await _create_client(StreamingAgent())
+        client = await _create_client(TracedStreamingAgent())
         try:
             status_resp = await client.get("/ui/api/status")
             status_payload = await status_resp.json()
@@ -1312,9 +1356,20 @@ def test_ui_events_stream_includes_chat_stream_events() -> None:
             assert isinstance(messages, list)
             assert messages
             assert len(messages) == 2
-            last = messages[-1]
-            assert isinstance(last, dict)
-            assert last.get("content") == "Hello stream"
+            user_message = messages[0]
+            assistant_message = messages[-1]
+            assert isinstance(user_message, dict)
+            assert isinstance(assistant_message, dict)
+            assert assistant_message.get("content") == "Hello stream"
+            assert isinstance(user_message.get("message_id"), str)
+            assert isinstance(assistant_message.get("message_id"), str)
+            assert isinstance(user_message.get("created_at"), str)
+            assert isinstance(assistant_message.get("created_at"), str)
+            assert user_message.get("trace_id") is None
+            assistant_trace = assistant_message.get("trace_id")
+            assert isinstance(assistant_trace, str)
+            assert assistant_trace.startswith("stream-trace-")
+            assert assistant_message.get("parent_user_message_id") == user_message.get("message_id")
             assistant_messages = [
                 item
                 for item in messages
@@ -1326,6 +1381,63 @@ def test_ui_events_stream_includes_chat_stream_events() -> None:
             assert "chat.stream.start" in event_types
             assert "chat.stream.delta" in event_types
             assert "chat.stream.done" in event_types
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_stream_persists_assistant_only_after_stream_done() -> None:
+    async def run() -> None:
+        client = await _create_client(TracedStreamingAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_task = asyncio.create_task(
+                client.post(
+                    "/ui/api/chat/send",
+                    json={"content": "Stream this chat output"},
+                    headers={"X-Slavik-Session": session_id},
+                ),
+            )
+
+            saw_delta = False
+            while not saw_delta:
+                event = await _read_first_sse_event(stream_resp)
+                event_type = event.get("type")
+                if event_type != "chat.stream.delta":
+                    continue
+                saw_delta = True
+
+            history_mid_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
+            assert history_mid_resp.status == 200
+            history_mid_payload = await history_mid_resp.json()
+            history_mid = history_mid_payload.get("messages")
+            assert isinstance(history_mid, list)
+            assert len(history_mid) == 1
+            only = history_mid[0]
+            assert isinstance(only, dict)
+            assert only.get("role") == "user"
+
+            send_resp = await send_task
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            messages = send_payload.get("messages")
+            assert isinstance(messages, list)
+            assert len(messages) == 2
             stream_resp.close()
         finally:
             await client.close()
@@ -1689,6 +1801,10 @@ def test_ui_settings_endpoint() -> None:
             assert isinstance(personalization, dict)
             assert isinstance(personalization.get("tone"), str)
             assert isinstance(personalization.get("system_prompt"), str)
+            composer = settings.get("composer")
+            assert isinstance(composer, dict)
+            assert isinstance(composer.get("long_paste_to_file_enabled"), bool)
+            assert isinstance(composer.get("long_paste_threshold_chars"), int)
             memory = settings.get("memory")
             assert isinstance(memory, dict)
             assert isinstance(memory.get("auto_save_dialogue"), bool)
@@ -1742,6 +1858,10 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
                         "tone": "direct",
                         "system_prompt": "Focus on concise implementation details.",
                     },
+                    "composer": {
+                        "long_paste_to_file_enabled": False,
+                        "long_paste_threshold_chars": 20000,
+                    },
                     "memory": {
                         "auto_save_dialogue": True,
                         "inbox_max_items": 77,
@@ -1772,6 +1892,10 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert (
                 personalization.get("system_prompt") == "Focus on concise implementation details."
             )
+            composer = settings.get("composer")
+            assert isinstance(composer, dict)
+            assert composer.get("long_paste_to_file_enabled") is False
+            assert composer.get("long_paste_threshold_chars") == 20000
             memory = settings.get("memory")
             assert isinstance(memory, dict)
             assert memory.get("auto_save_dialogue") is True
@@ -1819,6 +1943,215 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             openai_saved = providers_blob.get("openai")
             assert isinstance(openai_saved, dict)
             assert openai_saved.get("api_key") == "openai-test-key"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_settings_update_rejects_invalid_composer_threshold() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post(
+                "/ui/api/settings",
+                json={"composer": {"long_paste_threshold_chars": 10}},
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_accepts_optional_attachments() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "content": "",
+                    "attachments": [
+                        {
+                            "name": "clock.py",
+                            "mime": "text/x-python",
+                            "content": "print('ok')",
+                        }
+                    ],
+                },
+            )
+            assert send_resp.status == 200
+            payload = await send_resp.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert len(messages) == 2
+            user_message = messages[0]
+            assert isinstance(user_message, dict)
+            attachments = user_message.get("attachments")
+            assert isinstance(attachments, list)
+            assert len(attachments) == 1
+            attachment = attachments[0]
+            assert isinstance(attachment, dict)
+            assert attachment.get("name") == "clock.py"
+
+            history_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
+            assert history_resp.status == 200
+            history_payload = await history_resp.json()
+            history_messages = history_payload.get("messages")
+            assert isinstance(history_messages, list)
+            first = history_messages[0]
+            assert isinstance(first, dict)
+            history_attachments = first.get("attachments")
+            assert isinstance(history_attachments, list)
+            assert len(history_attachments) == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_rejects_oversized_attachment() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "content": "small",
+                    "attachments": [
+                        {
+                            "name": "large.txt",
+                            "mime": "text/plain",
+                            "content": "x" * 80001,
+                        }
+                    ],
+                },
+            )
+            assert send_resp.status == 413
+            payload = await send_resp.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "payload_too_large"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_stt_transcribe_success(monkeypatch, tmp_path) -> None:
+    ui_settings_path = tmp_path / "ui_settings.json"
+    ui_settings_path.write_text(
+        json.dumps({"providers": {"openai": {"api_key": "openai-test-key"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
+    monkeypatch.setattr(
+        "server.http_api.requests.post",
+        lambda *args, **kwargs: FakeSttResponse(200, {"text": "привет мир"}),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            data = FormData()
+            data.add_field(
+                "audio",
+                b"fake-audio",
+                filename="recording.webm",
+                content_type="audio/webm",
+            )
+            data.add_field("language", "ru")
+            response = await client.post("/ui/api/stt/transcribe", data=data)
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("text") == "привет мир"
+            assert payload.get("model") == "whisper-1"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_stt_transcribe_requires_openai_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    ui_settings_path = tmp_path / "ui_settings.json"
+    ui_settings_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            data = FormData()
+            data.add_field(
+                "audio",
+                b"fake-audio",
+                filename="recording.webm",
+                content_type="audio/webm",
+            )
+            response = await client.post("/ui/api/stt/transcribe", data=data)
+            assert response.status == 409
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "stt_api_key_missing"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_stt_transcribe_handles_unsupported_format(monkeypatch, tmp_path) -> None:
+    ui_settings_path = tmp_path / "ui_settings.json"
+    ui_settings_path.write_text(
+        json.dumps({"providers": {"openai": {"api_key": "openai-test-key"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
+    monkeypatch.setattr(
+        "server.http_api.requests.post",
+        lambda *args, **kwargs: FakeSttResponse(
+            400,
+            {"error": {"message": "Unsupported file format"}},
+        ),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            data = FormData()
+            data.add_field(
+                "audio",
+                b"fake-audio",
+                filename="recording.bin",
+                content_type="application/octet-stream",
+            )
+            response = await client.post("/ui/api/stt/transcribe", data=data)
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "unsupported_audio_format"
         finally:
             await client.close()
 
@@ -1914,8 +2247,22 @@ def test_ui_chats_export_import_endpoints() -> None:
                             "updated_at": "2026-01-01T00:00:00+00:00",
                             "status": "ok",
                             "messages": [
-                                {"role": "user", "content": "hello import"},
-                                {"role": "assistant", "content": "import ok"},
+                                {
+                                    "message_id": "msg-user-import",
+                                    "role": "user",
+                                    "content": "hello import",
+                                    "created_at": "2026-01-01T00:00:00+00:00",
+                                    "trace_id": None,
+                                    "parent_user_message_id": None,
+                                },
+                                {
+                                    "message_id": "msg-assistant-import",
+                                    "role": "assistant",
+                                    "content": "import ok",
+                                    "created_at": "2026-01-01T00:00:01+00:00",
+                                    "trace_id": "trace-import",
+                                    "parent_user_message_id": "msg-user-import",
+                                },
                             ],
                             "decision": None,
                             "selected_model": {"provider": "local", "model": "local-default"},

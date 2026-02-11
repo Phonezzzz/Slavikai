@@ -27,6 +27,8 @@ type ParsedSettings = {
   apiKeys: Record<ApiKeyProvider, string>;
   tone: string;
   systemPrompt: string;
+  longPasteToFileEnabled: boolean;
+  longPasteThresholdChars: number;
 };
 
 const DEFAULT_SYSTEM_PROMPT =
@@ -48,6 +50,8 @@ const DEFAULT_API_KEYS: Record<ApiKeyProvider, string> = {
   local: '',
   openai: '',
 };
+const DEFAULT_LONG_PASTE_TO_FILE_ENABLED = true;
+const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
 
 const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
   {
@@ -107,6 +111,8 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     apiKeys: DEFAULT_API_KEYS,
     tone: 'balanced',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
+    longPasteToFileEnabled: DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
+    longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
   };
   if (!payload || typeof payload !== 'object') {
     return defaults;
@@ -128,6 +134,23 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
     if (typeof promptRaw === 'string') {
       systemPrompt = promptRaw;
+    }
+  }
+  const composer = (settings as { composer?: unknown }).composer;
+  let longPasteToFileEnabled = defaults.longPasteToFileEnabled;
+  let longPasteThresholdChars = defaults.longPasteThresholdChars;
+  if (composer && typeof composer === 'object') {
+    const enabledRaw = (composer as { long_paste_to_file_enabled?: unknown }).long_paste_to_file_enabled;
+    const thresholdRaw = (composer as { long_paste_threshold_chars?: unknown }).long_paste_threshold_chars;
+    if (typeof enabledRaw === 'boolean') {
+      longPasteToFileEnabled = enabledRaw;
+    }
+    if (
+      typeof thresholdRaw === 'number'
+      && Number.isFinite(thresholdRaw)
+      && thresholdRaw > 0
+    ) {
+      longPasteThresholdChars = Math.floor(thresholdRaw);
     }
   }
 
@@ -189,6 +212,8 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     apiKeys: parsedApiKeys,
     tone,
     systemPrompt,
+    longPasteToFileEnabled,
+    longPasteThresholdChars,
   };
 };
 
@@ -219,6 +244,12 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [tone, setTone] = useState('balanced');
+  const [longPasteToFileEnabled, setLongPasteToFileEnabled] = useState(
+    DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
+  );
+  const [longPasteThresholdChars, setLongPasteThresholdChars] = useState(
+    DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
+  );
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -237,6 +268,8 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
       setApiKeys(parsed.apiKeys);
       setSystemPrompt(parsed.systemPrompt);
       setTone(parsed.tone);
+      setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
+      setLongPasteThresholdChars(parsed.longPasteThresholdChars);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load settings.';
       setStatus(message);
@@ -272,6 +305,10 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
           tone: tone.trim() || 'balanced',
           system_prompt: systemPrompt,
         },
+        composer: {
+          long_paste_to_file_enabled: longPasteToFileEnabled,
+          long_paste_threshold_chars: Math.max(1000, Math.min(80000, longPasteThresholdChars)),
+        },
       };
       if (Object.keys(providersPayload).length > 0) {
         payload.providers = providersPayload;
@@ -293,6 +330,8 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
       setApiKeys(parsed.apiKeys);
       setSystemPrompt(parsed.systemPrompt);
       setTone(parsed.tone);
+      setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
+      setLongPasteThresholdChars(parsed.longPasteThresholdChars);
       setStatus('Saved');
       onSaved?.();
     } catch (error) {
@@ -454,6 +493,54 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                           <option value="technical">Technical</option>
                           <option value="friendly">Friendly</option>
                         </select>
+                      </div>
+
+                      <div className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-medium text-zinc-200">
+                              Convert long paste to file
+                            </div>
+                            <p className="mt-1 text-xs text-zinc-400">
+                              Large paste will be converted to a virtual file attachment in composer.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={longPasteToFileEnabled}
+                            onClick={() => setLongPasteToFileEnabled((prev) => !prev)}
+                            className={`relative h-6 w-11 rounded-full transition-colors ${
+                              longPasteToFileEnabled ? 'bg-emerald-500/70' : 'bg-zinc-700'
+                            }`}
+                          >
+                            <span
+                              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
+                                longPasteToFileEnabled ? 'translate-x-5' : 'translate-x-0.5'
+                              }`}
+                            />
+                          </button>
+                        </div>
+
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-zinc-300">
+                            Long paste threshold (chars)
+                          </label>
+                          <input
+                            type="number"
+                            min={1000}
+                            max={80000}
+                            value={longPasteThresholdChars}
+                            onChange={(event) => {
+                              const next = Number.parseInt(event.target.value, 10);
+                              if (Number.isNaN(next)) {
+                                return;
+                              }
+                              setLongPasteThresholdChars(next);
+                            }}
+                            className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                          />
+                        </div>
                       </div>
 
                       <div>

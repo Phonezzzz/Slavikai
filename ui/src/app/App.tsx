@@ -2,12 +2,18 @@ import { useEffect, useMemo, useState } from 'react';
 import { PanelRight } from 'lucide-react';
 
 import { ArtifactPanel } from './components/artifact-panel';
-import { Canvas, type CanvasMessage } from './components/canvas';
+import {
+  Canvas,
+  type CanvasComposerAttachment,
+  type CanvasMessage,
+  type CanvasSendPayload,
+} from './components/canvas';
 import type { Artifact } from './components/artifacts-sidebar';
 import { HistorySidebar } from './components/history-sidebar';
 import { SearchModal } from './components/search-modal';
 import { Settings } from './components/Settings';
 import type {
+  ChatAttachment,
   ChatMessage,
   FolderSummary,
   ProviderModels,
@@ -44,24 +50,132 @@ type ChatStreamState = {
   content: string;
 };
 
+type PendingUserMessage = {
+  content: string;
+  attachments: ChatAttachment[];
+};
+
 const toOutputArtifactUiId = (artifactId: string): string => `output-${artifactId}`;
+const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
+
+type ComposerUiSettings = {
+  longPasteToFileEnabled: boolean;
+  longPasteThresholdChars: number;
+};
+
+const DEFAULT_COMPOSER_SETTINGS: ComposerUiSettings = {
+  longPasteToFileEnabled: true,
+  longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
+};
+
+const parseChatAttachments = (value: unknown): ChatAttachment[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const normalized: ChatAttachment[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const candidate = item as { name?: unknown; mime?: unknown; content?: unknown };
+    if (
+      typeof candidate.name !== 'string'
+      || !candidate.name.trim()
+      || typeof candidate.mime !== 'string'
+      || !candidate.mime.trim()
+      || typeof candidate.content !== 'string'
+    ) {
+      continue;
+    }
+    normalized.push({
+      name: candidate.name.trim(),
+      mime: candidate.mime.trim(),
+      content: candidate.content,
+    });
+  }
+  return normalized;
+};
 
 const isChatMessage = (value: unknown): value is ChatMessage => {
   if (!value || typeof value !== 'object') {
     return false;
   }
-  const candidate = value as { role?: unknown; content?: unknown };
+  const candidate = value as {
+    message_id?: unknown;
+    role?: unknown;
+    content?: unknown;
+    created_at?: unknown;
+    trace_id?: unknown;
+    parent_user_message_id?: unknown;
+    attachments?: unknown;
+  };
+  if (typeof candidate.message_id !== 'string' || !candidate.message_id.trim()) {
+    return false;
+  }
   if (candidate.role !== 'user' && candidate.role !== 'assistant' && candidate.role !== 'system') {
     return false;
   }
-  return typeof candidate.content === 'string';
+  if (typeof candidate.content !== 'string') {
+    return false;
+  }
+  if (typeof candidate.created_at !== 'string' || !candidate.created_at.trim()) {
+    return false;
+  }
+  if (candidate.trace_id !== null && typeof candidate.trace_id !== 'string') {
+    return false;
+  }
+  if (
+    candidate.parent_user_message_id !== null
+    && typeof candidate.parent_user_message_id !== 'string'
+  ) {
+    return false;
+  }
+  if (candidate.attachments !== undefined && !Array.isArray(candidate.attachments)) {
+    return false;
+  }
+  return true;
 };
 
 const parseMessages = (value: unknown): ChatMessage[] => {
   if (!Array.isArray(value)) {
     return [];
   }
-  return value.filter(isChatMessage);
+  return value.filter(isChatMessage).map((message) => ({
+    ...message,
+    attachments: parseChatAttachments((message as { attachments?: unknown }).attachments),
+  }));
+};
+
+const parseComposerSettings = (value: unknown): ComposerUiSettings => {
+  if (!value || typeof value !== 'object') {
+    return DEFAULT_COMPOSER_SETTINGS;
+  }
+  const settings = (value as { settings?: unknown }).settings;
+  if (!settings || typeof settings !== 'object') {
+    return DEFAULT_COMPOSER_SETTINGS;
+  }
+  const composer = (settings as { composer?: unknown }).composer;
+  if (!composer || typeof composer !== 'object') {
+    return DEFAULT_COMPOSER_SETTINGS;
+  }
+  const candidate = composer as {
+    long_paste_to_file_enabled?: unknown;
+    long_paste_threshold_chars?: unknown;
+  };
+  const enabled =
+    typeof candidate.long_paste_to_file_enabled === 'boolean'
+      ? candidate.long_paste_to_file_enabled
+      : DEFAULT_COMPOSER_SETTINGS.longPasteToFileEnabled;
+  const threshold =
+    typeof candidate.long_paste_threshold_chars === 'number'
+      && Number.isFinite(candidate.long_paste_threshold_chars)
+      && candidate.long_paste_threshold_chars > 0
+      ? Math.floor(candidate.long_paste_threshold_chars)
+      : DEFAULT_COMPOSER_SETTINGS.longPasteThresholdChars;
+  return {
+    longPasteToFileEnabled: enabled,
+    longPasteThresholdChars: threshold,
+  };
 };
 
 const parseSelectedModel = (value: unknown): SelectedModel | null => {
@@ -312,10 +426,16 @@ const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
 const buildCanvasMessages = (messages: ChatMessage[]): CanvasMessage[] => {
   return messages
     .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .map((message, index) => ({
-      id: `${message.role}-${index}`,
+    .map((message) => ({
+      id: message.message_id,
+      messageId: message.message_id,
       role: message.role,
       content: message.content,
+      createdAt: message.created_at,
+      traceId: message.trace_id,
+      parentUserMessageId: message.parent_user_message_id,
+      attachments: message.attachments,
+      transient: false,
     }));
 };
 
@@ -526,7 +646,7 @@ export default function App() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [savingModel, setSavingModel] = useState(false);
   const [sending, setSending] = useState(false);
-  const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
+  const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
@@ -539,6 +659,9 @@ export default function App() {
   const [lastModelApplied, setLastModelApplied] = useState(false);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
   const [awaitingFirstAssistantChunk, setAwaitingFirstAssistantChunk] = useState(false);
+  const [composerSettings, setComposerSettings] = useState<ComposerUiSettings>(
+    DEFAULT_COMPOSER_SETTINGS,
+  );
 
   const pendingForCanvas =
     pendingSessionId === selectedConversation ? pendingUserMessage : null;
@@ -547,13 +670,20 @@ export default function App() {
     [messages],
   );
   const pendingCanvasMessage = useMemo(() => {
-    if (!pendingForCanvas || pendingForCanvas.role !== 'user') {
+    if (!pendingForCanvas) {
       return null;
     }
+    const pendingId = `pending-${Date.now()}-${pendingForCanvas.content.length}-${pendingForCanvas.attachments.length}`;
     return {
-      id: `pending-${pendingForCanvas.content.length}`,
+      id: pendingId,
+      messageId: pendingId,
       role: 'user' as const,
       content: pendingForCanvas.content,
+      createdAt: new Date().toISOString(),
+      traceId: null,
+      parentUserMessageId: null,
+      attachments: pendingForCanvas.attachments,
+      transient: true,
     };
   }, [pendingForCanvas]);
   const streamingAssistantCanvasMessage = useMemo(() => {
@@ -562,8 +692,14 @@ export default function App() {
     }
     return {
       id: `stream-${chatStreamingState.streamId}`,
+      messageId: `stream-${chatStreamingState.streamId}`,
       role: 'assistant' as const,
       content: chatStreamingState.content,
+      createdAt: new Date().toISOString(),
+      traceId: null,
+      parentUserMessageId: null,
+      attachments: [],
+      transient: true,
     };
   }, [chatStreamingState]);
   const showAssistantLoading = useMemo(
@@ -814,6 +950,17 @@ export default function App() {
     }
   };
 
+  const loadComposerSettings = async (): Promise<ComposerUiSettings> => {
+    const response = await fetch('/ui/api/settings');
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to load composer settings.'));
+    }
+    const parsed = parseComposerSettings(payload);
+    setComposerSettings(parsed);
+    return parsed;
+  };
+
   const setSessionModel = async (
     sessionId: string,
     provider: string,
@@ -934,6 +1081,7 @@ export default function App() {
       try {
         const modelsPromise = loadModels();
         const foldersPromise = loadFolders();
+        const composerPromise = loadComposerSettings().catch(() => DEFAULT_COMPOSER_SETTINGS);
         const listedSessions = await loadSessions();
 
         const storedSession = loadLastSessionId();
@@ -957,6 +1105,7 @@ export default function App() {
           }
           const models = await modelsPromise;
           await foldersPromise;
+          await composerPromise;
           if (nextSession && !selectedFromSession && !lastModelApplied) {
             const lastModel = loadLastModel();
             if (lastModel && isModelAvailable(lastModel, models)) {
@@ -1282,15 +1431,33 @@ export default function App() {
     }
   };
 
-  const handleSend = async (content: string): Promise<boolean> => {
+  const normalizeComposerAttachments = (
+    attachments: CanvasComposerAttachment[],
+  ): ChatAttachment[] => {
+    return attachments
+      .map((item) => ({
+        name: item.name.trim(),
+        mime: item.mime.trim(),
+        content: item.content,
+      }))
+      .filter(
+        (item) =>
+          item.name.length > 0
+          && item.mime.length > 0
+          && typeof item.content === 'string',
+      );
+  };
+
+  const handleSend = async (payload: CanvasSendPayload): Promise<boolean> => {
     if (!selectedConversation || sending) {
       return false;
     }
-    const trimmed = content.trim();
-    if (!trimmed) {
+    const trimmed = payload.content.trim();
+    const normalizedAttachments = normalizeComposerAttachments(payload.attachments ?? []);
+    if (!trimmed && normalizedAttachments.length === 0) {
       return false;
     }
-    setPendingUserMessage({ role: 'user', content: trimmed });
+    setPendingUserMessage({ content: trimmed, attachments: normalizedAttachments });
     setPendingSessionId(selectedConversation);
     setChatStreamingState(null);
     setAwaitingFirstAssistantChunk(true);
@@ -1306,7 +1473,11 @@ export default function App() {
           'Content-Type': 'application/json',
           [SESSION_HEADER]: selectedConversation,
         },
-        body: JSON.stringify({ content, force_canvas: forceCanvasForRequest }),
+        body: JSON.stringify({
+          content: trimmed,
+          force_canvas: forceCanvasForRequest,
+          attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
+        }),
       });
       const payload: unknown = await response.json();
       if (!response.ok) {
@@ -1469,9 +1640,39 @@ export default function App() {
     }
   };
 
+  const handleSendFeedback = async (
+    interactionId: string,
+    rating: 'good' | 'bad',
+  ): Promise<boolean> => {
+    try {
+      const response = await fetch('/slavik/feedback', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          interaction_id: interactionId,
+          rating,
+          labels: [],
+          free_text: null,
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to save feedback.'));
+      }
+      setStatusMessage(null);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save feedback.';
+      setStatusMessage(message);
+      return false;
+    }
+  };
+
   const handleSettingsSaved = async () => {
     try {
-      await loadModels();
+      await Promise.all([loadModels(), loadComposerSettings()]);
       setStatusMessage('Settings saved.');
     } catch (error) {
       const message =
@@ -1516,12 +1717,13 @@ export default function App() {
           streamingAssistantMessage={streamingAssistantCanvasMessage}
           showAssistantLoading={showAssistantLoading}
           sending={sending}
-          onSendMessage={(content) => {
-            void handleSend(content);
-          }}
+          onSendMessage={(payload) => handleSend(payload)}
+          onSendFeedback={(interactionId, rating) => handleSendFeedback(interactionId, rating)}
           modelName={modelLabel}
           onOpenSettings={() => setSettingsOpen(true)}
           statusMessage={statusMessage}
+          longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
+          longPasteThresholdChars={composerSettings.longPasteThresholdChars}
           modelOptions={modelOptions}
           selectedModelValue={selectedModelValue}
           onSelectModel={(provider, model) => {
