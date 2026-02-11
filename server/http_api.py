@@ -3642,6 +3642,14 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
         resume_payload_raw = context.get("resume_payload")
         resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+        user_message_id_raw = resume_payload.get("user_message_id")
+        user_message_id = (
+            user_message_id_raw
+            if isinstance(user_message_id_raw, str) and user_message_id_raw
+            else None
+        )
+        source_request_raw = resume_payload.get("source_request")
+        source_request = source_request_raw if isinstance(source_request_raw, dict) else {}
 
         kind_raw = executing.get("kind")
         if kind_raw == "approval":
@@ -3656,69 +3664,133 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             if categories:
                 await session_store.approve(session_id, categories)
 
-        selected_model = await hub.get_session_model(session_id)
-        if selected_model is None:
-            return _model_not_selected_response()
-        approved_categories = await session_store.get_categories(session_id)
-        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
-        async with agent_lock:
-            model_config = _build_model_config(
-                selected_model["provider"],
-                selected_model["model"],
-            )
-            api_key = _resolve_provider_api_key(selected_model["provider"])
-            agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
-            try:
-                agent.set_session_context(session_id, approved_categories)
-            except Exception:  # noqa: BLE001
-                logger.debug("Failed to set session context in decision resume", exc_info=True)
-            response_raw = agent.respond(llm_messages)
-            response_text, mwv_report = _split_response_and_report(response_raw)
-            trace_id = _normalize_trace_id(getattr(agent, "last_chat_interaction_id", None))
-            approval_request = _serialize_approval_request(
-                getattr(agent, "last_approval_request", None),
-            )
-
-        resume_started = source_endpoint in {"chat.send", "project.command"}
-        user_message_id_raw = resume_payload.get("user_message_id")
-        user_message_id = (
-            user_message_id_raw
-            if isinstance(user_message_id_raw, str) and user_message_id_raw
-            else None
-        )
-        source_request_raw = resume_payload.get("source_request")
-        source_request = source_request_raw if isinstance(source_request_raw, dict) else {}
-
-        if approval_request is not None:
-            replacement = _build_ui_approval_decision(
-                approval_request=approval_request,
-                session_id=session_id,
-                source_endpoint=source_endpoint or "chat.send",
-                resume_payload=resume_payload,
-                trace_id=trace_id,
-            )
-            await hub.set_session_decision(session_id, replacement)
-            await hub.set_session_status(session_id, "ok")
-            return _json_response(
-                {
-                    "ok": True,
-                    "decision": _normalize_ui_decision(replacement, session_id=session_id),
-                    "status": "pending",
-                    "resume_started": False,
-                }
-            )
-
         if source_endpoint == "project.command":
+            command_raw = source_request.get("command")
+            args_raw = source_request.get("args")
+            if not isinstance(command_raw, str) or not command_raw.strip():
+                raise ValueError("decision resume payload missing command")
+            command = command_raw.strip().lower()
+            args_text = args_raw.strip() if isinstance(args_raw, str) else ""
+            if command not in UI_PROJECT_COMMANDS:
+                raise ValueError(f"Unsupported project command for decision resume: {command}")
+
+            resume_started = True
+            if command == "github_import":
+                repo_url, branch = _parse_github_import_args(args_text)
+                target_path, relative_target = _resolve_github_target(repo_url)
+                await _publish_agent_activity(
+                    hub,
+                    session_id=session_id,
+                    phase="github.clone.start",
+                    detail=repo_url,
+                )
+                cloned, clone_result = await _clone_github_repository(
+                    repo_url=repo_url,
+                    branch=branch,
+                    target_path=target_path,
+                )
+                if not cloned:
+                    response_text = f"Командный режим (без MWV)\n{clone_result}"
+                else:
+                    await _publish_agent_activity(
+                        hub,
+                        session_id=session_id,
+                        phase="github.index.start",
+                        detail=relative_target,
+                    )
+                    indexed, index_result = _index_imported_project(relative_target)
+                    await _publish_agent_activity(
+                        hub,
+                        session_id=session_id,
+                        phase="github.index.end",
+                        detail=index_result,
+                    )
+                    if indexed:
+                        response_text = (
+                            "Командный режим (без MWV)\n"
+                            f"GitHub import completed: {repo_url}\n"
+                            f"Path: {relative_target}\n"
+                            f"Index: {index_result}"
+                        )
+                    else:
+                        response_text = (
+                            "Командный режим (без MWV)\n"
+                            f"GitHub import completed with indexing errors: {repo_url}\n"
+                            f"Path: {relative_target}\n"
+                            f"Index error: {index_result}"
+                        )
+            else:
+                tool_result = handle_project_request(
+                    ToolRequest(
+                        name="project",
+                        args={"cmd": command, "args": [args_text] if args_text else []},
+                    )
+                )
+                tool_output_raw = (
+                    tool_result.data.get("output") if tool_result.ok else tool_result.error
+                )
+                tool_output = (
+                    str(tool_output_raw).strip()
+                    if tool_output_raw is not None and str(tool_output_raw).strip()
+                    else "Project command finished."
+                )
+                if tool_output.startswith("Командный режим (без MWV)"):
+                    response_text = tool_output
+                else:
+                    response_text = f"Командный режим (без MWV)\n{tool_output}"
+
             await hub.append_message(
                 session_id,
                 hub.create_message(
                     role="assistant",
                     content=response_text,
-                    trace_id=trace_id,
                     parent_user_message_id=user_message_id,
                 ),
             )
         else:
+            selected_model = await hub.get_session_model(session_id)
+            if selected_model is None:
+                return _model_not_selected_response()
+            approved_categories = await session_store.get_categories(session_id)
+            llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+            async with agent_lock:
+                model_config = _build_model_config(
+                    selected_model["provider"],
+                    selected_model["model"],
+                )
+                api_key = _resolve_provider_api_key(selected_model["provider"])
+                agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
+                try:
+                    agent.set_session_context(session_id, approved_categories)
+                except Exception:  # noqa: BLE001
+                    logger.debug("Failed to set session context in decision resume", exc_info=True)
+                response_raw = agent.respond(llm_messages)
+                response_text, mwv_report = _split_response_and_report(response_raw)
+                trace_id = _normalize_trace_id(getattr(agent, "last_chat_interaction_id", None))
+                approval_request = _serialize_approval_request(
+                    getattr(agent, "last_approval_request", None),
+                )
+
+            resume_started = source_endpoint == "chat.send"
+            if approval_request is not None:
+                replacement = _build_ui_approval_decision(
+                    approval_request=approval_request,
+                    session_id=session_id,
+                    source_endpoint=source_endpoint or "chat.send",
+                    resume_payload=resume_payload,
+                    trace_id=trace_id,
+                )
+                await hub.set_session_decision(session_id, replacement)
+                await hub.set_session_status(session_id, "ok")
+                return _json_response(
+                    {
+                        "ok": True,
+                        "decision": _normalize_ui_decision(replacement, session_id=session_id),
+                        "status": "pending",
+                        "resume_started": False,
+                    }
+                )
+
             force_canvas = source_request.get("force_canvas") is True
             await hub.set_session_output(session_id, response_text)
             files_from_tools: list[str] = []
