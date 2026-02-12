@@ -15,7 +15,7 @@
     "jszip": "3.10.1",
     "lucide-react": "0.487.0",
     "monaco-editor": "^0.55.1",
-    "motion": "12.23.24",
+    "motion": "12.34.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "9.0.1",
