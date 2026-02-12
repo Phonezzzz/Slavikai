@@ -10,13 +10,32 @@ from shared.models import JSONValue, ToolRequest, ToolResult
 SANDBOX_ROOT = Path("sandbox").resolve()
 WORKSPACE_ROOT = (SANDBOX_ROOT / "project").resolve()
 WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+_workspace_root_current: Path | None = None
 ALLOWED_EXTENSIONS = {".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml"}
 MAX_FILE_BYTES = 2_000_000  # 2 MB
 
 
+def get_workspace_root() -> Path:
+    return _workspace_root_current or WORKSPACE_ROOT
+
+
+def set_workspace_root(root: str | Path | None) -> Path:
+    global _workspace_root_current
+    if root is None:
+        _workspace_root_current = None
+        return get_workspace_root()
+    raw = Path(root).expanduser()
+    candidate = raw.resolve()
+    if not candidate.exists() or not candidate.is_dir():
+        raise ValueError(f"Рабочая директория не найдена: {candidate}")
+    _workspace_root_current = candidate
+    return _workspace_root_current
+
+
 def _ensure_in_workspace(raw_path: str) -> Path:
-    candidate = (WORKSPACE_ROOT / raw_path).resolve()
-    if not str(candidate).startswith(str(WORKSPACE_ROOT)):
+    workspace_root = get_workspace_root()
+    candidate = (workspace_root / raw_path).resolve()
+    if not str(candidate).startswith(str(workspace_root)):
         raise ValueError("Путь вне рабочей директории запрещён.")
     return candidate
 
@@ -112,7 +131,7 @@ def _prepend(first: str, iterator: Iterator[str]) -> Iterator[str]:
 
 class ListFilesTool:
     def handle(self, request: ToolRequest) -> ToolResult:
-        root = WORKSPACE_ROOT
+        root = get_workspace_root()
         tree = self._walk(root)
         return ToolResult.success({"output": "ok", "tree": tree})
 
@@ -132,7 +151,7 @@ class ListFilesTool:
                     {
                         "name": item.name,
                         "type": "file",
-                        "path": str(item.relative_to(WORKSPACE_ROOT)),
+                        "path": str(item.relative_to(get_workspace_root())),
                     }
                 )
         return entries
@@ -220,7 +239,7 @@ class RunCodeTool:
                 return ToolResult.failure("Файл не найден.")
             proc = subprocess.run(
                 [sys.executable, str(path)],
-                cwd=SANDBOX_ROOT,
+                cwd=get_workspace_root(),
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,

@@ -1968,6 +1968,7 @@ export default function App() {
         onCreateFolder={() => {
           void handleCreateFolder();
         }}
+        compact={activeView === 'workspace'}
       />
 
       <div className="flex-1 min-w-0 relative">
@@ -2079,6 +2080,8 @@ export default function App() {
         onSaved={() => {
           void handleSettingsSaved();
         }}
+        sessionId={selectedConversation}
+        sessionHeader={SESSION_HEADER}
       />
     </div>
   );

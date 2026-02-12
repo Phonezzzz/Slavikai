@@ -6,6 +6,8 @@ interface SettingsProps {
   isOpen: boolean;
   onClose: () => void;
   onSaved?: () => void;
+  sessionId?: string | null;
+  sessionHeader?: string;
 }
 
 type SettingsTab = 'api' | 'personalization' | 'memory' | 'tools' | 'import';
@@ -13,6 +15,7 @@ type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'openai';
 type ModelProvider = 'xai' | 'openrouter' | 'local';
 type ApiKeySource = 'settings' | 'env' | 'missing';
 type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt' | 'safe_mode';
+type PolicyProfile = 'sandbox' | 'index' | 'yolo';
 
 type ProviderSettings = {
   provider: ApiKeyProvider;
@@ -26,6 +29,9 @@ type ParsedSettings = {
   providers: ProviderSettings[];
   apiKeys: Record<ApiKeyProvider, string>;
   toolsState: Record<ToolKey, boolean>;
+  policyProfile: PolicyProfile;
+  yoloArmed: boolean;
+  yoloArmedAt: string | null;
   tone: string;
   systemPrompt: string;
   longPasteToFileEnabled: boolean;
@@ -77,6 +83,7 @@ const DEFAULT_API_KEYS: Record<ApiKeyProvider, string> = {
 };
 const DEFAULT_LONG_PASTE_TO_FILE_ENABLED = true;
 const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
+const DEFAULT_POLICY_PROFILE: PolicyProfile = 'sandbox';
 
 const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
   {
@@ -135,6 +142,9 @@ const isToolKey = (value: unknown): value is ToolKey =>
   || value === 'stt'
   || value === 'safe_mode';
 
+const isPolicyProfile = (value: unknown): value is PolicyProfile =>
+  value === 'sandbox' || value === 'index' || value === 'yolo';
+
 const extractErrorMessage = (payload: unknown, fallback: string): string => {
   if (!payload || typeof payload !== 'object') {
     return fallback;
@@ -151,6 +161,9 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     providers: DEFAULT_PROVIDER_SETTINGS,
     apiKeys: DEFAULT_API_KEYS,
     toolsState: DEFAULT_TOOLS_STATE,
+    policyProfile: DEFAULT_POLICY_PROFILE,
+    yoloArmed: false,
+    yoloArmedAt: null,
     tone: 'balanced',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     longPasteToFileEnabled: DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
@@ -241,6 +254,10 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     openai: '',
   };
   const tools = (settings as { tools?: unknown }).tools;
+  const policy = (settings as { policy?: unknown }).policy;
+  let policyProfile: PolicyProfile = defaults.policyProfile;
+  let yoloArmed = defaults.yoloArmed;
+  let yoloArmedAt = defaults.yoloArmedAt;
   let toolsState: Record<ToolKey, boolean> = { ...defaults.toolsState };
   if (tools && typeof tools === 'object') {
     const stateRaw = (tools as { state?: unknown }).state;
@@ -255,11 +272,28 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
       toolsState = nextToolsState;
     }
   }
+  if (policy && typeof policy === 'object') {
+    const profileRaw = (policy as { profile?: unknown }).profile;
+    const yoloArmedRaw = (policy as { yolo_armed?: unknown }).yolo_armed;
+    const yoloArmedAtRaw = (policy as { yolo_armed_at?: unknown }).yolo_armed_at;
+    if (isPolicyProfile(profileRaw)) {
+      policyProfile = profileRaw;
+    }
+    if (typeof yoloArmedRaw === 'boolean') {
+      yoloArmed = yoloArmedRaw;
+    }
+    if (typeof yoloArmedAtRaw === 'string' && yoloArmedAtRaw.trim()) {
+      yoloArmedAt = yoloArmedAtRaw.trim();
+    }
+  }
 
   return {
     providers,
     apiKeys: parsedApiKeys,
     toolsState,
+    policyProfile,
+    yoloArmed,
+    yoloArmedAt,
     tone,
     systemPrompt,
     longPasteToFileEnabled,
@@ -346,11 +380,61 @@ const toolStatusLabel = (tool: ToolKey, state: Record<ToolKey, boolean>): string
   return 'enabled';
 };
 
-export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
+const policyProfileLabel = (profile: PolicyProfile): string => {
+  if (profile === 'index') {
+    return 'Index';
+  }
+  if (profile === 'yolo') {
+    return 'YOLO (Danger)';
+  }
+  return 'Sandbox';
+};
+
+type ToggleSwitchProps = {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  onToggle: () => void;
+};
+
+function ToggleSwitch({ checked, disabled = false, label, onToggle }: ToggleSwitchProps) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onToggle}
+      className={`relative inline-flex h-6 w-10 shrink-0 items-center rounded-full p-[2px] transition-colors ${
+        checked ? 'bg-emerald-500/75' : 'bg-zinc-700'
+      } disabled:cursor-not-allowed disabled:opacity-40`}
+    >
+      <span
+        className={`block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${
+          checked ? 'translate-x-4' : 'translate-x-0'
+        }`}
+      />
+    </button>
+  );
+}
+
+export function Settings({
+  isOpen,
+  onClose,
+  onSaved,
+  sessionId = null,
+  sessionHeader = 'X-Slavik-Session',
+}: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('api');
   const [selectedProvider, setSelectedProvider] = useState<ModelProvider>('local');
   const [apiKeys, setApiKeys] = useState<Record<ApiKeyProvider, string>>(DEFAULT_API_KEYS);
   const [toolsState, setToolsState] = useState<Record<ToolKey, boolean>>(DEFAULT_TOOLS_STATE);
+  const [policyProfile, setPolicyProfile] = useState<PolicyProfile>(DEFAULT_POLICY_PROFILE);
+  const [yoloArmed, setYoloArmed] = useState(false);
+  const [yoloArmedAt, setYoloArmedAt] = useState<string | null>(null);
+  const [yoloConfirmText, setYoloConfirmText] = useState('');
+  const [yoloSecondConfirm, setYoloSecondConfirm] = useState(false);
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [tone, setTone] = useState('balanced');
@@ -363,15 +447,21 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingTools, setSavingTools] = useState(false);
+  const [savingPolicy, setSavingPolicy] = useState(false);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryResolvingKey, setMemoryResolvingKey] = useState<string | null>(null);
   const [memoryConflicts, setMemoryConflicts] = useState<MemoryConflict[]>([]);
   const [status, setStatus] = useState<string | null>(null);
 
+  const requestHeaders = sessionId ? { [sessionHeader]: sessionId } : {};
+
   const applyParsedSettings = (parsed: ParsedSettings): void => {
     setProviders(parsed.providers);
     setApiKeys(parsed.apiKeys);
     setToolsState(parsed.toolsState);
+    setPolicyProfile(parsed.policyProfile);
+    setYoloArmed(parsed.yoloArmed);
+    setYoloArmedAt(parsed.yoloArmedAt);
     setSystemPrompt(parsed.systemPrompt);
     setTone(parsed.tone);
     setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
@@ -382,7 +472,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
     setLoading(true);
     setStatus(null);
     try {
-      const response = await fetch('/ui/api/settings');
+      const response = await fetch('/ui/api/settings', { headers: requestHeaders });
       const payload: unknown = await response.json();
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to load settings.'));
@@ -400,7 +490,9 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
   const loadMemoryConflicts = async () => {
     setMemoryLoading(true);
     try {
-      const response = await fetch('/ui/api/memory/conflicts?limit=100');
+      const response = await fetch('/ui/api/memory/conflicts?limit=100', {
+        headers: requestHeaders,
+      });
       const payload: unknown = await response.json();
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to load memory conflicts.'));
@@ -420,7 +512,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
       return;
     }
     void loadSettings();
-  }, [isOpen]);
+  }, [isOpen, sessionId]);
 
   useEffect(() => {
     if (!isOpen || activeTab !== 'memory') {
@@ -430,7 +522,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
   }, [activeTab, isOpen]);
 
   const handleSave = async () => {
-    if (saving) {
+    if (saving || savingPolicy) {
       return;
     }
     setSaving(true);
@@ -465,6 +557,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...requestHeaders,
         },
         body: JSON.stringify(payload),
       });
@@ -485,7 +578,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
   };
 
   const handleToolToggle = async (tool: ToolKey) => {
-    if (loading || saving || savingTools) {
+    if (loading || saving || savingTools || savingPolicy) {
       return;
     }
     const previousState = toolsState;
@@ -502,6 +595,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...requestHeaders,
         },
         body: JSON.stringify({
           tools: {
@@ -543,6 +637,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...requestHeaders,
         },
         body: JSON.stringify({
           stable_key: stableKey,
@@ -561,6 +656,57 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
       setStatus(message);
     } finally {
       setMemoryResolvingKey(null);
+    }
+  };
+
+  const handleApplyPolicy = async () => {
+    if (loading || saving || savingTools || savingPolicy) {
+      return;
+    }
+    const wantsYolo = policyProfile === 'yolo';
+    if (wantsYolo && yoloConfirmText.trim().toUpperCase() !== 'YOLO') {
+      setStatus('Для YOLO введите подтверждение: YOLO');
+      return;
+    }
+    if (wantsYolo && !yoloSecondConfirm) {
+      setStatus('Подтвердите, что понимаете риск YOLO режима.');
+      return;
+    }
+    setSavingPolicy(true);
+    setStatus(null);
+    try {
+      const response = await fetch('/ui/api/settings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...requestHeaders,
+        },
+        body: JSON.stringify({
+          policy: {
+            profile: policyProfile,
+            yolo_armed: wantsYolo,
+            yolo_confirm: wantsYolo ? true : undefined,
+            yolo_confirm_text: wantsYolo ? yoloConfirmText.trim() : undefined,
+          },
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to apply policy profile.'));
+      }
+      const parsed = parseSettingsPayload(payload);
+      applyParsedSettings(parsed);
+      if (!wantsYolo) {
+        setYoloConfirmText('');
+        setYoloSecondConfirm(false);
+      }
+      setStatus(`Policy profile updated: ${policyProfileLabel(parsed.policyProfile)}.`);
+      onSaved?.();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to apply policy profile.';
+      setStatus(message);
+    } finally {
+      setSavingPolicy(false);
     }
   };
 
@@ -603,7 +749,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                     onClick={() => {
                       void handleSave();
                     }}
-                    disabled={saving || loading || savingTools}
+                    disabled={saving || loading || savingTools || savingPolicy}
                     className="rounded-lg border border-zinc-600 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {saving ? 'Saving...' : 'Save changes'}
@@ -727,21 +873,11 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                               Large paste will be converted to a virtual file attachment in composer.
                             </p>
                           </div>
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-checked={longPasteToFileEnabled}
-                            onClick={() => setLongPasteToFileEnabled((prev) => !prev)}
-                            className={`relative h-6 w-11 rounded-full transition-colors ${
-                              longPasteToFileEnabled ? 'bg-emerald-500/70' : 'bg-zinc-700'
-                            }`}
-                          >
-                            <span
-                              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-                                longPasteToFileEnabled ? 'translate-x-5' : 'translate-x-0.5'
-                              }`}
-                            />
-                          </button>
+                          <ToggleSwitch
+                            checked={longPasteToFileEnabled}
+                            label="Convert long paste to file"
+                            onToggle={() => setLongPasteToFileEnabled((prev) => !prev)}
+                          />
                         </div>
 
                         <div>
@@ -862,7 +998,67 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                       <p className="text-sm text-zinc-400">
                         Tools are applied live to the active agent. Safe mode can still block risky tools.
                       </p>
-                      <div className="space-y-3">
+                      <section className="space-y-3 border border-zinc-800 p-4">
+                        <div>
+                          <h3 className="text-sm font-medium text-zinc-100">Policy profile</h3>
+                          <p className="mt-1 text-xs text-zinc-400">
+                            Определяет базовые ограничения доступа: Sandbox / Index / YOLO.
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-[1fr_auto] gap-3 items-center">
+                          <select
+                            value={policyProfile}
+                            onChange={(event) => setPolicyProfile(event.target.value as PolicyProfile)}
+                            className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                          >
+                            <option value="sandbox">Sandbox</option>
+                            <option value="index">Index</option>
+                            <option value="yolo">YOLO (Danger)</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleApplyPolicy();
+                            }}
+                            disabled={savingPolicy || saving || loading || savingTools}
+                            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {savingPolicy ? 'Applying...' : 'Apply policy'}
+                          </button>
+                        </div>
+                        {policyProfile === 'yolo' ? (
+                          <div className="space-y-3 border border-red-500/50 bg-red-950/20 p-3">
+                            <div className="text-xs font-medium text-red-300">
+                              YOLO Danger Zone: one-shot override, все действия логируются.
+                            </div>
+                            <label className="block text-xs text-red-200">
+                              Введите <span className="font-mono">YOLO</span> для подтверждения
+                            </label>
+                            <input
+                              type="text"
+                              value={yoloConfirmText}
+                              onChange={(event) => setYoloConfirmText(event.target.value)}
+                              className="w-full rounded-md border border-red-500/40 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-red-400 focus:outline-none"
+                              placeholder="YOLO"
+                            />
+                            <label className="flex items-center gap-2 text-xs text-red-200">
+                              <input
+                                type="checkbox"
+                                checked={yoloSecondConfirm}
+                                onChange={(event) => setYoloSecondConfirm(event.target.checked)}
+                              />
+                              Я понимаю риск выполнения в YOLO режиме.
+                            </label>
+                          </div>
+                        ) : null}
+                        <div className="text-xs text-zinc-400">
+                          Текущий профиль: {policyProfileLabel(policyProfile)}
+                          {yoloArmed ? ' | YOLO active' : ''}
+                          {yoloArmedAt ? ` | armed at ${yoloArmedAt}` : ''}
+                        </div>
+                      </section>
+
+                      <div className="divide-y divide-zinc-800 border border-zinc-800">
                         {TOOL_TOGGLE_KEYS.map((tool) => {
                           const checked = toolsState[tool];
                           const effectiveEnabled = isToolEffectivelyEnabled(tool, toolsState);
@@ -870,7 +1066,7 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                           return (
                             <div
                               key={tool}
-                              className="flex items-center justify-between gap-4 rounded-xl border border-zinc-800 bg-zinc-900/50 p-4"
+                              className="flex items-center justify-between gap-4 px-4 py-3"
                               title={statusLabel}
                             >
                               <div>
@@ -879,25 +1075,14 @@ export function Settings({ isOpen, onClose, onSaved }: SettingsProps) {
                                   Requested: {checked ? 'on' : 'off'} | Effective: {effectiveEnabled ? 'on' : 'off'} ({statusLabel})
                                 </div>
                               </div>
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={checked}
-                                aria-label={`Toggle ${TOOL_LABELS[tool]}`}
-                                disabled={savingTools || saving || loading}
-                                onClick={() => {
+                              <ToggleSwitch
+                                checked={checked}
+                                label={`Toggle ${TOOL_LABELS[tool]}`}
+                                disabled={savingTools || saving || loading || savingPolicy}
+                                onToggle={() => {
                                   void handleToolToggle(tool);
                                 }}
-                                className={`relative h-6 w-11 rounded-full transition-colors ${
-                                  checked ? 'bg-emerald-500/70' : 'bg-zinc-700'
-                                } disabled:cursor-not-allowed disabled:opacity-40`}
-                              >
-                                <span
-                                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-                                    checked ? 'translate-x-5' : 'translate-x-0.5'
-                                  }`}
-                                />
-                              </button>
+                              />
                             </div>
                           );
                         })}

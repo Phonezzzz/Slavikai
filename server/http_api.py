@@ -48,6 +48,7 @@ from core.mwv.models import MWV_REPORT_PREFIX
 from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
+from memory.vector_index import VectorIndex
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession, SQLiteUISessionStorage, UISessionStorage
@@ -56,6 +57,12 @@ from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from shared.sanitize import safe_json_loads
 from tools.project_tool import handle_project_request
 from tools.tool_logger import DEFAULT_LOG_PATH as TOOL_CALLS_LOG
+from tools.workspace_tools import (
+    WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT,
+)
+from tools.workspace_tools import (
+    set_workspace_root as set_runtime_workspace_root,
+)
 
 ALLOWED_ROLES: Final[set[str]] = {"system", "user", "assistant", "tool"}
 ALLOWED_MESSAGE_KEYS: Final[set[str]] = {"role", "content", "tool_calls"}
@@ -117,7 +124,8 @@ CANVAS_DOCUMENT_LINE_THRESHOLD: Final[int] = 24
 CHAT_STREAM_CHUNK_SIZE: Final[int] = 80
 CHAT_STREAM_WARMUP_CHARS: Final[int] = 220
 CANVAS_STATUS_CHARS_STEP: Final[int] = 640
-WORKSPACE_ROOT: Final[Path] = Path("sandbox/project").resolve()
+PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
+WORKSPACE_ROOT: Final[Path] = DEFAULT_WORKSPACE_ROOT
 MAX_DOWNLOAD_BYTES: Final[int] = 5_000_000
 MAX_ATTACHMENTS_PER_MESSAGE: Final[int] = 8
 MAX_ATTACHMENT_CHARS: Final[int] = 80_000
@@ -125,6 +133,38 @@ MAX_TOTAL_ATTACHMENTS_CHARS: Final[int] = 160_000
 MAX_CONTENT_CHARS: Final[int] = 120_000
 MAX_TOTAL_PAYLOAD_CHARS: Final[int] = 220_000
 MAX_STT_AUDIO_BYTES: Final[int] = 10_000_000
+WORKSPACE_INDEX_IGNORED_DIRS: Final[set[str]] = {
+    "venv",
+    "__pycache__",
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".cache",
+}
+WORKSPACE_INDEX_ALLOWED_EXTENSIONS: Final[set[str]] = {
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".json",
+    ".md",
+    ".txt",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".html",
+    ".css",
+    ".sql",
+    ".sh",
+}
+WORKSPACE_INDEX_MAX_FILE_BYTES: Final[int] = 1_000_000
+POLICY_PROFILES: Final[set[str]] = {"sandbox", "index", "yolo"}
+DEFAULT_POLICY_PROFILE: Final[str] = "sandbox"
 _REQUEST_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?P<name>[A-Za-z0-9._/\-]+\.[A-Za-z0-9]{1,12})"
 )
@@ -1885,6 +1925,75 @@ def _save_composer_settings(
     _save_ui_settings_blob(payload)
 
 
+def _normalize_policy_profile(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in POLICY_PROFILES:
+            return normalized
+    return DEFAULT_POLICY_PROFILE
+
+
+def _load_policy_settings() -> tuple[str, bool, str | None]:
+    payload = _load_ui_settings_blob()
+    policy_raw = payload.get("policy")
+    if not isinstance(policy_raw, dict):
+        return DEFAULT_POLICY_PROFILE, False, None
+    profile = _normalize_policy_profile(policy_raw.get("profile"))
+    yolo_armed_raw = policy_raw.get("yolo_armed")
+    yolo_armed = yolo_armed_raw if isinstance(yolo_armed_raw, bool) else False
+    yolo_armed_at_raw = policy_raw.get("yolo_armed_at")
+    yolo_armed_at = (
+        yolo_armed_at_raw.strip()
+        if isinstance(yolo_armed_at_raw, str) and yolo_armed_at_raw.strip()
+        else None
+    )
+    if not yolo_armed:
+        yolo_armed_at = None
+    return profile, yolo_armed, yolo_armed_at
+
+
+def _save_policy_settings(
+    *,
+    profile: str,
+    yolo_armed: bool,
+    yolo_armed_at: str | None,
+) -> None:
+    payload = _load_ui_settings_blob()
+    payload["policy"] = {
+        "profile": _normalize_policy_profile(profile),
+        "yolo_armed": yolo_armed,
+        "yolo_armed_at": yolo_armed_at if yolo_armed else None,
+    }
+    _save_ui_settings_blob(payload)
+
+
+def _tools_state_for_profile(profile: str, current: dict[str, bool]) -> dict[str, bool]:
+    normalized = _normalize_policy_profile(profile)
+    if normalized == "sandbox":
+        return {
+            **current,
+            "fs": True,
+            "project": False,
+            "shell": False,
+            "web": False,
+            "safe_mode": True,
+        }
+    if normalized == "index":
+        return {
+            **current,
+            "fs": True,
+            "project": True,
+            "shell": False,
+            "web": False,
+            "safe_mode": True,
+        }
+    # yolo keeps current tool preferences, but still never bypasses safe_mode by default.
+    return {
+        **current,
+        "safe_mode": True,
+    }
+
+
 def _load_tools_state() -> dict[str, bool]:
     try:
         return load_tools_config().to_dict()
@@ -2025,6 +2134,7 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
 def _build_settings_payload() -> dict[str, JSONValue]:
     tone, system_prompt = _load_personalization_settings()
     long_paste_to_file_enabled, long_paste_threshold_chars = _load_composer_settings()
+    policy_profile, yolo_armed, yolo_armed_at = _load_policy_settings()
     memory_config = load_memory_config()
     tools_state = _load_tools_state()
     tools_registry = {key: value for key, value in tools_state.items() if key != "safe_mode"}
@@ -2045,6 +2155,11 @@ def _build_settings_payload() -> dict[str, JSONValue]:
             "tools": {
                 "state": tools_state,
                 "registry": tools_registry,
+            },
+            "policy": {
+                "profile": policy_profile,
+                "yolo_armed": yolo_armed,
+                "yolo_armed_at": yolo_armed_at,
             },
             "providers": _provider_settings_payload(),
         },
@@ -2409,6 +2524,158 @@ async def handle_workspace_index(request: web.Request) -> web.FileResponse:
     return await handle_ui_index(request)
 
 
+async def handle_ui_workspace_root_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    root_path = await _workspace_root_for_session(hub, session_id)
+    policy = await hub.get_session_policy(session_id)
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "root_path": str(root_path),
+            "policy": policy,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_store: SessionApprovalStore = request.app["session_store"]
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    path_raw = payload.get("root_path")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return _error_response(
+            status=400,
+            message="root_path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    policy = await hub.get_session_policy(session_id)
+    profile_raw = policy.get("profile")
+    profile = profile_raw if isinstance(profile_raw, str) else DEFAULT_POLICY_PROFILE
+    try:
+        target_root = _resolve_workspace_root_candidate(path_raw.strip(), policy_profile=profile)
+    except ValueError as exc:
+        return _error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    current_root = await _workspace_root_for_session(hub, session_id)
+    if current_root == target_root:
+        response = _json_response(
+            {
+                "session_id": session_id,
+                "root_path": str(current_root),
+                "applied": True,
+            }
+        )
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
+
+    required_category: ApprovalCategory = "FS_OUTSIDE_WORKSPACE"
+    approved = await session_store.get_categories(session_id)
+    if required_category in approved:
+        await hub.set_workspace_root(session_id, str(target_root))
+        response = _json_response(
+            {
+                "session_id": session_id,
+                "root_path": str(target_root),
+                "applied": True,
+            }
+        )
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
+
+    approval_request: dict[str, JSONValue] = {
+        "category": required_category,
+        "required_categories": [required_category],
+        "tool": "workspace_root_select",
+        "prompt": {
+            "what": "Сменить Workspace Root",
+            "why": "Требуется подтверждение смены рабочей директории.",
+            "risk": "Доступ к другой директории проекта.",
+            "changes": [str(target_root)],
+        },
+        "details": {
+            "root_path": str(target_root),
+            "policy_profile": profile,
+        },
+    }
+    decision = _build_ui_approval_decision(
+        approval_request=approval_request,
+        session_id=session_id,
+        source_endpoint="workspace.root_select",
+        resume_payload={
+            "root_path": str(target_root),
+            "session_id": session_id,
+        },
+    )
+    await hub.set_session_decision(session_id, decision)
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "decision": _normalize_ui_decision(decision, session_id=session_id),
+        },
+        status=202,
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    root_path = await _workspace_root_for_session(hub, session_id)
+    stats = _index_workspace_root(root_path)
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "ok": True,
+            **stats,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_git_diff(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    root_path = await _workspace_root_for_session(hub, session_id)
+    diff, error = _workspace_git_diff(root_path)
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "root_path": str(root_path),
+            "diff": diff,
+            "error": error,
+            "ok": error is None,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
 async def _resolve_workspace_session(
     request: web.Request,
 ) -> tuple[AgentProtocol | None, str, set[ApprovalCategory]]:
@@ -2418,6 +2685,81 @@ async def _resolve_workspace_session(
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
     approved_categories = await session_store.get_categories(session_id)
     return agent, session_id, approved_categories
+
+
+async def _workspace_root_for_session(hub: UIHub, session_id: str) -> Path:
+    stored_root = await hub.get_workspace_root(session_id)
+    if isinstance(stored_root, str) and stored_root.strip():
+        candidate = Path(stored_root).expanduser().resolve()
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return WORKSPACE_ROOT
+
+
+def _resolve_workspace_root_candidate(path_raw: str, *, policy_profile: str) -> Path:
+    candidate = Path(path_raw).expanduser().resolve()
+    if not candidate.exists() or not candidate.is_dir():
+        raise ValueError(f"Директория не найдена: {candidate}")
+    if policy_profile != "yolo":
+        try:
+            candidate.relative_to(PROJECT_ROOT)
+        except ValueError as exc:
+            raise ValueError("Root должен быть внутри директории проекта.") from exc
+    return candidate
+
+
+def _index_workspace_root(root: Path) -> dict[str, JSONValue]:
+    vector_index = VectorIndex("memory/vectors.db", model_name=_load_embeddings_model_setting())
+    indexed_code = 0
+    indexed_docs = 0
+    skipped = 0
+    for current_root, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in WORKSPACE_INDEX_IGNORED_DIRS]
+        current = Path(current_root)
+        for filename in files:
+            full_path = current / filename
+            if filename.endswith(".sqlite"):
+                skipped += 1
+                continue
+            suffix = full_path.suffix.lower()
+            if suffix not in WORKSPACE_INDEX_ALLOWED_EXTENSIONS:
+                skipped += 1
+                continue
+            try:
+                if full_path.stat().st_size > WORKSPACE_INDEX_MAX_FILE_BYTES:
+                    skipped += 1
+                    continue
+                content = full_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:  # noqa: BLE001
+                skipped += 1
+                continue
+            namespace = "code" if suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".sh"} else "docs"
+            vector_index.upsert_text(str(full_path), content, namespace=namespace)
+            if namespace == "code":
+                indexed_code += 1
+            else:
+                indexed_docs += 1
+    return {
+        "root_path": str(root),
+        "indexed_code": indexed_code,
+        "indexed_docs": indexed_docs,
+        "skipped": skipped,
+    }
+
+
+def _workspace_git_diff(root: Path) -> tuple[str, str | None]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "diff", "--no-ext-diff", "--", "."],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "not a git repository" in stderr.lower():
+            return "", None
+        return "", stderr or "git diff failed"
+    return result.stdout, None
 
 
 async def _call_workspace_tool(
@@ -2432,45 +2774,54 @@ async def _call_workspace_tool(
 ) -> ToolResult | web.Response:
     hub: UIHub = request.app["ui_hub"]
     agent_lock = request.app["agent_lock"]
+    session_root = await _workspace_root_for_session(hub, session_id)
     async with agent_lock:
+        set_runtime_workspace_root(session_root)
         try:
-            agent.set_session_context(session_id, approved_categories)
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to set session context for workspace tool call", exc_info=True)
-        try:
-            return agent.call_tool(
-                tool_name,
-                args=args or {},
-                raw_input=raw_input,
-            )
-        except ApprovalRequired as exc:
-            approval_payload = _serialize_approval_request(exc.request)
-            decision = _build_ui_approval_decision(
-                approval_request=approval_payload or {},
-                session_id=session_id,
-                source_endpoint="workspace.tool",
-                resume_payload={
-                    "tool_name": tool_name,
-                    "args": dict(args or {}),
-                    "raw_input": raw_input,
-                    "session_id": session_id,
-                },
-            )
-            await hub.set_session_decision(session_id, decision)
-            normalized_decision = _normalize_ui_decision(decision, session_id=session_id)
-            response = _json_response(
-                {
-                    "session_id": session_id,
-                    "decision": normalized_decision,
-                    "approval_request": approval_payload,
-                },
-                status=202,
-            )
-            response.headers[UI_SESSION_HEADER] = session_id
-            return response
+            try:
+                agent.set_session_context(session_id, approved_categories)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Failed to set session context for workspace tool call",
+                    exc_info=True,
+                )
+            try:
+                return agent.call_tool(
+                    tool_name,
+                    args=args or {},
+                    raw_input=raw_input,
+                )
+            except ApprovalRequired as exc:
+                approval_payload = _serialize_approval_request(exc.request)
+                decision = _build_ui_approval_decision(
+                    approval_request=approval_payload or {},
+                    session_id=session_id,
+                    source_endpoint="workspace.tool",
+                    resume_payload={
+                        "tool_name": tool_name,
+                        "args": dict(args or {}),
+                        "raw_input": raw_input,
+                        "session_id": session_id,
+                    },
+                )
+                await hub.set_session_decision(session_id, decision)
+                normalized_decision = _normalize_ui_decision(decision, session_id=session_id)
+                response = _json_response(
+                    {
+                        "session_id": session_id,
+                        "decision": normalized_decision,
+                        "approval_request": approval_payload,
+                    },
+                    status=202,
+                )
+                response.headers[UI_SESSION_HEADER] = session_id
+                return response
+        finally:
+            set_runtime_workspace_root(None)
 
 
 async def handle_ui_workspace_tree(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
     try:
         agent, session_id, approved_categories = await _resolve_workspace_session(request)
     except ModelNotAllowedError as exc:
@@ -2497,12 +2848,14 @@ async def handle_ui_workspace_tree(request: web.Request) -> web.Response:
         )
     tree_raw = tool_result.data.get("tree")
     tree: list[JSONValue] = tree_raw if isinstance(tree_raw, list) else []
-    response = _json_response({"session_id": session_id, "tree": tree})
+    root_path = await _workspace_root_for_session(hub, session_id)
+    response = _json_response({"session_id": session_id, "tree": tree, "root_path": str(root_path)})
     response.headers[UI_SESSION_HEADER] = session_id
     return response
 
 
 async def handle_ui_workspace_file_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
     try:
         agent, session_id, approved_categories = await _resolve_workspace_session(request)
     except ModelNotAllowedError as exc:
@@ -2545,6 +2898,7 @@ async def handle_ui_workspace_file_get(request: web.Request) -> web.Response:
             "session_id": session_id,
             "path": path_value,
             "content": content_raw,
+            "root_path": str(await _workspace_root_for_session(hub, session_id)),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -2552,6 +2906,7 @@ async def handle_ui_workspace_file_get(request: web.Request) -> web.Response:
 
 
 async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
     try:
         agent, session_id, approved_categories = await _resolve_workspace_session(request)
     except ModelNotAllowedError as exc:
@@ -2615,6 +2970,7 @@ async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
             "session_id": session_id,
             "path": path_value,
             "saved": True,
+            "root_path": str(await _workspace_root_for_session(hub, session_id)),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -2622,6 +2978,7 @@ async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
 
 
 async def handle_ui_workspace_run(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
     try:
         agent, session_id, approved_categories = await _resolve_workspace_session(request)
     except ModelNotAllowedError as exc:
@@ -2685,6 +3042,7 @@ async def handle_ui_workspace_run(request: web.Request) -> web.Response:
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
+            "root_path": str(await _workspace_root_for_session(hub, session_id)),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -2694,6 +3052,8 @@ async def handle_ui_workspace_run(request: web.Request) -> web.Response:
 async def handle_ui_status(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    workspace_root = await _workspace_root_for_session(hub, session_id)
+    policy = await hub.get_session_policy(session_id)
     decision = _normalize_ui_decision(
         await hub.get_session_decision(session_id),
         session_id=session_id,
@@ -2705,6 +3065,8 @@ async def handle_ui_status(request: web.Request) -> web.Response:
             "session_id": session_id,
             "decision": decision,
             "selected_model": selected_model,
+            "workspace_root": str(workspace_root),
+            "policy": policy,
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -2743,6 +3105,9 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
         )
 
     next_embeddings_model: str | None = None
+    next_policy_profile: str | None = None
+    next_yolo_armed: bool | None = None
+    next_yolo_armed_at: str | None = None
 
     personalization_raw = payload.get("personalization")
     if personalization_raw is not None:
@@ -2914,7 +3279,65 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             ),
         )
 
+    policy_raw = payload.get("policy")
+    if policy_raw is not None:
+        if not isinstance(policy_raw, dict):
+            return _error_response(
+                status=400,
+                message="policy должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        profile, yolo_armed, yolo_armed_at = _load_policy_settings()
+        if "profile" in policy_raw:
+            profile = _normalize_policy_profile(policy_raw.get("profile"))
+        if "yolo_armed" in policy_raw:
+            yolo_armed_raw = policy_raw.get("yolo_armed")
+            if not isinstance(yolo_armed_raw, bool):
+                return _error_response(
+                    status=400,
+                    message="policy.yolo_armed должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            yolo_armed = yolo_armed_raw
+        if profile == "yolo" or yolo_armed:
+            confirm_raw = policy_raw.get("yolo_confirm")
+            confirm_text_raw = policy_raw.get("yolo_confirm_text")
+            confirm_ok = (
+                confirm_raw is True
+                and isinstance(confirm_text_raw, str)
+                and confirm_text_raw.strip().upper() == "YOLO"
+            )
+            if not confirm_ok:
+                return _error_response(
+                    status=400,
+                    message=(
+                        "Для включения YOLO требуется подтверждение "
+                        "(yolo_confirm=true, yolo_confirm_text='YOLO')."
+                    ),
+                    error_type="invalid_request_error",
+                    code="yolo_confirmation_required",
+                )
+        if yolo_armed:
+            yolo_armed_at = _utc_now_iso()
+        else:
+            yolo_armed_at = None
+        _save_policy_settings(
+            profile=profile,
+            yolo_armed=yolo_armed,
+            yolo_armed_at=yolo_armed_at,
+        )
+        next_policy_profile = profile
+        next_yolo_armed = yolo_armed
+        next_yolo_armed_at = yolo_armed_at
+
     next_tools_state: dict[str, bool] | None = None
+    if next_policy_profile is not None:
+        profile_base = _tools_state_for_profile(next_policy_profile, _load_tools_state())
+        _save_tools_state(profile_base)
+        next_tools_state = dict(profile_base)
+
     tools_raw = payload.get("tools")
     if tools_raw is not None:
         if not isinstance(tools_raw, dict):
@@ -2932,7 +3355,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
-        current_state = _load_tools_state()
+        current_state = next_tools_state if next_tools_state is not None else _load_tools_state()
         next_state = dict(current_state)
         for key, raw_value in state_raw.items():
             if not isinstance(key, str) or key not in DEFAULT_TOOLS_STATE:
@@ -3002,6 +3425,17 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             else:
                 next_api_keys.pop(provider, None)
         _save_provider_api_keys(next_api_keys)
+
+    session_hint = _extract_ui_session_id(request)
+    if session_hint and (next_policy_profile is not None or next_yolo_armed is not None):
+        hub: UIHub = request.app["ui_hub"]
+        session_id = await hub.get_or_create_session(session_hint)
+        await hub.set_session_policy(
+            session_id,
+            profile=next_policy_profile,
+            yolo_armed=next_yolo_armed,
+            yolo_armed_at=next_yolo_armed_at,
+        )
 
     if next_tools_state is not None:
         agent_lock: asyncio.Lock = request.app["agent_lock"]
@@ -4214,6 +4648,27 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "data": {"output": response_text, "command": command},
                 "error": None,
             }
+        elif source_endpoint == "workspace.root_select":
+            root_raw = resume_payload.get("root_path")
+            if not isinstance(root_raw, str) or not root_raw.strip():
+                raise ValueError("decision resume payload missing root_path")
+            policy = await hub.get_session_policy(session_id)
+            profile_raw = policy.get("profile")
+            profile = profile_raw if isinstance(profile_raw, str) else DEFAULT_POLICY_PROFILE
+            target_root = _resolve_workspace_root_candidate(
+                root_raw.strip(),
+                policy_profile=profile,
+            )
+            await hub.set_workspace_root(session_id, str(target_root))
+            resume_started = True
+            resume = {
+                "ok": True,
+                "kind": "tool_result",
+                "source_endpoint": "workspace.root_select",
+                "tool_name": "workspace_root_select",
+                "data": {"root_path": str(target_root)},
+                "error": None,
+            }
         elif source_endpoint == "workspace.tool":
             tool_name_raw = resume_payload.get("tool_name")
             args_raw = resume_payload.get("args")
@@ -4231,53 +4686,61 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 else f"ui:{tool_name}"
             )
             approved_categories = await session_store.get_categories(session_id)
+            session_root = await _workspace_root_for_session(hub, session_id)
             async with agent_lock:
+                set_runtime_workspace_root(session_root)
                 try:
-                    agent.set_session_context(session_id, approved_categories)
-                except Exception:  # noqa: BLE001
-                    logger.debug(
-                        "Failed to set session context in workspace decision resume",
-                        exc_info=True,
-                    )
-                try:
-                    tool_result = agent.call_tool(
-                        tool_name,
-                        args=tool_args,
-                        raw_input=raw_input,
-                    )
-                except ApprovalRequired as exc:
-                    approval_request = _serialize_approval_request(exc.request)
-                    replacement = _build_ui_approval_decision(
-                        approval_request=approval_request or {},
-                        session_id=session_id,
-                        source_endpoint="workspace.tool",
-                        resume_payload={
-                            "tool_name": tool_name,
-                            "args": tool_args,
-                            "raw_input": raw_input,
-                            "session_id": session_id,
-                        },
-                    )
-                    await hub.set_session_decision(session_id, replacement)
-                    await hub.set_session_status(session_id, "ok")
-                    return _json_response(
-                        {
-                            "ok": True,
-                            "decision": _normalize_ui_decision(replacement, session_id=session_id),
-                            "status": "pending",
-                            "resume_started": False,
-                            "resume": {
-                                "ok": False,
-                                "kind": "approval_required",
-                                "source_endpoint": "workspace.tool",
+                    try:
+                        agent.set_session_context(session_id, approved_categories)
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "Failed to set session context in workspace decision resume",
+                            exc_info=True,
+                        )
+                    try:
+                        tool_result = agent.call_tool(
+                            tool_name,
+                            args=tool_args,
+                            raw_input=raw_input,
+                        )
+                    except ApprovalRequired as exc:
+                        approval_request = _serialize_approval_request(exc.request)
+                        replacement = _build_ui_approval_decision(
+                            approval_request=approval_request or {},
+                            session_id=session_id,
+                            source_endpoint="workspace.tool",
+                            resume_payload={
                                 "tool_name": tool_name,
-                                "data": {
-                                    "approval_request": approval_request or {},
-                                },
-                                "error": "Требуется подтверждение действия.",
+                                "args": tool_args,
+                                "raw_input": raw_input,
+                                "session_id": session_id,
                             },
-                        }
-                    )
+                        )
+                        await hub.set_session_decision(session_id, replacement)
+                        await hub.set_session_status(session_id, "ok")
+                        return _json_response(
+                            {
+                                "ok": True,
+                                "decision": _normalize_ui_decision(
+                                    replacement,
+                                    session_id=session_id,
+                                ),
+                                "status": "pending",
+                                "resume_started": False,
+                                "resume": {
+                                    "ok": False,
+                                    "kind": "approval_required",
+                                    "source_endpoint": "workspace.tool",
+                                    "tool_name": tool_name,
+                                    "data": {
+                                        "approval_request": approval_request or {},
+                                    },
+                                    "error": "Требуется подтверждение действия.",
+                                },
+                            }
+                        )
+                finally:
+                    set_runtime_workspace_root(None)
             resume_started = True
             resume = {
                 "ok": tool_result.ok,
@@ -6033,6 +6496,10 @@ def create_app(
     app.router.add_patch("/ui/api/sessions/{session_id}/title", handle_ui_session_title_update)
     app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)
     app.router.add_post("/ui/api/session-model", handle_ui_session_model)
+    app.router.add_get("/ui/api/workspace/root", handle_ui_workspace_root_get)
+    app.router.add_post("/ui/api/workspace/root/select", handle_ui_workspace_root_select)
+    app.router.add_post("/ui/api/workspace/index", handle_ui_workspace_index_run)
+    app.router.add_get("/ui/api/workspace/git-diff", handle_ui_workspace_git_diff)
     app.router.add_get("/ui/api/workspace/tree", handle_ui_workspace_tree)
     app.router.add_get("/ui/api/workspace/file", handle_ui_workspace_file_get)
     app.router.add_put("/ui/api/workspace/file", handle_ui_workspace_file_put)

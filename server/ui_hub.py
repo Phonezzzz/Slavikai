@@ -21,6 +21,7 @@ def _utc_iso_now() -> str:
 
 
 SessionStatus = Literal["ok", "busy", "error"]
+PolicyProfile = Literal["sandbox", "index", "yolo"]
 
 
 class SessionListItem(TypedDict):
@@ -173,6 +174,10 @@ class _SessionState:
     model_id: str | None = None
     title_override: str | None = None
     folder_id: str | None = None
+    workspace_root: str | None = None
+    policy_profile: PolicyProfile = "sandbox"
+    yolo_armed: bool = False
+    yolo_armed_at: str | None = None
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
 
@@ -478,6 +483,10 @@ class UIHub:
                         output_updated_at=state.output_updated_at,
                         files=list(state.files),
                         artifacts=[dict(item) for item in state.artifacts],
+                        workspace_root=state.workspace_root,
+                        policy_profile=state.policy_profile,
+                        yolo_armed=state.yolo_armed,
+                        yolo_armed_at=state.yolo_armed_at,
                     ),
                 )
             items.sort(
@@ -521,6 +530,10 @@ class UIHub:
                     model_id=item.model_id,
                     title_override=item.title_override,
                     folder_id=item.folder_id,
+                    workspace_root=item.workspace_root,
+                    policy_profile=self._normalize_policy_profile(item.policy_profile),
+                    yolo_armed=bool(item.yolo_armed),
+                    yolo_armed_at=item.yolo_armed_at,
                     created_at=created_at,
                     updated_at=restored_updated_at,
                 )
@@ -553,6 +566,12 @@ class UIHub:
                 "selected_model": selected_model,
                 "title_override": state.title_override,
                 "folder_id": state.folder_id,
+                "workspace_root": state.workspace_root,
+                "policy": {
+                    "profile": state.policy_profile,
+                    "yolo_armed": state.yolo_armed,
+                    "yolo_armed_at": state.yolo_armed_at,
+                },
             }
 
     async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
@@ -561,6 +580,90 @@ class UIHub:
             if state is None or state.decision_packet is None:
                 return None
             return dict(state.decision_packet)
+
+    async def get_workspace_root(self, session_id: str) -> str | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            return state.workspace_root
+
+    async def set_workspace_root(self, session_id: str, root_path: str | None) -> None:
+        normalized = root_path.strip() if isinstance(root_path, str) and root_path.strip() else None
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            if state.workspace_root == normalized:
+                return
+            state.workspace_root = normalized
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+
+    async def get_session_policy(self, session_id: str) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return {"profile": "sandbox", "yolo_armed": False, "yolo_armed_at": None}
+            return {
+                "profile": state.policy_profile,
+                "yolo_armed": state.yolo_armed,
+                "yolo_armed_at": state.yolo_armed_at,
+            }
+
+    async def set_session_policy(
+        self,
+        session_id: str,
+        *,
+        profile: str | None = None,
+        yolo_armed: bool | None = None,
+        yolo_armed_at: str | None = None,
+    ) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            changed = False
+            if profile is not None:
+                normalized_profile = self._normalize_policy_profile(profile)
+                if state.policy_profile != normalized_profile:
+                    state.policy_profile = normalized_profile
+                    changed = True
+            if yolo_armed is not None and state.yolo_armed != yolo_armed:
+                state.yolo_armed = yolo_armed
+                changed = True
+            if yolo_armed is not None:
+                next_armed_at = yolo_armed_at if yolo_armed else None
+                if state.yolo_armed_at != next_armed_at:
+                    state.yolo_armed_at = next_armed_at
+                    changed = True
+            elif yolo_armed_at is not None and state.yolo_armed_at != yolo_armed_at:
+                state.yolo_armed_at = yolo_armed_at
+                changed = True
+            if changed:
+                state.updated_at = _utc_iso_now()
+                self._persist_session_locked(session_id)
+                self._prune_sessions_locked(keep_session_id=session_id)
+            return {
+                "profile": state.policy_profile,
+                "yolo_armed": state.yolo_armed,
+                "yolo_armed_at": state.yolo_armed_at,
+            }
+
+    async def consume_yolo_once(self, session_id: str) -> bool:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or not state.yolo_armed:
+                return False
+            state.yolo_armed = False
+            state.yolo_armed_at = None
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            return True
 
     async def set_session_model(self, session_id: str, provider: str, model_id: str) -> None:
         async with self._lock:
@@ -804,6 +907,13 @@ class UIHub:
             return "error"
         return "ok"
 
+    def _normalize_policy_profile(self, value: str | None) -> PolicyProfile:
+        if value == "index":
+            return "index"
+        if value == "yolo":
+            return "yolo"
+        return "sandbox"
+
     def _publish_to_subscribers(
         self,
         subscribers: list[asyncio.Queue[dict[str, JSONValue]]],
@@ -836,6 +946,10 @@ class UIHub:
                 model_id=item.model_id,
                 title_override=item.title_override,
                 folder_id=item.folder_id,
+                workspace_root=item.workspace_root,
+                policy_profile=self._normalize_policy_profile(item.policy_profile),
+                yolo_armed=bool(item.yolo_armed),
+                yolo_armed_at=item.yolo_armed_at,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
@@ -870,6 +984,10 @@ class UIHub:
                 output_updated_at=state.output_updated_at,
                 files=list(state.files),
                 artifacts=[dict(entry) for entry in state.artifacts],
+                workspace_root=state.workspace_root,
+                policy_profile=state.policy_profile,
+                yolo_armed=state.yolo_armed,
+                yolo_armed_at=state.yolo_armed_at,
             ),
         )
 

@@ -27,6 +27,10 @@ class PersistedSession:
     output_updated_at: str | None = None
     files: list[str] = field(default_factory=list)
     artifacts: list[dict[str, JSONValue]] = field(default_factory=list)
+    workspace_root: str | None = None
+    policy_profile: str | None = None
+    yolo_armed: bool = False
+    yolo_armed_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,10 @@ class InMemoryUISessionStorage:
             output_updated_at=session.output_updated_at,
             files=list(session.files),
             artifacts=[dict(item) for item in session.artifacts],
+            workspace_root=session.workspace_root,
+            policy_profile=session.policy_profile,
+            yolo_armed=session.yolo_armed,
+            yolo_armed_at=session.yolo_armed_at,
         )
 
     def _clone_folder(self, folder: PersistedFolder) -> PersistedFolder:
@@ -118,6 +126,7 @@ class SQLiteUISessionStorage:
                 SELECT session_id, created_at, updated_at, status, decision_json
                     , model_provider, model_id, title_override, folder_id
                     , output_text, output_updated_at, files_json, artifacts_json
+                    , workspace_root, policy_profile, yolo_armed, yolo_armed_at
                 FROM ui_sessions
                 """,
             ).fetchall()
@@ -140,6 +149,10 @@ class SQLiteUISessionStorage:
                         output_updated_at=_optional_str(row["output_updated_at"]),
                         files=self._decode_files(row["files_json"]),
                         artifacts=self._decode_artifacts(row["artifacts_json"]),
+                        workspace_root=_optional_str(row["workspace_root"]),
+                        policy_profile=_optional_str(row["policy_profile"]),
+                        yolo_armed=bool(int(row["yolo_armed"] or 0)),
+                        yolo_armed_at=_optional_str(row["yolo_armed_at"]),
                     ),
                 )
         return sessions
@@ -161,9 +174,13 @@ class SQLiteUISessionStorage:
                     output_text,
                     output_updated_at,
                     files_json,
-                    artifacts_json
+                    artifacts_json,
+                    workspace_root,
+                    policy_profile,
+                    yolo_armed,
+                    yolo_armed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     created_at=excluded.created_at,
@@ -177,7 +194,11 @@ class SQLiteUISessionStorage:
                     output_text=excluded.output_text,
                     output_updated_at=excluded.output_updated_at,
                     files_json=excluded.files_json,
-                    artifacts_json=excluded.artifacts_json
+                    artifacts_json=excluded.artifacts_json,
+                    workspace_root=excluded.workspace_root,
+                    policy_profile=excluded.policy_profile,
+                    yolo_armed=excluded.yolo_armed,
+                    yolo_armed_at=excluded.yolo_armed_at
                 """,
                 (
                     session.session_id,
@@ -193,6 +214,10 @@ class SQLiteUISessionStorage:
                     session.output_updated_at,
                     self._encode_files(session.files),
                     self._encode_artifacts(session.artifacts),
+                    session.workspace_root,
+                    session.policy_profile,
+                    1 if session.yolo_armed else 0,
+                    session.yolo_armed_at,
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
@@ -322,7 +347,11 @@ class SQLiteUISessionStorage:
                     output_text TEXT,
                     output_updated_at TEXT,
                     files_json TEXT,
-                    artifacts_json TEXT
+                    artifacts_json TEXT,
+                    workspace_root TEXT,
+                    policy_profile TEXT,
+                    yolo_armed INTEGER NOT NULL DEFAULT 0,
+                    yolo_armed_at TEXT
                 )
                 """,
             )
@@ -469,6 +498,14 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN files_json TEXT")
         if "artifacts_json" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN artifacts_json TEXT")
+        if "workspace_root" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN workspace_root TEXT")
+        if "policy_profile" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN policy_profile TEXT")
+        if "yolo_armed" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN yolo_armed INTEGER NOT NULL DEFAULT 0")
+        if "yolo_armed_at" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN yolo_armed_at TEXT")
 
     def _ensure_ui_messages_table(self, conn: sqlite3.Connection) -> None:
         expected_columns = [

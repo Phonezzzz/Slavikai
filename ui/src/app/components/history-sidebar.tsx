@@ -43,6 +43,7 @@ interface HistorySidebarProps {
   onOpenSettings?: () => void;
   onCreateFolder?: () => void;
   className?: string;
+  compact?: boolean;
 }
 
 const defaultChats: ChatItem[] = [];
@@ -62,6 +63,7 @@ export function HistorySidebar({
   onOpenSettings,
   onCreateFolder,
   className = "",
+  compact = false,
 }: HistorySidebarProps) {
   const [hoveredChat, setHoveredChat] = useState<string | null>(null);
   const [menuChatId, setMenuChatId] = useState<string | null>(null);
@@ -86,6 +88,58 @@ export function HistorySidebar({
   const todayChats = chats.filter((c) => c.group === "today");
   const yesterdayChats = chats.filter((c) => c.group === "yesterday");
   const olderChats = chats.filter((c) => c.group === "older");
+
+  if (compact) {
+    return (
+      <div className={`flex h-full w-[64px] flex-col items-center bg-[#0b0b0d] py-3 ${className}`}>
+        <div className="mb-3 flex h-8 w-8 items-center justify-center">
+          <img src={BrainLogo} alt="SlavikAI" className="h-7 w-7 object-contain" />
+        </div>
+        <button
+          onClick={onNewChat}
+          className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg bg-[#141418] text-[#d0d0d0] hover:bg-[#1b1b20]"
+          title="New Chat"
+          aria-label="New Chat"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        <button
+          onClick={onOpenSearch}
+          className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg text-[#b3b3bb] hover:bg-[#15151a]"
+          title="Search"
+          aria-label="Search"
+        >
+          <Search className="h-4 w-4" />
+        </button>
+        <button
+          onClick={onOpenNotes}
+          className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg text-[#b3b3bb] hover:bg-[#15151a]"
+          title="Notes"
+          aria-label="Notes"
+        >
+          <StickyNote className="h-4 w-4" />
+        </button>
+        <button
+          onClick={onOpenWorkspace}
+          className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg bg-[#141418] text-[#d0d0d0] hover:bg-[#1b1b20]"
+          title="Workspace"
+          aria-label="Workspace"
+        >
+          <LayoutGrid className="h-4 w-4" />
+        </button>
+        <div className="mt-auto">
+          <button
+            onClick={onOpenSettings}
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-[#b3b3bb] hover:bg-[#15151a]"
+            title="Settings"
+            aria-label="Settings"
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const formatDate = (dateStr: string) => {
     try {
