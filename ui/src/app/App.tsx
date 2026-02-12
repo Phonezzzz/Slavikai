@@ -12,6 +12,10 @@ import type { Artifact } from './components/artifacts-sidebar';
 import { HistorySidebar } from './components/history-sidebar';
 import { SearchModal } from './components/search-modal';
 import { Settings } from './components/Settings';
+import {
+  WorkspaceSettingsModal,
+  type WorkspaceGithubImportResult,
+} from './components/workspace-settings-modal';
 import { WorkspaceIde } from './components/workspace-ide';
 import type {
   ChatAttachment,
@@ -59,6 +63,9 @@ type PendingUserMessage = {
 };
 
 type AppView = 'chat' | 'workspace';
+type SessionPayloadApplyOptions = {
+  applyDisplay: boolean;
+};
 
 const toOutputArtifactUiId = (artifactId: string): string => `output-${artifactId}`;
 const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
@@ -766,6 +773,7 @@ export default function App() {
   const [forceCanvasNext, setForceCanvasNext] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workspaceSettingsOpen, setWorkspaceSettingsOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
@@ -776,6 +784,7 @@ export default function App() {
   const [pendingDecision, setPendingDecision] = useState<UiDecision | null>(null);
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [decisionError, setDecisionError] = useState<string | null>(null);
+  const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
 
   const pendingForCanvas =
     pendingSessionId === selectedConversation ? pendingUserMessage : null;
@@ -1003,6 +1012,12 @@ export default function App() {
       window.removeEventListener('popstate', handlePopState);
     };
   }, []);
+
+  useEffect(() => {
+    if (activeView !== 'workspace' && workspaceSettingsOpen) {
+      setWorkspaceSettingsOpen(false);
+    }
+  }, [activeView, workspaceSettingsOpen]);
 
   const extractErrorFromResponse = async (
     response: Response,
@@ -1619,6 +1634,64 @@ export default function App() {
       );
   };
 
+  const applySessionPayload = (
+    payload: unknown,
+    options: SessionPayloadApplyOptions,
+  ): { decision: UiDecision | null } => {
+    const body = payload as {
+      messages?: unknown;
+      decision?: unknown;
+      output?: unknown;
+      files?: unknown;
+      artifacts?: unknown;
+      selected_model?: unknown;
+      display?: unknown;
+    };
+
+    if (body.messages !== undefined) {
+      setMessages(parseMessages(body.messages));
+    }
+
+    const parsedDecision = parseUiDecision(body.decision);
+    if (body.decision !== undefined) {
+      setPendingDecision(parsedDecision);
+      setDecisionError(null);
+    }
+
+    if (body.output !== undefined) {
+      const parsedOutput = parseSessionOutput(body.output);
+      setSessionOutput(parsedOutput.content);
+    }
+
+    if (body.files !== undefined) {
+      setSessionFiles(parseSessionFiles(body.files));
+    }
+
+    if (body.artifacts !== undefined) {
+      setSessionArtifacts(parseSessionArtifacts(body.artifacts));
+    }
+
+    const parsedModel = parseSelectedModel(body.selected_model);
+    if (parsedModel) {
+      setSelectedModel(parsedModel);
+      saveLastModel(parsedModel);
+    }
+
+    if (options.applyDisplay) {
+      const displayDecision = parseDisplayDecision(body.display);
+      if (displayDecision?.target === 'canvas') {
+        setArtifactPanelOpen(true);
+        if (displayDecision.artifactId) {
+          setArtifactViewerArtifactId(`output-${displayDecision.artifactId}`);
+        }
+      } else {
+        setArtifactViewerArtifactId(null);
+      }
+    }
+
+    return { decision: parsedDecision };
+  };
+
   const handleSend = async (payload: CanvasSendPayload): Promise<boolean> => {
     if (!selectedConversation || sending) {
       return false;
@@ -1667,28 +1740,7 @@ export default function App() {
       setPendingUserMessage(null);
       setPendingSessionId(null);
       setChatStreamingState(null);
-      setMessages(parseMessages((payload as { messages?: unknown }).messages));
-      setPendingDecision(parseUiDecision((payload as { decision?: unknown }).decision));
-      setDecisionError(null);
-      const parsedOutput = parseSessionOutput((payload as { output?: unknown }).output);
-      setSessionOutput(parsedOutput.content);
-      const parsedFiles = parseSessionFiles((payload as { files?: unknown }).files);
-      setSessionFiles(parsedFiles);
-      setSessionArtifacts(parseSessionArtifacts((payload as { artifacts?: unknown }).artifacts));
-      const displayDecision = parseDisplayDecision((payload as { display?: unknown }).display);
-      if (displayDecision?.target === 'canvas') {
-        setArtifactPanelOpen(true);
-        if (displayDecision.artifactId) {
-          setArtifactViewerArtifactId(`output-${displayDecision.artifactId}`);
-        }
-      } else {
-        setArtifactViewerArtifactId(null);
-      }
-      const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
-      if (parsedModel) {
-        setSelectedModel(parsedModel);
-        saveLastModel(parsedModel);
-      }
+      applySessionPayload(payload, { applyDisplay: true });
       await loadSessions();
       setStatusMessage(null);
       return true;
@@ -1854,6 +1906,63 @@ export default function App() {
     }
   };
 
+  const handleWorkspaceGithubImport = async (
+    repoUrl: string,
+    branch?: string,
+  ): Promise<WorkspaceGithubImportResult> => {
+    if (!selectedConversation) {
+      throw new Error('No active session. Create chat first.');
+    }
+    const normalizedRepoUrl = repoUrl.trim();
+    if (!normalizedRepoUrl) {
+      throw new Error('Repository URL is required.');
+    }
+    const normalizedBranch = (branch ?? '').trim();
+    const args = normalizedBranch
+      ? `${normalizedRepoUrl} --branch ${normalizedBranch}`
+      : normalizedRepoUrl;
+
+    const response = await fetch('/ui/api/project/command', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [SESSION_HEADER]: selectedConversation,
+      },
+      body: JSON.stringify({
+        command: 'github_import',
+        args,
+      }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to run GitHub import.'));
+    }
+
+    const headerSession = response.headers.get(SESSION_HEADER);
+    const payloadSession = extractSessionIdFromPayload(payload);
+    const nextSession =
+      (headerSession && headerSession.trim()) || payloadSession || selectedConversation;
+    if (nextSession !== selectedConversation) {
+      setSelectedConversation(nextSession);
+    }
+    saveLastSessionId(nextSession);
+
+    const { decision } = applySessionPayload(payload, { applyDisplay: false });
+    await loadSessions();
+    const pending = decision?.status === 'pending' && decision.blocking === true;
+    if (pending) {
+      return {
+        status: 'pending',
+        message: 'Действие ожидает подтверждения в DecisionPanel (AI Assistant).',
+      };
+    }
+    setWorkspaceRefreshToken((value) => value + 1);
+    return {
+      status: 'done',
+      message: 'GitHub import completed.',
+    };
+  };
+
   const handleDecisionRespond = async (
     choice: 'approve' | 'reject' | 'edit',
     editedAction?: Record<string, unknown> | null,
@@ -1881,34 +1990,12 @@ export default function App() {
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to resolve decision.'));
       }
-      const parsedDecision = parseUiDecision((payload as { decision?: unknown }).decision);
-      setPendingDecision(parsedDecision);
-      const maybeMessages = (payload as { messages?: unknown }).messages;
-      if (Array.isArray(maybeMessages)) {
-        setMessages(parseMessages(maybeMessages));
-      }
-      const maybeOutput = (payload as { output?: unknown }).output;
-      if (maybeOutput !== undefined) {
-        const parsedOutput = parseSessionOutput(maybeOutput);
-        setSessionOutput(parsedOutput.content);
-      }
-      const maybeFiles = (payload as { files?: unknown }).files;
-      if (maybeFiles !== undefined) {
-        setSessionFiles(parseSessionFiles(maybeFiles));
-      }
-      const maybeArtifacts = (payload as { artifacts?: unknown }).artifacts;
-      if (maybeArtifacts !== undefined) {
-        setSessionArtifacts(parseSessionArtifacts(maybeArtifacts));
-      }
-      const parsedModel = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
-      if (parsedModel) {
-        setSelectedModel(parsedModel);
-        saveLastModel(parsedModel);
-      }
+      applySessionPayload(payload, { applyDisplay: false });
       const resumeRaw = (payload as { resume?: unknown }).resume;
       if (resumeRaw && typeof resumeRaw === 'object') {
         const resume = resumeRaw as {
           ok?: unknown;
+          data?: unknown;
           source_endpoint?: unknown;
           tool_name?: unknown;
           error?: unknown;
@@ -1922,6 +2009,32 @@ export default function App() {
               typeof resume.error === 'string' && resume.error.trim()
                 ? resume.error
                 : `Workspace: ${toolName} failed.`;
+            setStatusMessage(errorText);
+          }
+        } else if (resume.source_endpoint === 'project.command') {
+          const toolName = typeof resume.tool_name === 'string' ? resume.tool_name : 'project';
+          const data = resume.data && typeof resume.data === 'object'
+            ? (resume.data as { command?: unknown; output?: unknown })
+            : null;
+          const command = data && typeof data.command === 'string' ? data.command : null;
+          if (resume.ok === true) {
+            if (command === 'github_import') {
+              setWorkspaceRefreshToken((value) => value + 1);
+            }
+            const outputPreview =
+              data && typeof data.output === 'string' && data.output.trim()
+                ? data.output.trim()
+                : null;
+            setStatusMessage(
+              outputPreview
+                ? outputPreview
+                : `Project command (${toolName}) completed.`,
+            );
+          } else {
+            const errorText =
+              typeof resume.error === 'string' && resume.error.trim()
+                ? resume.error
+                : `Project command (${toolName}) failed.`;
             setStatusMessage(errorText);
           }
         } else {
@@ -1980,8 +2093,11 @@ export default function App() {
             messages={workspaceMessages}
             sending={sending}
             statusMessage={statusMessage}
-            onBackToChat={() => setView('chat')}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onBackToChat={() => {
+              setWorkspaceSettingsOpen(false);
+              setView('chat');
+            }}
+            onOpenWorkspaceSettings={() => setWorkspaceSettingsOpen(true)}
             onSendAgentMessage={(payload) => handleSend(payload)}
             decision={pendingDecision}
             decisionBusy={decisionBusy}
@@ -1989,6 +2105,7 @@ export default function App() {
             onDecisionRespond={(choice, editedAction) => {
               void handleDecisionRespond(choice, editedAction);
             }}
+            refreshToken={workspaceRefreshToken}
           />
         ) : (
           <>
@@ -2072,6 +2189,13 @@ export default function App() {
           setView('chat');
           void handleCreateConversation();
         }}
+      />
+
+      <WorkspaceSettingsModal
+        isOpen={workspaceSettingsOpen}
+        onClose={() => setWorkspaceSettingsOpen(false)}
+        pendingDecision={pendingDecision}
+        onRunGithubImport={(repoUrl, branch) => handleWorkspaceGithubImport(repoUrl, branch)}
       />
 
       <Settings

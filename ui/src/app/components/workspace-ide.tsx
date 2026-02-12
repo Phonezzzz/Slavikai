@@ -53,7 +53,7 @@ type WorkspaceIdeProps = {
   sending: boolean;
   statusMessage?: string | null;
   onBackToChat: () => void;
-  onOpenSettings: () => void;
+  onOpenWorkspaceSettings: () => void;
   onSendAgentMessage: (payload: CanvasSendPayload) => Promise<boolean>;
   decision?: UiDecision | null;
   decisionBusy?: boolean;
@@ -62,6 +62,7 @@ type WorkspaceIdeProps = {
     choice: 'approve' | 'reject' | 'edit',
     editedAction?: Record<string, unknown> | null,
   ) => Promise<void> | void;
+  refreshToken?: number;
 };
 
 type ApiErrorPayload = {
@@ -249,12 +250,13 @@ export function WorkspaceIde({
   sending,
   statusMessage,
   onBackToChat,
-  onOpenSettings,
+  onOpenWorkspaceSettings,
   onSendAgentMessage,
   decision,
   decisionBusy = false,
   decisionError = null,
   onDecisionRespond,
+  refreshToken = 0,
 }: WorkspaceIdeProps) {
   const [tree, setTree] = useState<WorkspaceNode[]>([]);
   const [treeLoading, setTreeLoading] = useState(false);
@@ -536,7 +538,7 @@ export function WorkspaceIde({
     void loadWorkspaceRoot();
     void loadTree();
     void loadGitDiff();
-  }, [sessionId]);
+  }, [refreshToken, sessionId]);
 
   const readFileContent = async (path: string): Promise<string | null> => {
     const response = await fetch(`/ui/api/workspace/file?path=${encodeURIComponent(path)}`, {
@@ -1028,7 +1030,7 @@ export function WorkspaceIde({
             <RefreshCcw className="h-3.5 w-3.5" />
           </button>
           <button
-            onClick={onOpenSettings}
+            onClick={onOpenWorkspaceSettings}
             className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2 py-1 text-[12px] text-[#bdbdc6] hover:bg-[#181820]"
           >
             <Settings className="h-3.5 w-3.5" />
