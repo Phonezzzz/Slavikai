@@ -23,7 +23,9 @@ def _utc_iso_now() -> str:
 SessionStatus = Literal["ok", "busy", "error"]
 PolicyProfile = Literal["sandbox", "index", "yolo"]
 SessionMode = Literal["ask", "plan", "act"]
+SessionAccess = Literal["owned", "forbidden", "missing"]
 _UNSET: object = object()
+DEFAULT_LEGACY_PRINCIPAL_ID = "legacy"
 
 
 class SessionListItem(TypedDict):
@@ -163,6 +165,7 @@ def _normalize_message_payload(message: dict[str, JSONValue]) -> dict[str, JSONV
 
 @dataclass
 class _SessionState:
+    principal_id: str = DEFAULT_LEGACY_PRINCIPAL_ID
     messages: list[dict[str, JSONValue]] = field(default_factory=list)
     output_text: str | None = None
     output_updated_at: str | None = None
@@ -213,25 +216,42 @@ class UIHub:
         self._restore_sessions()
         self._restore_folders()
 
-    async def get_or_create_session(self, session_id: str | None) -> str:
+    async def get_or_create_session(self, session_id: str | None, principal_id: str) -> str:
         normalized = session_id.strip() if session_id else ""
+        normalized_principal = self._normalize_principal_id(principal_id)
         async with self._lock:
             self._prune_sessions_locked(keep_session_id=normalized if normalized else None)
             if normalized:
-                if normalized not in self._sessions:
-                    self._sessions[normalized] = _SessionState()
+                state = self._sessions.get(normalized)
+                if state is None:
+                    self._sessions[normalized] = _SessionState(principal_id=normalized_principal)
                     self._persist_session_locked(normalized)
+                elif state.principal_id != normalized_principal:
+                    raise PermissionError("session belongs to another principal")
                 return normalized
             new_id = uuid.uuid4().hex
             while new_id in self._sessions:
                 new_id = uuid.uuid4().hex
-            self._sessions[new_id] = _SessionState()
+            self._sessions[new_id] = _SessionState(principal_id=normalized_principal)
             self._persist_session_locked(new_id)
             self._prune_sessions_locked(keep_session_id=new_id)
             return new_id
 
-    async def create_session(self) -> str:
-        return await self.get_or_create_session(None)
+    async def create_session(self, principal_id: str) -> str:
+        return await self.get_or_create_session(None, principal_id)
+
+    async def get_session_access(self, session_id: str, principal_id: str) -> SessionAccess:
+        normalized_session = session_id.strip()
+        normalized_principal = self._normalize_principal_id(principal_id)
+        if not normalized_session:
+            return "missing"
+        async with self._lock:
+            state = self._sessions.get(normalized_session)
+            if state is None:
+                return "missing"
+            if state.principal_id != normalized_principal:
+                return "forbidden"
+            return "owned"
 
     async def delete_session(self, session_id: str) -> bool:
         normalized = session_id.strip()
@@ -345,11 +365,14 @@ class UIHub:
             self._prune_sessions_locked(keep_session_id=session_id)
             return dict(artifact)
 
-    async def list_sessions(self) -> list[SessionListItem]:
+    async def list_sessions(self, principal_id: str) -> list[SessionListItem]:
+        normalized_principal = self._normalize_principal_id(principal_id)
         async with self._lock:
             self._prune_sessions_locked()
             items: list[_SessionListSortableItem] = []
             for session_id, state in self._sessions.items():
+                if state.principal_id != normalized_principal:
+                    continue
                 title = state.title_override or self._build_session_title(state.messages)
                 items.append(
                     {
@@ -463,14 +486,18 @@ class UIHub:
             self._prune_sessions_locked(keep_session_id=session_id)
             return {"session_id": session_id, "folder_id": normalized_folder}
 
-    async def export_sessions(self) -> list[PersistedSession]:
+    async def export_sessions(self, principal_id: str) -> list[PersistedSession]:
+        normalized_principal = self._normalize_principal_id(principal_id)
         async with self._lock:
             self._prune_sessions_locked()
             items: list[PersistedSession] = []
             for session_id, state in self._sessions.items():
+                if state.principal_id != normalized_principal:
+                    continue
                 items.append(
                     PersistedSession(
                         session_id=session_id,
+                        principal_id=state.principal_id,
                         created_at=state.created_at,
                         updated_at=state.updated_at,
                         status=self._normalize_status(state.status_state),
@@ -511,11 +538,19 @@ class UIHub:
         self,
         sessions: list[PersistedSession],
         *,
+        principal_id: str,
         mode: Literal["replace", "merge"] = "replace",
     ) -> int:
+        normalized_principal = self._normalize_principal_id(principal_id)
         async with self._lock:
             if mode == "replace":
-                self._drop_sessions_locked(list(self._sessions.keys()))
+                self._drop_sessions_locked(
+                    [
+                        session_id
+                        for session_id, state in self._sessions.items()
+                        if state.principal_id == normalized_principal
+                    ]
+                )
             imported = 0
             for item in sessions:
                 decision = dict(item.decision) if item.decision is not None else None
@@ -527,8 +562,11 @@ class UIHub:
                 restored_updated_at = _utc_iso_now()
                 created_at = item.created_at or restored_updated_at
                 existing = self._sessions.get(item.session_id)
+                if existing is not None and existing.principal_id != normalized_principal:
+                    continue
                 subscribers = set(existing.subscribers) if existing is not None else set()
                 self._sessions[item.session_id] = _SessionState(
+                    principal_id=normalized_principal,
                     messages=[dict(message) for message in item.messages],
                     output_text=item.output_text,
                     output_updated_at=item.output_updated_at,
@@ -994,6 +1032,10 @@ class UIHub:
             return "yolo"
         return "sandbox"
 
+    def _normalize_principal_id(self, value: str | None) -> str:
+        normalized = value.strip() if isinstance(value, str) else ""
+        return normalized or DEFAULT_LEGACY_PRINCIPAL_ID
+
     def _normalize_mode(self, value: str | None) -> SessionMode:
         normalized = value.strip().lower() if isinstance(value, str) else ""
         if normalized == "plan":
@@ -1035,6 +1077,7 @@ class UIHub:
                 if isinstance(decision_id, str):
                     last_decision_id = decision_id
             self._sessions[item.session_id] = _SessionState(
+                principal_id=self._normalize_principal_id(item.principal_id),
                 messages=[dict(message) for message in item.messages],
                 output_text=item.output_text,
                 output_updated_at=item.output_updated_at,
@@ -1073,6 +1116,7 @@ class UIHub:
         self._storage.save_session(
             PersistedSession(
                 session_id=session_id,
+                principal_id=state.principal_id,
                 created_at=state.created_at,
                 updated_at=state.updated_at,
                 status=state.status_state,

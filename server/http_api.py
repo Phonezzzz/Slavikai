@@ -503,19 +503,29 @@ def _is_auth_protected_path(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in AUTH_PROTECTED_PREFIXES)
 
 
-def _is_request_authorized(request: web.Request, auth_config: HttpAuthConfig) -> bool:
+def _principal_id_from_token(token: str) -> str:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"principal_{digest[:16]}"
+
+
+def _resolve_request_principal_id(
+    request: web.Request,
+    auth_config: HttpAuthConfig,
+) -> str | None:
     if auth_config.allow_unauth_local:
-        return True
+        return "local_unauth"
     presented_token = _extract_bearer_token(request)
     if presented_token is None:
-        return False
+        return None
     candidate_tokens: list[str] = []
     if auth_config.api_token:
         candidate_tokens.append(auth_config.api_token)
     admin_token = os.environ.get("SLAVIK_ADMIN_TOKEN", "").strip()
     if admin_token:
         candidate_tokens.append(admin_token)
-    return any(hmac.compare_digest(presented_token, token) for token in candidate_tokens)
+    if any(hmac.compare_digest(presented_token, token) for token in candidate_tokens):
+        return _principal_id_from_token(presented_token)
+    return None
 
 
 @web.middleware
@@ -526,7 +536,9 @@ async def auth_gate_middleware(
     if not _is_auth_protected_path(request.path):
         return await handler(request)
     auth_config: HttpAuthConfig = request.app["auth_config"]
-    if _is_request_authorized(request, auth_config):
+    principal_id = _resolve_request_principal_id(request, auth_config)
+    if principal_id is not None:
+        request["principal_id"] = principal_id
         return await handler(request)
     return _error_response(
         status=401,
@@ -534,6 +546,74 @@ async def auth_gate_middleware(
         error_type="invalid_request_error",
         code="unauthorized",
     )
+
+
+def _request_principal_id(request: web.Request) -> str | None:
+    principal_raw = request.get("principal_id")
+    if not isinstance(principal_raw, str):
+        return None
+    normalized = principal_raw.strip()
+    return normalized or None
+
+
+def _session_forbidden_response() -> web.Response:
+    return _error_response(
+        status=403,
+        message="Session access forbidden.",
+        error_type="invalid_request_error",
+        code="session_forbidden",
+    )
+
+
+async def _resolve_ui_session_id_for_principal(
+    request: web.Request,
+    hub: UIHub,
+) -> tuple[str | None, web.Response | None]:
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return (
+            None,
+            _error_response(
+                status=401,
+                message="Unauthorized.",
+                error_type="invalid_request_error",
+                code="unauthorized",
+            ),
+        )
+    try:
+        session_id = await hub.get_or_create_session(
+            _extract_ui_session_id(request),
+            principal_id=principal_id,
+        )
+    except PermissionError:
+        return None, _session_forbidden_response()
+    return session_id, None
+
+
+async def _ensure_session_owned(
+    request: web.Request,
+    hub: UIHub,
+    session_id: str,
+) -> web.Response | None:
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return _error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
+    access = await hub.get_session_access(session_id, principal_id)
+    if access == "owned":
+        return None
+    if access == "missing":
+        return _error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    return _session_forbidden_response()
 
 
 def _normalize_provider(raw_provider: str) -> str | None:
@@ -2633,7 +2713,7 @@ def _parse_imported_message(raw: object) -> dict[str, JSONValue] | None:
     }
 
 
-def _parse_imported_session(raw: object) -> PersistedSession | None:
+def _parse_imported_session(raw: object, *, principal_id: str) -> PersistedSession | None:
     if not isinstance(raw, dict):
         return None
     session_id_raw = raw.get("session_id")
@@ -2659,6 +2739,7 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
         messages.append(parsed_message)
     return PersistedSession(
         session_id=session_id,
+        principal_id=principal_id,
         created_at=created_at,
         updated_at=updated_at,
         status="ok",
@@ -2877,7 +2958,11 @@ async def handle_workspace_index(request: web.Request) -> web.FileResponse:
 
 async def handle_ui_workspace_root_get(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     root_path = await _workspace_root_for_session(hub, session_id)
     policy = await hub.get_session_policy(session_id)
     response = _json_response(
@@ -2894,7 +2979,11 @@ async def handle_ui_workspace_root_get(request: web.Request) -> web.Response:
 async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_store: SessionApprovalStore = request.app["session_store"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -3009,7 +3098,11 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
 
 async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     root_path = await _workspace_root_for_session(hub, session_id)
     stats = _index_workspace_root(root_path)
     response = _json_response(
@@ -3025,7 +3118,11 @@ async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
 
 async def handle_ui_workspace_git_diff(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     root_path = await _workspace_root_for_session(hub, session_id)
     diff, error = _workspace_git_diff(root_path)
     response = _json_response(
@@ -3043,13 +3140,17 @@ async def handle_ui_workspace_git_diff(request: web.Request) -> web.Response:
 
 async def _resolve_workspace_session(
     request: web.Request,
-) -> tuple[AgentProtocol | None, str, set[ApprovalCategory]]:
+) -> tuple[AgentProtocol | None, str | None, set[ApprovalCategory], web.Response | None]:
     hub: UIHub = request.app["ui_hub"]
     session_store: SessionApprovalStore = request.app["session_store"]
     agent = await _resolve_agent(request)
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return agent, None, set(), session_error
+    if session_id is None:
+        return agent, None, set(), _session_forbidden_response()
     approved_categories = await session_store.get_categories(session_id)
-    return agent, session_id, approved_categories
+    return agent, session_id, approved_categories, None
 
 
 async def _workspace_root_for_session(hub: UIHub, session_id: str) -> Path:
@@ -3470,9 +3571,15 @@ async def _call_workspace_tool(
 async def handle_ui_workspace_tree(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     try:
-        agent, session_id, approved_categories = await _resolve_workspace_session(request)
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
     except ModelNotAllowedError as exc:
         return _model_not_allowed_response(exc.model_id)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     if agent is None:
         return _model_not_selected_response()
     tool_result_or_error = await _call_workspace_tool(
@@ -3504,9 +3611,15 @@ async def handle_ui_workspace_tree(request: web.Request) -> web.Response:
 async def handle_ui_workspace_file_get(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     try:
-        agent, session_id, approved_categories = await _resolve_workspace_session(request)
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
     except ModelNotAllowedError as exc:
         return _model_not_allowed_response(exc.model_id)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     if agent is None:
         return _model_not_selected_response()
     path_raw = request.query.get("path", "")
@@ -3555,9 +3668,15 @@ async def handle_ui_workspace_file_get(request: web.Request) -> web.Response:
 async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     try:
-        agent, session_id, approved_categories = await _resolve_workspace_session(request)
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
     except ModelNotAllowedError as exc:
         return _model_not_allowed_response(exc.model_id)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     if agent is None:
         return _model_not_selected_response()
     try:
@@ -3627,9 +3746,15 @@ async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
 async def handle_ui_workspace_run(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     try:
-        agent, session_id, approved_categories = await _resolve_workspace_session(request)
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
     except ModelNotAllowedError as exc:
         return _model_not_allowed_response(exc.model_id)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     if agent is None:
         return _model_not_selected_response()
     try:
@@ -3698,7 +3823,11 @@ async def handle_ui_workspace_run(request: web.Request) -> web.Response:
 
 async def handle_ui_status(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     workspace_root = await _workspace_root_for_session(hub, session_id)
     policy = await hub.get_session_policy(session_id)
     workflow = await hub.get_session_workflow(session_id)
@@ -3726,7 +3855,11 @@ async def handle_ui_status(request: web.Request) -> web.Response:
 
 async def handle_ui_state(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     workflow = await hub.get_session_workflow(session_id)
     decision = _normalize_ui_decision(
         await hub.get_session_decision(session_id),
@@ -3763,7 +3896,11 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_json",
         )
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     mode_raw = payload.get("mode")
     if not isinstance(mode_raw, str) or mode_raw.strip().lower() not in SESSION_MODES:
         return _error_response(
@@ -3823,7 +3960,11 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
 
 async def handle_ui_plan_draft(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     workflow = await hub.get_session_workflow(session_id)
     mode = _normalize_mode_value(workflow.get("mode"), default="ask")
     if mode != "plan":
@@ -3891,7 +4032,11 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
 
 async def handle_ui_plan_approve(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     workflow = await hub.get_session_workflow(session_id)
     mode = _normalize_mode_value(workflow.get("mode"), default="ask")
     if mode != "plan":
@@ -3934,7 +4079,11 @@ async def handle_ui_plan_approve(request: web.Request) -> web.Response:
 
 async def handle_ui_plan_execute(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     workflow = await hub.get_session_workflow(session_id)
     plan = _normalize_plan_payload(workflow.get("active_plan"))
     if plan is None:
@@ -4015,7 +4164,11 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
 
 async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     workflow = await hub.get_session_workflow(session_id)
     plan = _normalize_plan_payload(workflow.get("active_plan"))
     task = _normalize_task_payload(workflow.get("active_task"))
@@ -4402,7 +4555,11 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
     session_hint = _extract_ui_session_id(request)
     if session_hint and (next_policy_profile is not None or next_yolo_armed is not None):
         hub: UIHub = request.app["ui_hub"]
-        session_id = await hub.get_or_create_session(session_hint)
+        session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+        if session_error is not None:
+            return session_error
+        if session_id is None:
+            return _session_forbidden_response()
         await hub.set_session_policy(
             session_id,
             profile=next_policy_profile,
@@ -4611,7 +4768,15 @@ async def handle_ui_stt_transcribe(request: web.Request) -> web.Response:
 
 async def handle_ui_chats_export(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    sessions = await hub.export_sessions()
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return _error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
+    sessions = await hub.export_sessions(principal_id)
     payload_sessions = [_serialize_persisted_session(item) for item in sessions]
     return _json_response(
         {
@@ -4624,6 +4789,14 @@ async def handle_ui_chats_export(request: web.Request) -> web.Response:
 
 async def handle_ui_chats_import(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return _error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -4664,7 +4837,7 @@ async def handle_ui_chats_import(request: web.Request) -> web.Response:
 
     sessions: list[PersistedSession] = []
     for index, item in enumerate(sessions_raw):
-        parsed = _parse_imported_session(item)
+        parsed = _parse_imported_session(item, principal_id=principal_id)
         if parsed is None:
             return _error_response(
                 status=400,
@@ -4673,7 +4846,7 @@ async def handle_ui_chats_import(request: web.Request) -> web.Response:
                 code="invalid_request_error",
             )
         sessions.append(parsed)
-    imported = await hub.import_sessions(sessions, mode=mode)
+    imported = await hub.import_sessions(sessions, principal_id=principal_id, mode=mode)
     return _json_response(
         {
             "imported": imported,
@@ -4768,7 +4941,9 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             code="model_not_found",
             details=details,
         )
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None or session_id is None:
+        return session_error or _session_forbidden_response()
     await hub.set_session_model(session_id, provider, model_raw)
     response = _json_response(
         {"session_id": session_id, "selected_model": {"provider": provider, "model": model_raw}}
@@ -4779,7 +4954,15 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
 
 async def handle_ui_sessions_list(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    sessions = await hub.list_sessions()
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return _error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
+    sessions = await hub.list_sessions(principal_id)
     serialized_sessions: list[dict[str, JSONValue]] = [
         {
             "session_id": item["session_id"],
@@ -4841,7 +5024,15 @@ async def handle_ui_folders_create(request: web.Request) -> web.Response:
 
 async def handle_ui_sessions_create(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.create_session()
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return _error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
+    session_id = await hub.create_session(principal_id)
     session = await hub.get_session(session_id)
     if session is None:
         return _error_response(
@@ -4865,6 +5056,9 @@ async def handle_ui_session_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     session = await hub.get_session(session_id)
     if session is None:
         return _error_response(
@@ -4890,6 +5084,9 @@ async def handle_ui_session_history_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     messages = await hub.get_session_history(session_id)
     if messages is None:
         return _error_response(
@@ -4911,6 +5108,9 @@ async def handle_ui_session_output_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     output = await hub.get_session_output(session_id)
     if output is None:
         return _error_response(
@@ -4932,6 +5132,9 @@ async def handle_ui_session_files_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     files = await hub.get_session_files(session_id)
     if files is None:
         return _error_response(
@@ -4953,6 +5156,9 @@ async def handle_ui_session_file_download(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     files = await hub.get_session_files(session_id)
     if files is None:
         return _error_response(
@@ -5014,6 +5220,9 @@ async def handle_ui_session_artifact_download(request: web.Request) -> web.Respo
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     artifacts = await hub.get_session_artifacts(session_id)
     if artifacts is None:
         return _error_response(
@@ -5063,6 +5272,9 @@ async def handle_ui_session_artifacts_download_all(request: web.Request) -> web.
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     artifacts = await hub.get_session_artifacts(session_id)
     if artifacts is None:
         return _error_response(
@@ -5127,6 +5339,9 @@ async def handle_ui_session_title_update(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -5180,6 +5395,9 @@ async def handle_ui_session_folder_update(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -5238,6 +5456,9 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
     deleted = await hub.delete_session(session_id)
     if not deleted:
         return _error_response(
@@ -5322,6 +5543,9 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     session_id = session_id_raw.strip()
     decision_id = decision_id_raw.strip()
     choice = choice_raw
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
 
     current_decision = _normalize_ui_decision(
         await hub.get_session_decision(session_id),
@@ -5508,7 +5732,15 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 code="payload_too_large",
             )
 
-        session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+        resolved_session_id, session_error = await _resolve_ui_session_id_for_principal(
+            request,
+            hub,
+        )
+        if session_error is not None:
+            return session_error
+        if resolved_session_id is None:
+            return _session_forbidden_response()
+        session_id = resolved_session_id
         selected_model = await hub.get_session_model(session_id)
         if selected_model is None:
             return _model_not_selected_response()
@@ -6103,7 +6335,15 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         if args_raw:
             user_command = f"{user_command} {args_raw}"
 
-        session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+        resolved_session_id, session_error = await _resolve_ui_session_id_for_principal(
+            request,
+            hub,
+        )
+        if session_error is not None:
+            return session_error
+        if resolved_session_id is None:
+            return _session_forbidden_response()
+        session_id = resolved_session_id
         selected_model = await hub.get_session_model(session_id)
         if selected_model is None:
             return _model_not_selected_response()
@@ -6635,7 +6875,11 @@ async def handle_ui_memory_conflicts_resolve(request: web.Request) -> web.Respon
 
 async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
     hub: UIHub = request.app["ui_hub"]
-    session_id = await hub.get_or_create_session(_extract_ui_session_id(request))
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
     queue = await hub.subscribe(session_id)
 
     response = web.StreamResponse(

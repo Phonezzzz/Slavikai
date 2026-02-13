@@ -3227,3 +3227,183 @@ def test_imported_forged_decision_cannot_trigger_tool_execution() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_session_ownership_enforced_for_stream_workspace_decision_delete_files_output_history(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "secondary-principal-token")
+
+    async def assert_forbidden(response) -> None:
+        assert response.status == 403
+        payload = await response.json()
+        error = payload.get("error")
+        assert isinstance(error, dict)
+        assert error.get("code") == "session_forbidden"
+
+    async def run() -> None:
+        app = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            session_id = "owner-session-pr3"
+            status_resp = await client.get(
+                "/ui/api/status",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert status_resp.status == 200
+            await _select_local_model(client, session_id)
+
+            foreign_headers = {
+                "Authorization": "Bearer secondary-principal-token",
+                "X-Slavik-Session": session_id,
+            }
+            foreign_payload = {
+                "Authorization": "Bearer secondary-principal-token",
+            }
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                headers=foreign_headers,
+            )
+            await assert_forbidden(stream_resp)
+
+            workspace_resp = await client.get(
+                "/ui/api/workspace/tree",
+                headers=foreign_headers,
+            )
+            await assert_forbidden(workspace_resp)
+
+            decision_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers=foreign_payload,
+                json={
+                    "session_id": session_id,
+                    "decision_id": "non-existent-decision",
+                    "choice": "reject",
+                },
+            )
+            await assert_forbidden(decision_resp)
+
+            delete_resp = await client.delete(
+                f"/ui/api/sessions/{session_id}",
+                headers=foreign_payload,
+            )
+            await assert_forbidden(delete_resp)
+
+            files_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/files",
+                headers=foreign_payload,
+            )
+            await assert_forbidden(files_resp)
+
+            download_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/files/download?path=main.py",
+                headers=foreign_payload,
+            )
+            await assert_forbidden(download_resp)
+
+            output_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/output",
+                headers=foreign_payload,
+            )
+            await assert_forbidden(output_resp)
+
+            history_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/history",
+                headers=foreign_payload,
+            )
+            await assert_forbidden(history_resp)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_foreign_session_returns_403_consistently(monkeypatch) -> None:
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "secondary-principal-token")
+
+    async def assert_forbidden(response) -> None:
+        assert response.status == 403
+        payload = await response.json()
+        error = payload.get("error")
+        assert isinstance(error, dict)
+        assert error.get("code") == "session_forbidden"
+
+    async def run() -> None:
+        app = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            session_id = "owner-session-pr3-consistency"
+            status_resp = await client.get(
+                "/ui/api/status",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert status_resp.status == 200
+            model_id = await _select_local_model(client, session_id)
+
+            foreign_headers = {
+                "Authorization": "Bearer secondary-principal-token",
+                "X-Slavik-Session": session_id,
+            }
+            foreign_payload = {
+                "Authorization": "Bearer secondary-principal-token",
+            }
+
+            session_get_resp = await client.get(
+                f"/ui/api/sessions/{session_id}",
+                headers=foreign_payload,
+            )
+            await assert_forbidden(session_get_resp)
+
+            title_resp = await client.patch(
+                f"/ui/api/sessions/{session_id}/title",
+                headers=foreign_payload,
+                json={"title": "hijacked"},
+            )
+            await assert_forbidden(title_resp)
+
+            folder_resp = await client.put(
+                f"/ui/api/sessions/{session_id}/folder",
+                headers=foreign_payload,
+                json={"folder_id": None},
+            )
+            await assert_forbidden(folder_resp)
+
+            session_model_resp = await client.post(
+                "/ui/api/session-model",
+                headers=foreign_headers,
+                json={"provider": "local", "model": model_id},
+            )
+            await assert_forbidden(session_model_resp)
+
+            chat_resp = await client.post(
+                "/ui/api/chat/send",
+                headers=foreign_headers,
+                json={"content": "foreign request"},
+            )
+            await assert_forbidden(chat_resp)
+
+            project_resp = await client.post(
+                "/ui/api/tools/project",
+                headers=foreign_headers,
+                json={"command": "find", "args": "README.md"},
+            )
+            await assert_forbidden(project_resp)
+        finally:
+            await client.close()
+
+    asyncio.run(run())

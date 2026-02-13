@@ -19,6 +19,7 @@ class PersistedSession:
     status: str
     decision: dict[str, JSONValue] | None
     messages: list[dict[str, JSONValue]]
+    principal_id: str | None = None
     model_provider: str | None = None
     model_id: str | None = None
     title_override: str | None = None
@@ -88,6 +89,7 @@ class InMemoryUISessionStorage:
         messages = [dict(item) for item in session.messages]
         return PersistedSession(
             session_id=session.session_id,
+            principal_id=session.principal_id,
             created_at=session.created_at,
             updated_at=session.updated_at,
             status=session.status,
@@ -130,6 +132,7 @@ class SQLiteUISessionStorage:
             rows = conn.execute(
                 """
                 SELECT session_id, created_at, updated_at, status, decision_json
+                    , principal_id
                     , model_provider, model_id, title_override, folder_id
                     , output_text, output_updated_at, files_json, artifacts_json
                     , workspace_root, policy_profile, yolo_armed, yolo_armed_at
@@ -143,6 +146,7 @@ class SQLiteUISessionStorage:
                 sessions.append(
                     PersistedSession(
                         session_id=session_id,
+                        principal_id=_optional_str(row["principal_id"]),
                         created_at=str(row["created_at"]),
                         updated_at=str(row["updated_at"]),
                         status=str(row["status"]),
@@ -173,6 +177,7 @@ class SQLiteUISessionStorage:
                 """
                 INSERT INTO ui_sessions (
                     session_id,
+                    principal_id,
                     created_at,
                     updated_at,
                     status,
@@ -193,9 +198,10 @@ class SQLiteUISessionStorage:
                     active_plan_json,
                     active_task_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
+                    principal_id=excluded.principal_id,
                     created_at=excluded.created_at,
                     updated_at=excluded.updated_at,
                     status=excluded.status,
@@ -218,6 +224,7 @@ class SQLiteUISessionStorage:
                 """,
                 (
                     session.session_id,
+                    session.principal_id,
                     session.created_at,
                     session.updated_at,
                     session.status,
@@ -355,6 +362,7 @@ class SQLiteUISessionStorage:
                 """
                 CREATE TABLE IF NOT EXISTS ui_sessions (
                     session_id TEXT PRIMARY KEY,
+                    principal_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -506,6 +514,8 @@ class SQLiteUISessionStorage:
         }
         if "model_provider" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN model_provider TEXT")
+        if "principal_id" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN principal_id TEXT")
         if "model_id" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN model_id TEXT")
         if "title_override" not in existing:
