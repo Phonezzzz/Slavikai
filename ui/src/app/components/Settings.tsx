@@ -473,9 +473,18 @@ export function Settings({
   sessionId = null,
   sessionHeader = 'X-Slavik-Session',
 }: SettingsProps) {
+  const EMPTY_PROVIDER_DIRTY: Record<ApiKeyProvider, boolean> = {
+    xai: false,
+    openrouter: false,
+    local: false,
+    openai: false,
+  };
   const [activeTab, setActiveTab] = useState<SettingsTab>('api');
   const [selectedProvider, setSelectedProvider] = useState<ModelProvider>('local');
   const [apiKeys, setApiKeys] = useState<Record<ApiKeyProvider, string>>(DEFAULT_API_KEYS);
+  const [providerDirty, setProviderDirty] = useState<Record<ApiKeyProvider, boolean>>(
+    EMPTY_PROVIDER_DIRTY,
+  );
   const [toolsState, setToolsState] = useState<Record<ToolKey, boolean>>(DEFAULT_TOOLS_STATE);
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>(DEFAULT_POLICY_PROFILE);
   const [yoloArmed, setYoloArmed] = useState(false);
@@ -510,6 +519,7 @@ export function Settings({
   const applyParsedSettings = (parsed: ParsedSettings): void => {
     setProviders(parsed.providers);
     setApiKeys(parsed.apiKeys);
+    setProviderDirty(EMPTY_PROVIDER_DIRTY);
     setToolsState(parsed.toolsState);
     setPolicyProfile(parsed.policyProfile);
     setYoloArmed(parsed.yoloArmed);
@@ -594,13 +604,18 @@ export function Settings({
     setStatus(null);
     try {
       const providersPayload: Record<string, { api_key: string } | null> = {};
+      let hasProviderChanges = false;
       for (const provider of API_KEY_PROVIDERS) {
+        if (!providerDirty[provider]) {
+          continue;
+        }
         const key = apiKeys[provider].trim();
         if (key) {
           providersPayload[provider] = { api_key: key };
         } else {
           providersPayload[provider] = null;
         }
+        hasProviderChanges = true;
       }
 
       const payload: Record<string, unknown> = {
@@ -613,7 +628,9 @@ export function Settings({
           long_paste_threshold_chars: Math.max(1000, Math.min(80000, longPasteThresholdChars)),
         },
       };
-      payload.providers = providersPayload;
+      if (hasProviderChanges) {
+        payload.providers = providersPayload;
+      }
 
       const response = await fetch('/ui/api/settings', {
         method: 'POST',
@@ -920,9 +937,10 @@ export function Settings({
                           <input
                             type="password"
                             value={apiKeys[provider.provider]}
-                            onChange={(event) =>
-                              setApiKeys((prev) => ({ ...prev, [provider.provider]: event.target.value }))
-                            }
+                            onChange={(event) => {
+                              setApiKeys((prev) => ({ ...prev, [provider.provider]: event.target.value }));
+                              setProviderDirty((prev) => ({ ...prev, [provider.provider]: true }));
+                            }}
                             placeholder={providerPlaceholder(provider)}
                             className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
                           />
