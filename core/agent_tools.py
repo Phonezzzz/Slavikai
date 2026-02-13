@@ -101,6 +101,10 @@ class AgentToolsMixin:
     last_plan_summary: str | None
     last_execution_summary: str | None
     _pending_decision_packet: DecisionPacket | None
+    runtime_mode: str
+    runtime_active_plan: dict[str, JSONValue] | None
+    runtime_active_task: dict[str, JSONValue] | None
+    runtime_plan_guard_enabled: bool
 
     def _inc_metric(self, name: str) -> None:
         current = self._skill_metrics.get(name, 0) + 1
@@ -327,6 +331,19 @@ class AgentToolsMixin:
         self.session_id = session_id
         self.approved_categories = set(approved_categories)
 
+    def set_runtime_state(
+        self,
+        *,
+        mode: str,
+        active_plan: dict[str, JSONValue] | None,
+        active_task: dict[str, JSONValue] | None,
+        enforce_plan_guard: bool,
+    ) -> None:
+        self.runtime_mode = mode.strip().lower() if isinstance(mode, str) else "ask"
+        self.runtime_active_plan = dict(active_plan) if isinstance(active_plan, dict) else None
+        self.runtime_active_task = dict(active_task) if isinstance(active_task, dict) else None
+        self.runtime_plan_guard_enabled = bool(enforce_plan_guard)
+
     def _approval_context(self, *, safe_mode_override: bool | None = None) -> ApprovalContext:
         safe_mode = bool(self.tools_enabled.get("safe_mode", False))
         if safe_mode_override is not None:
@@ -345,6 +362,13 @@ class AgentToolsMixin:
         post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
         safe_mode_override: bool | None = None,
     ) -> ToolGateway:
+        self.tool_registry.set_execution_policy(
+            mode=getattr(self, "runtime_mode", "act"),
+            active_plan=getattr(self, "runtime_active_plan", None),
+            active_task=getattr(self, "runtime_active_task", None),
+            enforce_plan_guard=bool(getattr(self, "runtime_plan_guard_enabled", False)),
+        )
+
         def _post_call(request: ToolRequest, result: ToolResult, context: object | None) -> None:
             if post_call:
                 post_call(request, result, context)

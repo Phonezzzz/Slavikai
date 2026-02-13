@@ -204,6 +204,10 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         self.conversation_id = str(uuid.uuid4())
         self.session_id: str | None = None
         self.approved_categories: set[ApprovalCategory] = set()
+        self.runtime_mode = "act"
+        self.runtime_active_plan: dict[str, JSONValue] | None = None
+        self.runtime_active_task: dict[str, JSONValue] | None = None
+        self.runtime_plan_guard_enabled = False
         self.last_plan: TaskPlan | None = None
         self.last_plan_original: TaskPlan | None = None
         self.last_hints_used: list[str] = []
@@ -252,51 +256,68 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             "fs",
             FilesystemTool(),
             enabled=self.tools_enabled.get("fs", False),
+            capability="exec",
         )
         self.tool_registry.register(
             "web",
             self.web_tool.handle,
             enabled=self.tools_enabled.get("web", False),
+            capability="read",
         )
         self.tool_registry.register(
             "shell",
             ShellTool(),
             enabled=self.tools_enabled.get("shell", False),
+            capability="exec",
         )
         self.tool_registry.register(
             "project",
             ProjectTool(),
             enabled=self.tools_enabled.get("project", False),
+            capability="exec",
         )
         self.tool_registry.register(
             "image_analyze",
             ImageAnalyzeTool(),
             enabled=self.tools_enabled.get("image_analyze", False),
+            capability="read",
         )
         self.tool_registry.register(
             "image_generate",
             ImageGenerateTool(),
             enabled=self.tools_enabled.get("image_generate", False),
+            capability="exec",
         )
         http_client = HttpClient()
         self.tool_registry.register(
             "tts",
             TtsTool(http_client),
             enabled=self.tools_enabled.get("tts", False),
+            capability="exec",
         )
         self.tool_registry.register(
             "stt",
             SttTool(http_client),
             enabled=self.tools_enabled.get("stt", False),
+            capability="exec",
         )
-        self.tool_registry.register("workspace_list", ListFilesTool(), enabled=True)
-        self.tool_registry.register("workspace_read", ReadFileTool(), enabled=True)
-        self.tool_registry.register("workspace_write", WriteFileTool(), enabled=True)
-        self.tool_registry.register("workspace_patch", ApplyPatchTool(), enabled=True)
+        self.tool_registry.register(
+            "workspace_list", ListFilesTool(), enabled=True, capability="read"
+        )
+        self.tool_registry.register(
+            "workspace_read", ReadFileTool(), enabled=True, capability="read"
+        )
+        self.tool_registry.register(
+            "workspace_write", WriteFileTool(), enabled=True, capability="write"
+        )
+        self.tool_registry.register(
+            "workspace_patch", ApplyPatchTool(), enabled=True, capability="write"
+        )
         self.tool_registry.register(
             "workspace_run",
             RunCodeTool(),
             enabled=self.tools_enabled.get("workspace_run", True),
+            capability="exec",
         )
 
     def synthesize_speech(

@@ -589,6 +589,43 @@ async def _select_local_model(client: TestClient, session_id: str) -> str:
     return model_id
 
 
+async def _enter_act_mode(client: TestClient, session_id: str, *, goal: str = "test run") -> None:
+    to_plan = await client.post(
+        "/ui/api/mode",
+        headers={"X-Slavik-Session": session_id},
+        json={"mode": "plan"},
+    )
+    assert to_plan.status == 200
+
+    draft_resp = await client.post(
+        "/ui/api/plan/draft",
+        headers={"X-Slavik-Session": session_id},
+        json={"goal": goal},
+    )
+    assert draft_resp.status == 200
+    draft_payload = await draft_resp.json()
+    draft_plan = draft_payload.get("active_plan")
+    assert isinstance(draft_plan, dict)
+    plan_hash = draft_plan.get("plan_hash")
+    assert isinstance(plan_hash, str)
+    assert plan_hash
+
+    approve_resp = await client.post(
+        "/ui/api/plan/approve",
+        headers={"X-Slavik-Session": session_id},
+    )
+    assert approve_resp.status == 200
+
+    execute_resp = await client.post(
+        "/ui/api/plan/execute",
+        headers={"X-Slavik-Session": session_id},
+        json={"plan_hash": plan_hash},
+    )
+    assert execute_resp.status == 200
+    execute_payload = await execute_resp.json()
+    assert execute_payload.get("mode") == "act"
+
+
 def test_ui_status_endpoint() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -601,6 +638,154 @@ def test_ui_status_endpoint() -> None:
             assert isinstance(session_id, str)
             assert session_id
             assert resp.headers.get("X-Slavik-Session") == session_id
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_state_and_mode_transitions() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            state_resp = await client.get(
+                "/ui/api/state",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert state_resp.status == 200
+            state_payload = await state_resp.json()
+            assert state_payload.get("mode") == "ask"
+            assert state_payload.get("active_plan") is None
+            assert state_payload.get("active_task") is None
+
+            to_plan = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "plan"},
+            )
+            assert to_plan.status == 200
+            to_plan_payload = await to_plan.json()
+            assert to_plan_payload.get("mode") == "plan"
+
+            to_act = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "act", "confirm": True},
+            )
+            assert to_act.status == 409
+            error_payload = await to_act.json()
+            error = error_payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "plan_not_approved"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_plan_lifecycle_endpoints() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            mode_resp = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "plan"},
+            )
+            assert mode_resp.status == 200
+
+            draft_resp = await client.post(
+                "/ui/api/plan/draft",
+                headers={"X-Slavik-Session": session_id},
+                json={"goal": "Добавить Ask/Plan/Act"},
+            )
+            assert draft_resp.status == 200
+            draft_payload = await draft_resp.json()
+            plan_raw = draft_payload.get("active_plan")
+            assert isinstance(plan_raw, dict)
+            assert plan_raw.get("status") == "draft"
+            plan_hash = plan_raw.get("plan_hash")
+            assert isinstance(plan_hash, str)
+            assert plan_hash
+
+            approve_resp = await client.post(
+                "/ui/api/plan/approve",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert approve_resp.status == 200
+            approve_payload = await approve_resp.json()
+            approved_plan = approve_payload.get("active_plan")
+            assert isinstance(approved_plan, dict)
+            assert approved_plan.get("status") == "approved"
+
+            execute_resp = await client.post(
+                "/ui/api/plan/execute",
+                headers={"X-Slavik-Session": session_id},
+                json={"plan_hash": plan_hash},
+            )
+            assert execute_resp.status == 200
+            execute_payload = await execute_resp.json()
+            assert execute_payload.get("mode") == "act"
+            task_raw = execute_payload.get("active_task")
+            assert isinstance(task_raw, dict)
+            assert task_raw.get("status") == "running"
+
+            # runner skeleton доходит до completed асинхронно
+            completed = False
+            for _ in range(20):
+                await asyncio.sleep(0.02)
+                state_resp = await client.get(
+                    "/ui/api/state",
+                    headers={"X-Slavik-Session": session_id},
+                )
+                assert state_resp.status == 200
+                state_payload = await state_resp.json()
+                next_task = state_payload.get("active_task")
+                if isinstance(next_task, dict) and next_task.get("status") == "completed":
+                    completed = True
+                    break
+            assert completed is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_ask_mode_blocks_action_intent() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "/sh ls"},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            content = last.get("content")
+            assert isinstance(content, str)
+            assert "ASK_MODE_NO_ACTIONS" in content
         finally:
             await client.close()
 
@@ -1123,6 +1308,7 @@ def test_ui_project_tool_endpoint() -> None:
             assert isinstance(session_id, str)
             assert session_id
             await _select_local_model(client, session_id)
+            await _enter_act_mode(client, session_id, goal="project find command")
 
             response = await client.post(
                 "/ui/api/tools/project",
@@ -1157,6 +1343,7 @@ def test_ui_project_tool_endpoint_rejects_unknown_command() -> None:
             assert isinstance(session_id, str)
             assert session_id
             await _select_local_model(client, session_id)
+            await _enter_act_mode(client, session_id, goal="project import requires approval")
 
             response = await client.post(
                 "/ui/api/tools/project",
@@ -1184,6 +1371,7 @@ def test_ui_project_github_import_requires_approval() -> None:
             assert isinstance(session_id, str)
             assert session_id
             await _select_local_model(client, session_id)
+            await _enter_act_mode(client, session_id, goal="project import requires approval")
 
             response = await client.post(
                 "/ui/api/tools/project",
@@ -1232,6 +1420,7 @@ def test_ui_project_github_import_runs_after_approval(monkeypatch, tmp_path) -> 
             assert isinstance(session_id, str)
             assert session_id
             await _select_local_model(client, session_id)
+            await _enter_act_mode(client, session_id, goal="project import after approval")
 
             approve_resp = await client.post(
                 "/slavik/approve-session",
@@ -2409,6 +2598,7 @@ def test_settings_update_applies_tools_live(monkeypatch, tmp_path) -> None:
             assert isinstance(session_id, str)
             assert session_id
             await _select_local_model(client, session_id)
+            await _enter_act_mode(client, session_id, goal="live web tool settings")
 
             disabled_resp = await client.post(
                 "/ui/api/chat/send",

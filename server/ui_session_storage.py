@@ -31,6 +31,9 @@ class PersistedSession:
     policy_profile: str | None = None
     yolo_armed: bool = False
     yolo_armed_at: str | None = None
+    mode: str = "ask"
+    active_plan: dict[str, JSONValue] | None = None
+    active_task: dict[str, JSONValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,9 @@ class InMemoryUISessionStorage:
             policy_profile=session.policy_profile,
             yolo_armed=session.yolo_armed,
             yolo_armed_at=session.yolo_armed_at,
+            mode=session.mode,
+            active_plan=(dict(session.active_plan) if session.active_plan is not None else None),
+            active_task=(dict(session.active_task) if session.active_task is not None else None),
         )
 
     def _clone_folder(self, folder: PersistedFolder) -> PersistedFolder:
@@ -127,6 +133,7 @@ class SQLiteUISessionStorage:
                     , model_provider, model_id, title_override, folder_id
                     , output_text, output_updated_at, files_json, artifacts_json
                     , workspace_root, policy_profile, yolo_armed, yolo_armed_at
+                    , mode, active_plan_json, active_task_json
                 FROM ui_sessions
                 """,
             ).fetchall()
@@ -153,6 +160,9 @@ class SQLiteUISessionStorage:
                         policy_profile=_optional_str(row["policy_profile"]),
                         yolo_armed=bool(int(row["yolo_armed"] or 0)),
                         yolo_armed_at=_optional_str(row["yolo_armed_at"]),
+                        mode=self._decode_mode(row["mode"]),
+                        active_plan=self._decode_json_object(row["active_plan_json"]),
+                        active_task=self._decode_json_object(row["active_task_json"]),
                     ),
                 )
         return sessions
@@ -178,9 +188,12 @@ class SQLiteUISessionStorage:
                     workspace_root,
                     policy_profile,
                     yolo_armed,
-                    yolo_armed_at
+                    yolo_armed_at,
+                    mode,
+                    active_plan_json,
+                    active_task_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     created_at=excluded.created_at,
@@ -198,7 +211,10 @@ class SQLiteUISessionStorage:
                     workspace_root=excluded.workspace_root,
                     policy_profile=excluded.policy_profile,
                     yolo_armed=excluded.yolo_armed,
-                    yolo_armed_at=excluded.yolo_armed_at
+                    yolo_armed_at=excluded.yolo_armed_at,
+                    mode=excluded.mode,
+                    active_plan_json=excluded.active_plan_json,
+                    active_task_json=excluded.active_task_json
                 """,
                 (
                     session.session_id,
@@ -218,6 +234,9 @@ class SQLiteUISessionStorage:
                     session.policy_profile,
                     1 if session.yolo_armed else 0,
                     session.yolo_armed_at,
+                    self._normalize_mode(session.mode),
+                    self._encode_json_object(session.active_plan),
+                    self._encode_json_object(session.active_task),
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
@@ -351,7 +370,10 @@ class SQLiteUISessionStorage:
                     workspace_root TEXT,
                     policy_profile TEXT,
                     yolo_armed INTEGER NOT NULL DEFAULT 0,
-                    yolo_armed_at TEXT
+                    yolo_armed_at TEXT,
+                    mode TEXT NOT NULL DEFAULT 'ask',
+                    active_plan_json TEXT,
+                    active_task_json TEXT
                 )
                 """,
             )
@@ -506,6 +528,12 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN yolo_armed INTEGER NOT NULL DEFAULT 0")
         if "yolo_armed_at" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN yolo_armed_at TEXT")
+        if "mode" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'ask'")
+        if "active_plan_json" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN active_plan_json TEXT")
+        if "active_task_json" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN active_task_json TEXT")
 
     def _ensure_ui_messages_table(self, conn: sqlite3.Connection) -> None:
         expected_columns = [
@@ -605,6 +633,35 @@ class SQLiteUISessionStorage:
                     },
                 )
         return normalized
+
+    def _decode_mode(self, value: object) -> str:
+        if isinstance(value, str):
+            return self._normalize_mode(value)
+        return "ask"
+
+    def _normalize_mode(self, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized in {"ask", "plan", "act"}:
+            return normalized
+        return "ask"
+
+    def _decode_json_object(self, value: object) -> dict[str, JSONValue] | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return None
+        parsed = safe_json_loads(value)
+        if not isinstance(parsed, dict):
+            return None
+        normalized: dict[str, JSONValue] = {}
+        for key, item in parsed.items():
+            normalized[str(key)] = item
+        return normalized
+
+    def _encode_json_object(self, value: dict[str, JSONValue] | None) -> str | None:
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False)
 
     def _normalize_attachments_for_write(
         self,

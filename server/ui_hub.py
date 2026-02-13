@@ -22,6 +22,8 @@ def _utc_iso_now() -> str:
 
 SessionStatus = Literal["ok", "busy", "error"]
 PolicyProfile = Literal["sandbox", "index", "yolo"]
+SessionMode = Literal["ask", "plan", "act"]
+_UNSET: object = object()
 
 
 class SessionListItem(TypedDict):
@@ -178,6 +180,9 @@ class _SessionState:
     policy_profile: PolicyProfile = "sandbox"
     yolo_armed: bool = False
     yolo_armed_at: str | None = None
+    mode: SessionMode = "ask"
+    active_plan: dict[str, JSONValue] | None = None
+    active_task: dict[str, JSONValue] | None = None
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
 
@@ -487,6 +492,13 @@ class UIHub:
                         policy_profile=state.policy_profile,
                         yolo_armed=state.yolo_armed,
                         yolo_armed_at=state.yolo_armed_at,
+                        mode=state.mode,
+                        active_plan=(
+                            dict(state.active_plan) if state.active_plan is not None else None
+                        ),
+                        active_task=(
+                            dict(state.active_task) if state.active_task is not None else None
+                        ),
                     ),
                 )
             items.sort(
@@ -534,6 +546,9 @@ class UIHub:
                     policy_profile=self._normalize_policy_profile(item.policy_profile),
                     yolo_armed=bool(item.yolo_armed),
                     yolo_armed_at=item.yolo_armed_at,
+                    mode=self._normalize_mode(item.mode),
+                    active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
+                    active_task=(dict(item.active_task) if item.active_task is not None else None),
                     created_at=created_at,
                     updated_at=restored_updated_at,
                 )
@@ -572,6 +587,9 @@ class UIHub:
                     "yolo_armed": state.yolo_armed,
                     "yolo_armed_at": state.yolo_armed_at,
                 },
+                "mode": state.mode,
+                "active_plan": dict(state.active_plan) if state.active_plan is not None else None,
+                "active_task": dict(state.active_task) if state.active_task is not None else None,
             }
 
     async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
@@ -729,6 +747,68 @@ class UIHub:
                 self._persist_session_locked(session_id)
             payload = self._status_payload(session_id, state.status_state)
         return self._build_event("status", payload)
+
+    async def get_session_workflow(self, session_id: str) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+                self._persist_session_locked(session_id)
+            return {
+                "mode": state.mode,
+                "active_plan": dict(state.active_plan) if state.active_plan is not None else None,
+                "active_task": dict(state.active_task) if state.active_task is not None else None,
+            }
+
+    async def set_session_workflow(
+        self,
+        session_id: str,
+        *,
+        mode: str | None = None,
+        active_plan: dict[str, JSONValue] | None | object = _UNSET,
+        active_task: dict[str, JSONValue] | None | object = _UNSET,
+    ) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            changed = False
+            if mode is not None:
+                normalized_mode = self._normalize_mode(mode)
+                if state.mode != normalized_mode:
+                    state.mode = normalized_mode
+                    changed = True
+            if active_plan is not _UNSET:
+                next_plan = self._normalize_optional_object(active_plan)
+                if state.active_plan != next_plan:
+                    state.active_plan = next_plan
+                    changed = True
+            if active_task is not _UNSET:
+                next_task = self._normalize_optional_object(active_task)
+                if state.active_task != next_task:
+                    state.active_task = next_task
+                    changed = True
+            payload: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "mode": state.mode,
+                "active_plan": (dict(state.active_plan) if state.active_plan is not None else None),
+                "active_task": (dict(state.active_task) if state.active_task is not None else None),
+            }
+            if not changed:
+                subscribers: list[asyncio.Queue[dict[str, JSONValue]]] = []
+            else:
+                state.updated_at = _utc_iso_now()
+                self._persist_session_locked(session_id)
+                self._prune_sessions_locked(keep_session_id=session_id)
+                subscribers = list(state.subscribers)
+        if subscribers:
+            self._publish_to_subscribers(
+                subscribers,
+                self._build_event("session.workflow", payload),
+            )
+        return payload
 
     async def append_message(
         self,
@@ -914,6 +994,27 @@ class UIHub:
             return "yolo"
         return "sandbox"
 
+    def _normalize_mode(self, value: str | None) -> SessionMode:
+        normalized = value.strip().lower() if isinstance(value, str) else ""
+        if normalized == "plan":
+            return "plan"
+        if normalized == "act":
+            return "act"
+        return "ask"
+
+    def _normalize_optional_object(
+        self,
+        value: dict[str, JSONValue] | None | object,
+    ) -> dict[str, JSONValue] | None:
+        if value is None or value is _UNSET:
+            return None
+        if not isinstance(value, dict):
+            return None
+        normalized: dict[str, JSONValue] = {}
+        for key, item in value.items():
+            normalized[str(key)] = item
+        return normalized
+
     def _publish_to_subscribers(
         self,
         subscribers: list[asyncio.Queue[dict[str, JSONValue]]],
@@ -950,6 +1051,9 @@ class UIHub:
                 policy_profile=self._normalize_policy_profile(item.policy_profile),
                 yolo_armed=bool(item.yolo_armed),
                 yolo_armed_at=item.yolo_armed_at,
+                mode=self._normalize_mode(item.mode),
+                active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
+                active_task=(dict(item.active_task) if item.active_task is not None else None),
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
@@ -988,6 +1092,9 @@ class UIHub:
                 policy_profile=state.policy_profile,
                 yolo_armed=state.yolo_armed,
                 yolo_armed_at=state.yolo_armed_at,
+                mode=state.mode,
+                active_plan=(dict(state.active_plan) if state.active_plan is not None else None),
+                active_task=(dict(state.active_task) if state.active_task is not None else None),
             ),
         )
 
