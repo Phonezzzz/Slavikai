@@ -612,9 +612,6 @@ export function Settings({
           long_paste_to_file_enabled: longPasteToFileEnabled,
           long_paste_threshold_chars: Math.max(1000, Math.min(80000, longPasteThresholdChars)),
         },
-        tools: {
-          state: toolsState,
-        },
       };
       payload.providers = providersPayload;
 
