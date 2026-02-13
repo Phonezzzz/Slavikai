@@ -9,6 +9,7 @@ from pathlib import Path
 from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
+from config.http_server_config import HttpAuthConfig
 from config.memory_config import (
     load_memory_config as load_memory_config_from_path,
 )
@@ -28,6 +29,9 @@ from server.ui_hub import UIHub
 from server.ui_session_storage import InMemoryUISessionStorage, SQLiteUISessionStorage
 from shared.models import JSONValue, ToolResult
 from tools.tool_logger import ToolCallLogger
+
+TEST_API_TOKEN = "test-ui-api-token"
+TEST_AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
 
 
 class DummyAgent:
@@ -507,11 +511,36 @@ async def _create_client(agent: DummyAgent) -> TestClient:
         agent=agent,
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
     )
     server = TestServer(app)
-    client = TestClient(server)
+    client = TestClient(server, headers=TEST_AUTH_HEADERS)
     await client.start_server()
     return client
+
+
+def test_ui_api_requires_bearer_by_default() -> None:
+    async def run() -> None:
+        app = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token="ui-auth-required", allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            response = await client.get("/ui/api/status")
+            assert response.status == 401
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "unauthorized"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 async def _read_first_sse_event(response) -> dict[str, object]:
@@ -1681,10 +1710,11 @@ def test_ui_chat_send_decision_isolated_between_sessions() -> None:
             agent=DecisionEchoAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
         )
         app["ui_hub"] = DelayedFirstUserMessageHub("session-a")
         server = TestServer(app)
-        client = TestClient(server)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
         await client.start_server()
         try:
             await _select_local_model(client, "session-a")
@@ -1739,9 +1769,10 @@ def test_ui_chat_send_no_decision_leak_from_other_session() -> None:
             agent=DecisionOnlyForSessionAAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
         )
         server = TestServer(app)
-        client = TestClient(server)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
         await client.start_server()
         try:
             await _select_local_model(client, "session-a")
@@ -2235,9 +2266,10 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             agent=DecisionEchoAgent(),
             max_request_bytes=1_000_000,
             ui_storage=storage_before,
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
         )
         server_before = TestServer(app_before)
-        client_before = TestClient(server_before)
+        client_before = TestClient(server_before, headers=TEST_AUTH_HEADERS)
         await client_before.start_server()
 
         session_id: str | None = None
@@ -2272,9 +2304,10 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=storage_after,
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
         )
         server_after = TestServer(app_after)
-        client_after = TestClient(server_after)
+        client_after = TestClient(server_after, headers=TEST_AUTH_HEADERS)
         await client_after.start_server()
         try:
             get_resp = await client_after.get(f"/ui/api/sessions/{session_id}")

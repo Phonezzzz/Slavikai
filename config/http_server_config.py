@@ -9,6 +9,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_MAX_REQUEST_BYTES = 1_000_000
 DEFAULT_PATH = Path("config/http_server.json")
+DEFAULT_ALLOW_UNAUTH_LOCAL = False
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,12 @@ class HttpServerConfig:
             "port": self.port,
             "max_request_bytes": self.max_request_bytes,
         }
+
+
+@dataclass(frozen=True)
+class HttpAuthConfig:
+    api_token: str
+    allow_unauth_local: bool = DEFAULT_ALLOW_UNAUTH_LOCAL
 
 
 def load_http_server_config(path: Path = DEFAULT_PATH) -> HttpServerConfig:
@@ -76,3 +83,20 @@ def resolve_http_server_config(path: Path = DEFAULT_PATH) -> HttpServerConfig:
             raise ValueError("SLAVIK_HTTP_MAX_REQUEST_BYTES должен быть int.") from exc
 
     return HttpServerConfig(host=host, port=port, max_request_bytes=max_bytes)
+
+
+def resolve_http_auth_config() -> HttpAuthConfig:
+    api_token_raw = os.getenv("SLAVIK_API_TOKEN", "")
+    allow_unauth_raw = os.getenv("SLAVIK_ALLOW_UNAUTH_LOCAL", "")
+    allow_unauth_local = allow_unauth_raw.strip().lower() == "true"
+    return HttpAuthConfig(
+        api_token=api_token_raw.strip(),
+        allow_unauth_local=allow_unauth_local,
+    )
+
+
+def ensure_http_auth_boot_config(auth_config: HttpAuthConfig | None = None) -> HttpAuthConfig:
+    resolved = auth_config or resolve_http_auth_config()
+    if not resolved.allow_unauth_local and not resolved.api_token:
+        raise RuntimeError("SLAVIK_API_TOKEN is required unless SLAVIK_ALLOW_UNAUTH_LOCAL=true.")
+    return resolved

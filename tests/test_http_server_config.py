@@ -10,6 +10,7 @@ from config.http_server_config import (
     DEFAULT_MAX_REQUEST_BYTES,
     DEFAULT_PORT,
     HttpServerConfig,
+    ensure_http_auth_boot_config,
     load_http_server_config,
     resolve_http_server_config,
 )
@@ -95,3 +96,13 @@ def test_resolve_http_server_config_env_invalid_max_bytes(
     monkeypatch.setenv("SLAVIK_HTTP_MAX_REQUEST_BYTES", "oops")
     with pytest.raises(ValueError):
         resolve_http_server_config(path)
+
+
+def test_server_fails_start_without_api_token_when_local_unauth_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SLAVIK_API_TOKEN", raising=False)
+    monkeypatch.delenv("SLAVIK_ALLOW_UNAUTH_LOCAL", raising=False)
+
+    with pytest.raises(RuntimeError):
+        ensure_http_auth_boot_config()

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from config.http_server_config import HttpAuthConfig
 from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from core.tracer import Tracer
@@ -15,6 +16,9 @@ from llm.types import LLMResult, ModelConfig
 from server.http_api import create_app
 from server.ui_session_storage import InMemoryUISessionStorage
 from shared.models import LLMMessage
+
+TEST_API_TOKEN = "test-api-token"
+TEST_AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
 
 
 class DummyBrain(Brain):
@@ -109,9 +113,10 @@ async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> Te
         agent=agent,
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
     )
     server = TestServer(app)
-    client = TestClient(server)
+    client = TestClient(server, headers=TEST_AUTH_HEADERS)
     await client.start_server()
     return client
 
@@ -122,11 +127,64 @@ async def _create_client_without_agent(trace_path: Path, monkeypatch) -> TestCli
         agent=None,
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
     )
     server = TestServer(app)
-    client = TestClient(server)
+    client = TestClient(server, headers=TEST_AUTH_HEADERS)
     await client.start_server()
     return client
+
+
+def test_auth_gate_rejects_missing_bearer(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+
+    async def run() -> None:
+        monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
+        app = create_app(
+            agent=agent,
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            resp = await client.get("/v1/models")
+            assert resp.status == 401
+            payload = await resp.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "unauthorized"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_auth_gate_accepts_valid_bearer(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+
+    async def run() -> None:
+        monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
+        app = create_app(
+            agent=agent,
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            resp = await client.get("/v1/models")
+            assert resp.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 def test_models_endpoint(monkeypatch, tmp_path) -> None:

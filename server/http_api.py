@@ -16,6 +16,7 @@ import subprocess
 import time
 import uuid
 import zipfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +29,10 @@ from aiohttp.multipart import BodyPartReader
 
 from config.http_server_config import (
     DEFAULT_MAX_REQUEST_BYTES,
+    HttpAuthConfig,
     HttpServerConfig,
+    ensure_http_auth_boot_config,
+    resolve_http_auth_config,
     resolve_http_server_config,
 )
 from config.memory_config import MemoryConfig, load_memory_config, save_memory_config
@@ -97,6 +101,7 @@ _CATEGORY_MAP: Final[dict[str, ApprovalCategory]] = {item: item for item in ALL_
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
 UI_SESSION_HEADER: Final[str] = "X-Slavik-Session"
+AUTH_PROTECTED_PREFIXES: Final[tuple[str, ...]] = ("/ui/api/", "/v1/", "/slavik/")
 SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local"}
 API_KEY_SETTINGS_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local", "openai"}
 PROVIDER_API_KEY_ENV: Final[dict[str, str]] = {
@@ -492,6 +497,43 @@ def _extract_bearer_token(request: web.Request) -> str | None:
         return None
     normalized = token.strip()
     return normalized or None
+
+
+def _is_auth_protected_path(path: str) -> bool:
+    return any(path.startswith(prefix) for prefix in AUTH_PROTECTED_PREFIXES)
+
+
+def _is_request_authorized(request: web.Request, auth_config: HttpAuthConfig) -> bool:
+    if auth_config.allow_unauth_local:
+        return True
+    presented_token = _extract_bearer_token(request)
+    if presented_token is None:
+        return False
+    candidate_tokens: list[str] = []
+    if auth_config.api_token:
+        candidate_tokens.append(auth_config.api_token)
+    admin_token = os.environ.get("SLAVIK_ADMIN_TOKEN", "").strip()
+    if admin_token:
+        candidate_tokens.append(admin_token)
+    return any(hmac.compare_digest(presented_token, token) for token in candidate_tokens)
+
+
+@web.middleware
+async def auth_gate_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> web.StreamResponse:
+    if not _is_auth_protected_path(request.path):
+        return await handler(request)
+    auth_config: HttpAuthConfig = request.app["auth_config"]
+    if _is_request_authorized(request, auth_config):
+        return await handler(request)
+    return _error_response(
+        status=401,
+        message="Unauthorized.",
+        error_type="invalid_request_error",
+        code="unauthorized",
+    )
 
 
 def _normalize_provider(raw_provider: str) -> str | None:
@@ -7038,9 +7080,15 @@ def create_app(
     agent: AgentProtocol | None = None,
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
+    auth_config: HttpAuthConfig | None = None,
 ) -> web.Application:
     config_max_bytes = max_request_bytes or DEFAULT_MAX_REQUEST_BYTES
-    app = web.Application(client_max_size=config_max_bytes)
+    resolved_auth_config = auth_config or resolve_http_auth_config()
+    app = web.Application(
+        client_max_size=config_max_bytes,
+        middlewares=[auth_gate_middleware],
+    )
+    app["auth_config"] = resolved_auth_config
     if agent is None:
 
         def _factory() -> AgentProtocol:
@@ -7134,6 +7182,7 @@ def create_app(
 
 
 def run_server(config: HttpServerConfig) -> None:
+    ensure_http_auth_boot_config()
     app = create_app(max_request_bytes=config.max_request_bytes)
     web.run_app(app, host=config.host, port=config.port)
 
