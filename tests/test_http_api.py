@@ -638,3 +638,57 @@ def test_approve_session_requires_admin_bearer_token(monkeypatch, tmp_path) -> N
             await client.close()
 
     asyncio.run(run())
+
+
+def test_control_plane_requires_admin_token(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            missing_admin_resp = await client.post(
+                "/slavik/admin/settings/security",
+                json={"tools": {"state": {"web": True}}},
+            )
+            assert missing_admin_resp.status == 503
+            missing_admin_payload = await missing_admin_resp.json()
+            missing_error = missing_admin_payload.get("error")
+            assert isinstance(missing_error, dict)
+            assert missing_error.get("code") == "admin_token_not_configured"
+
+            monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "admin-secret")
+            monkeypatch.setenv("SLAVIK_API_TOKEN", "api-secret")
+
+            invalid_auth_resp = await client.post(
+                "/slavik/admin/settings/security",
+                headers={"Authorization": "Bearer wrong-secret"},
+                json={"tools": {"state": {"web": True}}},
+            )
+            assert invalid_auth_resp.status == 401
+
+            api_token_resp = await client.post(
+                "/slavik/admin/settings/security",
+                headers={"Authorization": "Bearer api-secret"},
+                json={"tools": {"state": {"web": True}}},
+            )
+            assert api_token_resp.status == 401
+
+            valid_admin_resp = await client.post(
+                "/slavik/admin/settings/security",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"tools": {"state": {"web": True}}},
+            )
+            assert valid_admin_resp.status == 200
+            payload = await valid_admin_resp.json()
+            settings = payload.get("settings")
+            assert isinstance(settings, dict)
+            tools = settings.get("tools")
+            assert isinstance(tools, dict)
+            state = tools.get("state")
+            assert isinstance(state, dict)
+            assert state.get("web") is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())

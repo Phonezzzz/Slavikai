@@ -271,7 +271,14 @@ UI_DECISION_STATUSES: Final[set[str]] = {
 }
 UI_DECISION_RESPONSES: Final[set[str]] = {"approve", "reject"}
 UI_DECISION_EDITABLE_FIELDS: Final[set[str]] = {"details", "args", "query", "branch", "repo_url"}
-UI_SETTINGS_FORBIDDEN_TOP_LEVEL_KEYS: Final[set[str]] = {
+UI_SETTINGS_USER_ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = {
+    "personalization",
+    "composer",
+    "memory",
+    "providers",
+}
+UI_SETTINGS_CONTROL_TOP_LEVEL_KEYS: Final[set[str]] = {
+    "tools",
     "policy",
     "risk",
     "security",
@@ -281,7 +288,7 @@ UI_SETTINGS_FORBIDDEN_TOP_LEVEL_KEYS: Final[set[str]] = {
     "approved_categories",
     "safe_mode",
 }
-UI_SETTINGS_FORBIDDEN_TOOL_KEYS: Final[set[str]] = {"shell", "safe_mode"}
+UI_SETTINGS_ADMIN_ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = {"tools", "policy"}
 SESSION_MODES: Final[set[str]] = {"ask", "plan", "act"}
 PLAN_STATUSES: Final[set[str]] = {
     "draft",
@@ -554,6 +561,26 @@ def _request_principal_id(request: web.Request) -> str | None:
         return None
     normalized = principal_raw.strip()
     return normalized or None
+
+
+def _require_admin_bearer(request: web.Request) -> web.Response | None:
+    admin_token = os.environ.get("SLAVIK_ADMIN_TOKEN", "").strip()
+    if not admin_token:
+        return _error_response(
+            status=503,
+            message="Admin token is not configured.",
+            error_type="configuration_error",
+            code="admin_token_not_configured",
+        )
+    presented_token = _extract_bearer_token(request)
+    if presented_token is None or not hmac.compare_digest(presented_token, admin_token):
+        return _error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
+    return None
 
 
 def _session_forbidden_response() -> web.Response:
@@ -2381,20 +2408,20 @@ def _save_composer_settings(
     _save_ui_settings_blob(payload)
 
 
-def _forbidden_settings_update_key(payload: dict[str, object]) -> str | None:
-    for key in UI_SETTINGS_FORBIDDEN_TOP_LEVEL_KEYS:
-        if key in payload:
-            return key
-    tools_raw = payload.get("tools")
-    if not isinstance(tools_raw, dict):
+def _user_plane_forbidden_settings_key(payload: dict[str, object]) -> str | None:
+    invalid = sorted(
+        {
+            normalized
+            for key in payload
+            if (
+                (normalized := str(key).strip()) in UI_SETTINGS_CONTROL_TOP_LEVEL_KEYS
+                or normalized not in UI_SETTINGS_USER_ALLOWED_TOP_LEVEL_KEYS
+            )
+        }
+    )
+    if not invalid:
         return None
-    state_raw = tools_raw.get("state")
-    if not isinstance(state_raw, dict):
-        return None
-    for key in UI_SETTINGS_FORBIDDEN_TOOL_KEYS:
-        if key in state_raw:
-            return f"tools.state.{key}"
-    return None
+    return invalid[0]
 
 
 def _normalize_policy_profile(value: object) -> str:
@@ -4221,19 +4248,16 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_json",
         )
-    forbidden_key = _forbidden_settings_update_key(payload)
+    forbidden_key = _user_plane_forbidden_settings_key(payload)
     if forbidden_key is not None:
         return _error_response(
             status=403,
-            message=f"Изменение security-поля запрещено: {forbidden_key}",
+            message=f"Control-plane поле запрещено в user-plane: {forbidden_key}",
             error_type="forbidden",
             code="security_fields_forbidden",
         )
 
     next_embeddings_model: str | None = None
-    next_policy_profile: str | None = None
-    next_yolo_armed: bool | None = None
-    next_yolo_armed_at: str | None = None
 
     personalization_raw = payload.get("personalization")
     if personalization_raw is not None:
@@ -4405,103 +4429,6 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             ),
         )
 
-    policy_raw = payload.get("policy")
-    if policy_raw is not None:
-        if not isinstance(policy_raw, dict):
-            return _error_response(
-                status=400,
-                message="policy должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        profile, yolo_armed, yolo_armed_at = _load_policy_settings()
-        if "profile" in policy_raw:
-            profile = _normalize_policy_profile(policy_raw.get("profile"))
-        if "yolo_armed" in policy_raw:
-            yolo_armed_raw = policy_raw.get("yolo_armed")
-            if not isinstance(yolo_armed_raw, bool):
-                return _error_response(
-                    status=400,
-                    message="policy.yolo_armed должен быть bool.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            yolo_armed = yolo_armed_raw
-        if profile == "yolo" or yolo_armed:
-            confirm_raw = policy_raw.get("yolo_confirm")
-            confirm_text_raw = policy_raw.get("yolo_confirm_text")
-            confirm_ok = (
-                confirm_raw is True
-                and isinstance(confirm_text_raw, str)
-                and confirm_text_raw.strip().upper() == "YOLO"
-            )
-            if not confirm_ok:
-                return _error_response(
-                    status=400,
-                    message=(
-                        "Для включения YOLO требуется подтверждение "
-                        "(yolo_confirm=true, yolo_confirm_text='YOLO')."
-                    ),
-                    error_type="invalid_request_error",
-                    code="yolo_confirmation_required",
-                )
-        if yolo_armed:
-            yolo_armed_at = _utc_now_iso()
-        else:
-            yolo_armed_at = None
-        _save_policy_settings(
-            profile=profile,
-            yolo_armed=yolo_armed,
-            yolo_armed_at=yolo_armed_at,
-        )
-        next_policy_profile = profile
-        next_yolo_armed = yolo_armed
-        next_yolo_armed_at = yolo_armed_at
-
-    next_tools_state: dict[str, bool] | None = None
-    if next_policy_profile is not None:
-        profile_base = _tools_state_for_profile(next_policy_profile, _load_tools_state())
-        _save_tools_state(profile_base)
-        next_tools_state = dict(profile_base)
-
-    tools_raw = payload.get("tools")
-    if tools_raw is not None:
-        if not isinstance(tools_raw, dict):
-            return _error_response(
-                status=400,
-                message="tools должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        state_raw = tools_raw.get("state", tools_raw)
-        if not isinstance(state_raw, dict):
-            return _error_response(
-                status=400,
-                message="tools.state должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        current_state = next_tools_state if next_tools_state is not None else _load_tools_state()
-        next_state = dict(current_state)
-        for key, raw_value in state_raw.items():
-            if not isinstance(key, str) or key not in DEFAULT_TOOLS_STATE:
-                return _error_response(
-                    status=400,
-                    message=f"Неизвестный tools ключ: {key}",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            if not isinstance(raw_value, bool):
-                return _error_response(
-                    status=400,
-                    message=f"tools.{key} должен быть bool.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            next_state[key] = raw_value
-        _save_tools_state(next_state)
-        next_tools_state = dict(next_state)
-
     providers_raw = payload.get("providers")
     if providers_raw is not None:
         if not isinstance(providers_raw, dict):
@@ -4552,44 +4479,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 next_api_keys.pop(provider, None)
         _save_provider_api_keys(next_api_keys)
 
-    session_hint = _extract_ui_session_id(request)
-    if session_hint and (next_policy_profile is not None or next_yolo_armed is not None):
-        hub: UIHub = request.app["ui_hub"]
-        session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
-        if session_error is not None:
-            return session_error
-        if session_id is None:
-            return _session_forbidden_response()
-        await hub.set_session_policy(
-            session_id,
-            profile=next_policy_profile,
-            yolo_armed=next_yolo_armed,
-            yolo_armed_at=next_yolo_armed_at,
-        )
-
-    if next_tools_state is not None:
-        agent_lock: asyncio.Lock = request.app["agent_lock"]
-        try:
-            agent = await _resolve_agent(request)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Failed to resolve agent for live tools update",
-                exc_info=True,
-                extra={"error": str(exc)},
-            )
-            agent = None
-        if agent is not None:
-            update_tools_enabled = getattr(agent, "update_tools_enabled", None)
-            set_embeddings_model = getattr(agent, "set_embeddings_model", None)
-            if callable(update_tools_enabled) or (
-                callable(set_embeddings_model) and next_embeddings_model is not None
-            ):
-                async with agent_lock:
-                    if callable(set_embeddings_model) and next_embeddings_model is not None:
-                        set_embeddings_model(next_embeddings_model)
-                    if callable(update_tools_enabled):
-                        update_tools_enabled(next_tools_state)
-    elif next_embeddings_model is not None:
+    if next_embeddings_model is not None:
         agent_lock = request.app["agent_lock"]
         try:
             agent = await _resolve_agent(request)
@@ -4605,6 +4495,164 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             if callable(set_embeddings_model):
                 async with agent_lock:
                     set_embeddings_model(next_embeddings_model)
+
+    return _json_response(_build_settings_payload())
+
+
+async def handle_admin_security_settings_update(request: web.Request) -> web.Response:
+    admin_error = _require_admin_bearer(request)
+    if admin_error is not None:
+        return admin_error
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    invalid_keys = sorted(
+        {
+            str(key).strip()
+            for key in payload
+            if str(key).strip() not in UI_SETTINGS_ADMIN_ALLOWED_TOP_LEVEL_KEYS
+        }
+    )
+    if invalid_keys:
+        return _error_response(
+            status=400,
+            message=f"Неподдерживаемые control-plane поля: {', '.join(invalid_keys)}.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if not payload:
+        return _error_response(
+            status=400,
+            message="Нужно передать control-plane изменения (tools и/или policy).",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    next_policy_profile: str | None = None
+    policy_raw = payload.get("policy")
+    if policy_raw is not None:
+        if not isinstance(policy_raw, dict):
+            return _error_response(
+                status=400,
+                message="policy должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        profile, yolo_armed, yolo_armed_at = _load_policy_settings()
+        if "profile" in policy_raw:
+            profile = _normalize_policy_profile(policy_raw.get("profile"))
+        if "yolo_armed" in policy_raw:
+            yolo_armed_raw = policy_raw.get("yolo_armed")
+            if not isinstance(yolo_armed_raw, bool):
+                return _error_response(
+                    status=400,
+                    message="policy.yolo_armed должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            yolo_armed = yolo_armed_raw
+        if profile == "yolo" or yolo_armed:
+            confirm_raw = policy_raw.get("yolo_confirm")
+            confirm_text_raw = policy_raw.get("yolo_confirm_text")
+            confirm_ok = (
+                confirm_raw is True
+                and isinstance(confirm_text_raw, str)
+                and confirm_text_raw.strip().upper() == "YOLO"
+            )
+            if not confirm_ok:
+                return _error_response(
+                    status=400,
+                    message=(
+                        "Для включения YOLO требуется подтверждение "
+                        "(yolo_confirm=true, yolo_confirm_text='YOLO')."
+                    ),
+                    error_type="invalid_request_error",
+                    code="yolo_confirmation_required",
+                )
+        if yolo_armed:
+            yolo_armed_at = _utc_now_iso()
+        else:
+            yolo_armed_at = None
+        _save_policy_settings(
+            profile=profile,
+            yolo_armed=yolo_armed,
+            yolo_armed_at=yolo_armed_at,
+        )
+        next_policy_profile = profile
+
+    next_tools_state: dict[str, bool] | None = None
+    if next_policy_profile is not None:
+        profile_base = _tools_state_for_profile(next_policy_profile, _load_tools_state())
+        _save_tools_state(profile_base)
+        next_tools_state = dict(profile_base)
+
+    tools_raw = payload.get("tools")
+    if tools_raw is not None:
+        if not isinstance(tools_raw, dict):
+            return _error_response(
+                status=400,
+                message="tools должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        state_raw = tools_raw.get("state", tools_raw)
+        if not isinstance(state_raw, dict):
+            return _error_response(
+                status=400,
+                message="tools.state должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        current_state = next_tools_state if next_tools_state is not None else _load_tools_state()
+        next_state = dict(current_state)
+        for key, raw_value in state_raw.items():
+            if not isinstance(key, str) or key not in DEFAULT_TOOLS_STATE:
+                return _error_response(
+                    status=400,
+                    message=f"Неизвестный tools ключ: {key}",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if not isinstance(raw_value, bool):
+                return _error_response(
+                    status=400,
+                    message=f"tools.{key} должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            next_state[key] = raw_value
+        _save_tools_state(next_state)
+        next_tools_state = dict(next_state)
+
+    if next_tools_state is not None:
+        agent_lock: asyncio.Lock = request.app["agent_lock"]
+        try:
+            agent = await _resolve_agent(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to resolve agent for control-plane tools update",
+                exc_info=True,
+                extra={"error": str(exc)},
+            )
+            agent = None
+        if agent is not None:
+            update_tools_enabled = getattr(agent, "update_tools_enabled", None)
+            if callable(update_tools_enabled):
+                async with agent_lock:
+                    update_tools_enabled(next_tools_state)
 
     return _json_response(_build_settings_payload())
 
@@ -7218,22 +7266,9 @@ async def handle_feedback(request: web.Request) -> web.Response:
 async def handle_approve_session(request: web.Request) -> web.Response:
     session_store = request.app["session_store"]
     agent = request.app.get("agent")
-    admin_token = os.environ.get("SLAVIK_ADMIN_TOKEN", "").strip()
-    if not admin_token:
-        return _error_response(
-            status=503,
-            message="Admin token is not configured.",
-            error_type="configuration_error",
-            code="admin_token_not_configured",
-        )
-    presented_token = _extract_bearer_token(request)
-    if presented_token is None or not hmac.compare_digest(presented_token, admin_token):
-        return _error_response(
-            status=401,
-            message="Unauthorized.",
-            error_type="invalid_request_error",
-            code="unauthorized",
-        )
+    admin_error = _require_admin_bearer(request)
+    if admin_error is not None:
+        return admin_error
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -7361,6 +7396,7 @@ def create_app(
     app.router.add_get("/slavik/tool-calls/{trace_id}", handle_tool_calls)
     app.router.add_post("/slavik/feedback", handle_feedback)
     app.router.add_post("/slavik/approve-session", handle_approve_session)
+    app.router.add_post("/slavik/admin/settings/security", handle_admin_security_settings_update)
     app.router.add_get("/", handle_ui_index)
     app.router.add_get("/workspace", handle_workspace_index)
     app.router.add_get("/ui", handle_ui_redirect)

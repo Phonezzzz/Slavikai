@@ -2443,11 +2443,6 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
                         "inbox_writes_per_minute": 9,
                         "embeddings_model": "test-embeddings-v1",
                     },
-                    "tools": {
-                        "state": {
-                            "web": True,
-                        },
-                    },
                     "providers": {
                         "xai": {"api_key": "xai-test-key"},
                         "openrouter": {"api_key": "or-test-key"},
@@ -2481,7 +2476,7 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             state = tools.get("state")
             assert isinstance(state, dict)
             assert state.get("safe_mode") is True
-            assert state.get("web") is True
+            assert state.get("web") is False
             providers = settings.get("providers")
             assert isinstance(providers, list)
             provider_by_name = {
@@ -2522,7 +2517,37 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_ui_settings_blocks_shell_and_safe_mode_changes(monkeypatch, tmp_path) -> None:
+def test_user_plane_settings_allows_only_whitelisted_fields() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            allowed_resp = await client.post(
+                "/ui/api/settings",
+                json={
+                    "personalization": {"tone": "strict"},
+                    "composer": {"long_paste_threshold_chars": 25000},
+                    "memory": {"inbox_max_items": 101},
+                    "providers": {"xai": {"api_key": "xai-whitelist-key"}},
+                },
+            )
+            assert allowed_resp.status == 200
+
+            forbidden_resp = await client.post(
+                "/ui/api/settings",
+                json={"non_security_unknown_field": {"value": True}},
+            )
+            assert forbidden_resp.status == 403
+            forbidden_payload = await forbidden_resp.json()
+            error = forbidden_payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "security_fields_forbidden"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_user_plane_security_mutators_always_forbidden(monkeypatch, tmp_path) -> None:
     tools_path = tmp_path / "tools.json"
     monkeypatch.setattr(
         "server.http_api.load_tools_config",
@@ -2536,25 +2561,22 @@ def test_ui_settings_blocks_shell_and_safe_mode_changes(monkeypatch, tmp_path) -
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
-            shell_resp = await client.post(
-                "/ui/api/settings",
-                json={"tools": {"state": {"shell": True}}},
-            )
-            assert shell_resp.status == 403
-            shell_payload = await shell_resp.json()
-            shell_error = shell_payload.get("error")
-            assert isinstance(shell_error, dict)
-            assert shell_error.get("code") == "security_fields_forbidden"
-
-            safe_mode_resp = await client.post(
-                "/ui/api/settings",
-                json={"tools": {"state": {"safe_mode": False, "web": True}}},
-            )
-            assert safe_mode_resp.status == 403
-            safe_mode_payload = await safe_mode_resp.json()
-            safe_mode_error = safe_mode_payload.get("error")
-            assert isinstance(safe_mode_error, dict)
-            assert safe_mode_error.get("code") == "security_fields_forbidden"
+            payloads = [
+                {"tools": {"state": {"shell": True}}},
+                {"tools": {"state": {"safe_mode": False, "web": True}}},
+                {"tools": {"state": {"web": True}}},
+                {"policy": {"profile": "index"}},
+                {"safe_mode": False},
+                {"risk": {"categories": ["EXEC_ARBITRARY"]}},
+                {"security": {"categories": ["EXEC_ARBITRARY"]}},
+            ]
+            for body in payloads:
+                response = await client.post("/ui/api/settings", json=body)
+                assert response.status == 403
+                response_payload = await response.json()
+                error = response_payload.get("error")
+                assert isinstance(error, dict)
+                assert error.get("code") == "security_fields_forbidden"
 
             settings_resp = await client.get("/ui/api/settings")
             assert settings_resp.status == 200
@@ -2609,8 +2631,9 @@ def test_ui_settings_no_api_key_leak(monkeypatch, tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_settings_update_applies_tools_live(monkeypatch, tmp_path) -> None:
+def test_control_plane_security_settings_applies_tools_live(monkeypatch, tmp_path) -> None:
     tools_path = tmp_path / "tools.json"
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "admin-secret")
     monkeypatch.setattr(
         "server.http_api.load_tools_config",
         lambda: load_tools_config_from_path(path=tools_path),
@@ -2650,7 +2673,8 @@ def test_settings_update_applies_tools_live(monkeypatch, tmp_path) -> None:
             assert "Инструмент web отключён" in disabled_text
 
             settings_resp = await client.post(
-                "/ui/api/settings",
+                "/slavik/admin/settings/security",
+                headers={"Authorization": "Bearer admin-secret"},
                 json={"tools": {"state": {"web": True}}},
             )
             assert settings_resp.status == 200
