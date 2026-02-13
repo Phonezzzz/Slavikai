@@ -742,6 +742,14 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
   return fallback;
 };
 
+const compactProviderError = (value: string): string => {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= 64) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 61)}...`;
+};
+
 export default function App() {
   const [activeView, setActiveView] = useState<AppView>(() => {
     if (typeof window === 'undefined') {
@@ -878,14 +886,29 @@ export default function App() {
     : 'Model not selected';
   const modelOptions = useMemo(
     () =>
-      providerModels.flatMap((provider) =>
-        provider.models.map((model) => ({
-          value: `${provider.provider}::${model}`,
-          label: `${provider.provider}/${model}`,
-          provider: provider.provider,
-          model,
-        })),
-      ),
+      providerModels.flatMap((provider) => {
+        if (provider.models.length > 0) {
+          return provider.models.map((model) => ({
+            value: `${provider.provider}::${model}`,
+            label: `${provider.provider}/${model}`,
+            provider: provider.provider,
+            model,
+            disabled: false,
+          }));
+        }
+        const unavailableReason = provider.error
+          ? `unavailable: ${compactProviderError(provider.error)}`
+          : 'unavailable';
+        return [
+          {
+            value: `${provider.provider}::__unavailable__`,
+            label: `${provider.provider}/${unavailableReason}`,
+            provider: provider.provider,
+            model: '',
+            disabled: true,
+          },
+        ];
+      }),
     [providerModels],
   );
   const selectedModelValue = selectedModel

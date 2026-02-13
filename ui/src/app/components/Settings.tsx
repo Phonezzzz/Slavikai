@@ -25,6 +25,13 @@ type ProviderSettings = {
   endpoint: string;
 };
 
+type ProviderRuntimeState = {
+  modelsCount: number;
+  error: string | null;
+};
+
+type ProviderRuntimeByModel = Record<ModelProvider, ProviderRuntimeState | null>;
+
 type ParsedSettings = {
   providers: ProviderSettings[];
   apiKeys: Record<ApiKeyProvider, string>;
@@ -131,6 +138,9 @@ const isApiKeyProvider = (value: unknown): value is ApiKeyProvider =>
 
 const isApiKeySource = (value: unknown): value is ApiKeySource =>
   value === 'settings' || value === 'env' || value === 'missing';
+
+const isModelProvider = (value: unknown): value is ModelProvider =>
+  value === 'xai' || value === 'openrouter' || value === 'local';
 
 const isToolKey = (value: unknown): value is ToolKey =>
   value === 'fs'
@@ -301,6 +311,43 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   };
 };
 
+const DEFAULT_PROVIDER_RUNTIME: ProviderRuntimeByModel = {
+  xai: null,
+  openrouter: null,
+  local: null,
+};
+
+const parseProviderRuntimePayload = (payload: unknown): ProviderRuntimeByModel => {
+  const result: ProviderRuntimeByModel = { ...DEFAULT_PROVIDER_RUNTIME };
+  if (!payload || typeof payload !== 'object') {
+    return result;
+  }
+  const providersRaw = (payload as { providers?: unknown }).providers;
+  if (!Array.isArray(providersRaw)) {
+    return result;
+  }
+  for (const item of providersRaw) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const providerRaw = (item as { provider?: unknown }).provider;
+    if (!isModelProvider(providerRaw)) {
+      continue;
+    }
+    const modelsRaw = (item as { models?: unknown }).models;
+    const errorRaw = (item as { error?: unknown }).error;
+    const modelsCount = Array.isArray(modelsRaw)
+      ? modelsRaw.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).length
+      : 0;
+    const error =
+      typeof errorRaw === 'string' && errorRaw.trim().length > 0
+        ? errorRaw.trim()
+        : null;
+    result[providerRaw] = { modelsCount, error };
+  }
+  return result;
+};
+
 const parseMemoryConflictsPayload = (payload: unknown): MemoryConflict[] => {
   if (!payload || typeof payload !== 'object') {
     return [];
@@ -336,7 +383,7 @@ const parseMemoryConflictsPayload = (payload: unknown): MemoryConflict[] => {
 
 const providerPlaceholder = (provider: ProviderSettings): string => {
   if (provider.api_key_source === 'settings') {
-    return `Stored in settings. Paste new ${provider.provider} key to replace.`;
+    return `Stored in settings. Paste new ${provider.provider} key or leave empty and Save to clear.`;
   }
   if (provider.api_key_source === 'env') {
     return `Using ${provider.api_key_env}. Paste key here to override in UI.`;
@@ -436,6 +483,11 @@ export function Settings({
   const [yoloConfirmText, setYoloConfirmText] = useState('');
   const [yoloSecondConfirm, setYoloSecondConfirm] = useState(false);
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
+  const [providerRuntime, setProviderRuntime] = useState<ProviderRuntimeByModel>(
+    DEFAULT_PROVIDER_RUNTIME,
+  );
+  const [providerRuntimeLoading, setProviderRuntimeLoading] = useState(false);
+  const [providerRuntimeError, setProviderRuntimeError] = useState<string | null>(null);
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [tone, setTone] = useState('balanced');
   const [longPasteToFileEnabled, setLongPasteToFileEnabled] = useState(
@@ -471,18 +523,31 @@ export function Settings({
   const loadSettings = async () => {
     setLoading(true);
     setStatus(null);
+    setProviderRuntimeLoading(true);
+    setProviderRuntimeError(null);
     try {
-      const response = await fetch('/ui/api/settings', { headers: requestHeaders });
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, 'Failed to load settings.'));
+      const [settingsResponse, providerRuntimeResponse] = await Promise.all([
+        fetch('/ui/api/settings', { headers: requestHeaders }),
+        fetch('/ui/api/models', { headers: requestHeaders }),
+      ]);
+      const settingsPayload: unknown = await settingsResponse.json();
+      if (!settingsResponse.ok) {
+        throw new Error(extractErrorMessage(settingsPayload, 'Failed to load settings.'));
       }
-      const parsed = parseSettingsPayload(payload);
+      const parsed = parseSettingsPayload(settingsPayload);
       applyParsedSettings(parsed);
+      const providerRuntimePayload: unknown = await providerRuntimeResponse.json();
+      if (!providerRuntimeResponse.ok) {
+        throw new Error(extractErrorMessage(providerRuntimePayload, 'Failed to load provider runtime status.'));
+      }
+      setProviderRuntime(parseProviderRuntimePayload(providerRuntimePayload));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load settings.';
+      setProviderRuntime({ ...DEFAULT_PROVIDER_RUNTIME });
+      setProviderRuntimeError(message);
       setStatus(message);
     } finally {
+      setProviderRuntimeLoading(false);
       setLoading(false);
     }
   };
@@ -528,11 +593,13 @@ export function Settings({
     setSaving(true);
     setStatus(null);
     try {
-      const providersPayload: Record<string, { api_key: string }> = {};
+      const providersPayload: Record<string, { api_key: string } | null> = {};
       for (const provider of API_KEY_PROVIDERS) {
         const key = apiKeys[provider].trim();
         if (key) {
           providersPayload[provider] = { api_key: key };
+        } else {
+          providersPayload[provider] = null;
         }
       }
 
@@ -549,9 +616,7 @@ export function Settings({
           state: toolsState,
         },
       };
-      if (Object.keys(providersPayload).length > 0) {
-        payload.providers = providersPayload;
-      }
+      payload.providers = providersPayload;
 
       const response = await fetch('/ui/api/settings', {
         method: 'POST',
@@ -796,7 +861,31 @@ export function Settings({
 
                   {!loading && activeTab === 'api' ? (
                     <div className="space-y-4">
-                      {providers.map((provider) => (
+                      {providers.map((provider) => {
+                        const runtime = isModelProvider(provider.provider)
+                          ? providerRuntime[provider.provider]
+                          : null;
+                        const runtimeLabel = providerRuntimeLoading
+                          ? 'checking'
+                          : runtime?.error
+                            ? 'models error'
+                            : runtime && runtime.modelsCount > 0
+                              ? `${runtime.modelsCount} models`
+                              : runtime
+                                ? '0 models'
+                                : providerRuntimeError
+                                  ? 'probe failed'
+                                  : 'unknown';
+                        const runtimeClass = providerRuntimeLoading
+                          ? 'bg-zinc-800 text-zinc-300'
+                          : runtime?.error || providerRuntimeError
+                            ? 'bg-rose-500/20 text-rose-300'
+                            : runtime && runtime.modelsCount > 0
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : 'bg-amber-500/20 text-amber-300';
+                        const runtimeDetail = runtime?.error ?? providerRuntimeError;
+
+                        return (
                         <div key={provider.provider} className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
                           <div className="mb-3 flex items-center justify-between">
                             <h3 className="font-medium text-zinc-100">{PROVIDER_LABELS[provider.provider]}</h3>
@@ -813,6 +902,11 @@ export function Settings({
                               <span className="rounded-md bg-zinc-800 px-2 py-1 text-xs text-zinc-400">
                                 {sourceLabel(provider.api_key_source)}
                               </span>
+                              {isModelProvider(provider.provider) ? (
+                                <span className={`rounded-md px-2 py-1 text-xs font-medium ${runtimeClass}`}>
+                                  {runtimeLabel}
+                                </span>
+                              ) : null}
                             </div>
                           </div>
                           <div className="space-y-2 text-xs text-zinc-400">
@@ -820,6 +914,11 @@ export function Settings({
                               Env: <span className="font-mono text-zinc-300">{provider.api_key_env}</span>
                             </div>
                             <div className="break-all">Endpoint: {provider.endpoint}</div>
+                            {isModelProvider(provider.provider) && runtimeDetail ? (
+                              <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-2 py-1.5 text-rose-200">
+                                Runtime: {runtimeDetail}
+                              </div>
+                            ) : null}
                           </div>
                           <input
                             type="password"
@@ -831,7 +930,8 @@ export function Settings({
                             className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
                           />
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : null}
 

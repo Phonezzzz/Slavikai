@@ -141,6 +141,7 @@ interface CanvasProps {
     label: string;
     provider: string;
     model: string;
+    disabled?: boolean;
   }>;
   selectedModelValue?: string | null;
   onSelectModel?: (provider: string, model: string) => void;
@@ -994,7 +995,7 @@ export function Canvas({
               value={selectedModelValue ?? ""}
               onChange={(event) => {
                 const next = modelOptions.find((option) => option.value === event.target.value);
-                if (next) {
+                if (next && !next.disabled && next.model.trim()) {
                   onSelectModel?.(next.provider, next.model);
                 }
               }}
@@ -1005,7 +1006,12 @@ export function Canvas({
                 Select model
               </option>
               {modelOptions.map((option) => (
-                <option key={option.value} value={option.value} className="bg-[#0b0b0d] text-[#ddd]">
+                <option
+                  key={option.value}
+                  value={option.value}
+                  disabled={option.disabled}
+                  className="bg-[#0b0b0d] text-[#ddd]"
+                >
                   {option.label}
                 </option>
               ))}
