@@ -650,7 +650,7 @@ export function WorkspaceAssistantPanel({
               void handleToggleRecording();
             }}
             disabled={!canUseMediaRecorder || sending || isTranscribing || isDecisionBlocking}
-            className={`rounded p-1 transition-colors ${
+            className={`relative rounded p-1 transition-colors ${
               !canUseMediaRecorder
                 ? 'text-[#444]'
                 : isRecording
@@ -670,7 +670,14 @@ export function WorkspaceAssistantPanel({
             }
             aria-label="Toggle speech-to-text"
           >
-            {isTranscribing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Mic className="h-4 w-4" />}
+            {isTranscribing ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <span className="relative inline-flex items-center justify-center">
+                {isRecording ? <span className="stt-mic-recording" aria-hidden="true" /> : null}
+                <Mic className="relative z-10 h-4 w-4" />
+              </span>
+            )}
           </button>
           <button
             type="button"

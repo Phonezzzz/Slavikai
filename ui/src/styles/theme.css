@@ -261,4 +261,40 @@
   .composer-textarea::-webkit-scrollbar-thumb:hover {
     background: rgba(145, 145, 150, 0.7);
   }
+
+  @keyframes stt-mic-pulse {
+    0% {
+      opacity: 0.72;
+      transform: scale(0.72);
+    }
+
+    75% {
+      opacity: 0;
+      transform: scale(1.4);
+    }
+
+    100% {
+      opacity: 0;
+      transform: scale(1.4);
+    }
+  }
+
+  .stt-mic-recording {
+    position: absolute;
+    inset: -6px;
+    border-radius: 9999px;
+    border: 1px solid rgba(251, 113, 133, 0.7);
+    animation: stt-mic-pulse 1.2s ease-out infinite;
+    pointer-events: none;
+  }
+
+  .stt-mic-recording::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: inherit;
+    animation: stt-mic-pulse 1.2s ease-out infinite;
+    animation-delay: 0.35s;
+  }
 }

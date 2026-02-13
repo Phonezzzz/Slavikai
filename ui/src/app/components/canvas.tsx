@@ -733,17 +733,24 @@ export function Canvas({
     if (!trimmed && attachmentsPayload.length === 0) {
       return;
     }
+    const previousInputValue = inputValue;
+    const previousAttachments = composerAttachments;
+    const previousPasteUndo = pasteUndo;
+    setInputValue("");
+    setComposerAttachments([]);
+    setPasteUndo(null);
+    setSttError(null);
+
     const sent = await onSendMessage?.({
       content: trimmed,
       attachments: attachmentsPayload.length > 0 ? attachmentsPayload : undefined,
     });
     if (sent === false) {
+      setInputValue((current) => (current.trim().length === 0 ? previousInputValue : current));
+      setComposerAttachments((current) => (current.length === 0 ? previousAttachments : current));
+      setPasteUndo((current) => current ?? previousPasteUndo);
       return;
     }
-    setInputValue("");
-    setComposerAttachments([]);
-    setPasteUndo(null);
-    setSttError(null);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1202,7 +1209,7 @@ export function Canvas({
                 void handleToggleRecording();
               }}
               disabled={!canUseMediaRecorder || sending || isTranscribing || composerBlocked}
-              className={`transition-colors pb-0.5 cursor-pointer ${
+              className={`relative transition-colors pb-0.5 cursor-pointer ${
                 !canUseMediaRecorder
                   ? "text-[#444]"
                   : isRecording
@@ -1214,14 +1221,21 @@ export function Canvas({
               title={
                 !canUseMediaRecorder
                   ? "Microphone unavailable"
-                  : isRecording
-                    ? "Stop recording"
-                    : isTranscribing
-                      ? "Transcribing..."
-                      : "Start recording"
+                : isRecording
+                  ? "Stop recording"
+                  : isTranscribing
+                    ? "Transcribing..."
+                    : "Start recording"
               }
             >
-              {isTranscribing ? <LoaderCircle className="w-4.5 h-4.5 animate-spin" /> : <Mic className="w-4.5 h-4.5" />}
+              {isTranscribing ? (
+                <LoaderCircle className="w-4.5 h-4.5 animate-spin" />
+              ) : (
+                <span className="relative inline-flex items-center justify-center">
+                  {isRecording ? <span className="stt-mic-recording" aria-hidden="true" /> : null}
+                  <Mic className="relative z-10 w-4.5 h-4.5" />
+                </span>
+              )}
             </button>
 
             {/* Send button */}

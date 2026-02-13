@@ -614,12 +614,14 @@ export function WorkspaceIde({
     if ((!content && attachments.length === 0) || sending || isDecisionBlocking) {
       return;
     }
+    const previousInput = agentInput;
+    setAgentInput('');
     const ok = await onSendAgentMessage({
       content,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
-    if (ok) {
-      setAgentInput('');
+    if (!ok) {
+      setAgentInput((current) => (current.trim().length === 0 ? previousInput : current));
     }
   };
 
