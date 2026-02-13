@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hmac
 import importlib
 import io
 import json
@@ -262,8 +263,18 @@ UI_DECISION_STATUSES: Final[set[str]] = {
     "executing",
     "resolved",
 }
-UI_DECISION_RESPONSES: Final[set[str]] = {"approve", "reject", "edit"}
-UI_DECISION_EDITABLE_FIELDS: Final[set[str]] = {"details", "args", "query", "branch", "repo_url"}
+UI_DECISION_RESPONSES: Final[set[str]] = {"approve", "reject"}
+UI_SETTINGS_FORBIDDEN_TOP_LEVEL_KEYS: Final[set[str]] = {
+    "policy",
+    "risk",
+    "security",
+    "risk_categories",
+    "security_categories",
+    "approval_categories",
+    "approved_categories",
+    "safe_mode",
+}
+UI_SETTINGS_FORBIDDEN_TOOL_KEYS: Final[set[str]] = {"shell", "safe_mode"}
 
 
 @dataclass(frozen=True)
@@ -439,6 +450,17 @@ def _extract_ui_session_id(request: web.Request) -> str | None:
     if query_value:
         return query_value
     return None
+
+
+def _extract_bearer_token(request: web.Request) -> str | None:
+    header_value = request.headers.get("Authorization", "").strip()
+    if not header_value:
+        return None
+    scheme, _, token = header_value.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    normalized = token.strip()
+    return normalized or None
 
 
 def _normalize_provider(raw_provider: str) -> str | None:
@@ -2166,6 +2188,23 @@ def _build_settings_payload() -> dict[str, JSONValue]:
     }
 
 
+def _forbidden_settings_update_key(payload: dict[str, object]) -> str | None:
+    for key in payload:
+        normalized = key.strip().lower()
+        if normalized in UI_SETTINGS_FORBIDDEN_TOP_LEVEL_KEYS:
+            return key
+    tools_raw = payload.get("tools")
+    if isinstance(tools_raw, dict):
+        state_raw = tools_raw.get("state", tools_raw)
+        if isinstance(state_raw, dict):
+            for key in state_raw:
+                if not isinstance(key, str):
+                    continue
+                if key.strip().lower() in UI_SETTINGS_FORBIDDEN_TOOL_KEYS:
+                    return f"tools.state.{key.strip().lower()}"
+    return None
+
+
 def _normalize_import_status(raw: object) -> str:
     if isinstance(raw, str):
         normalized = raw.strip().lower()
@@ -2265,65 +2304,13 @@ def _parse_imported_session(raw: object) -> PersistedSession | None:
         if parsed_message is None:
             return None
         messages.append(parsed_message)
-    decision_raw = raw.get("decision")
-    decision: dict[str, JSONValue] | None = None
-    if isinstance(decision_raw, dict):
-        parsed_decision: dict[str, JSONValue] = {}
-        for key, item in decision_raw.items():
-            parsed_decision[str(key)] = _normalize_json_value(item)
-        decision = parsed_decision
-    selected_model_raw = raw.get("selected_model")
-    model_provider: str | None = None
-    model_id: str | None = None
-    if isinstance(selected_model_raw, dict):
-        provider_raw = selected_model_raw.get("provider")
-        model_raw = selected_model_raw.get("model")
-        if isinstance(provider_raw, str) and provider_raw.strip():
-            model_provider = provider_raw.strip()
-        if isinstance(model_raw, str) and model_raw.strip():
-            model_id = model_raw.strip()
-    title_override_raw = raw.get("title_override")
-    title_override = title_override_raw.strip() if isinstance(title_override_raw, str) else None
-    folder_id_raw = raw.get("folder_id")
-    folder_id = folder_id_raw.strip() if isinstance(folder_id_raw, str) else None
-    output_text: str | None = None
-    output_updated_at: str | None = None
-    output_raw = raw.get("output")
-    if isinstance(output_raw, dict):
-        output_content_raw = output_raw.get("content")
-        output_updated_raw = output_raw.get("updated_at")
-        if isinstance(output_content_raw, str) and output_content_raw.strip():
-            output_text = output_content_raw
-        if isinstance(output_updated_raw, str) and output_updated_raw.strip():
-            output_updated_at = output_updated_raw
-    if output_text is None:
-        output_text_raw = raw.get("output_text")
-        if isinstance(output_text_raw, str) and output_text_raw.strip():
-            output_text = output_text_raw
-    if output_updated_at is None:
-        output_updated_at_raw = raw.get("output_updated_at")
-        if isinstance(output_updated_at_raw, str) and output_updated_at_raw.strip():
-            output_updated_at = output_updated_at_raw
-    files: list[str] = []
-    files_raw = raw.get("files")
-    if isinstance(files_raw, list):
-        for item in files_raw:
-            if isinstance(item, str) and item.strip():
-                files.append(item.strip())
     return PersistedSession(
         session_id=session_id,
         created_at=created_at,
         updated_at=updated_at,
-        status=_normalize_import_status(raw.get("status")),
-        decision=decision,
+        status="ok",
+        decision=None,
         messages=messages,
-        model_provider=model_provider,
-        model_id=model_id,
-        title_override=title_override,
-        folder_id=folder_id,
-        output_text=output_text,
-        output_updated_at=output_updated_at,
-        files=files,
     )
 
 
@@ -3102,6 +3089,15 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             message="JSON должен быть объектом.",
             error_type="invalid_request_error",
             code="invalid_json",
+        )
+    forbidden_key = _forbidden_settings_update_key(payload)
+    if forbidden_key is not None:
+        return _error_response(
+            status=403,
+            message=f"Изменение security-поля запрещено: {forbidden_key}.",
+            error_type="forbidden",
+            code="security_fields_forbidden",
+            details={"field": forbidden_key},
         )
 
     next_embeddings_model: str | None = None
@@ -4277,16 +4273,7 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
 
 
 async def handle_ui_decision_respond(request: web.Request) -> web.Response:
-    agent_lock = request.app["agent_lock"]
-    session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
-
-    try:
-        agent = await _resolve_agent(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
-    if agent is None:
-        return _model_not_selected_response()
 
     try:
         payload = await request.json()
@@ -4304,11 +4291,36 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_json",
         )
+    allowed_keys = {"session_id", "decision_id", "choice"}
+    rejected_control_keys = {
+        "edited_action",
+        "context",
+        "proposed_action",
+        "resume_payload",
+        "source_endpoint",
+    }
+    forbidden_keys = sorted(
+        {
+            str(key).strip()
+            for key in payload
+            if str(key).strip() in rejected_control_keys or str(key).strip() not in allowed_keys
+        }
+    )
+    if forbidden_keys:
+        return _error_response(
+            status=400,
+            message=(
+                "Допустимы только session_id, decision_id, choice. "
+                f"Запрещённые поля: {', '.join(forbidden_keys)}."
+            ),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            details={"forbidden_fields": forbidden_keys},
+        )
 
     session_id_raw = payload.get("session_id")
     decision_id_raw = payload.get("decision_id")
     choice_raw = payload.get("choice")
-    edited_action_raw = payload.get("edited_action")
     if not isinstance(session_id_raw, str) or not session_id_raw.strip():
         return _error_response(
             status=400,
@@ -4326,7 +4338,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     if not isinstance(choice_raw, str) or choice_raw not in UI_DECISION_RESPONSES:
         return _error_response(
             status=400,
-            message="choice должен быть approve|reject|edit.",
+            message="choice должен быть approve|reject.",
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
@@ -4363,68 +4375,6 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "status": status_value,
                 "resume_started": False,
                 "already_resolved": status_value in {"resolved", "rejected"},
-                "resume": None,
-            }
-        )
-
-    if choice == "edit":
-        if not isinstance(edited_action_raw, dict):
-            return _error_response(
-                status=400,
-                message="edited_action должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        proposed_raw = current_decision.get("proposed_action")
-        proposed_action = dict(proposed_raw) if isinstance(proposed_raw, dict) else {}
-        for key, value in edited_action_raw.items():
-            normalized_key = str(key)
-            if normalized_key not in UI_DECISION_EDITABLE_FIELDS:
-                continue
-            proposed_action[normalized_key] = _normalize_json_value(value)
-        edited_decision = dict(current_decision)
-        edited_decision["proposed_action"] = proposed_action
-        edited_decision["updated_at"] = _utc_now_iso()
-        updated, latest = await hub.transition_session_decision(
-            session_id,
-            expected_id=decision_id,
-            expected_status="pending",
-            next_decision=edited_decision,
-        )
-        normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
-        if not updated:
-            if normalized_latest is not None:
-                latest_status_raw = normalized_latest.get("status")
-                latest_status = (
-                    latest_status_raw if isinstance(latest_status_raw, str) else "unknown"
-                )
-                return _json_response(
-                    {
-                        "ok": True,
-                        "decision": normalized_latest,
-                        "status": latest_status,
-                        "resume_started": False,
-                        "already_resolved": latest_status in {"resolved", "rejected"},
-                        "resume": None,
-                    }
-                )
-            return _error_response(
-                status=409,
-                message="Decision is not pending.",
-                error_type="invalid_request_error",
-                code="decision_not_pending",
-            )
-        normalized = (
-            normalized_latest
-            if normalized_latest is not None
-            else _normalize_ui_decision(edited_decision, session_id=session_id)
-        )
-        return _json_response(
-            {
-                "ok": True,
-                "decision": normalized,
-                "status": "pending",
-                "resume_started": False,
                 "resume": None,
             }
         )
@@ -4480,443 +4430,12 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             }
         )
 
-    # choice == "approve"
-    executing_candidate = _decision_with_status(current_decision, status="executing")
-    updated, executing_latest = await hub.transition_session_decision(
-        session_id,
-        expected_id=decision_id,
-        expected_status="pending",
-        next_decision=executing_candidate,
+    return _error_response(
+        status=409,
+        message="Decision resume disabled by emergency lockdown.",
+        error_type="invalid_request_error",
+        code="decision_resume_disabled_emergency",
     )
-    normalized_executing = _normalize_ui_decision(executing_latest, session_id=session_id)
-    if not updated:
-        if normalized_executing is not None:
-            status_raw = normalized_executing.get("status")
-            status_value = status_raw if isinstance(status_raw, str) else "unknown"
-            return _json_response(
-                {
-                    "ok": True,
-                    "decision": normalized_executing,
-                    "status": status_value,
-                    "resume_started": False,
-                    "already_resolved": status_value in {"resolved", "rejected"},
-                    "resume": None,
-                }
-            )
-        return _error_response(
-            status=409,
-            message="Decision is not pending.",
-            error_type="invalid_request_error",
-            code="decision_not_pending",
-        )
-    executing = (
-        normalized_executing
-        if normalized_executing is not None
-        else _normalize_ui_decision(executing_candidate, session_id=session_id)
-    )
-    if executing is None:
-        return _error_response(
-            status=500,
-            message="Decision execution state is invalid.",
-            error_type="internal_error",
-            code="decision_invalid",
-        )
-    await hub.set_session_status(session_id, "busy")
-
-    resume_started = False
-    resume: dict[str, JSONValue] | None = None
-    trace_id: str | None = None
-    mwv_report: dict[str, JSONValue] | None = None
-    approval_request: dict[str, JSONValue] | None = None
-    try:
-        context_raw = executing.get("context")
-        context = context_raw if isinstance(context_raw, dict) else {}
-        source_endpoint_raw = context.get("source_endpoint")
-        source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
-        resume_payload_raw = context.get("resume_payload")
-        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
-        user_message_id_raw = resume_payload.get("user_message_id")
-        user_message_id = (
-            user_message_id_raw
-            if isinstance(user_message_id_raw, str) and user_message_id_raw
-            else None
-        )
-        source_request_raw = resume_payload.get("source_request")
-        source_request = source_request_raw if isinstance(source_request_raw, dict) else {}
-
-        kind_raw = executing.get("kind")
-        if kind_raw == "approval":
-            proposed_raw = executing.get("proposed_action")
-            proposed = proposed_raw if isinstance(proposed_raw, dict) else {}
-            required_raw = proposed.get("required_categories")
-            categories: set[ApprovalCategory] = set()
-            if isinstance(required_raw, list):
-                for item in required_raw:
-                    if isinstance(item, str) and item in ALL_CATEGORIES:
-                        categories.add(cast(ApprovalCategory, item))
-            if categories:
-                await session_store.approve(session_id, categories)
-
-        if source_endpoint == "project.command":
-            command_raw = source_request.get("command")
-            args_raw = source_request.get("args")
-            if not isinstance(command_raw, str) or not command_raw.strip():
-                raise ValueError("decision resume payload missing command")
-            command = command_raw.strip().lower()
-            args_text = args_raw.strip() if isinstance(args_raw, str) else ""
-            if command not in UI_PROJECT_COMMANDS:
-                raise ValueError(f"Unsupported project command for decision resume: {command}")
-
-            resume_started = True
-            if command == "github_import":
-                repo_url, branch = _parse_github_import_args(args_text)
-                target_path, relative_target = _resolve_github_target(repo_url)
-                await _publish_agent_activity(
-                    hub,
-                    session_id=session_id,
-                    phase="github.clone.start",
-                    detail=repo_url,
-                )
-                cloned, clone_result = await _clone_github_repository(
-                    repo_url=repo_url,
-                    branch=branch,
-                    target_path=target_path,
-                )
-                if not cloned:
-                    response_text = f"Командный режим (без MWV)\n{clone_result}"
-                else:
-                    await _publish_agent_activity(
-                        hub,
-                        session_id=session_id,
-                        phase="github.index.start",
-                        detail=relative_target,
-                    )
-                    indexed, index_result = _index_imported_project(relative_target)
-                    await _publish_agent_activity(
-                        hub,
-                        session_id=session_id,
-                        phase="github.index.end",
-                        detail=index_result,
-                    )
-                    if indexed:
-                        response_text = (
-                            "Командный режим (без MWV)\n"
-                            f"GitHub import completed: {repo_url}\n"
-                            f"Path: {relative_target}\n"
-                            f"Index: {index_result}"
-                        )
-                    else:
-                        response_text = (
-                            "Командный режим (без MWV)\n"
-                            f"GitHub import completed with indexing errors: {repo_url}\n"
-                            f"Path: {relative_target}\n"
-                            f"Index error: {index_result}"
-                        )
-            else:
-                tool_result = handle_project_request(
-                    ToolRequest(
-                        name="project",
-                        args={"cmd": command, "args": [args_text] if args_text else []},
-                    )
-                )
-                tool_output_raw = (
-                    tool_result.data.get("output") if tool_result.ok else tool_result.error
-                )
-                tool_output = (
-                    str(tool_output_raw).strip()
-                    if tool_output_raw is not None and str(tool_output_raw).strip()
-                    else "Project command finished."
-                )
-                if tool_output.startswith("Командный режим (без MWV)"):
-                    response_text = tool_output
-                else:
-                    response_text = f"Командный режим (без MWV)\n{tool_output}"
-
-            await hub.append_message(
-                session_id,
-                hub.create_message(
-                    role="assistant",
-                    content=response_text,
-                    parent_user_message_id=user_message_id,
-                ),
-            )
-            resume = {
-                "ok": True,
-                "kind": "tool_result",
-                "source_endpoint": "project.command",
-                "tool_name": "project",
-                "data": {"output": response_text, "command": command},
-                "error": None,
-            }
-        elif source_endpoint == "workspace.root_select":
-            root_raw = resume_payload.get("root_path")
-            if not isinstance(root_raw, str) or not root_raw.strip():
-                raise ValueError("decision resume payload missing root_path")
-            policy = await hub.get_session_policy(session_id)
-            profile_raw = policy.get("profile")
-            profile = profile_raw if isinstance(profile_raw, str) else DEFAULT_POLICY_PROFILE
-            target_root = _resolve_workspace_root_candidate(
-                root_raw.strip(),
-                policy_profile=profile,
-            )
-            await hub.set_workspace_root(session_id, str(target_root))
-            resume_started = True
-            resume = {
-                "ok": True,
-                "kind": "tool_result",
-                "source_endpoint": "workspace.root_select",
-                "tool_name": "workspace_root_select",
-                "data": {"root_path": str(target_root)},
-                "error": None,
-            }
-        elif source_endpoint == "workspace.tool":
-            tool_name_raw = resume_payload.get("tool_name")
-            args_raw = resume_payload.get("args")
-            raw_input_raw = resume_payload.get("raw_input")
-            tool_name = tool_name_raw.strip() if isinstance(tool_name_raw, str) else ""
-            if not tool_name:
-                raise ValueError("decision resume payload missing tool_name")
-            tool_args: dict[str, JSONValue] = {}
-            if isinstance(args_raw, dict):
-                for key, value in args_raw.items():
-                    tool_args[str(key)] = _normalize_json_value(value)
-            raw_input = (
-                raw_input_raw.strip()
-                if isinstance(raw_input_raw, str) and raw_input_raw.strip()
-                else f"ui:{tool_name}"
-            )
-            approved_categories = await session_store.get_categories(session_id)
-            session_root = await _workspace_root_for_session(hub, session_id)
-            async with agent_lock:
-                set_runtime_workspace_root(session_root)
-                try:
-                    try:
-                        agent.set_session_context(session_id, approved_categories)
-                    except Exception:  # noqa: BLE001
-                        logger.debug(
-                            "Failed to set session context in workspace decision resume",
-                            exc_info=True,
-                        )
-                    try:
-                        tool_result = agent.call_tool(
-                            tool_name,
-                            args=tool_args,
-                            raw_input=raw_input,
-                        )
-                    except ApprovalRequired as exc:
-                        approval_request = _serialize_approval_request(exc.request)
-                        replacement = _build_ui_approval_decision(
-                            approval_request=approval_request or {},
-                            session_id=session_id,
-                            source_endpoint="workspace.tool",
-                            resume_payload={
-                                "tool_name": tool_name,
-                                "args": tool_args,
-                                "raw_input": raw_input,
-                                "session_id": session_id,
-                            },
-                        )
-                        await hub.set_session_decision(session_id, replacement)
-                        await hub.set_session_status(session_id, "ok")
-                        return _json_response(
-                            {
-                                "ok": True,
-                                "decision": _normalize_ui_decision(
-                                    replacement,
-                                    session_id=session_id,
-                                ),
-                                "status": "pending",
-                                "resume_started": False,
-                                "resume": {
-                                    "ok": False,
-                                    "kind": "approval_required",
-                                    "source_endpoint": "workspace.tool",
-                                    "tool_name": tool_name,
-                                    "data": {
-                                        "approval_request": approval_request or {},
-                                    },
-                                    "error": "Требуется подтверждение действия.",
-                                },
-                            }
-                        )
-                finally:
-                    set_runtime_workspace_root(None)
-            resume_started = True
-            resume = {
-                "ok": tool_result.ok,
-                "kind": "tool_result",
-                "source_endpoint": "workspace.tool",
-                "tool_name": tool_name,
-                "data": tool_result.data,
-                "error": tool_result.error,
-            }
-        else:
-            selected_model = await hub.get_session_model(session_id)
-            if selected_model is None:
-                return _model_not_selected_response()
-            approved_categories = await session_store.get_categories(session_id)
-            llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
-            async with agent_lock:
-                model_config = _build_model_config(
-                    selected_model["provider"],
-                    selected_model["model"],
-                )
-                api_key = _resolve_provider_api_key(selected_model["provider"])
-                agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
-                try:
-                    agent.set_session_context(session_id, approved_categories)
-                except Exception:  # noqa: BLE001
-                    logger.debug("Failed to set session context in decision resume", exc_info=True)
-                response_raw = agent.respond(llm_messages)
-                response_text, mwv_report = _split_response_and_report(response_raw)
-                trace_id = _normalize_trace_id(getattr(agent, "last_chat_interaction_id", None))
-                approval_request = _serialize_approval_request(
-                    getattr(agent, "last_approval_request", None),
-                )
-
-            resume_started = source_endpoint == "chat.send"
-            if approval_request is not None:
-                replacement = _build_ui_approval_decision(
-                    approval_request=approval_request,
-                    session_id=session_id,
-                    source_endpoint=source_endpoint or "chat.send",
-                    resume_payload=resume_payload,
-                    trace_id=trace_id,
-                )
-                await hub.set_session_decision(session_id, replacement)
-                await hub.set_session_status(session_id, "ok")
-                return _json_response(
-                    {
-                        "ok": True,
-                        "decision": _normalize_ui_decision(replacement, session_id=session_id),
-                        "status": "pending",
-                        "resume_started": False,
-                        "resume": {
-                            "ok": False,
-                            "kind": "approval_required",
-                            "source_endpoint": source_endpoint or "chat.send",
-                            "tool_name": None,
-                            "data": {
-                                "approval_request": approval_request,
-                            },
-                            "error": "Требуется подтверждение действия.",
-                        },
-                    }
-                )
-
-            force_canvas = source_request.get("force_canvas") is True
-            await hub.set_session_output(session_id, response_text)
-            files_from_tools: list[str] = []
-            if trace_id:
-                tool_calls = _tool_calls_for_trace_id(trace_id) or []
-                files_from_tools = _extract_files_from_tool_calls(tool_calls)
-                if files_from_tools:
-                    await hub.merge_session_files(session_id, files_from_tools)
-            named_files_count = len(_extract_named_files_from_output(response_text))
-            display_target: Literal["chat", "canvas"] = (
-                "canvas"
-                if _should_render_result_in_canvas(
-                    response_text=response_text,
-                    files_from_tools=files_from_tools,
-                    named_files_count=named_files_count,
-                    force_canvas=force_canvas,
-                )
-                else "chat"
-            )
-            artifact_payloads = _build_output_artifacts(
-                response_text=response_text,
-                display_target=display_target,
-                files_from_tools=files_from_tools,
-            )
-            for artifact in artifact_payloads:
-                await hub.append_session_artifact(session_id, artifact)
-            first_artifact = artifact_payloads[0] if artifact_payloads else None
-            artifact_id_raw = first_artifact.get("id") if first_artifact is not None else None
-            artifact_id = artifact_id_raw if isinstance(artifact_id_raw, str) else None
-            artifact_title = _canvas_summary_title_from_artifact(first_artifact)
-            if display_target == "canvas" and artifact_id is not None:
-                stream_source_raw = (
-                    first_artifact.get("content") if first_artifact is not None else response_text
-                )
-                stream_source = (
-                    stream_source_raw if isinstance(stream_source_raw, str) else response_text
-                )
-                asyncio.create_task(
-                    _publish_canvas_stream(
-                        hub,
-                        session_id=session_id,
-                        artifact_id=artifact_id,
-                        content=stream_source,
-                    )
-                )
-            if display_target == "chat":
-                await _publish_chat_stream_from_text(
-                    hub,
-                    session_id=session_id,
-                    stream_id=uuid.uuid4().hex,
-                    content=response_text,
-                )
-            chat_summary = (
-                response_text
-                if display_target == "chat"
-                else _build_canvas_chat_summary(artifact_title=artifact_title)
-            )
-            await hub.append_message(
-                session_id,
-                hub.create_message(
-                    role="assistant",
-                    content=chat_summary,
-                    trace_id=trace_id,
-                    parent_user_message_id=user_message_id,
-                ),
-            )
-            resume = {
-                "ok": True,
-                "kind": "chat_response",
-                "source_endpoint": source_endpoint or "chat.send",
-                "tool_name": None,
-                "data": {
-                    "trace_id": trace_id,
-                    "display_target": display_target,
-                },
-                "error": None,
-            }
-
-        resolved = _decision_with_status(executing, status="resolved", resolved=True)
-        await hub.set_session_decision(session_id, resolved)
-        await hub.set_session_status(session_id, "ok")
-        messages = await hub.get_messages(session_id)
-        output_payload = await hub.get_session_output(session_id)
-        files_payload = await hub.get_session_files(session_id)
-        artifacts_payload = await hub.get_session_artifacts(session_id)
-        current_model = await hub.get_session_model(session_id)
-        return _json_response(
-            {
-                "ok": True,
-                "status": "resolved",
-                "resume_started": resume_started,
-                "decision": _normalize_ui_decision(resolved, session_id=session_id),
-                "messages": messages,
-                "output": output_payload,
-                "files": files_payload or [],
-                "artifacts": artifacts_payload or [],
-                "trace_id": trace_id,
-                "selected_model": current_model,
-                "approval_request": approval_request,
-                "mwv_report": mwv_report,
-                "resume": resume,
-            }
-        )
-    except Exception as exc:  # noqa: BLE001
-        failed = _decision_with_status(executing, status="rejected", resolved=True)
-        await hub.set_session_decision(session_id, failed)
-        await hub.set_session_status(session_id, "error")
-        return _error_response(
-            status=500,
-            message=f"Decision resume error: {exc}",
-            error_type="internal_error",
-            code="decision_resume_error",
-        )
 
 
 async def handle_ui_chat_send(request: web.Request) -> web.Response:
@@ -6336,6 +5855,22 @@ async def handle_feedback(request: web.Request) -> web.Response:
 async def handle_approve_session(request: web.Request) -> web.Response:
     session_store = request.app["session_store"]
     agent = request.app.get("agent")
+    admin_token = os.getenv("SLAVIK_ADMIN_TOKEN", "").strip()
+    if not admin_token:
+        return _error_response(
+            status=503,
+            message="SLAVIK_ADMIN_TOKEN не настроен; approve-session отключён.",
+            error_type="configuration_error",
+            code="admin_token_not_configured",
+        )
+    presented_token = _extract_bearer_token(request)
+    if presented_token is None or not hmac.compare_digest(presented_token, admin_token):
+        return _error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="authentication_error",
+            code="unauthorized",
+        )
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001

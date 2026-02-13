@@ -415,6 +415,7 @@ def test_trace_endpoint_returns_events(monkeypatch, tmp_path) -> None:
 def test_approve_session_reflected(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "admin-secret")
 
     async def run() -> None:
         client = await _create_client(agent, trace_path, monkeypatch)
@@ -422,6 +423,7 @@ def test_approve_session_reflected(monkeypatch, tmp_path) -> None:
             session_id = "session-123"
             approve_resp = await client.post(
                 "/slavik/approve-session",
+                headers={"Authorization": "Bearer admin-secret"},
                 json={"session_id": session_id, "categories": ["EXEC_ARBITRARY"]},
             )
             assert approve_resp.status == 200
@@ -477,6 +479,7 @@ def test_approval_required_response(monkeypatch, tmp_path) -> None:
 def test_approval_flow_and_session_reset(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "admin-secret")
 
     async def run() -> None:
         client = await _create_client(agent, trace_path, monkeypatch)
@@ -494,6 +497,7 @@ def test_approval_flow_and_session_reset(monkeypatch, tmp_path) -> None:
 
             approve = await client.post(
                 "/slavik/approve-session",
+                headers={"Authorization": "Bearer admin-secret"},
                 json={
                     "session_id": session_id,
                     "categories": ["SUDO", "EXEC_ARBITRARY"],
@@ -520,6 +524,58 @@ def test_approval_flow_and_session_reset(monkeypatch, tmp_path) -> None:
                 headers={"X-Slavik-Session": "session-new"},
             )
             assert new_session.status == 400
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_approve_session_requires_admin_bearer_token(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            missing_admin_resp = await client.post(
+                "/slavik/approve-session",
+                json={"session_id": "s1", "categories": ["EXEC_ARBITRARY"]},
+            )
+            assert missing_admin_resp.status == 503
+            missing_admin_payload = await missing_admin_resp.json()
+            missing_error = missing_admin_payload.get("error")
+            assert isinstance(missing_error, dict)
+            assert missing_error.get("code") == "admin_token_not_configured"
+
+            monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "admin-secret")
+            monkeypatch.setenv("SLAVIK_API_TOKEN", "api-secret")
+
+            no_auth_resp = await client.post(
+                "/slavik/approve-session",
+                json={"session_id": "s1", "categories": ["EXEC_ARBITRARY"]},
+            )
+            assert no_auth_resp.status == 401
+
+            invalid_auth_resp = await client.post(
+                "/slavik/approve-session",
+                headers={"Authorization": "Bearer wrong-secret"},
+                json={"session_id": "s1", "categories": ["EXEC_ARBITRARY"]},
+            )
+            assert invalid_auth_resp.status == 401
+
+            api_token_resp = await client.post(
+                "/slavik/approve-session",
+                headers={"Authorization": "Bearer api-secret"},
+                json={"session_id": "s1", "categories": ["EXEC_ARBITRARY"]},
+            )
+            assert api_token_resp.status == 401
+
+            valid_admin_resp = await client.post(
+                "/slavik/approve-session",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"session_id": "s1", "categories": ["EXEC_ARBITRARY"]},
+            )
+            assert valid_admin_resp.status == 200
         finally:
             await client.close()
 
