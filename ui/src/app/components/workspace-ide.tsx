@@ -152,7 +152,7 @@ export function WorkspaceIde({
   const [draggingAssistant, setDraggingAssistant] = useState(false);
   const [draggingTerminal, setDraggingTerminal] = useState(false);
 
-  const terminalEndRef = useRef<HTMLDivElement | null>(null);
+  const terminalEndRef = useRef<HTMLDivElement>(null);
   const assistantSeenRef = useRef<Set<string>>(new Set());
   const assistantInitRef = useRef(false);
   const decisionSeenRef = useRef<Set<string>>(new Set());
@@ -628,7 +628,10 @@ export function WorkspaceIde({
   const handleEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
     editor.onDidChangeCursorSelection(() => {
-      const selected = editor.getModel()?.getValueInRange(editor.getSelection() ?? undefined) ?? '';
+      const model = editor.getModel();
+      const selection = editor.getSelection();
+      const selected =
+        model && selection ? model.getValueInRange(selection) : '';
       setSelectionText(selected.trim());
     });
   };

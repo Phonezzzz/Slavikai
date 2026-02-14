@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Search, Edit3, FileText, X } from "lucide-react";
 
 export interface ChatHistoryItem {

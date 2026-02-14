@@ -1,5 +1,6 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
 import { Play, Save, Terminal, X } from 'lucide-react';
+import type { RefObject } from 'react';
 
 import { monacoLanguageFromPath } from './workspace-helpers';
 
@@ -24,7 +25,7 @@ type WorkspaceEditorPaneProps = {
   terminalLines: string[];
   terminalInput: string;
   terminalInputDisabled: boolean;
-  terminalEndRef: React.RefObject<HTMLDivElement | null>;
+  terminalEndRef: RefObject<HTMLDivElement>;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onRunActiveFile: () => void;
