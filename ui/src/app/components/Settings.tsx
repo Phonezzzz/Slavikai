@@ -16,6 +16,7 @@ type ModelProvider = 'xai' | 'openrouter' | 'local';
 type ApiKeySource = 'settings' | 'env' | 'missing';
 type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt' | 'safe_mode';
 type PolicyProfile = 'sandbox' | 'index' | 'yolo';
+type EmbeddingsProvider = 'local' | 'openai';
 
 type ProviderSettings = {
   provider: ApiKeyProvider;
@@ -46,6 +47,9 @@ type ParsedSettings = {
   systemPrompt: string;
   longPasteToFileEnabled: boolean;
   longPasteThresholdChars: number;
+  embeddingsProvider: EmbeddingsProvider;
+  embeddingsLocalModel: string;
+  embeddingsOpenaiModel: string;
 };
 
 type MemoryConflict = {
@@ -94,6 +98,9 @@ const DEFAULT_API_KEYS: Record<ApiKeyProvider, string> = {
 const DEFAULT_LONG_PASTE_TO_FILE_ENABLED = true;
 const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
 const DEFAULT_POLICY_PROFILE: PolicyProfile = 'sandbox';
+const DEFAULT_EMBEDDINGS_PROVIDER: EmbeddingsProvider = 'local';
+const DEFAULT_EMBEDDINGS_LOCAL_MODEL = 'all-MiniLM-L6-v2';
+const DEFAULT_EMBEDDINGS_OPENAI_MODEL = 'text-embedding-3-small';
 
 const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
   {
@@ -170,6 +177,9 @@ const isToolKey = (value: unknown): value is ToolKey =>
 const isPolicyProfile = (value: unknown): value is PolicyProfile =>
   value === 'sandbox' || value === 'index' || value === 'yolo';
 
+const isEmbeddingsProvider = (value: unknown): value is EmbeddingsProvider =>
+  value === 'local' || value === 'openai';
+
 const extractErrorMessage = (payload: unknown, fallback: string): string => {
   if (!payload || typeof payload !== 'object') {
     return fallback;
@@ -193,6 +203,9 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     longPasteToFileEnabled: DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
     longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
+    embeddingsProvider: DEFAULT_EMBEDDINGS_PROVIDER,
+    embeddingsLocalModel: DEFAULT_EMBEDDINGS_LOCAL_MODEL,
+    embeddingsOpenaiModel: DEFAULT_EMBEDDINGS_OPENAI_MODEL,
   };
   if (!payload || typeof payload !== 'object') {
     return defaults;
@@ -295,9 +308,13 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   };
   const tools = (settings as { tools?: unknown }).tools;
   const policy = (settings as { policy?: unknown }).policy;
+  const memory = (settings as { memory?: unknown }).memory;
   let policyProfile: PolicyProfile = defaults.policyProfile;
   let yoloArmed = defaults.yoloArmed;
   let yoloArmedAt = defaults.yoloArmedAt;
+  let embeddingsProvider = defaults.embeddingsProvider;
+  let embeddingsLocalModel = defaults.embeddingsLocalModel;
+  let embeddingsOpenaiModel = defaults.embeddingsOpenaiModel;
   let toolsState: Record<ToolKey, boolean> = { ...defaults.toolsState };
   if (tools && typeof tools === 'object') {
     const stateRaw = (tools as { state?: unknown }).state;
@@ -327,6 +344,31 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
+  if (memory && typeof memory === 'object') {
+    const embeddingsRaw = (memory as { embeddings?: unknown }).embeddings;
+    if (embeddingsRaw && typeof embeddingsRaw === 'object') {
+      const providerRaw = (embeddingsRaw as { provider?: unknown }).provider;
+      const localModelRaw = (embeddingsRaw as { local_model?: unknown }).local_model;
+      const openaiModelRaw = (embeddingsRaw as { openai_model?: unknown }).openai_model;
+      if (isEmbeddingsProvider(providerRaw)) {
+        embeddingsProvider = providerRaw;
+      }
+      if (typeof localModelRaw === 'string' && localModelRaw.trim()) {
+        embeddingsLocalModel = localModelRaw.trim();
+      }
+      if (typeof openaiModelRaw === 'string' && openaiModelRaw.trim()) {
+        embeddingsOpenaiModel = openaiModelRaw.trim();
+      }
+    } else {
+      // legacy fallback for older payloads
+      const legacyRaw = (memory as { embeddings_model?: unknown }).embeddings_model;
+      if (typeof legacyRaw === 'string' && legacyRaw.trim()) {
+        embeddingsProvider = 'local';
+        embeddingsLocalModel = legacyRaw.trim();
+      }
+    }
+  }
+
   return {
     providers,
     apiKeys: parsedApiKeys,
@@ -338,6 +380,9 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     systemPrompt,
     longPasteToFileEnabled,
     longPasteThresholdChars,
+    embeddingsProvider,
+    embeddingsLocalModel,
+    embeddingsOpenaiModel,
   };
 };
 
@@ -535,6 +580,13 @@ export function Settings({
   const [longPasteThresholdChars, setLongPasteThresholdChars] = useState(
     DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
   );
+  const [embeddingsProvider, setEmbeddingsProvider] = useState<EmbeddingsProvider>(
+    DEFAULT_EMBEDDINGS_PROVIDER,
+  );
+  const [embeddingsLocalModel, setEmbeddingsLocalModel] = useState(DEFAULT_EMBEDDINGS_LOCAL_MODEL);
+  const [embeddingsOpenaiModel, setEmbeddingsOpenaiModel] = useState(
+    DEFAULT_EMBEDDINGS_OPENAI_MODEL,
+  );
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingTools, setSavingTools] = useState(false);
@@ -558,6 +610,9 @@ export function Settings({
     setTone(parsed.tone);
     setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
     setLongPasteThresholdChars(parsed.longPasteThresholdChars);
+    setEmbeddingsProvider(parsed.embeddingsProvider);
+    setEmbeddingsLocalModel(parsed.embeddingsLocalModel);
+    setEmbeddingsOpenaiModel(parsed.embeddingsOpenaiModel);
   };
 
   const loadSettings = async () => {
@@ -656,6 +711,13 @@ export function Settings({
         composer: {
           long_paste_to_file_enabled: longPasteToFileEnabled,
           long_paste_threshold_chars: Math.max(1000, Math.min(80000, longPasteThresholdChars)),
+        },
+        memory: {
+          embeddings: {
+            provider: embeddingsProvider,
+            local_model: embeddingsLocalModel.trim() || DEFAULT_EMBEDDINGS_LOCAL_MODEL,
+            openai_model: embeddingsOpenaiModel.trim() || DEFAULT_EMBEDDINGS_OPENAI_MODEL,
+          },
         },
       };
       if (hasProviderChanges) {
@@ -1093,6 +1155,50 @@ export function Settings({
 
                   {!loading && activeTab === 'memory' ? (
                     <div className="space-y-4">
+                      <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
+                        <div>
+                          <h3 className="text-sm font-medium text-zinc-100">Embeddings provider</h3>
+                          <p className="mt-1 text-xs text-zinc-400">
+                            Для индексации и semantic search. Ключ берется из OpenAI provider settings.
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {(['local', 'openai'] as EmbeddingsProvider[]).map((provider) => (
+                            <button
+                              key={provider}
+                              type="button"
+                              onClick={() => setEmbeddingsProvider(provider)}
+                              className={`rounded-lg border px-4 py-2 text-sm transition-colors ${
+                                embeddingsProvider === provider
+                                  ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
+                                  : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800'
+                              }`}
+                            >
+                              {provider === 'local' ? 'Local (SentenceTransformer)' : 'OpenAI'}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          <label className="space-y-2">
+                            <span className="block text-xs text-zinc-400">local_model</span>
+                            <input
+                              type="text"
+                              value={embeddingsLocalModel}
+                              onChange={(event) => setEmbeddingsLocalModel(event.target.value)}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                            />
+                          </label>
+                          <label className="space-y-2">
+                            <span className="block text-xs text-zinc-400">openai_model</span>
+                            <input
+                              type="text"
+                              value={embeddingsOpenaiModel}
+                              onChange={(event) => setEmbeddingsOpenaiModel(event.target.value)}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                            />
+                          </label>
+                        </div>
+                      </div>
                       <div className="flex items-center justify-between">
                         <p className="text-sm text-zinc-400">
                           Conflict atoms require manual resolve. Choose activate or deprecate.

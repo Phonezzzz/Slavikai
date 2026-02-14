@@ -43,6 +43,11 @@ from config.tools_config import (
     load_tools_config,
     save_tools_config,
 )
+from config.ui_embeddings_settings import (
+    UIEmbeddingsSettings,
+    load_ui_embeddings_settings,
+    save_ui_embeddings_settings,
+)
 from core.approval_policy import (
     ALL_CATEGORIES,
     ApprovalCategory,
@@ -117,7 +122,6 @@ MODEL_FETCH_TIMEOUT: Final[int] = 20
 UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index", "github_import"}
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parent.parent / ".run" / "ui_settings.json"
 DEFAULT_UI_TONE: Final[str] = "balanced"
-DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
 INDEX_ENABLED_ENV: Final[str] = "SLAVIK_INDEX_ENABLED"
 DEFAULT_LONG_PASTE_TO_FILE_ENABLED: Final[bool] = True
 DEFAULT_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 12_000
@@ -2373,29 +2377,12 @@ def _save_personalization_settings(*, tone: str, system_prompt: str) -> None:
     _save_ui_settings_blob(payload)
 
 
-def _load_embeddings_model_setting() -> str:
-    payload = _load_ui_settings_blob()
-    memory_raw = payload.get("memory")
-    if not isinstance(memory_raw, dict):
-        return DEFAULT_EMBEDDINGS_MODEL
-    model_raw = memory_raw.get("embeddings_model")
-    if not isinstance(model_raw, str):
-        return DEFAULT_EMBEDDINGS_MODEL
-    normalized = model_raw.strip()
-    return normalized or DEFAULT_EMBEDDINGS_MODEL
+def _load_embeddings_settings() -> UIEmbeddingsSettings:
+    return load_ui_embeddings_settings(path=UI_SETTINGS_PATH)
 
 
-def _save_embeddings_model_setting(model_name: str) -> None:
-    payload = _load_ui_settings_blob()
-    memory_raw = payload.get("memory")
-    memory_payload: dict[str, object]
-    if isinstance(memory_raw, dict):
-        memory_payload = dict(memory_raw)
-    else:
-        memory_payload = {}
-    memory_payload["embeddings_model"] = model_name.strip() or DEFAULT_EMBEDDINGS_MODEL
-    payload["memory"] = memory_payload
-    _save_ui_settings_blob(payload)
+def _save_embeddings_settings(settings: UIEmbeddingsSettings) -> None:
+    save_ui_embeddings_settings(settings, path=UI_SETTINGS_PATH)
 
 
 def _load_composer_settings() -> tuple[bool, int]:
@@ -2720,6 +2707,7 @@ def _build_settings_payload() -> dict[str, JSONValue]:
     long_paste_to_file_enabled, long_paste_threshold_chars = _load_composer_settings()
     policy_profile, yolo_armed, yolo_armed_at = _load_policy_settings()
     memory_config = load_memory_config()
+    embeddings_settings = _load_embeddings_settings()
     tools_state = _load_tools_state()
     tools_registry = {key: value for key, value in tools_state.items() if key != "safe_mode"}
     return {
@@ -2734,7 +2722,11 @@ def _build_settings_payload() -> dict[str, JSONValue]:
                 "inbox_max_items": memory_config.inbox_max_items,
                 "inbox_ttl_days": memory_config.inbox_ttl_days,
                 "inbox_writes_per_minute": memory_config.inbox_writes_per_minute,
-                "embeddings_model": _load_embeddings_model_setting(),
+                "embeddings": {
+                    "provider": embeddings_settings.provider,
+                    "local_model": embeddings_settings.local_model,
+                    "openai_model": embeddings_settings.openai_model,
+                },
             },
             "tools": {
                 "state": tools_state,
@@ -3217,7 +3209,22 @@ async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
     root_path = await _workspace_root_for_session(hub, session_id)
-    stats = _index_workspace_root(root_path)
+    try:
+        stats = _index_workspace_root(root_path)
+    except ValueError as exc:
+        return _error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="workspace_index_failed",
+        )
+    except RuntimeError as exc:
+        return _error_response(
+            status=500,
+            message=str(exc),
+            error_type="internal_error",
+            code="workspace_index_failed",
+        )
     response = _json_response(
         {
             "session_id": session_id,
@@ -3323,7 +3330,15 @@ def _index_workspace_root(root: Path) -> dict[str, JSONValue]:
             "skipped": 0,
         }
 
-    vector_index = VectorIndex("memory/vectors.db", model_name=_load_embeddings_model_setting())
+    embeddings = _load_embeddings_settings()
+    vector_index = VectorIndex(
+        "memory/vectors.db",
+        provider=embeddings.provider,
+        local_model=embeddings.local_model,
+        openai_model=embeddings.openai_model,
+        openai_api_key=_resolve_provider_api_key("openai"),
+    )
+    vector_index.ensure_runtime_ready()
     indexed_code = 0
     indexed_docs = 0
     skipped = 0
@@ -4389,7 +4404,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             code="security_fields_forbidden",
         )
 
-    next_embeddings_model: str | None = None
+    next_embeddings_settings: UIEmbeddingsSettings | None = None
 
     personalization_raw = payload.get("personalization")
     if personalization_raw is not None:
@@ -4493,6 +4508,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
         inbox_max_items = current_memory.inbox_max_items
         inbox_ttl_days = current_memory.inbox_ttl_days
         inbox_writes_per_minute = current_memory.inbox_writes_per_minute
+        embeddings_settings = _load_embeddings_settings()
         if "auto_save_dialogue" in memory_raw:
             raw_auto_save = memory_raw.get("auto_save_dialogue")
             if not isinstance(raw_auto_save, bool):
@@ -4533,6 +4549,85 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                     code="invalid_request_error",
                 )
             inbox_writes_per_minute = raw_value
+        if "embeddings" in memory_raw:
+            embeddings_raw = memory_raw.get("embeddings")
+            if not isinstance(embeddings_raw, dict):
+                return _error_response(
+                    status=400,
+                    message="memory.embeddings должен быть объектом.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            provider = embeddings_settings.provider
+            local_model = embeddings_settings.local_model
+            openai_model = embeddings_settings.openai_model
+
+            if "provider" in embeddings_raw:
+                provider_raw = embeddings_raw.get("provider")
+                if not isinstance(provider_raw, str):
+                    return _error_response(
+                        status=400,
+                        message="memory.embeddings.provider должен быть строкой.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                normalized_provider = provider_raw.strip().lower()
+                if normalized_provider not in {"local", "openai"}:
+                    return _error_response(
+                        status=400,
+                        message="memory.embeddings.provider должен быть local|openai.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                provider = cast(Literal["local", "openai"], normalized_provider)
+
+            if "local_model" in embeddings_raw:
+                local_model_raw = embeddings_raw.get("local_model")
+                if not isinstance(local_model_raw, str):
+                    return _error_response(
+                        status=400,
+                        message="memory.embeddings.local_model должен быть строкой.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                normalized_local = local_model_raw.strip()
+                if not normalized_local:
+                    return _error_response(
+                        status=400,
+                        message="memory.embeddings.local_model не должен быть пустым.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                local_model = normalized_local
+
+            if "openai_model" in embeddings_raw:
+                openai_model_raw = embeddings_raw.get("openai_model")
+                if not isinstance(openai_model_raw, str):
+                    return _error_response(
+                        status=400,
+                        message="memory.embeddings.openai_model должен быть строкой.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                normalized_openai = openai_model_raw.strip()
+                if not normalized_openai:
+                    return _error_response(
+                        status=400,
+                        message="memory.embeddings.openai_model не должен быть пустым.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                openai_model = normalized_openai
+
+            embeddings_settings = UIEmbeddingsSettings(
+                provider=provider,
+                local_model=local_model,
+                openai_model=openai_model,
+            )
+            _save_embeddings_settings(embeddings_settings)
+            next_embeddings_settings = embeddings_settings
+
+        # Backward-compatible alias: memory.embeddings_model -> memory.embeddings.local_model
         if "embeddings_model" in memory_raw:
             raw_model = memory_raw.get("embeddings_model")
             if not isinstance(raw_model, str):
@@ -4550,8 +4645,13 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                     error_type="invalid_request_error",
                     code="invalid_request_error",
                 )
-            _save_embeddings_model_setting(normalized_model)
-            next_embeddings_model = normalized_model
+            embeddings_settings = UIEmbeddingsSettings(
+                provider="local",
+                local_model=normalized_model,
+                openai_model=embeddings_settings.openai_model,
+            )
+            _save_embeddings_settings(embeddings_settings)
+            next_embeddings_settings = embeddings_settings
         save_memory_config(
             MemoryConfig(
                 auto_save_dialogue=auto_save_dialogue,
@@ -4617,24 +4717,24 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
         _save_provider_api_keys(next_api_keys)
         if changed_providers:
             next_runtime_checks = _load_provider_runtime_checks()
-            for provider in changed_providers:
-                if provider in SUPPORTED_MODEL_PROVIDERS:
-                    models, error_text = _fetch_provider_models(provider)
-                    next_runtime_checks[provider] = {
+            for provider_name in changed_providers:
+                if provider_name in SUPPORTED_MODEL_PROVIDERS:
+                    models, error_text = _fetch_provider_models(provider_name)
+                    next_runtime_checks[provider_name] = {
                         "api_key_valid": error_text is None,
                         "last_check_error": error_text,
                         "last_checked_at": _utc_now_iso(),
                     }
                     continue
                 # Non-model providers (e.g. OpenAI STT) do not have models probe yet.
-                next_runtime_checks[provider] = {
+                next_runtime_checks[provider_name] = {
                     "api_key_valid": None,
                     "last_check_error": None,
                     "last_checked_at": _utc_now_iso(),
                 }
             _save_provider_runtime_checks(next_runtime_checks)
 
-    if next_embeddings_model is not None:
+    if next_embeddings_settings is not None:
         agent_lock = request.app["agent_lock"]
         try:
             agent = await _resolve_agent(request)
@@ -4646,10 +4746,24 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             )
             agent = None
         if agent is not None:
+            embeddings_model_for_agent = (
+                next_embeddings_settings.local_model
+                if next_embeddings_settings.provider == "local"
+                else next_embeddings_settings.openai_model
+            )
+            set_embeddings_config = getattr(agent, "set_embeddings_config", None)
             set_embeddings_model = getattr(agent, "set_embeddings_model", None)
-            if callable(set_embeddings_model):
+            if callable(set_embeddings_config):
                 async with agent_lock:
-                    set_embeddings_model(next_embeddings_model)
+                    set_embeddings_config(
+                        provider=next_embeddings_settings.provider,
+                        local_model=next_embeddings_settings.local_model,
+                        openai_model=next_embeddings_settings.openai_model,
+                        openai_api_key=_resolve_provider_api_key("openai"),
+                    )
+            elif callable(set_embeddings_model):
+                async with agent_lock:
+                    set_embeddings_model(embeddings_model_for_agent)
 
     return _json_response(_build_settings_payload())
 

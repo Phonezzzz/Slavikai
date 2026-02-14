@@ -132,3 +132,24 @@ def test_vector_index_upsert_delete_and_clear_namespace(tmp_path, monkeypatch) -
     cleared = index.clear_namespace("atoms")
     assert cleared == 2
     assert index.search("query", namespace="atoms", top_k=5) == []
+
+
+def test_vector_index_openai_requires_key(tmp_path) -> None:
+    db_path = tmp_path / "vec.db"
+    index = VectorIndex(str(db_path), provider="openai", openai_model="text-embedding-3-small")
+    with pytest.raises(RuntimeError, match="requires API key|требует API key"):
+        index.search("query", namespace="default", top_k=1)
+
+
+def test_vector_index_local_provider_errors_without_sentence_transformers(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = tmp_path / "vec.db"
+
+    def _raise(*_args: object, **_kwargs: object) -> DummyModel:
+        raise RuntimeError("sentence-transformers not available")
+
+    monkeypatch.setattr("memory.vector_index.VectorIndex._get_model", _raise)
+    index = VectorIndex(str(db_path), provider="local", local_model="all-MiniLM-L6-v2")
+    with pytest.raises(RuntimeError, match="не смог загрузить локальную модель"):
+        index.search("query", namespace="default", top_k=1)

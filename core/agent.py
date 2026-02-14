@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from typing import Literal, cast
 
 from config.memory_config import MemoryConfig, load_memory_config
 from config.model_store import load_model_configs
@@ -380,15 +381,55 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         normalized = model_name.strip()
         if not normalized:
             raise ValueError("embeddings model не должен быть пустым")
-        if self.vectors.model_name == normalized:
+        self.set_embeddings_config(
+            provider="local",
+            local_model=normalized,
+            openai_model=self.vectors.openai_model,
+            openai_api_key=self.vectors.openai_api_key,
+        )
+
+    def set_embeddings_config(
+        self,
+        *,
+        provider: Literal["local", "openai"],
+        local_model: str,
+        openai_model: str,
+        openai_api_key: str | None,
+    ) -> None:
+        normalized_provider = provider.strip().lower()
+        normalized_local_model = local_model.strip()
+        normalized_openai_model = openai_model.strip()
+        if normalized_provider not in {"local", "openai"}:
+            raise ValueError("embeddings provider должен быть local|openai")
+        if not normalized_local_model:
+            raise ValueError("local embeddings model не должен быть пустым")
+        if not normalized_openai_model:
+            raise ValueError("openai embeddings model не должен быть пустым")
+        if (
+            self.vectors.provider == normalized_provider
+            and self.vectors.local_model == normalized_local_model
+            and self.vectors.openai_model == normalized_openai_model
+            and self.vectors.openai_api_key == openai_api_key
+        ):
             return
+
         self.vectors.close()
-        self.vectors = VectorIndex("memory/vectors.db", model_name=normalized)
+        self.vectors = VectorIndex(
+            "memory/vectors.db",
+            provider=cast(Literal["local", "openai"], normalized_provider),
+            local_model=normalized_local_model,
+            openai_model=normalized_openai_model,
+            openai_api_key=openai_api_key,
+        )
         self._atom_embedding_index = AtomEmbeddingIndex(self.vectors)
         self.tracer.log(
             "embeddings_model_updated",
             "Embeddings model updated",
-            {"model_name": normalized},
+            {
+                "provider": normalized_provider,
+                "local_model": normalized_local_model,
+                "openai_model": normalized_openai_model,
+            },
         )
 
     def _apply_safe_mode(self, enabled: bool) -> None:

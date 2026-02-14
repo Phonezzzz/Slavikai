@@ -277,12 +277,42 @@ class LiveToolsAgent(DummyAgent):
 class LiveEmbeddingsAgent(DummyAgent):
     def __init__(self) -> None:
         super().__init__()
-        self.embeddings_model = "all-MiniLM-L6-v2"
-        self.set_calls: list[str] = []
+        self.embeddings_provider = "local"
+        self.embeddings_local_model = "all-MiniLM-L6-v2"
+        self.embeddings_openai_model = "text-embedding-3-small"
+        self.set_calls: list[dict[str, str | None]] = []
 
     def set_embeddings_model(self, model_name: str) -> None:
-        self.embeddings_model = model_name
-        self.set_calls.append(model_name)
+        self.embeddings_provider = "local"
+        self.embeddings_local_model = model_name
+        self.set_calls.append(
+            {
+                "provider": "local",
+                "local_model": model_name,
+                "openai_model": self.embeddings_openai_model,
+                "openai_api_key": None,
+            }
+        )
+
+    def set_embeddings_config(
+        self,
+        *,
+        provider: str,
+        local_model: str,
+        openai_model: str,
+        openai_api_key: str | None,
+    ) -> None:
+        self.embeddings_provider = provider
+        self.embeddings_local_model = local_model
+        self.embeddings_openai_model = openai_model
+        self.set_calls.append(
+            {
+                "provider": provider,
+                "local_model": local_model,
+                "openai_model": openai_model,
+                "openai_api_key": openai_api_key,
+            }
+        )
 
 
 class MemoryConflictAgent(DummyAgent):
@@ -747,6 +777,53 @@ def test_ui_workspace_index_respects_index_enabled_env(monkeypatch) -> None:
             payload = await response.json()
             assert payload.get("ok") is False
             assert payload.get("message") == "INDEX disabled"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_index_openai_provider_requires_api_key(monkeypatch, tmp_path) -> None:
+    ui_settings_path = tmp_path / "ui_settings.json"
+    ui_settings_path.write_text(
+        json.dumps(
+            {
+                "memory": {
+                    "embeddings": {
+                        "provider": "openai",
+                        "local_model": "all-MiniLM-L6-v2",
+                        "openai_model": "text-embedding-3-small",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            response = await client.post(
+                "/ui/api/workspace/index",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert response.status == 500
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            message = error.get("message")
+            assert isinstance(message, str)
+            assert "API key" in message
         finally:
             await client.close()
 
@@ -2659,7 +2736,11 @@ def test_ui_settings_endpoint() -> None:
             assert isinstance(memory, dict)
             assert isinstance(memory.get("auto_save_dialogue"), bool)
             assert isinstance(memory.get("inbox_max_items"), int)
-            assert isinstance(memory.get("embeddings_model"), str)
+            embeddings = memory.get("embeddings")
+            assert isinstance(embeddings, dict)
+            assert embeddings.get("provider") in {"local", "openai"}
+            assert isinstance(embeddings.get("local_model"), str)
+            assert isinstance(embeddings.get("openai_model"), str)
             tools = settings.get("tools")
             assert isinstance(tools, dict)
             state = tools.get("state")
@@ -2724,7 +2805,11 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
                         "inbox_max_items": 77,
                         "inbox_ttl_days": 14,
                         "inbox_writes_per_minute": 9,
-                        "embeddings_model": "test-embeddings-v1",
+                        "embeddings": {
+                            "provider": "local",
+                            "local_model": "test-embeddings-v1",
+                            "openai_model": "text-embedding-3-small",
+                        },
                     },
                     "providers": {
                         "xai": {"api_key": "xai-test-key"},
@@ -2753,7 +2838,11 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert memory.get("inbox_max_items") == 77
             assert memory.get("inbox_ttl_days") == 14
             assert memory.get("inbox_writes_per_minute") == 9
-            assert memory.get("embeddings_model") == "test-embeddings-v1"
+            embeddings = memory.get("embeddings")
+            assert isinstance(embeddings, dict)
+            assert embeddings.get("provider") == "local"
+            assert embeddings.get("local_model") == "test-embeddings-v1"
+            assert embeddings.get("openai_model") == "text-embedding-3-small"
             tools = settings.get("tools")
             assert isinstance(tools, dict)
             state = tools.get("state")
@@ -3024,14 +3113,23 @@ def test_ui_settings_update_rejects_invalid_composer_threshold() -> None:
     asyncio.run(run())
 
 
-def test_settings_update_applies_embeddings_model_live() -> None:
+def test_settings_update_applies_embeddings_config_live() -> None:
     async def run() -> None:
         agent = LiveEmbeddingsAgent()
         client = await _create_client(agent)
         try:
             response = await client.post(
                 "/ui/api/settings",
-                json={"memory": {"embeddings_model": "e5-small-v2"}},
+                json={
+                    "memory": {
+                        "embeddings": {
+                            "provider": "openai",
+                            "local_model": "all-MiniLM-L6-v2",
+                            "openai_model": "text-embedding-3-small",
+                        }
+                    },
+                    "providers": {"openai": {"api_key": "openai-test-key"}},
+                },
             )
             assert response.status == 200
             payload = await response.json()
@@ -3039,9 +3137,20 @@ def test_settings_update_applies_embeddings_model_live() -> None:
             assert isinstance(settings, dict)
             memory = settings.get("memory")
             assert isinstance(memory, dict)
-            assert memory.get("embeddings_model") == "e5-small-v2"
-            assert agent.embeddings_model == "e5-small-v2"
-            assert agent.set_calls == ["e5-small-v2"]
+            embeddings = memory.get("embeddings")
+            assert isinstance(embeddings, dict)
+            assert embeddings.get("provider") == "openai"
+            assert embeddings.get("local_model") == "all-MiniLM-L6-v2"
+            assert embeddings.get("openai_model") == "text-embedding-3-small"
+            assert agent.embeddings_provider == "openai"
+            assert agent.embeddings_openai_model == "text-embedding-3-small"
+            assert agent.set_calls
+            assert agent.set_calls[-1] == {
+                "provider": "openai",
+                "local_model": "all-MiniLM-L6-v2",
+                "openai_model": "text-embedding-3-small",
+                "openai_api_key": "openai-test-key",
+            }
         finally:
             await client.close()
 

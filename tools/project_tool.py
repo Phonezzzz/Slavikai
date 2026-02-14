@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Final
 
+from config.ui_embeddings_settings import load_ui_embeddings_settings, resolve_openai_api_key
 from memory.vector_index import VectorIndex
 from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.sandbox import SandboxViolationError, normalize_sandbox_path
@@ -37,8 +38,19 @@ def handle_project_request(request: ToolRequest) -> ToolResult:
     cmd = str(request.args.get("cmd") or "").strip()
     args_raw = request.args.get("args") or []
     args = [str(a) for a in args_raw] if isinstance(args_raw, list) else [str(args_raw)]
-    index = VectorIndex("memory/vectors.db")
+    embeddings = load_ui_embeddings_settings()
+    index = VectorIndex(
+        "memory/vectors.db",
+        provider=embeddings.provider,
+        local_model=embeddings.local_model,
+        openai_model=embeddings.openai_model,
+        openai_api_key=resolve_openai_api_key(),
+    )
     if cmd == "index":
+        try:
+            index.ensure_runtime_ready()
+        except RuntimeError as exc:
+            return ToolResult.failure(str(exc))
         path_str = args[0] if args else "."
         try:
             base = _normalize_path(path_str)
@@ -101,6 +113,10 @@ def handle_project_request(request: ToolRequest) -> ToolResult:
         query = " ".join(args).strip()
         if not query:
             return ToolResult.failure("Пустой поисковый запрос.")
+        try:
+            index.ensure_runtime_ready()
+        except RuntimeError as exc:
+            return ToolResult.failure(str(exc))
         results_code = index.search(query, namespace="code")
         results_docs = index.search(query, namespace="docs")
         results = results_code + results_docs

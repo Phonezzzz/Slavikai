@@ -10,6 +10,9 @@ class FakeVectorIndex:
     def __init__(self, *_: Any, **__: Any) -> None:
         pass
 
+    def ensure_runtime_ready(self) -> None:
+        return
+
     def search(self, query: str, namespace: str = "default", top_k: int = 5):
         return [
             VectorSearchResult(path=f"{namespace}/file.py", snippet=f"{query} snippet", score=0.9)
@@ -23,3 +26,16 @@ def test_project_find_uses_vectors(monkeypatch) -> None:
     assert result.ok
     assert "matches" in result.data
     assert result.meta and result.meta.get("matches") == 2  # code + docs namespaces
+
+
+class BrokenVectorIndex(FakeVectorIndex):
+    def ensure_runtime_ready(self) -> None:
+        raise RuntimeError("OpenAI embeddings provider требует API key")
+
+
+def test_project_find_fails_when_embeddings_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr("tools.project_tool.VectorIndex", BrokenVectorIndex)
+    req = ToolRequest(name="project", args={"cmd": "find", "args": ["foo"]})
+    result = handle_project_request(req)
+    assert not result.ok
+    assert "API key" in (result.error or "")

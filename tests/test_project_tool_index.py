@@ -7,8 +7,11 @@ from tools.project_tool import handle_project_request
 
 
 class DummyVectorIndex:
-    def __init__(self, db_path: str = "memory/vectors.db"):  # noqa: ARG002
+    def __init__(self, db_path: str = "memory/vectors.db", **_: object):  # noqa: ARG002
         self.indexed = []
+
+    def ensure_runtime_ready(self) -> None:
+        return
 
     def index_text(self, path: str, content: str, namespace: str = "default", meta=None) -> None:
         self.indexed.append((path, namespace, content[:10]))
