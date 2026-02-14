@@ -17,7 +17,7 @@
     "lucide-react": "0.487.0",
     "monaco-editor": "^0.55.1",
     "motion": "12.23.24",
-    "react": "^18.3.1",
+    "react": "^19.2.4",
     "react-dom": "^18.3.1",
     "react-markdown": "9.0.1",
     "remark-gfm": "4.0.0",
@@ -25,7 +25,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.12",
-    "@types/react": "^18.3.5",
+    "@types/react": "^19.2.14",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "4.7.0",
     "tailwindcss": "4.1.12",
