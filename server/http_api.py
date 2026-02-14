@@ -2542,6 +2542,51 @@ def _save_provider_api_keys(api_keys: dict[str, str]) -> None:
     _save_ui_settings_blob(payload)
 
 
+def _load_provider_runtime_checks() -> dict[str, dict[str, JSONValue]]:
+    payload = _load_ui_settings_blob()
+    checks_raw = payload.get("provider_runtime_checks")
+    if not isinstance(checks_raw, dict):
+        return {}
+    checks: dict[str, dict[str, JSONValue]] = {}
+    for provider in API_KEY_SETTINGS_PROVIDERS:
+        item_raw = checks_raw.get(provider)
+        if not isinstance(item_raw, dict):
+            continue
+        valid_raw = item_raw.get("api_key_valid")
+        error_raw = item_raw.get("last_check_error")
+        checked_at_raw = item_raw.get("last_checked_at")
+        checks[provider] = {
+            "api_key_valid": valid_raw if isinstance(valid_raw, bool) else None,
+            "last_check_error": error_raw if isinstance(error_raw, str) else None,
+            "last_checked_at": checked_at_raw if isinstance(checked_at_raw, str) else None,
+        }
+    return checks
+
+
+def _save_provider_runtime_checks(
+    checks: dict[str, dict[str, JSONValue]],
+) -> None:
+    payload = _load_ui_settings_blob()
+    serialized: dict[str, object] = {}
+    for provider in sorted(API_KEY_SETTINGS_PROVIDERS):
+        item = checks.get(provider)
+        if not isinstance(item, dict):
+            continue
+        valid_raw = item.get("api_key_valid")
+        error_raw = item.get("last_check_error")
+        checked_at_raw = item.get("last_checked_at")
+        serialized[provider] = {
+            "api_key_valid": valid_raw if isinstance(valid_raw, bool) else None,
+            "last_check_error": error_raw if isinstance(error_raw, str) else None,
+            "last_checked_at": checked_at_raw if isinstance(checked_at_raw, str) else None,
+        }
+    if serialized:
+        payload["provider_runtime_checks"] = serialized
+    else:
+        payload.pop("provider_runtime_checks", None)
+    _save_ui_settings_blob(payload)
+
+
 def _load_provider_env_api_key(provider: str) -> str | None:
     env_name = PROVIDER_API_KEY_ENV.get(provider)
     if env_name is None:
@@ -2582,6 +2627,19 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
         os.getenv("LOCAL_LLM_URL", DEFAULT_LOCAL_ENDPOINT).strip() or DEFAULT_LOCAL_ENDPOINT
     )
     saved_api_keys = _load_provider_api_keys()
+    runtime_checks = _load_provider_runtime_checks()
+
+    def _runtime_status(provider: str) -> dict[str, JSONValue]:
+        item = runtime_checks.get(provider, {})
+        valid_raw = item.get("api_key_valid")
+        error_raw = item.get("last_check_error")
+        checked_raw = item.get("last_checked_at")
+        return {
+            "api_key_valid": valid_raw if isinstance(valid_raw, bool) else None,
+            "last_check_error": error_raw if isinstance(error_raw, str) else None,
+            "last_checked_at": checked_raw if isinstance(checked_raw, str) else None,
+        }
+
     return [
         {
             "provider": "xai",
@@ -2590,6 +2648,7 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
             is not None,
             "api_key_source": _provider_api_key_source("xai", settings_api_keys=saved_api_keys),
             "endpoint": XAI_MODELS_ENDPOINT,
+            **_runtime_status("xai"),
         },
         {
             "provider": "openrouter",
@@ -2604,6 +2663,7 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
                 settings_api_keys=saved_api_keys,
             ),
             "endpoint": OPENROUTER_MODELS_ENDPOINT,
+            **_runtime_status("openrouter"),
         },
         {
             "provider": "local",
@@ -2615,6 +2675,7 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
                 settings_api_keys=saved_api_keys,
             ),
             "endpoint": local_endpoint,
+            **_runtime_status("local"),
         },
         {
             "provider": "openai",
@@ -2626,6 +2687,7 @@ def _provider_settings_payload() -> list[dict[str, JSONValue]]:
                 settings_api_keys=saved_api_keys,
             ),
             "endpoint": OPENAI_STT_ENDPOINT,
+            **_runtime_status("openai"),
         },
     ]
 
@@ -4439,6 +4501,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 code="invalid_request_error",
             )
         next_api_keys = _load_provider_api_keys()
+        changed_providers: set[str] = set()
         for provider, provider_payload in providers_raw.items():
             if provider not in API_KEY_SETTINGS_PROVIDERS:
                 return _error_response(
@@ -4449,6 +4512,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 )
             if provider_payload is None:
                 next_api_keys.pop(provider, None)
+                changed_providers.add(provider)
                 continue
             api_key_raw: object | None = None
             if isinstance(provider_payload, dict):
@@ -4464,6 +4528,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 )
             if api_key_raw is None:
                 next_api_keys.pop(provider, None)
+                changed_providers.add(provider)
                 continue
             if not isinstance(api_key_raw, str):
                 return _error_response(
@@ -4475,9 +4540,29 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             normalized_key = api_key_raw.strip()
             if normalized_key:
                 next_api_keys[provider] = normalized_key
+                changed_providers.add(provider)
             else:
                 next_api_keys.pop(provider, None)
+                changed_providers.add(provider)
         _save_provider_api_keys(next_api_keys)
+        if changed_providers:
+            next_runtime_checks = _load_provider_runtime_checks()
+            for provider in changed_providers:
+                if provider in SUPPORTED_MODEL_PROVIDERS:
+                    models, error_text = _fetch_provider_models(provider)
+                    next_runtime_checks[provider] = {
+                        "api_key_valid": error_text is None,
+                        "last_check_error": error_text,
+                        "last_checked_at": _utc_now_iso(),
+                    }
+                    continue
+                # Non-model providers (e.g. OpenAI STT) do not have models probe yet.
+                next_runtime_checks[provider] = {
+                    "api_key_valid": None,
+                    "last_check_error": None,
+                    "last_checked_at": _utc_now_iso(),
+                }
+            _save_provider_runtime_checks(next_runtime_checks)
 
     if next_embeddings_model is not None:
         agent_lock = request.app["agent_lock"]

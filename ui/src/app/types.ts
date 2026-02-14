@@ -42,6 +42,52 @@ export type UiDecision = {
   resolved_at: string | null;
 };
 
+export type SessionMode = 'ask' | 'plan' | 'act';
+
+export type PlanStepStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
+
+export type PlanStatus = 'draft' | 'approved' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type TaskStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type PlanStep = {
+  step_id: string;
+  title: string;
+  description: string;
+  allowed_tool_kinds: string[];
+  acceptance_checks: string[];
+  status: PlanStepStatus;
+  details: string | null;
+};
+
+export type PlanEnvelope = {
+  plan_id: string;
+  plan_hash: string;
+  status: PlanStatus;
+  goal: string;
+  scope_in: string[];
+  scope_out: string[];
+  assumptions: string[];
+  inputs_needed: string[];
+  audit_log: unknown[];
+  steps: PlanStep[];
+  exit_criteria: string[];
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+  approved_by: string | null;
+};
+
+export type TaskExecutionState = {
+  task_id: string;
+  plan_id: string;
+  plan_hash: string;
+  current_step_id: string | null;
+  status: TaskStatus;
+  started_at: string;
+  updated_at: string;
+};
+
 export type SessionSummary = {
   session_id: string;
   title: string;

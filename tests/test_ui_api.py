@@ -2421,6 +2421,10 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
         "server.http_api.save_tools_config",
         lambda config: save_tools_config_to_path(config, path=tools_path),
     )
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["ok-model"], None),
+    )
 
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -2486,11 +2490,17 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert isinstance(xai_provider, dict)
             assert xai_provider.get("api_key_set") is True
             assert xai_provider.get("api_key_source") == "settings"
+            assert xai_provider.get("api_key_valid") is True
+            assert xai_provider.get("last_check_error") is None
+            assert isinstance(xai_provider.get("last_checked_at"), str)
             assert "api_key_value" not in xai_provider
             openrouter_provider = provider_by_name.get("openrouter")
             assert isinstance(openrouter_provider, dict)
             assert openrouter_provider.get("api_key_set") is True
             assert openrouter_provider.get("api_key_source") == "settings"
+            assert openrouter_provider.get("api_key_valid") is True
+            assert openrouter_provider.get("last_check_error") is None
+            assert isinstance(openrouter_provider.get("last_checked_at"), str)
             assert "api_key_value" not in openrouter_provider
 
             saved_payload = json.loads(ui_settings_path.read_text(encoding="utf-8"))
@@ -2517,7 +2527,12 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_user_plane_settings_allows_only_whitelisted_fields() -> None:
+def test_user_plane_settings_allows_only_whitelisted_fields(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["ok-model"], None),
+    )
+
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:

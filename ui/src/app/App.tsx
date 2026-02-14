@@ -21,9 +21,13 @@ import type {
   ChatAttachment,
   ChatMessage,
   FolderSummary,
+  PlanEnvelope,
+  PlanStepStatus,
   ProviderModels,
+  SessionMode,
   SelectedModel,
   SessionSummary,
+  TaskExecutionState,
   UiDecision,
 } from './types';
 
@@ -516,6 +520,139 @@ const parseUiDecision = (value: unknown): UiDecision | null => {
   };
 };
 
+const parseSessionMode = (value: unknown): SessionMode => {
+  if (value === 'ask' || value === 'plan' || value === 'act') {
+    return value;
+  }
+  return 'ask';
+};
+
+const parsePlanEnvelope = (value: unknown): PlanEnvelope | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as {
+    plan_id?: unknown;
+    plan_hash?: unknown;
+    status?: unknown;
+    goal?: unknown;
+    scope_in?: unknown;
+    scope_out?: unknown;
+    assumptions?: unknown;
+    inputs_needed?: unknown;
+    audit_log?: unknown;
+    steps?: unknown;
+    exit_criteria?: unknown;
+    created_at?: unknown;
+    updated_at?: unknown;
+    approved_at?: unknown;
+    approved_by?: unknown;
+  };
+  if (
+    typeof candidate.plan_id !== 'string'
+    || typeof candidate.plan_hash !== 'string'
+    || typeof candidate.goal !== 'string'
+    || typeof candidate.created_at !== 'string'
+    || typeof candidate.updated_at !== 'string'
+  ) {
+    return null;
+  }
+  const status =
+    candidate.status === 'draft'
+    || candidate.status === 'approved'
+    || candidate.status === 'running'
+    || candidate.status === 'completed'
+    || candidate.status === 'failed'
+    || candidate.status === 'cancelled'
+      ? candidate.status
+      : 'draft';
+  const normalizeStringList = (input: unknown): string[] =>
+    Array.isArray(input)
+      ? input.filter((item): item is string => typeof item === 'string')
+      : [];
+  const stepsRaw = Array.isArray(candidate.steps) ? candidate.steps : [];
+  const steps = stepsRaw
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    .map((step) => {
+      const rawStatus = step.status;
+      const stepStatus: PlanStepStatus =
+        rawStatus === 'pending'
+        || rawStatus === 'running'
+        || rawStatus === 'passed'
+        || rawStatus === 'failed'
+        || rawStatus === 'skipped'
+          ? rawStatus
+          : 'pending';
+      return {
+        step_id: typeof step.step_id === 'string' ? step.step_id : '',
+        title: typeof step.title === 'string' ? step.title : '',
+        description: typeof step.description === 'string' ? step.description : '',
+        allowed_tool_kinds: normalizeStringList(step.allowed_tool_kinds),
+        acceptance_checks: normalizeStringList(step.acceptance_checks),
+        status: stepStatus,
+        details: typeof step.details === 'string' ? step.details : null,
+      };
+    })
+    .filter((step) => step.step_id.trim().length > 0);
+  return {
+    plan_id: candidate.plan_id,
+    plan_hash: candidate.plan_hash,
+    status,
+    goal: candidate.goal,
+    scope_in: normalizeStringList(candidate.scope_in),
+    scope_out: normalizeStringList(candidate.scope_out),
+    assumptions: normalizeStringList(candidate.assumptions),
+    inputs_needed: normalizeStringList(candidate.inputs_needed),
+    audit_log: Array.isArray(candidate.audit_log) ? candidate.audit_log : [],
+    steps,
+    exit_criteria: normalizeStringList(candidate.exit_criteria),
+    created_at: candidate.created_at,
+    updated_at: candidate.updated_at,
+    approved_at: typeof candidate.approved_at === 'string' ? candidate.approved_at : null,
+    approved_by: typeof candidate.approved_by === 'string' ? candidate.approved_by : null,
+  };
+};
+
+const parseTaskExecution = (value: unknown): TaskExecutionState | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as {
+    task_id?: unknown;
+    plan_id?: unknown;
+    plan_hash?: unknown;
+    current_step_id?: unknown;
+    status?: unknown;
+    started_at?: unknown;
+    updated_at?: unknown;
+  };
+  if (
+    typeof candidate.task_id !== 'string'
+    || typeof candidate.plan_id !== 'string'
+    || typeof candidate.plan_hash !== 'string'
+    || typeof candidate.started_at !== 'string'
+    || typeof candidate.updated_at !== 'string'
+  ) {
+    return null;
+  }
+  const status =
+    candidate.status === 'running'
+    || candidate.status === 'completed'
+    || candidate.status === 'failed'
+    || candidate.status === 'cancelled'
+      ? candidate.status
+      : 'running';
+  return {
+    task_id: candidate.task_id,
+    plan_id: candidate.plan_id,
+    plan_hash: candidate.plan_hash,
+    current_step_id: typeof candidate.current_step_id === 'string' ? candidate.current_step_id : null,
+    status,
+    started_at: candidate.started_at,
+    updated_at: candidate.updated_at,
+  };
+};
+
 const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) {
@@ -537,7 +674,10 @@ const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
 
 const buildCanvasMessages = (messages: ChatMessage[]): CanvasMessage[] => {
   return messages
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .filter(
+      (message): message is ChatMessage & { role: 'user' | 'assistant' } =>
+        message.role === 'user' || message.role === 'assistant',
+    )
     .map((message) => ({
       id: message.message_id,
       messageId: message.message_id,
@@ -768,7 +908,7 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [folders, setFolders] = useState<FolderSummary[]>([]);
 
-  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [, setSessionsLoading] = useState(false);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [savingModel, setSavingModel] = useState(false);
   const [sending, setSending] = useState(false);
@@ -792,6 +932,11 @@ export default function App() {
   const [pendingDecision, setPendingDecision] = useState<UiDecision | null>(null);
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [decisionError, setDecisionError] = useState<string | null>(null);
+  const [sessionMode, setSessionMode] = useState<SessionMode>('ask');
+  const [activePlan, setActivePlan] = useState<PlanEnvelope | null>(null);
+  const [activeTask, setActiveTask] = useState<TaskExecutionState | null>(null);
+  const [modeBusy, setModeBusy] = useState(false);
+  const [modeError, setModeError] = useState<string | null>(null);
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
 
   const pendingForCanvas =
@@ -1177,6 +1322,116 @@ export default function App() {
     return parsed || { provider, model };
   };
 
+  const setSessionModeRemote = async (
+    sessionId: string,
+    mode: SessionMode,
+  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+    const response = await fetch('/ui/api/mode', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [SESSION_HEADER]: sessionId,
+      },
+      body: JSON.stringify({
+        mode,
+        confirm: mode === 'act',
+      }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to set mode.'));
+    }
+    return {
+      mode: parseSessionMode((payload as { mode?: unknown }).mode),
+      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
+      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+    };
+  };
+
+  const draftPlanRemote = async (
+    sessionId: string,
+    goal: string,
+  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+    const response = await fetch('/ui/api/plan/draft', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [SESSION_HEADER]: sessionId,
+      },
+      body: JSON.stringify({ goal }),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to draft plan.'));
+    }
+    return {
+      mode: parseSessionMode((payload as { mode?: unknown }).mode),
+      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
+      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+    };
+  };
+
+  const approvePlanRemote = async (
+    sessionId: string,
+  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+    const response = await fetch('/ui/api/plan/approve', {
+      method: 'POST',
+      headers: {
+        [SESSION_HEADER]: sessionId,
+      },
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to approve plan.'));
+    }
+    return {
+      mode: parseSessionMode((payload as { mode?: unknown }).mode),
+      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
+      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+    };
+  };
+
+  const executePlanRemote = async (
+    sessionId: string,
+  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+    const response = await fetch('/ui/api/plan/execute', {
+      method: 'POST',
+      headers: {
+        [SESSION_HEADER]: sessionId,
+      },
+      body: JSON.stringify({}),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to execute plan.'));
+    }
+    return {
+      mode: parseSessionMode((payload as { mode?: unknown }).mode),
+      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
+      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+    };
+  };
+
+  const cancelPlanRemote = async (
+    sessionId: string,
+  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+    const response = await fetch('/ui/api/plan/cancel', {
+      method: 'POST',
+      headers: {
+        [SESSION_HEADER]: sessionId,
+      },
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to cancel plan.'));
+    }
+    return {
+      mode: parseSessionMode((payload as { mode?: unknown }).mode),
+      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
+      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+    };
+  };
+
   const loadConversation = async (sessionId: string): Promise<SelectedModel | null> => {
     const [sessionResponse, historyResponse, outputResponse, filesResponse] = await Promise.all([
       fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -1233,6 +1488,9 @@ export default function App() {
     setSessionArtifacts(
       parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
     );
+    setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
+    setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
+    setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
     const parsedSelectedModel = parseSelectedModel(session?.selected_model);
     setSelectedModel(parsedSelectedModel);
     return parsedSelectedModel;
@@ -1268,6 +1526,9 @@ export default function App() {
     setSessionArtifacts(
       parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
     );
+    setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
+    setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
+    setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
     setSelectedModel(sessionModel);
     return { sessionId: nextSession, selectedModel: sessionModel };
   };
@@ -1383,6 +1644,7 @@ export default function App() {
         stream_id?: unknown;
         delta?: unknown;
         decision?: unknown;
+        workflow?: unknown;
       };
       if (envelope.type === 'chat.stream.start') {
         const streamId =
@@ -1416,6 +1678,16 @@ export default function App() {
       if (envelope.type === 'decision.packet') {
         setPendingDecision(parseUiDecision(payload.decision));
         setDecisionError(null);
+        if (payload.workflow && typeof payload.workflow === 'object') {
+          const workflow = payload.workflow as {
+            mode?: unknown;
+            active_plan?: unknown;
+            active_task?: unknown;
+          };
+          setSessionMode(parseSessionMode(workflow.mode));
+          setActivePlan(parsePlanEnvelope(workflow.active_plan));
+          setActiveTask(parseTaskExecution(workflow.active_task));
+        }
         return;
       }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
@@ -1669,6 +1941,9 @@ export default function App() {
       artifacts?: unknown;
       selected_model?: unknown;
       display?: unknown;
+      mode?: unknown;
+      active_plan?: unknown;
+      active_task?: unknown;
     };
 
     if (body.messages !== undefined) {
@@ -1698,6 +1973,15 @@ export default function App() {
     if (parsedModel) {
       setSelectedModel(parsedModel);
       saveLastModel(parsedModel);
+    }
+    if (body.mode !== undefined) {
+      setSessionMode(parseSessionMode(body.mode));
+    }
+    if (body.active_plan !== undefined) {
+      setActivePlan(parsePlanEnvelope(body.active_plan));
+    }
+    if (body.active_task !== undefined) {
+      setActiveTask(parseTaskExecution(body.active_task));
     }
 
     if (options.applyDisplay) {
@@ -1929,6 +2213,106 @@ export default function App() {
     }
   };
 
+  const handleChangeMode = async (mode: SessionMode): Promise<void> => {
+    if (!selectedConversation || modeBusy) {
+      return;
+    }
+    setModeBusy(true);
+    setModeError(null);
+    try {
+      const updated = await setSessionModeRemote(selectedConversation, mode);
+      setSessionMode(updated.mode);
+      setActivePlan(updated.activePlan);
+      setActiveTask(updated.activeTask);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to change mode.';
+      setModeError(message);
+      setStatusMessage(message);
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
+  const handlePlanDraft = async (goal: string): Promise<void> => {
+    if (!selectedConversation || modeBusy) {
+      return;
+    }
+    setModeBusy(true);
+    setModeError(null);
+    try {
+      const updated = await draftPlanRemote(selectedConversation, goal);
+      setSessionMode(updated.mode);
+      setActivePlan(updated.activePlan);
+      setActiveTask(updated.activeTask);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to draft plan.';
+      setModeError(message);
+      setStatusMessage(message);
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
+  const handlePlanApprove = async (): Promise<void> => {
+    if (!selectedConversation || modeBusy) {
+      return;
+    }
+    setModeBusy(true);
+    setModeError(null);
+    try {
+      const updated = await approvePlanRemote(selectedConversation);
+      setSessionMode(updated.mode);
+      setActivePlan(updated.activePlan);
+      setActiveTask(updated.activeTask);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to approve plan.';
+      setModeError(message);
+      setStatusMessage(message);
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
+  const handlePlanExecute = async (): Promise<void> => {
+    if (!selectedConversation || modeBusy) {
+      return;
+    }
+    setModeBusy(true);
+    setModeError(null);
+    try {
+      const updated = await executePlanRemote(selectedConversation);
+      setSessionMode(updated.mode);
+      setActivePlan(updated.activePlan);
+      setActiveTask(updated.activeTask);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to execute plan.';
+      setModeError(message);
+      setStatusMessage(message);
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
+  const handlePlanCancel = async (): Promise<void> => {
+    if (!selectedConversation || modeBusy) {
+      return;
+    }
+    setModeBusy(true);
+    setModeError(null);
+    try {
+      const updated = await cancelPlanRemote(selectedConversation);
+      setSessionMode(updated.mode);
+      setActivePlan(updated.activePlan);
+      setActiveTask(updated.activeTask);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cancel plan.';
+      setModeError(message);
+      setStatusMessage(message);
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
   const handleWorkspaceGithubImport = async (
     repoUrl: string,
     branch?: string,
@@ -2113,6 +2497,13 @@ export default function App() {
             sessionId={selectedConversation}
             sessionHeader={SESSION_HEADER}
             modelLabel={modelLabel}
+            modelOptions={modelOptions}
+            selectedModelValue={selectedModelValue}
+            modelsLoading={modelsLoading}
+            savingModel={savingModel}
+            onSelectModel={(provider, model) => {
+              void handleSetModel(provider, model);
+            }}
             messages={workspaceMessages}
             sending={sending}
             statusMessage={statusMessage}
@@ -2122,6 +2513,16 @@ export default function App() {
             }}
             onOpenWorkspaceSettings={() => setWorkspaceSettingsOpen(true)}
             onSendAgentMessage={(payload) => handleSend(payload)}
+            mode={sessionMode}
+            activePlan={activePlan}
+            activeTask={activeTask}
+            modeBusy={modeBusy}
+            modeError={modeError}
+            onChangeMode={handleChangeMode}
+            onPlanDraft={handlePlanDraft}
+            onPlanApprove={handlePlanApprove}
+            onPlanExecute={handlePlanExecute}
+            onPlanCancel={handlePlanCancel}
             decision={pendingDecision}
             decisionBusy={decisionBusy}
             decisionError={decisionError}

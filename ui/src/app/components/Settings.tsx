@@ -23,6 +23,9 @@ type ProviderSettings = {
   api_key_set: boolean;
   api_key_source: ApiKeySource;
   endpoint: string;
+  api_key_valid: boolean | null;
+  last_check_error: string | null;
+  last_checked_at: string | null;
 };
 
 type ProviderRuntimeState = {
@@ -99,6 +102,9 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     api_key_set: false,
     api_key_source: 'missing',
     endpoint: 'https://api.x.ai/v1/models',
+    api_key_valid: null,
+    last_check_error: null,
+    last_checked_at: null,
   },
   {
     provider: 'openrouter',
@@ -106,6 +112,9 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     api_key_set: false,
     api_key_source: 'missing',
     endpoint: 'https://openrouter.ai/api/v1/models',
+    api_key_valid: null,
+    last_check_error: null,
+    last_checked_at: null,
   },
   {
     provider: 'local',
@@ -113,6 +122,9 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     api_key_set: false,
     api_key_source: 'missing',
     endpoint: 'http://localhost:11434/v1/models',
+    api_key_valid: null,
+    last_check_error: null,
+    last_checked_at: null,
   },
   {
     provider: 'openai',
@@ -120,6 +132,9 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     api_key_set: false,
     api_key_source: 'missing',
     endpoint: 'https://api.openai.com/v1/audio/transcriptions',
+    api_key_valid: null,
+    last_check_error: null,
+    last_checked_at: null,
   },
 ];
 const DEFAULT_TOOLS_STATE: Record<ToolKey, boolean> = {
@@ -238,6 +253,9 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
       const endpoint = (item as { endpoint?: unknown }).endpoint;
       const apiKeySet = (item as { api_key_set?: unknown }).api_key_set;
       const sourceRaw = (item as { api_key_source?: unknown }).api_key_source;
+      const apiKeyValid = (item as { api_key_valid?: unknown }).api_key_valid;
+      const lastCheckError = (item as { last_check_error?: unknown }).last_check_error;
+      const lastCheckedAt = (item as { last_checked_at?: unknown }).last_checked_at;
       const current = providersMap.get(providerRaw);
       providersMap.set(providerRaw, {
         provider: providerRaw,
@@ -247,6 +265,18 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
         api_key_source: isApiKeySource(sourceRaw)
           ? sourceRaw
           : current?.api_key_source || 'missing',
+        api_key_valid:
+          typeof apiKeyValid === 'boolean'
+            ? apiKeyValid
+            : current?.api_key_valid ?? null,
+        last_check_error:
+          typeof lastCheckError === 'string'
+            ? lastCheckError
+            : current?.last_check_error ?? null,
+        last_checked_at:
+          typeof lastCheckedAt === 'string'
+            ? lastCheckedAt
+            : current?.last_checked_at ?? null,
       });
     }
   }
@@ -916,6 +946,21 @@ export function Settings({
                               <span className="rounded-md bg-zinc-800 px-2 py-1 text-xs text-zinc-400">
                                 {sourceLabel(provider.api_key_source)}
                               </span>
+                              <span
+                                className={`rounded-md px-2 py-1 text-xs font-medium ${
+                                  provider.api_key_valid === true
+                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    : provider.api_key_valid === false
+                                      ? 'bg-rose-500/20 text-rose-300'
+                                      : 'bg-zinc-800 text-zinc-300'
+                                }`}
+                              >
+                                {provider.api_key_valid === true
+                                  ? 'key valid'
+                                  : provider.api_key_valid === false
+                                    ? 'key invalid'
+                                    : 'key unchecked'}
+                              </span>
                               {isModelProvider(provider.provider) ? (
                                 <span className={`rounded-md px-2 py-1 text-xs font-medium ${runtimeClass}`}>
                                   {runtimeLabel}
@@ -928,6 +973,14 @@ export function Settings({
                               Env: <span className="font-mono text-zinc-300">{provider.api_key_env}</span>
                             </div>
                             <div className="break-all">Endpoint: {provider.endpoint}</div>
+                            {provider.last_checked_at ? (
+                              <div>Last check: {provider.last_checked_at}</div>
+                            ) : null}
+                            {provider.last_check_error ? (
+                              <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-2 py-1.5 text-rose-200">
+                                Validation: {provider.last_check_error}
+                              </div>
+                            ) : null}
                             {isModelProvider(provider.provider) && runtimeDetail ? (
                               <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-2 py-1.5 text-rose-200">
                                 Runtime: {runtimeDetail}
