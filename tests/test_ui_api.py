@@ -24,7 +24,7 @@ from config.tools_config import (
 )
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
 from core.tracer import Tracer
-from server.http_api import create_app
+from server.http_api import _resolve_workspace_root_candidate, create_app
 from server.ui_hub import UIHub
 from server.ui_session_storage import (
     InMemoryUISessionStorage,
@@ -598,7 +598,7 @@ def test_ui_workspace_root_select_rejects_outside_workspace_in_sandbox() -> None
     asyncio.run(run())
 
 
-def test_ui_workspace_root_select_applies_without_approval_in_index() -> None:
+def test_ui_workspace_root_select_applies_without_approval_in_index(tmp_path) -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -613,15 +613,18 @@ def test_ui_workspace_root_select_applies_without_approval_in_index() -> None:
             hub: UIHub = client.server.app["ui_hub"]
             await hub.set_session_policy(session_id, profile="index")
 
+            outside_home = tmp_path / "outside-index-root"
+            outside_home.mkdir(parents=True, exist_ok=True)
+
             response = await client.post(
                 "/ui/api/workspace/root/select",
                 headers={"X-Slavik-Session": session_id},
-                json={"root_path": str(Path.cwd())},
+                json={"root_path": str(outside_home)},
             )
             assert response.status == 200
             payload = await response.json()
             assert payload.get("applied") is True
-            assert payload.get("root_path") == str(Path.cwd())
+            assert payload.get("root_path") == str(outside_home)
             assert payload.get("decision") is None
         finally:
             await client.close()
@@ -661,6 +664,65 @@ def test_ui_workspace_root_select_requires_approval_in_yolo() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_resolve_workspace_root_candidate_sandbox_accepts_and_rejects(
+    monkeypatch, tmp_path
+) -> None:
+    sandbox_root = tmp_path / "sandbox-root"
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    inside = sandbox_root / "inside"
+    inside.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("server.http_api.WORKSPACE_ROOT", sandbox_root)
+
+    accepted = _resolve_workspace_root_candidate(str(inside), policy_profile="sandbox")
+    assert accepted == inside.resolve()
+
+    try:
+        _resolve_workspace_root_candidate(str(outside), policy_profile="sandbox")
+    except ValueError as exc:
+        assert "sandbox директории" in str(exc)
+    else:
+        raise AssertionError("sandbox profile must reject outside directories")
+
+
+def test_resolve_workspace_root_candidate_index_rejects_home(monkeypatch, tmp_path) -> None:
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    inside_home = fake_home / "project"
+    inside_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("server.http_api.Path.home", lambda: fake_home)
+
+    try:
+        _resolve_workspace_root_candidate(str(inside_home), policy_profile="index")
+    except ValueError as exc:
+        assert "домашней директории" in str(exc)
+    else:
+        raise AssertionError("index profile must reject home subtree")
+
+
+def test_resolve_workspace_root_candidate_index_accepts_outside_home(monkeypatch, tmp_path) -> None:
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    outside_home = tmp_path / "outside-home"
+    outside_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("server.http_api.Path.home", lambda: fake_home)
+
+    accepted = _resolve_workspace_root_candidate(str(outside_home), policy_profile="index")
+    assert accepted == outside_home.resolve()
+
+
+def test_resolve_workspace_root_candidate_yolo_accepts_outside_home(monkeypatch, tmp_path) -> None:
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    outside_home = tmp_path / "outside-home-yolo"
+    outside_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("server.http_api.Path.home", lambda: fake_home)
+
+    accepted = _resolve_workspace_root_candidate(str(outside_home), policy_profile="yolo")
+    assert accepted == outside_home.resolve()
 
 
 def test_ui_workspace_index_respects_index_enabled_env(monkeypatch) -> None:

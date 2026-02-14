@@ -3285,11 +3285,12 @@ def _resolve_workspace_root_candidate(path_raw: str, *, policy_profile: str) -> 
             raise ValueError("Root должен быть внутри sandbox директории.") from exc
         return candidate
     if policy_profile == "index":
+        home_dir = Path.home().resolve()
         try:
-            candidate.relative_to(PROJECT_ROOT)
-        except ValueError as exc:
-            raise ValueError("Root должен быть внутри директории проекта.") from exc
-        return candidate
+            candidate.relative_to(home_dir)
+        except ValueError:
+            return candidate
+        raise ValueError("Root не должен быть внутри домашней директории пользователя.")
     if policy_profile == "yolo":
         return candidate
     raise ValueError(f"Неизвестный policy profile: {policy_profile}")
