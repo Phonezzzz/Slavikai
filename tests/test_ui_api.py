@@ -26,7 +26,11 @@ from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequir
 from core.tracer import Tracer
 from server.http_api import create_app
 from server.ui_hub import UIHub
-from server.ui_session_storage import InMemoryUISessionStorage, SQLiteUISessionStorage
+from server.ui_session_storage import (
+    InMemoryUISessionStorage,
+    PersistedSession,
+    SQLiteUISessionStorage,
+)
 from shared.models import JSONValue, ToolResult
 from tools.tool_logger import ToolCallLogger
 
@@ -541,6 +545,219 @@ def test_ui_api_requires_bearer_by_default() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_workspace_settings_alias_returns_root_payload() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.get("/ui/api/workspace/settings")
+            assert response.status == 200
+            payload = await response.json()
+            assert isinstance(payload.get("session_id"), str)
+            assert isinstance(payload.get("root_path"), str)
+            policy = payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("profile") == "sandbox"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_root_select_rejects_outside_workspace_in_sandbox() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_policy(session_id, profile="sandbox")
+
+            response = await client.post(
+                "/ui/api/workspace/root/select",
+                headers={"X-Slavik-Session": session_id},
+                json={"root_path": str(Path.cwd())},
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            message = error.get("message")
+            assert isinstance(message, str)
+            assert "sandbox директории" in message
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_root_select_applies_without_approval_in_index() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_policy(session_id, profile="index")
+
+            response = await client.post(
+                "/ui/api/workspace/root/select",
+                headers={"X-Slavik-Session": session_id},
+                json={"root_path": str(Path.cwd())},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("applied") is True
+            assert payload.get("root_path") == str(Path.cwd())
+            assert payload.get("decision") is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_root_select_requires_approval_in_yolo() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_policy(session_id, profile="yolo")
+
+            response = await client.post(
+                "/ui/api/workspace/root/select",
+                headers={"X-Slavik-Session": session_id},
+                json={"root_path": "/"},
+            )
+            assert response.status == 202
+            payload = await response.json()
+            decision = payload.get("decision")
+            assert isinstance(decision, dict)
+            proposed_action = decision.get("proposed_action")
+            assert isinstance(proposed_action, dict)
+            required_categories = proposed_action.get("required_categories")
+            assert required_categories == ["FS_OUTSIDE_WORKSPACE"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_index_respects_index_enabled_env(monkeypatch) -> None:
+    monkeypatch.setenv("SLAVIK_INDEX_ENABLED", "false")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            response = await client.post(
+                "/ui/api/workspace/index",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("ok") is False
+            assert payload.get("message") == "INDEX disabled"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_settings_unauthorized_logs_snapshot(monkeypatch) -> None:
+    records: list[dict[str, object]] = []
+
+    def _capture_warning(message: str, *args, **kwargs) -> None:
+        del args
+        extra = kwargs.get("extra")
+        if isinstance(extra, dict):
+            records.append(dict(extra))
+        else:
+            records.append({"message": message})
+
+    monkeypatch.setattr("server.http_api.logger.warning", _capture_warning)
+
+    async def run() -> None:
+        app = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token="ui-auth-required", allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server)
+        await client.start_server()
+        try:
+            response = await client.get("/ui/api/settings")
+            assert response.status == 401
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "unauthorized"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+    assert records
+    assert any("settings_snapshot" in item or "settings_snapshot_error" in item for item in records)
+
+
+def test_create_app_resets_workspace_defaults_on_boot(tmp_path) -> None:
+    db_path = tmp_path / "ui_sessions.db"
+    storage = SQLiteUISessionStorage(db_path)
+    storage.save_session(
+        PersistedSession(
+            session_id="session-reset",
+            principal_id="principal-reset",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            status="ok",
+            decision=None,
+            messages=[],
+            workspace_root="/tmp",
+            policy_profile="yolo",
+        )
+    )
+
+    _ = create_app(
+        agent=DummyAgent(),
+        max_request_bytes=1_000_000,
+        ui_storage=storage,
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+    )
+
+    sessions = storage.load_sessions()
+    assert len(sessions) == 1
+    restored = sessions[0]
+    assert restored.workspace_root is None
+    assert restored.policy_profile == "sandbox"
 
 
 async def _read_first_sse_event(response) -> dict[str, object]:

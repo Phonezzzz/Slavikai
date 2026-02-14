@@ -118,6 +118,7 @@ UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index", "github_import"}
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parent.parent / ".run" / "ui_settings.json"
 DEFAULT_UI_TONE: Final[str] = "balanced"
 DEFAULT_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
+INDEX_ENABLED_ENV: Final[str] = "SLAVIK_INDEX_ENABLED"
 DEFAULT_LONG_PASTE_TO_FILE_ENABLED: Final[bool] = True
 DEFAULT_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 12_000
 MIN_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 1_000
@@ -547,6 +548,28 @@ async def auth_gate_middleware(
     if principal_id is not None:
         request["principal_id"] = principal_id
         return await handler(request)
+    if request.path == "/ui/api/settings":
+        try:
+            snapshot = _build_settings_payload()
+            logger.warning(
+                "Unauthorized settings access denied",
+                extra={
+                    "reason": "unauthorized",
+                    "path": request.path,
+                    "remote": request.remote,
+                    "settings_snapshot": snapshot,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Unauthorized settings access denied (snapshot unavailable)",
+                extra={
+                    "reason": "unauthorized",
+                    "path": request.path,
+                    "remote": request.remote,
+                    "settings_snapshot_error": str(exc),
+                },
+            )
     return _error_response(
         status=401,
         message="Unauthorized.",
@@ -3121,9 +3144,10 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
         response.headers[UI_SESSION_HEADER] = session_id
         return response
 
+    require_approval = profile == "yolo"
     required_category: ApprovalCategory = "FS_OUTSIDE_WORKSPACE"
     approved = await session_store.get_categories(session_id)
-    if required_category in approved:
+    if not require_approval or required_category in approved:
         await hub.set_workspace_root(session_id, str(target_root))
         response = _json_response(
             {
@@ -3197,7 +3221,6 @@ async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
     response = _json_response(
         {
             "session_id": session_id,
-            "ok": True,
             **stats,
         }
     )
@@ -3255,15 +3278,50 @@ def _resolve_workspace_root_candidate(path_raw: str, *, policy_profile: str) -> 
     candidate = Path(path_raw).expanduser().resolve()
     if not candidate.exists() or not candidate.is_dir():
         raise ValueError(f"Директория не найдена: {candidate}")
-    if policy_profile != "yolo":
+    if policy_profile == "sandbox":
+        try:
+            candidate.relative_to(WORKSPACE_ROOT)
+        except ValueError as exc:
+            raise ValueError("Root должен быть внутри sandbox директории.") from exc
+        return candidate
+    if policy_profile == "index":
         try:
             candidate.relative_to(PROJECT_ROOT)
         except ValueError as exc:
             raise ValueError("Root должен быть внутри директории проекта.") from exc
-    return candidate
+        return candidate
+    if policy_profile == "yolo":
+        return candidate
+    raise ValueError(f"Неизвестный policy profile: {policy_profile}")
+
+
+def _env_flag_enabled(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _is_index_enabled() -> bool:
+    return _env_flag_enabled(INDEX_ENABLED_ENV, default=True)
 
 
 def _index_workspace_root(root: Path) -> dict[str, JSONValue]:
+    if not _is_index_enabled():
+        return {
+            "ok": False,
+            "message": "INDEX disabled",
+            "root_path": str(root),
+            "indexed_code": 0,
+            "indexed_docs": 0,
+            "skipped": 0,
+        }
+
     vector_index = VectorIndex("memory/vectors.db", model_name=_load_embeddings_model_setting())
     indexed_code = 0
     indexed_docs = 0
@@ -3295,6 +3353,8 @@ def _index_workspace_root(root: Path) -> dict[str, JSONValue]:
             else:
                 indexed_docs += 1
     return {
+        "ok": True,
+        "message": None,
         "root_path": str(root),
         "indexed_code": indexed_code,
         "indexed_docs": indexed_docs,
@@ -4283,7 +4343,16 @@ async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
 async def handle_ui_settings(request: web.Request) -> web.Response:
     del request
     try:
-        return _json_response(_build_settings_payload())
+        payload = _build_settings_payload()
+        logger.info(
+            "Settings payload prepared",
+            extra={
+                "path": "/ui/api/settings",
+                "reason": "success",
+                "settings_snapshot": payload,
+            },
+        )
+        return _json_response(payload)
     except Exception as exc:  # noqa: BLE001
         return _error_response(
             status=500,
@@ -7439,6 +7508,42 @@ async def handle_approve_session(request: web.Request) -> web.Response:
     )
 
 
+def _reset_workspace_session_defaults_on_boot(storage: UISessionStorage) -> int:
+    sessions = storage.load_sessions()
+    updated = 0
+    for session in sessions:
+        if session.workspace_root is None and session.policy_profile == DEFAULT_POLICY_PROFILE:
+            continue
+        storage.save_session(
+            PersistedSession(
+                session_id=session.session_id,
+                principal_id=session.principal_id,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                status=session.status,
+                decision=session.decision,
+                messages=list(session.messages),
+                model_provider=session.model_provider,
+                model_id=session.model_id,
+                title_override=session.title_override,
+                folder_id=session.folder_id,
+                output_text=session.output_text,
+                output_updated_at=session.output_updated_at,
+                files=list(session.files),
+                artifacts=list(session.artifacts),
+                workspace_root=None,
+                policy_profile=DEFAULT_POLICY_PROFILE,
+                yolo_armed=session.yolo_armed,
+                yolo_armed_at=session.yolo_armed_at,
+                mode=session.mode,
+                active_plan=session.active_plan,
+                active_task=session.active_task,
+            )
+        )
+        updated += 1
+    return updated
+
+
 def create_app(
     *,
     agent: AgentProtocol | None = None,
@@ -7472,6 +7577,9 @@ def create_app(
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         Path(__file__).resolve().parent.parent / ".run" / "ui_sessions.db",
     )
+    reset_count = _reset_workspace_session_defaults_on_boot(resolved_ui_storage)
+    if reset_count > 0:
+        logger.info("Workspace defaults reset on startup", extra={"sessions_reset": reset_count})
     app["ui_hub"] = UIHub(storage=resolved_ui_storage)
     dist_path = Path(__file__).resolve().parent.parent / "ui" / "dist"
     app["ui_dist_path"] = dist_path
@@ -7528,6 +7636,7 @@ def create_app(
     app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)
     app.router.add_post("/ui/api/session-model", handle_ui_session_model)
     app.router.add_get("/ui/api/workspace/root", handle_ui_workspace_root_get)
+    app.router.add_get("/ui/api/workspace/settings", handle_ui_workspace_root_get)
     app.router.add_post("/ui/api/workspace/root/select", handle_ui_workspace_root_select)
     app.router.add_post("/ui/api/workspace/index", handle_ui_workspace_index_run)
     app.router.add_get("/ui/api/workspace/git-diff", handle_ui_workspace_git_diff)
