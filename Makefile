@@ -34,8 +34,9 @@ help:
 	@echo "  make format          ruff format ."
 	@echo "  make format-check    ruff format --check ."
 	@echo "  make type            mypy . (strict, tests excluded by config)"
+	@echo "  make ui-type         npm run typecheck (ui)"
 	@echo "  make test            pytest (coverage configured in pyproject.toml)"
-	@echo "  make check           lint + format-check + type + test"
+	@echo "  make check           lint + format-check + type + ui-type + test"
 	@echo "  make ci              skills lint/manifest + pytest -q (temp candidates)"
 	@echo
 	@echo "Git:"
@@ -104,13 +105,17 @@ format-check: venv
 type: venv
 	"$(VENV_PY)" -m mypy .
 
+.PHONY: ui-type
+ui-type:
+	cd ui && npm run typecheck
+
 .PHONY: test
 PYTEST_ARGS ?=
 test: venv
 	"$(VENV_PY)" -m pytest $(PYTEST_ARGS)
 
 .PHONY: check
-check: lint format-check type test
+check: lint format-check type ui-type test
 
 .PHONY: guard-main
 guard-main:
