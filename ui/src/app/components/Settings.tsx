@@ -617,9 +617,9 @@ export function Settings({
   const [embeddingsOpenaiModel, setEmbeddingsOpenaiModel] = useState(
     DEFAULT_EMBEDDINGS_OPENAI_MODEL,
   );
-  const [, setAudioProvider] = useState<'openai' | 'elevenlabs'>('elevenlabs');
-  const [, setAudioVoice] = useState('');
-  const [, setAudioModel] = useState('tts-1');
+  const [audioProvider, setAudioProvider] = useState<'openai' | 'elevenlabs'>('elevenlabs');
+  const [audioVoice, setAudioVoice] = useState('');
+  const [audioModel, setAudioModel] = useState('tts-1');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingTools, setSavingTools] = useState(false);
@@ -755,6 +755,12 @@ export function Settings({
             openai_model: embeddingsOpenaiModel.trim() || DEFAULT_EMBEDDINGS_OPENAI_MODEL,
           },
         },
+      };
+      // include audio settings in save payload
+      payload.audio = {
+        provider: audioProvider,
+        voice: audioVoice,
+        model: audioModel,
       };
       if (hasProviderChanges) {
         payload.providers = providersPayload;
@@ -978,6 +984,7 @@ export function Settings({
                       { id: 'personalization', title: 'Personalization' },
                       { id: 'memory', title: 'Memory' },
                       { id: 'tools', title: 'Tools' },
+                      { id: 'audio', title: 'Audio / TTS' },
                       { id: 'import', title: 'Import / Export chats DB' },
                     ].map((tab) => (
                       <button
@@ -1097,6 +1104,50 @@ export function Settings({
                         </div>
                         );
                       })}
+                    </div>
+                  ) : null}
+
+                  {!loading && activeTab === 'audio' ? (
+                    <div className="space-y-4">
+                      <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
+                        <div>
+                          <h3 className="text-sm font-medium text-zinc-100">Audio / Text-to-Speech</h3>
+                          <p className="mt-1 text-xs text-zinc-400">Configure TTS provider and voice.</p>
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          <label className="space-y-2">
+                            <span className="block text-xs text-zinc-400">Provider</span>
+                            <select
+                              value={audioProvider}
+                              onChange={(e) => setAudioProvider(e.target.value as 'openai' | 'elevenlabs')}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                            >
+                              <option value="elevenlabs">ElevenLabs</option>
+                              <option value="openai">OpenAI</option>
+                            </select>
+                          </label>
+                          <label className="space-y-2">
+                            <span className="block text-xs text-zinc-400">Voice</span>
+                            <input
+                              type="text"
+                              value={audioVoice}
+                              onChange={(e) => setAudioVoice(e.target.value)}
+                              placeholder="Voice id or name"
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                            />
+                          </label>
+                          <label className="space-y-2 md:col-span-2">
+                            <span className="block text-xs text-zinc-400">Model</span>
+                            <input
+                              type="text"
+                              value={audioModel}
+                              onChange={(e) => setAudioModel(e.target.value)}
+                              placeholder="tts-1"
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                            />
+                          </label>
+                        </div>
+                      </div>
                     </div>
                   ) : null}
 
