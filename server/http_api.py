@@ -2385,6 +2385,31 @@ def _save_embeddings_settings(settings: UIEmbeddingsSettings) -> None:
     save_ui_embeddings_settings(settings, path=UI_SETTINGS_PATH)
 
 
+def _load_audio_settings() -> dict[str, str]:
+    """Загружает TTS UI settings из ui_settings.json."""
+    from config.tts_config import load_ui_tts_settings
+
+    return load_ui_tts_settings()
+
+
+def _save_audio_settings(payload: dict[str, str]) -> None:
+    """Сохраняет TTS UI settings в ui_settings.json (merge)."""
+    data = {}
+    if UI_SETTINGS_PATH.exists():
+        try:
+            data = json.loads(UI_SETTINGS_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
+    if not isinstance(data, dict):
+        data = {}
+    data["audio"] = payload
+    UI_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UI_SETTINGS_PATH.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def _load_composer_settings() -> tuple[bool, int]:
     payload = _load_ui_settings_blob()
     composer_raw = payload.get("composer")
@@ -2708,6 +2733,7 @@ def _build_settings_payload() -> dict[str, JSONValue]:
     policy_profile, yolo_armed, yolo_armed_at = _load_policy_settings()
     memory_config = load_memory_config()
     embeddings_settings = _load_embeddings_settings()
+    audio_settings = _load_audio_settings()
     tools_state = _load_tools_state()
     tools_registry = {key: value for key, value in tools_state.items() if key != "safe_mode"}
     return {
@@ -2728,6 +2754,7 @@ def _build_settings_payload() -> dict[str, JSONValue]:
                     "openai_model": embeddings_settings.openai_model,
                 },
             },
+            "audio": audio_settings,
             "tools": {
                 "state": tools_state,
                 "registry": tools_registry,
@@ -4493,6 +4520,66 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             long_paste_to_file_enabled=long_paste_to_file_enabled,
             long_paste_threshold_chars=long_paste_threshold_chars,
         )
+
+        # Audio (TTS) settings
+        audio_raw = payload.get("audio")
+        if audio_raw is not None:
+            if not isinstance(audio_raw, dict):
+                return _error_response(
+                    status=400,
+                    message="audio должен быть объектом.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            current_audio = _load_audio_settings()
+            if isinstance(current_audio, dict):
+                provider = current_audio.get("provider", "elevenlabs")
+                model = current_audio.get("model", "tts-1")
+                voice = current_audio.get("voice", "")
+            else:
+                provider = "elevenlabs"
+                model = "tts-1"
+                voice = ""
+            if "provider" in audio_raw:
+                provider_raw = audio_raw.get("provider")
+                if not isinstance(provider_raw, str) or provider_raw not in {
+                    "openai",
+                    "elevenlabs",
+                }:
+                    return _error_response(
+                        status=400,
+                        message="audio.provider должен быть 'openai' или 'elevenlabs'.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                provider = provider_raw
+            if "model" in audio_raw:
+                model_raw = audio_raw.get("model")
+                if not isinstance(model_raw, str):
+                    return _error_response(
+                        status=400,
+                        message="audio.model должен быть строкой.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                model = model_raw
+            if "voice" in audio_raw:
+                voice_raw = audio_raw.get("voice")
+                if not isinstance(voice_raw, str):
+                    return _error_response(
+                        status=400,
+                        message="audio.voice должен быть строкой.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                voice = voice_raw
+            _save_audio_settings(
+                {
+                    "provider": provider,
+                    "model": model,
+                    "voice": voice,
+                }
+            )
 
     memory_raw = payload.get("memory")
     if memory_raw is not None:

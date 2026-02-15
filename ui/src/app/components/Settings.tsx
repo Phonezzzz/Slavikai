@@ -10,7 +10,7 @@ interface SettingsProps {
   sessionHeader?: string;
 }
 
-type SettingsTab = 'api' | 'personalization' | 'memory' | 'tools' | 'import';
+type SettingsTab = 'api' | 'personalization' | 'memory' | 'tools' | 'audio' | 'import';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'openai';
 type ModelProvider = 'xai' | 'openrouter' | 'local';
 type ApiKeySource = 'settings' | 'env' | 'missing';
@@ -50,6 +50,11 @@ type ParsedSettings = {
   embeddingsProvider: EmbeddingsProvider;
   embeddingsLocalModel: string;
   embeddingsOpenaiModel: string;
+  audio: {
+    provider: 'openai' | 'elevenlabs';
+    voice: string;
+    model: string;
+  };
 };
 
 type MemoryConflict = {
@@ -206,6 +211,11 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     embeddingsProvider: DEFAULT_EMBEDDINGS_PROVIDER,
     embeddingsLocalModel: DEFAULT_EMBEDDINGS_LOCAL_MODEL,
     embeddingsOpenaiModel: DEFAULT_EMBEDDINGS_OPENAI_MODEL,
+    audio: {
+      provider: 'elevenlabs',
+      voice: '',
+      model: 'tts-1',
+    },
   };
   if (!payload || typeof payload !== 'object') {
     return defaults;
@@ -316,6 +326,9 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   let embeddingsLocalModel = defaults.embeddingsLocalModel;
   let embeddingsOpenaiModel = defaults.embeddingsOpenaiModel;
   let toolsState: Record<ToolKey, boolean> = { ...defaults.toolsState };
+  let audioProvider: 'openai' | 'elevenlabs' = 'elevenlabs';
+  let audioVoice = '';
+  let audioModel = 'tts-1';
   if (tools && typeof tools === 'object') {
     const stateRaw = (tools as { state?: unknown }).state;
     if (stateRaw && typeof stateRaw === 'object') {
@@ -369,6 +382,22 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
+  const audioRaw = (settings as { audio?: unknown }).audio;
+  if (audioRaw && typeof audioRaw === 'object') {
+    const providerRaw = (audioRaw as { provider?: unknown }).provider;
+    const voiceRaw = (audioRaw as { voice?: unknown }).voice;
+    const modelRaw = (audioRaw as { model?: unknown }).model;
+    if (typeof providerRaw === 'string') {
+      const normalized = providerRaw.toLowerCase().trim();
+      if (normalized === 'openai' || normalized === 'elevenlabs') {
+        audioProvider = normalized as 'openai' | 'elevenlabs';
+      }
+    }
+    audioVoice = typeof voiceRaw === 'string' ? voiceRaw.trim() : '';
+    audioModel = typeof modelRaw === 'string' ? modelRaw.trim() : 'tts-1';
+  }
+  defaults.audio = { provider: audioProvider, voice: audioVoice, model: audioModel };
+
   return {
     providers,
     apiKeys: parsedApiKeys,
@@ -383,6 +412,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     embeddingsProvider,
     embeddingsLocalModel,
     embeddingsOpenaiModel,
+    audio: { provider: audioProvider, voice: audioVoice, model: audioModel },
   };
 };
 
@@ -587,6 +617,9 @@ export function Settings({
   const [embeddingsOpenaiModel, setEmbeddingsOpenaiModel] = useState(
     DEFAULT_EMBEDDINGS_OPENAI_MODEL,
   );
+  const [, setAudioProvider] = useState<'openai' | 'elevenlabs'>('elevenlabs');
+  const [, setAudioVoice] = useState('');
+  const [, setAudioModel] = useState('tts-1');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingTools, setSavingTools] = useState(false);
@@ -613,6 +646,9 @@ export function Settings({
     setEmbeddingsProvider(parsed.embeddingsProvider);
     setEmbeddingsLocalModel(parsed.embeddingsLocalModel);
     setEmbeddingsOpenaiModel(parsed.embeddingsOpenaiModel);
+    setAudioProvider(parsed.audio.provider);
+    setAudioVoice(parsed.audio.voice);
+    setAudioModel(parsed.audio.model);
   };
 
   const loadSettings = async () => {
@@ -905,7 +941,7 @@ export function Settings({
                   <div className="mb-1 text-xs tracking-[0.18em] text-zinc-500">SETTINGS</div>
                   <h2 className="text-xl font-semibold text-zinc-100">Workspace controls</h2>
                 </div>
-                <div className="flex gap-2">
+                  <div className="flex gap-2">
                   <button
                     type="button"
                     onClick={() => {
@@ -920,10 +956,9 @@ export function Settings({
                     onClick={() => {
                       void handleSave();
                     }}
-                    disabled={saving || loading || savingTools || savingPolicy}
-                    className="rounded-lg border border-zinc-600 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="rounded-lg border border-zinc-700 bg-emerald-600 px-4 py-2 text-sm text-zinc-900 transition-colors hover:bg-emerald-500"
                   >
-                    {saving ? 'Saving...' : 'Save changes'}
+                    Save
                   </button>
                   <button
                     type="button"

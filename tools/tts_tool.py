@@ -15,7 +15,7 @@ SANDBOX_AUDIO.mkdir(parents=True, exist_ok=True)
 class TtsTool:
     def __init__(self, http_client: HttpClient, config: TtsConfig | None = None) -> None:
         self.http = http_client
-        self.config = config or TtsConfig()
+        self.config = config or TtsConfig.from_ui_settings()
 
     def handle(self, request: ToolRequest) -> ToolResult:
         text = str(request.args.get("text") or "").strip()
