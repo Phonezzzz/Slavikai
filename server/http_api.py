@@ -49,7 +49,7 @@ from core.mwv.models import MWV_REPORT_PREFIX
 from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
-from server.http.common import github_import, workspace_index
+from server.http.common import github_import, workspace_index, workspace_paths
 from server.http.common.responses import (
     error_response as _error_response,
 )
@@ -3107,34 +3107,19 @@ async def _publish_agent_activity(
 
 
 async def _workspace_root_for_session(hub: UIHub, session_id: str) -> Path:
-    stored_root = await hub.get_workspace_root(session_id)
-    if isinstance(stored_root, str) and stored_root.strip():
-        candidate = Path(stored_root).expanduser().resolve()
-        if candidate.exists() and candidate.is_dir():
-            return candidate
-    return WORKSPACE_ROOT
+    return await workspace_paths.workspace_root_for_session(
+        hub=hub,
+        session_id=session_id,
+        fallback_root=WORKSPACE_ROOT,
+    )
 
 
 def _resolve_workspace_root_candidate(path_raw: str, *, policy_profile: str) -> Path:
-    candidate = Path(path_raw).expanduser().resolve()
-    if not candidate.exists() or not candidate.is_dir():
-        raise ValueError(f"Директория не найдена: {candidate}")
-    if policy_profile == "sandbox":
-        try:
-            candidate.relative_to(WORKSPACE_ROOT)
-        except ValueError as exc:
-            raise ValueError("Root должен быть внутри sandbox директории.") from exc
-        return candidate
-    if policy_profile == "index":
-        home_dir = Path.home().resolve()
-        try:
-            candidate.relative_to(home_dir)
-        except ValueError:
-            return candidate
-        raise ValueError("Root не должен быть внутри домашней директории пользователя.")
-    if policy_profile == "yolo":
-        return candidate
-    raise ValueError(f"Неизвестный policy profile: {policy_profile}")
+    return workspace_paths.resolve_workspace_root_candidate(
+        path_raw,
+        policy_profile=policy_profile,
+        workspace_root=WORKSPACE_ROOT,
+    )
 
 
 def _index_workspace_root(root: Path) -> dict[str, JSONValue]:
