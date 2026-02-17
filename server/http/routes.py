@@ -5,7 +5,7 @@ from aiohttp import web
 
 def register_routes(app: web.Application) -> None:
     from server import http_api as api
-    from server.http.handlers import sessions, workspace
+    from server.http.handlers import sessions, workflow, workspace
 
     app.router.add_get("/v1/models", api.handle_models)
     app.router.add_post("/v1/chat/completions", api.handle_chat_completions)
@@ -22,9 +22,9 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/ui", workspace.handle_ui_redirect)
     app.router.add_get("/ui/", workspace.handle_ui_index)
     app.router.add_get("/ui/workspace", workspace.handle_workspace_index)
-    app.router.add_get("/ui/api/status", api.handle_ui_status)
-    app.router.add_get("/ui/api/state", api.handle_ui_state)
-    app.router.add_post("/ui/api/mode", api.handle_ui_mode)
+    app.router.add_get("/ui/api/status", workflow.handle_ui_status)
+    app.router.add_get("/ui/api/state", workflow.handle_ui_state)
+    app.router.add_post("/ui/api/mode", workflow.handle_ui_mode)
     app.router.add_post("/ui/api/plan/draft", api.handle_ui_plan_draft)
     app.router.add_post("/ui/api/plan/approve", api.handle_ui_plan_approve)
     app.router.add_post("/ui/api/plan/edit", api.handle_ui_plan_edit)
