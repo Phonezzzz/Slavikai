@@ -3,13 +3,14 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from shared.models import ToolRequest
+from shared.models import ExecutionContext, JSONValue, ToolRequest
 from tools.workspace_tools import (
     WORKSPACE_ROOT,
     ApplyPatchTool,
     ListFilesTool,
     ReadFileTool,
     RunCodeTool,
+    WorkspaceIndexTool,
     WriteFileTool,
 )
 
@@ -131,6 +132,56 @@ def test_run_code_success_and_timeout(tmp_path: Path) -> None:
     assert "превышено" in (result_timeout.error or "").lower()
 
     shutil.rmtree(scripts_dir, ignore_errors=True)
+
+
+def test_workspace_index_tool_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("SLAVIK_INDEX_ENABLED", "false")
+    result = WorkspaceIndexTool().handle(_make_request("workspace_index", {}))
+    assert result.ok
+    assert result.data.get("ok") is False
+    assert result.data.get("message") == "INDEX disabled"
+
+
+def test_workspace_index_tool_reports_progress(monkeypatch, tmp_path: Path) -> None:
+    settings_path = tmp_path / "ui_settings.json"
+    settings_path.write_text(
+        '{"memory":{"embeddings":{"provider":"local","local_model":"all-MiniLM-L6-v2","openai_model":"text-embedding-3-small"}}}',
+        encoding="utf-8",
+    )
+
+    workspace_file = WORKSPACE_ROOT / "index_progress_unit.py"
+    workspace_file.write_text("print('ok')\n", encoding="utf-8")
+
+    calls: list[dict[str, JSONValue]] = []
+
+    def _capture(payload: dict[str, JSONValue]) -> None:
+        calls.append(dict(payload))
+
+    class _FakeVectorIndex:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def ensure_runtime_ready(self) -> None:
+            return None
+
+        def upsert_text(self, path: str, content: str, namespace: str) -> None:
+            del path, content, namespace
+
+    monkeypatch.setattr("tools.workspace_tools.VectorIndex", _FakeVectorIndex)
+
+    try:
+        result = WorkspaceIndexTool(ui_settings_path=settings_path).handle(
+            ToolRequest(
+                name="workspace_index",
+                args={},
+                execution_context=ExecutionContext(progress_callback=_capture),
+            )
+        )
+        assert result.ok
+        assert calls
+        assert any(item.get("done") is True for item in calls)
+    finally:
+        workspace_file.unlink(missing_ok=True)
 
 
 def _flatten_paths(tree: list[dict[str, object]]) -> set[str]:

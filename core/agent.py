@@ -89,6 +89,7 @@ from tools.workspace_tools import (
     ListFilesTool,
     ReadFileTool,
     RunCodeTool,
+    WorkspaceIndexTool,
     WriteFileTool,
 )
 
@@ -318,6 +319,12 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             "workspace_run",
             RunCodeTool(),
             enabled=self.tools_enabled.get("workspace_run", True),
+            capability="exec",
+        )
+        self.tool_registry.register(
+            "workspace_index",
+            WorkspaceIndexTool(),
+            enabled=True,
             capability="exec",
         )
 

@@ -72,6 +72,15 @@ type WorkspaceIdeProps = {
     editedAction?: Record<string, unknown> | null,
   ) => Promise<void> | void;
   refreshToken?: number;
+  workspaceIndexProgress?: {
+    total: number;
+    processed: number;
+    indexedCode: number;
+    indexedDocs: number;
+    skipped: number;
+    done: boolean;
+    rootPath: string;
+  } | null;
 };
 
 const MIN_EXPLORER_WIDTH = 240;
@@ -112,6 +121,7 @@ export function WorkspaceIde({
   decisionError = null,
   onDecisionRespond,
   refreshToken = 0,
+  workspaceIndexProgress = null,
 }: WorkspaceIdeProps) {
   const [tree, setTree] = useState<WorkspaceNode[]>([]);
   const [treeLoading, setTreeLoading] = useState(false);
@@ -142,6 +152,18 @@ export function WorkspaceIde({
   const [rootInput, setRootInput] = useState('');
   const [rootBusy, setRootBusy] = useState(false);
   const [indexing, setIndexing] = useState(false);
+  const [indexModalOpen, setIndexModalOpen] = useState(false);
+  const [indexModalStatus, setIndexModalStatus] = useState<'confirm' | 'running' | 'done' | 'error'>('confirm');
+  const [indexModalError, setIndexModalError] = useState<string | null>(null);
+  const [indexModalProgress, setIndexModalProgress] = useState<{
+    total: number;
+    processed: number;
+    indexedCode: number;
+    indexedDocs: number;
+    skipped: number;
+    done: boolean;
+    rootPath: string;
+  } | null>(null);
   const [gitDiffLoading, setGitDiffLoading] = useState(false);
   const [gitDiff, setGitDiff] = useState('');
 
@@ -199,7 +221,21 @@ export function WorkspaceIde({
     setOpenFiles([]);
     setActiveFileId(null);
     setSelectionText('');
+    setIndexModalOpen(false);
+    setIndexModalStatus('confirm');
+    setIndexModalError(null);
+    setIndexModalProgress(null);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!workspaceIndexProgress) {
+      return;
+    }
+    setIndexModalProgress(workspaceIndexProgress);
+    if (indexModalStatus === 'running' && workspaceIndexProgress.done) {
+      setIndexModalStatus('done');
+    }
+  }, [indexModalStatus, workspaceIndexProgress]);
 
   useEffect(() => {
     const assistantMessages = messages.filter((item) => item.role === 'assistant');
@@ -577,18 +613,58 @@ export function WorkspaceIde({
   };
 
   const handleReindex = async () => {
+    if (!sessionId || indexing || isDecisionBlocking) {
+      return;
+    }
+    setIndexModalOpen(true);
+    setIndexModalStatus('confirm');
+    setIndexModalError(null);
+    setIndexModalProgress(null);
+  };
+
+  const handleStartReindex = async () => {
     if (!sessionId || indexing) {
       return;
     }
+    setIndexModalStatus('running');
+    setIndexModalError(null);
+    if (
+      !indexModalProgress
+      || indexModalProgress.rootPath !== workspaceRoot
+    ) {
+      setIndexModalProgress({
+        total: 0,
+        processed: 0,
+        indexedCode: 0,
+        indexedDocs: 0,
+        skipped: 0,
+        done: false,
+        rootPath: workspaceRoot,
+      });
+    }
     setIndexing(true);
     try {
-      const { indexedCode, indexedDocs, skipped } = await postWorkspaceIndex(requestHeaders);
+      const { total, processed, indexedCode, indexedDocs, skipped } = await postWorkspaceIndex(
+        requestHeaders,
+      );
+      setIndexModalProgress({
+        total,
+        processed,
+        indexedCode,
+        indexedDocs,
+        skipped,
+        done: true,
+        rootPath: workspaceRoot,
+      });
+      setIndexModalStatus('done');
       setTerminalLines((prev) => [
         ...prev,
-        `[${terminalTimestamp()}] index complete: code=${indexedCode} docs=${indexedDocs} skipped=${skipped}`,
+        `[${terminalTimestamp()}] index complete: ${processed}/${total} code=${indexedCode} docs=${indexedDocs} skipped=${skipped}`,
       ]);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to index workspace.';
+      setIndexModalStatus('error');
+      setIndexModalError(message);
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
     } finally {
       setIndexing(false);
@@ -656,6 +732,15 @@ export function WorkspaceIde({
     ? 'Ожидает подтверждения решения. Отправка временно заблокирована.'
     : null;
   const canSendWithContext = Boolean(agentInput.trim() || buildContextAttachments().length > 0);
+  const indexPercent = useMemo(() => {
+    if (!indexModalProgress || indexModalProgress.total <= 0) {
+      return 0;
+    }
+    return Math.min(
+      100,
+      Math.round((indexModalProgress.processed / indexModalProgress.total) * 100),
+    );
+  }, [indexModalProgress]);
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-[#0a0a0d] text-[#d2d2d9]">
@@ -792,6 +877,65 @@ export function WorkspaceIde({
           }}
         />
       </div>
+      {indexModalOpen ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 px-4">
+          <div className="w-full max-w-xl rounded-xl border border-[#2a2a31] bg-[#111117] p-5 shadow-2xl">
+            <h3 className="text-sm font-semibold text-[#ececf3]">Индексация может занять время</h3>
+            <p className="mt-2 text-xs text-[#a8a8b4]">
+              Текущий root: <span className="text-[#d2d2db]">{workspaceRoot || '—'}</span>
+            </p>
+            {indexModalProgress ? (
+              <div className="mt-4 space-y-2 text-xs text-[#c8c8d2]">
+                <div className="flex items-center justify-between">
+                  <span>
+                    {indexModalProgress.processed} / {indexModalProgress.total}
+                  </span>
+                  <span>{indexPercent}%</span>
+                </div>
+                <div className="h-2 w-full rounded bg-[#1b1b22]">
+                  <div
+                    className="h-2 rounded bg-[#3b82f6]"
+                    style={{ width: `${indexPercent}%` }}
+                  />
+                </div>
+                <div>
+                  code={indexModalProgress.indexedCode} docs={indexModalProgress.indexedDocs} skipped=
+                  {indexModalProgress.skipped}
+                </div>
+              </div>
+            ) : null}
+            {indexModalError ? (
+              <div className="mt-3 rounded border border-red-900/70 bg-red-950/30 px-3 py-2 text-xs text-red-200">
+                {indexModalError}
+              </div>
+            ) : null}
+            {indexModalStatus === 'done' ? (
+              <div className="mt-3 rounded border border-emerald-900/70 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-200">
+                Индексация завершена.
+              </div>
+            ) : null}
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setIndexModalOpen(false)}
+                disabled={indexModalStatus === 'running'}
+                className="rounded-md border border-[#2a2a31] bg-[#16161d] px-3 py-1.5 text-xs text-[#c5c5cf] disabled:opacity-50"
+              >
+                {indexModalStatus === 'confirm' ? 'Cancel' : 'Close'}
+              </button>
+              {indexModalStatus === 'confirm' ? (
+                <button
+                  onClick={() => {
+                    void handleStartReindex();
+                  }}
+                  className="rounded-md border border-[#2a2a31] bg-[#1f2536] px-3 py-1.5 text-xs text-[#d9e5ff]"
+                >
+                  Start
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -31,8 +32,9 @@ from server.ui_session_storage import (
     PersistedSession,
     SQLiteUISessionStorage,
 )
-from shared.models import JSONValue, ToolResult
+from shared.models import ExecutionContext, JSONValue, ToolRequest, ToolResult
 from tools.tool_logger import ToolCallLogger
+from tools.workspace_tools import WORKSPACE_ROOT, WorkspaceIndexTool
 
 TEST_API_TOKEN = "test-ui-api-token"
 TEST_AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
@@ -62,8 +64,9 @@ class DummyAgent:
         name: str,
         args: dict[str, JSONValue] | None = None,
         raw_input: str | None = None,
+        execution_context: ExecutionContext | None = None,
     ) -> ToolResult:
-        del args, raw_input
+        del args, raw_input, execution_context
         return ToolResult.failure(f"Инструмент {name} не поддерживается в тестовом агенте")
 
 
@@ -77,8 +80,9 @@ class WorkspaceDecisionAgent(DummyAgent):
         name: str,
         args: dict[str, JSONValue] | None = None,
         raw_input: str | None = None,
+        execution_context: ExecutionContext | None = None,
     ) -> ToolResult:
-        del raw_input
+        del raw_input, execution_context
         if name == "workspace_list":
             return ToolResult.success({"tree": []})
         if name == "workspace_read":
@@ -108,6 +112,34 @@ class WorkspaceDecisionAgent(DummyAgent):
                 path = path_raw if isinstance(path_raw, str) else "main.py"
                 return ToolResult.success({"output": "saved", "path": path})
             return ToolResult.success({"output": "ran", "stderr": "", "exit_code": 0})
+        return ToolResult.failure(f"unsupported tool {name}")
+
+
+class WorkspaceIndexAgent(DummyAgent):
+    def __init__(self, *, settings_path: Path | None = None) -> None:
+        super().__init__()
+        self.index_tool = (
+            WorkspaceIndexTool(ui_settings_path=settings_path)
+            if settings_path is not None
+            else WorkspaceIndexTool()
+        )
+
+    def call_tool(
+        self,
+        name: str,
+        args: dict[str, JSONValue] | None = None,
+        raw_input: str | None = None,
+        execution_context: ExecutionContext | None = None,
+    ) -> ToolResult:
+        del args, raw_input
+        if name == "workspace_index":
+            return self.index_tool.handle(
+                ToolRequest(
+                    name=name,
+                    args={},
+                    execution_context=execution_context,
+                )
+            )
         return ToolResult.failure(f"unsupported tool {name}")
 
 
@@ -929,7 +961,7 @@ def test_ui_workspace_index_respects_index_enabled_env(monkeypatch) -> None:
     monkeypatch.setenv("SLAVIK_INDEX_ENABLED", "false")
 
     async def run() -> None:
-        client = await _create_client(DummyAgent())
+        client = await _create_client(WorkspaceIndexAgent())
         try:
             create_resp = await client.post("/ui/api/sessions")
             assert create_resp.status == 200
@@ -969,11 +1001,10 @@ def test_ui_workspace_index_openai_provider_requires_api_key(monkeypatch, tmp_pa
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     async def run() -> None:
-        client = await _create_client(DummyAgent())
+        client = await _create_client(WorkspaceIndexAgent(settings_path=ui_settings_path))
         try:
             create_resp = await client.post("/ui/api/sessions")
             assert create_resp.status == 200
@@ -987,7 +1018,7 @@ def test_ui_workspace_index_openai_provider_requires_api_key(monkeypatch, tmp_pa
                 "/ui/api/workspace/index",
                 headers={"X-Slavik-Session": session_id},
             )
-            assert response.status == 500
+            assert response.status == 400
             payload = await response.json()
             error = payload.get("error")
             assert isinstance(error, dict)
@@ -998,6 +1029,87 @@ def test_ui_workspace_index_openai_provider_requires_api_key(monkeypatch, tmp_pa
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_workspace_index_emits_progress_events(monkeypatch, tmp_path) -> None:
+    sample_dir = WORKSPACE_ROOT / "index-progress"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    sample_file = sample_dir / "sample.py"
+    sample_file.write_text("print('progress')\n", encoding="utf-8")
+    settings_path = tmp_path / "ui_settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "memory": {
+                    "embeddings": {
+                        "provider": "local",
+                        "local_model": "all-MiniLM-L6-v2",
+                        "openai_model": "text-embedding-3-small",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeVectorIndex:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def ensure_runtime_ready(self) -> None:
+            return None
+
+        def upsert_text(self, path: str, content: str, namespace: str) -> None:
+            del path, content, namespace
+
+    monkeypatch.setattr("tools.workspace_tools.VectorIndex", _FakeVectorIndex)
+
+    async def run() -> None:
+        client = await _create_client(WorkspaceIndexAgent(settings_path=settings_path))
+        stream_resp = None
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            response = await client.post(
+                "/ui/api/workspace/index",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("total") is not None
+
+            events = await _read_sse_events(stream_resp, max_events=40)
+            progress_events = [
+                event for event in events if event.get("type") == "workspace.index.progress"
+            ]
+            assert progress_events
+            payloads = [event.get("payload") for event in progress_events]
+            done_payloads = [
+                item for item in payloads if isinstance(item, dict) and item.get("done") is True
+            ]
+            assert done_payloads
+        finally:
+            if stream_resp is not None:
+                stream_resp.close()
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        sample_file.unlink(missing_ok=True)
+        shutil.rmtree(sample_dir, ignore_errors=True)
 
 
 def test_ui_settings_unauthorized_logs_snapshot(monkeypatch) -> None:

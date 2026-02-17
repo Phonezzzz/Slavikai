@@ -165,7 +165,13 @@ export const postWorkspaceRootSelect = async (
 
 export const postWorkspaceIndex = async (
   headers: Record<string, string>,
-): Promise<{ indexedCode: number; indexedDocs: number; skipped: number }> => {
+): Promise<{
+  total: number;
+  processed: number;
+  indexedCode: number;
+  indexedDocs: number;
+  skipped: number;
+}> => {
   const { response, payload } = await fetchJson('/ui/api/workspace/index', {
     method: 'POST',
     headers,
@@ -174,6 +180,8 @@ export const postWorkspaceIndex = async (
     throwWorkspaceError(payload, 'Failed to index workspace.');
   }
   return {
+    total: getNumber(payload, 'total') ?? 0,
+    processed: getNumber(payload, 'processed') ?? 0,
     indexedCode: getNumber(payload, 'indexed_code') ?? 0,
     indexedDocs: getNumber(payload, 'indexed_docs') ?? 0,
     skipped: getNumber(payload, 'skipped') ?? 0,

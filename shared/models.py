@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
 JSONPrimitive = str | bytes | int | float | bool | None
 JSONValue = JSONPrimitive | Sequence["JSONValue"] | Mapping[str, "JSONValue"]
+ProgressCallback = Callable[[dict[str, JSONValue]], None]
 
 
 class ToolResultStatus(StrEnum):
@@ -15,9 +16,15 @@ class ToolResultStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class ExecutionContext:
+    progress_callback: ProgressCallback | None = None
+
+
+@dataclass(frozen=True)
 class ToolRequest:
     name: str
     args: dict[str, JSONValue] = field(default_factory=dict)
+    execution_context: ExecutionContext | None = None
 
 
 @dataclass

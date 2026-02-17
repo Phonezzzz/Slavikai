@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-from shared.models import JSONValue, ToolRequest, ToolResult
+from config.ui_embeddings_settings import (
+    DEFAULT_UI_SETTINGS_PATH,
+    load_ui_embeddings_settings,
+    resolve_openai_api_key,
+)
+from memory.vector_index import VectorIndex
+from shared.models import JSONValue, ProgressCallback, ToolRequest, ToolResult
 
 SANDBOX_ROOT = Path("sandbox").resolve()
 WORKSPACE_ROOT = (SANDBOX_ROOT / "project").resolve()
@@ -13,6 +20,38 @@ WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 _workspace_root_current: Path | None = None
 ALLOWED_EXTENSIONS = {".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml"}
 MAX_FILE_BYTES = 2_000_000  # 2 MB
+INDEX_ENABLED_ENV = "SLAVIK_INDEX_ENABLED"
+WORKSPACE_INDEX_IGNORED_DIRS = {
+    "venv",
+    "__pycache__",
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".cache",
+}
+WORKSPACE_INDEX_ALLOWED_EXTENSIONS = {
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".json",
+    ".md",
+    ".txt",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".html",
+    ".css",
+    ".sql",
+    ".sh",
+}
+WORKSPACE_INDEX_MAX_FILE_BYTES = 1_000_000
+WORKSPACE_INDEX_CODE_EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx", ".sh"}
 
 
 def get_workspace_root() -> Path:
@@ -256,3 +295,179 @@ class RunCodeTool:
             return ToolResult.failure(f"Время выполнения превышено ({self.timeout}с).")
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Ошибка запуска: {exc}")
+
+
+class WorkspaceIndexTool:
+    def __init__(
+        self,
+        *,
+        vectors_db_path: str = "memory/vectors.db",
+        ui_settings_path: Path = DEFAULT_UI_SETTINGS_PATH,
+    ) -> None:
+        self._vectors_db_path = vectors_db_path
+        self._ui_settings_path = ui_settings_path
+
+    def handle(self, request: ToolRequest) -> ToolResult:
+        root = get_workspace_root()
+        if not self._is_index_enabled():
+            return ToolResult.success(
+                {
+                    "ok": False,
+                    "message": "INDEX disabled",
+                    "root_path": str(root),
+                    "total": 0,
+                    "processed": 0,
+                    "indexed_code": 0,
+                    "indexed_docs": 0,
+                    "skipped": 0,
+                }
+            )
+
+        progress_callback = (
+            request.execution_context.progress_callback
+            if request.execution_context is not None
+            else None
+        )
+        try:
+            embeddings = load_ui_embeddings_settings(path=self._ui_settings_path)
+            vector_index = VectorIndex(
+                self._vectors_db_path,
+                provider=embeddings.provider,
+                local_model=embeddings.local_model,
+                openai_model=embeddings.openai_model,
+                openai_api_key=resolve_openai_api_key(path=self._ui_settings_path),
+            )
+            vector_index.ensure_runtime_ready()
+            candidates = self._collect_candidates(root)
+            total = len(candidates)
+            indexed_code = 0
+            indexed_docs = 0
+            skipped = 0
+            processed = 0
+            self._report_progress(
+                progress_callback,
+                root=root,
+                total=total,
+                processed=processed,
+                indexed_code=indexed_code,
+                indexed_docs=indexed_docs,
+                skipped=skipped,
+                done=False,
+            )
+            for full_path in candidates:
+                processed += 1
+                suffix = full_path.suffix.lower()
+                try:
+                    content = full_path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:  # noqa: BLE001
+                    skipped += 1
+                    self._report_progress(
+                        progress_callback,
+                        root=root,
+                        total=total,
+                        processed=processed,
+                        indexed_code=indexed_code,
+                        indexed_docs=indexed_docs,
+                        skipped=skipped,
+                        done=False,
+                    )
+                    continue
+                namespace = "code" if suffix in WORKSPACE_INDEX_CODE_EXTENSIONS else "docs"
+                vector_index.upsert_text(str(full_path), content, namespace=namespace)
+                if namespace == "code":
+                    indexed_code += 1
+                else:
+                    indexed_docs += 1
+                self._report_progress(
+                    progress_callback,
+                    root=root,
+                    total=total,
+                    processed=processed,
+                    indexed_code=indexed_code,
+                    indexed_docs=indexed_docs,
+                    skipped=skipped,
+                    done=False,
+                )
+            self._report_progress(
+                progress_callback,
+                root=root,
+                total=total,
+                processed=processed,
+                indexed_code=indexed_code,
+                indexed_docs=indexed_docs,
+                skipped=skipped,
+                done=True,
+            )
+            return ToolResult.success(
+                {
+                    "ok": True,
+                    "message": None,
+                    "root_path": str(root),
+                    "total": total,
+                    "processed": processed,
+                    "indexed_code": indexed_code,
+                    "indexed_docs": indexed_docs,
+                    "skipped": skipped,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(str(exc))
+
+    def _collect_candidates(self, root: Path) -> list[Path]:
+        candidates: list[Path] = []
+        for current_root, dirs, files in os.walk(root):
+            dirs[:] = [name for name in dirs if name not in WORKSPACE_INDEX_IGNORED_DIRS]
+            current = Path(current_root)
+            for filename in files:
+                if filename.endswith(".sqlite"):
+                    continue
+                full_path = current / filename
+                suffix = full_path.suffix.lower()
+                if suffix not in WORKSPACE_INDEX_ALLOWED_EXTENSIONS:
+                    continue
+                try:
+                    if full_path.stat().st_size > WORKSPACE_INDEX_MAX_FILE_BYTES:
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                candidates.append(full_path)
+        return candidates
+
+    def _report_progress(
+        self,
+        callback: ProgressCallback | None,
+        *,
+        root: Path,
+        total: int,
+        processed: int,
+        indexed_code: int,
+        indexed_docs: int,
+        skipped: int,
+        done: bool,
+    ) -> None:
+        if callback is None:
+            return
+        payload: dict[str, JSONValue] = {
+            "root_path": str(root),
+            "total": total,
+            "processed": processed,
+            "indexed_code": indexed_code,
+            "indexed_docs": indexed_docs,
+            "skipped": skipped,
+            "done": done,
+        }
+        try:
+            callback(payload)
+        except Exception:  # noqa: BLE001
+            return
+
+    def _is_index_enabled(self) -> bool:
+        raw = os.getenv(INDEX_ENABLED_ENV)
+        if raw is None:
+            return True
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return True

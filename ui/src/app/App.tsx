@@ -61,6 +61,16 @@ type ChatStreamState = {
   content: string;
 };
 
+type WorkspaceIndexProgress = {
+  total: number;
+  processed: number;
+  indexedCode: number;
+  indexedDocs: number;
+  skipped: number;
+  done: boolean;
+  rootPath: string;
+};
+
 type PendingUserMessage = {
   content: string;
   attachments: ChatAttachment[];
@@ -938,6 +948,7 @@ export default function App() {
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
+  const [workspaceIndexProgress, setWorkspaceIndexProgress] = useState<WorkspaceIndexProgress | null>(null);
 
   const pendingForCanvas =
     pendingSessionId === selectedConversation ? pendingUserMessage : null;
@@ -1623,6 +1634,7 @@ export default function App() {
       return;
     }
     setChatStreamingState(null);
+    setWorkspaceIndexProgress(null);
     const streamUrl = `/ui/api/events/stream?session_id=${encodeURIComponent(selectedConversation)}`;
     const eventSource = new EventSource(streamUrl);
     eventSource.onmessage = (event) => {
@@ -1645,6 +1657,13 @@ export default function App() {
         delta?: unknown;
         decision?: unknown;
         workflow?: unknown;
+        total?: unknown;
+        processed?: unknown;
+        indexed_code?: unknown;
+        indexed_docs?: unknown;
+        skipped?: unknown;
+        done?: unknown;
+        root_path?: unknown;
       };
       if (envelope.type === 'chat.stream.start') {
         const streamId =
@@ -1690,6 +1709,18 @@ export default function App() {
         }
         return;
       }
+      if (envelope.type === 'workspace.index.progress') {
+        setWorkspaceIndexProgress({
+          total: typeof payload.total === 'number' ? payload.total : 0,
+          processed: typeof payload.processed === 'number' ? payload.processed : 0,
+          indexedCode: typeof payload.indexed_code === 'number' ? payload.indexed_code : 0,
+          indexedDocs: typeof payload.indexed_docs === 'number' ? payload.indexed_docs : 0,
+          skipped: typeof payload.skipped === 'number' ? payload.skipped : 0,
+          done: payload.done === true,
+          rootPath: typeof payload.root_path === 'string' ? payload.root_path : '',
+        });
+        return;
+      }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
       if (!artifactId) {
         return;
@@ -1726,6 +1757,7 @@ export default function App() {
     return () => {
       eventSource.close();
       setChatStreamingState(null);
+      setWorkspaceIndexProgress(null);
     };
   }, [selectedConversation]);
 
@@ -2530,6 +2562,7 @@ export default function App() {
               void handleDecisionRespond(choice, editedAction);
             }}
             refreshToken={workspaceRefreshToken}
+            workspaceIndexProgress={workspaceIndexProgress}
           />
         ) : (
           <>

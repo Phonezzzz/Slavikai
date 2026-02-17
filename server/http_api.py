@@ -59,12 +59,11 @@ from core.mwv.models import MWV_REPORT_PREFIX
 from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
-from memory.vector_index import VectorIndex
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession, SQLiteUISessionStorage, UISessionStorage
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
-from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
+from shared.models import ExecutionContext, JSONValue, LLMMessage, ToolRequest, ToolResult
 from shared.sanitize import safe_json_loads
 from tools.project_tool import handle_project_request
 from tools.tool_logger import DEFAULT_LOG_PATH as TOOL_CALLS_LOG
@@ -122,7 +121,6 @@ MODEL_FETCH_TIMEOUT: Final[int] = 20
 UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index", "github_import"}
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parent.parent / ".run" / "ui_settings.json"
 DEFAULT_UI_TONE: Final[str] = "balanced"
-INDEX_ENABLED_ENV: Final[str] = "SLAVIK_INDEX_ENABLED"
 DEFAULT_LONG_PASTE_TO_FILE_ENABLED: Final[bool] = True
 DEFAULT_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 12_000
 MIN_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 1_000
@@ -174,7 +172,6 @@ WORKSPACE_INDEX_ALLOWED_EXTENSIONS: Final[set[str]] = {
     ".sql",
     ".sh",
 }
-WORKSPACE_INDEX_MAX_FILE_BYTES: Final[int] = 1_000_000
 POLICY_PROFILES: Final[set[str]] = {"sandbox", "index", "yolo"}
 DEFAULT_POLICY_PROFILE: Final[str] = "sandbox"
 _REQUEST_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -402,6 +399,7 @@ class AgentProtocol(Protocol):
         name: str,
         args: dict[str, JSONValue] | None = None,
         raw_input: str | None = None,
+        execution_context: ExecutionContext | None = None,
     ) -> ToolResult: ...
 
     def record_feedback_event(
@@ -3283,34 +3281,57 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
 
 async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    try:
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
+    except ModelNotAllowedError as exc:
+        return _model_not_allowed_response(exc.model_id)
     if session_error is not None:
         return session_error
     if session_id is None:
         return _session_forbidden_response()
-    root_path = await _workspace_root_for_session(hub, session_id)
-    try:
-        stats = _index_workspace_root(root_path)
-    except ValueError as exc:
+    if agent is None:
+        return _model_not_selected_response()
+
+    loop = asyncio.get_running_loop()
+
+    async def _publish_index_progress(progress_payload: dict[str, JSONValue]) -> None:
+        event_payload: dict[str, JSONValue] = {"session_id": session_id, **progress_payload}
+        try:
+            await hub.publish(
+                session_id,
+                {
+                    "type": "workspace.index.progress",
+                    "payload": event_payload,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to publish workspace index progress", exc_info=True)
+
+    def _on_progress(progress_payload: dict[str, JSONValue]) -> None:
+        loop.create_task(_publish_index_progress(progress_payload))
+
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_index",
+        raw_input="ui:workspace_index",
+        execution_context=ExecutionContext(progress_callback=_on_progress),
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
         return _error_response(
             status=400,
-            message=str(exc),
+            message=tool_result.error or "Не удалось проиндексировать workspace.",
             error_type="invalid_request_error",
             code="workspace_index_failed",
         )
-    except RuntimeError as exc:
-        return _error_response(
-            status=500,
-            message=str(exc),
-            error_type="internal_error",
-            code="workspace_index_failed",
-        )
-    response = _json_response(
-        {
-            "session_id": session_id,
-            **stats,
-        }
-    )
+    response = _json_response({"session_id": session_id, **tool_result.data})
     response.headers[UI_SESSION_HEADER] = session_id
     return response
 
@@ -3381,81 +3402,6 @@ def _resolve_workspace_root_candidate(path_raw: str, *, policy_profile: str) -> 
     if policy_profile == "yolo":
         return candidate
     raise ValueError(f"Неизвестный policy profile: {policy_profile}")
-
-
-def _env_flag_enabled(name: str, *, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def _is_index_enabled() -> bool:
-    return _env_flag_enabled(INDEX_ENABLED_ENV, default=True)
-
-
-def _index_workspace_root(root: Path) -> dict[str, JSONValue]:
-    if not _is_index_enabled():
-        return {
-            "ok": False,
-            "message": "INDEX disabled",
-            "root_path": str(root),
-            "indexed_code": 0,
-            "indexed_docs": 0,
-            "skipped": 0,
-        }
-
-    embeddings = _load_embeddings_settings()
-    vector_index = VectorIndex(
-        "memory/vectors.db",
-        provider=embeddings.provider,
-        local_model=embeddings.local_model,
-        openai_model=embeddings.openai_model,
-        openai_api_key=_resolve_provider_api_key("openai"),
-    )
-    vector_index.ensure_runtime_ready()
-    indexed_code = 0
-    indexed_docs = 0
-    skipped = 0
-    for current_root, dirs, files in os.walk(root):
-        dirs[:] = [name for name in dirs if name not in WORKSPACE_INDEX_IGNORED_DIRS]
-        current = Path(current_root)
-        for filename in files:
-            full_path = current / filename
-            if filename.endswith(".sqlite"):
-                skipped += 1
-                continue
-            suffix = full_path.suffix.lower()
-            if suffix not in WORKSPACE_INDEX_ALLOWED_EXTENSIONS:
-                skipped += 1
-                continue
-            try:
-                if full_path.stat().st_size > WORKSPACE_INDEX_MAX_FILE_BYTES:
-                    skipped += 1
-                    continue
-                content = full_path.read_text(encoding="utf-8", errors="ignore")
-            except Exception:  # noqa: BLE001
-                skipped += 1
-                continue
-            namespace = "code" if suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".sh"} else "docs"
-            vector_index.upsert_text(str(full_path), content, namespace=namespace)
-            if namespace == "code":
-                indexed_code += 1
-            else:
-                indexed_docs += 1
-    return {
-        "ok": True,
-        "message": None,
-        "root_path": str(root),
-        "indexed_code": indexed_code,
-        "indexed_docs": indexed_docs,
-        "skipped": skipped,
-    }
 
 
 def _workspace_git_diff(root: Path) -> tuple[str, str | None]:
@@ -3749,6 +3695,7 @@ async def _call_workspace_tool(
     tool_name: str,
     args: dict[str, JSONValue] | None = None,
     raw_input: str,
+    execution_context: ExecutionContext | None = None,
 ) -> ToolResult | web.Response:
     hub: UIHub = request.app["ui_hub"]
     agent_lock = request.app["agent_lock"]
@@ -3769,6 +3716,7 @@ async def _call_workspace_tool(
                     tool_name,
                     args=args or {},
                     raw_input=raw_input,
+                    execution_context=execution_context,
                 )
             except ApprovalRequired as exc:
                 approval_payload = _serialize_approval_request(exc.request)

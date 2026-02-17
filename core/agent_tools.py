@@ -48,6 +48,7 @@ from shared.memory_companion_models import (
     ToolStatus,
 )
 from shared.models import (
+    ExecutionContext,
     JSONValue,
     LLMMessage,
     MemoryKind,
@@ -644,8 +645,13 @@ class AgentToolsMixin:
         name: str,
         args: dict[str, JSONValue] | None = None,
         raw_input: str | None = None,
+        execution_context: ExecutionContext | None = None,
     ) -> ToolResult:
-        request = ToolRequest(name=name, args=args or {})
+        request = ToolRequest(
+            name=name,
+            args=args or {},
+            execution_context=execution_context,
+        )
         return self._call_tool_logged(raw_input or f"tool:{name}", request)
 
     def _call_tool_logged(
