@@ -1125,13 +1125,6 @@ def _serialize_trace_events(
     return serialized
 
 
-async def handle_models(request: web.Request) -> web.Response:
-    models = [
-        {"id": "slavik", "object": "model", "owned_by": "slavik"},
-    ]
-    return _json_response({"object": "list", "data": models})
-
-
 def _ui_messages_to_llm(messages: list[dict[str, JSONValue]]) -> list[LLMMessage]:
     def _message_attachments(raw: object) -> list[dict[str, str]]:
         if not isinstance(raw, list):
