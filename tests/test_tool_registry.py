@@ -40,7 +40,7 @@ def test_tool_registry_logs_disabled(tmp_path) -> None:
     assert not records[0].ok
 
 
-def test_tool_registry_blocks_all_tools_in_ask_mode(tmp_path) -> None:
+def test_tool_registry_allows_read_in_ask_mode(tmp_path) -> None:
     log_path = tmp_path / "tool_calls.log"
     registry = ToolRegistry(call_logger=ToolCallLogger(log_path))
 
@@ -50,8 +50,7 @@ def test_tool_registry_blocks_all_tools_in_ask_mode(tmp_path) -> None:
     registry.register("dummy", handler, enabled=True, capability="read")
     registry.set_execution_policy(mode="ask")
     result = registry.call(ToolRequest(name="dummy"))
-    assert not result.ok
-    assert "ASK_MODE_NO_ACTIONS" in (result.error or "")
+    assert result.ok
 
 
 def test_tool_registry_blocks_write_in_plan_mode(tmp_path) -> None:

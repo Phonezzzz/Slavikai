@@ -801,6 +801,55 @@ def test_ui_session_policy_set_updates_session_state() -> None:
     asyncio.run(run())
 
 
+def test_ui_session_security_get_and_post_updates_state() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            update_resp = await client.post(
+                "/ui/api/session/security",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "tools": {"state": {"shell": True, "web": True}},
+                    "policy": {"profile": "sandbox"},
+                },
+            )
+            assert update_resp.status == 200
+            update_payload = await update_resp.json()
+            tools_state = update_payload.get("tools_state")
+            assert isinstance(tools_state, dict)
+            assert tools_state.get("shell") is True
+            assert tools_state.get("web") is True
+            policy = update_payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("profile") == "sandbox"
+
+            get_resp = await client.get(
+                "/ui/api/session/security",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert get_resp.status == 200
+            get_payload = await get_resp.json()
+            get_tools = get_payload.get("tools_state")
+            assert isinstance(get_tools, dict)
+            assert get_tools.get("shell") is True
+            assert get_tools.get("web") is True
+            get_policy = get_payload.get("policy")
+            assert isinstance(get_policy, dict)
+            assert get_policy.get("profile") == "sandbox"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_session_policy_requires_confirm_for_yolo() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -1038,7 +1087,7 @@ def test_ui_settings_unauthorized_logs_snapshot(monkeypatch) -> None:
     assert any("settings_snapshot" in item or "settings_snapshot_error" in item for item in records)
 
 
-def test_create_app_resets_workspace_root_but_keeps_policy_on_boot(tmp_path) -> None:
+def test_create_app_keeps_workspace_root_and_policy_on_boot(tmp_path) -> None:
     db_path = tmp_path / "ui_sessions.db"
     storage = SQLiteUISessionStorage(db_path)
     storage.save_session(
@@ -1065,7 +1114,7 @@ def test_create_app_resets_workspace_root_but_keeps_policy_on_boot(tmp_path) -> 
     sessions = storage.load_sessions()
     assert len(sessions) == 1
     restored = sessions[0]
-    assert restored.workspace_root is None
+    assert restored.workspace_root == "/tmp"
     assert restored.policy_profile == "yolo"
 
 
@@ -1161,24 +1210,44 @@ async def _enter_act_mode(client: TestClient, session_id: str, *, goal: str = "t
     draft_payload = await draft_resp.json()
     draft_plan = draft_payload.get("active_plan")
     assert isinstance(draft_plan, dict)
-    plan_hash = draft_plan.get("plan_hash")
-    assert isinstance(plan_hash, str)
-    assert plan_hash
+    plan_revision = draft_plan.get("plan_revision")
+    assert isinstance(plan_revision, int)
+    assert plan_revision > 0
 
     approve_resp = await client.post(
         "/ui/api/plan/approve",
         headers={"X-Slavik-Session": session_id},
     )
     assert approve_resp.status == 200
+    approve_payload = await approve_resp.json()
+    approved_plan = approve_payload.get("active_plan")
+    assert isinstance(approved_plan, dict)
+    approved_revision = approved_plan.get("plan_revision")
+    assert isinstance(approved_revision, int)
 
     execute_resp = await client.post(
         "/ui/api/plan/execute",
         headers={"X-Slavik-Session": session_id},
-        json={"plan_hash": plan_hash},
+        json={"plan_revision": approved_revision},
     )
-    assert execute_resp.status == 200
+    assert execute_resp.status == 409
     execute_payload = await execute_resp.json()
-    assert execute_payload.get("mode") == "act"
+    decision = execute_payload.get("decision")
+    assert isinstance(decision, dict)
+    decision_id = decision.get("id")
+    assert isinstance(decision_id, str)
+    respond_resp = await client.post(
+        "/ui/api/decision/respond",
+        headers={"X-Slavik-Session": session_id},
+        json={
+            "session_id": session_id,
+            "decision_id": decision_id,
+            "choice": "approve_once",
+        },
+    )
+    assert respond_resp.status == 200
+    respond_payload = await respond_resp.json()
+    assert respond_payload.get("mode") == "act"
 
 
 def test_ui_status_endpoint() -> None:
@@ -1269,9 +1338,9 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             plan_raw = draft_payload.get("active_plan")
             assert isinstance(plan_raw, dict)
             assert plan_raw.get("status") == "draft"
-            plan_hash = plan_raw.get("plan_hash")
-            assert isinstance(plan_hash, str)
-            assert plan_hash
+            plan_revision = plan_raw.get("plan_revision")
+            assert isinstance(plan_revision, int)
+            assert plan_revision > 0
 
             approve_resp = await client.post(
                 "/ui/api/plan/approve",
@@ -1282,16 +1351,33 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             approved_plan = approve_payload.get("active_plan")
             assert isinstance(approved_plan, dict)
             assert approved_plan.get("status") == "approved"
+            approved_revision = approved_plan.get("plan_revision")
+            assert isinstance(approved_revision, int)
 
             execute_resp = await client.post(
                 "/ui/api/plan/execute",
                 headers={"X-Slavik-Session": session_id},
-                json={"plan_hash": plan_hash},
+                json={"plan_revision": approved_revision},
             )
-            assert execute_resp.status == 200
+            assert execute_resp.status == 409
             execute_payload = await execute_resp.json()
-            assert execute_payload.get("mode") == "act"
-            task_raw = execute_payload.get("active_task")
+            decision = execute_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+            decision_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_once",
+                },
+            )
+            assert decision_resp.status == 200
+            decision_payload = await decision_resp.json()
+            assert decision_payload.get("mode") == "act"
+            task_raw = decision_payload.get("active_task")
             assert isinstance(task_raw, dict)
             assert task_raw.get("status") == "running"
 
@@ -1316,7 +1402,70 @@ def test_ui_plan_lifecycle_endpoints() -> None:
     asyncio.run(run())
 
 
-def test_ui_chat_send_ask_mode_blocks_action_intent() -> None:
+def test_ui_plan_edit_resets_approved_to_draft() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            mode_resp = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "plan"},
+            )
+            assert mode_resp.status == 200
+
+            draft_resp = await client.post(
+                "/ui/api/plan/draft",
+                headers={"X-Slavik-Session": session_id},
+                json={"goal": "Проверить edit flow"},
+            )
+            assert draft_resp.status == 200
+            draft_payload = await draft_resp.json()
+            plan_raw = draft_payload.get("active_plan")
+            assert isinstance(plan_raw, dict)
+
+            approve_resp = await client.post(
+                "/ui/api/plan/approve",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert approve_resp.status == 200
+            approve_payload = await approve_resp.json()
+            approved_plan = approve_payload.get("active_plan")
+            assert isinstance(approved_plan, dict)
+            approved_revision = approved_plan.get("plan_revision")
+            assert isinstance(approved_revision, int)
+
+            edit_resp = await client.post(
+                "/ui/api/plan/edit",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "plan_revision": approved_revision,
+                    "operation": {
+                        "op": "update_step",
+                        "step_id": "step-1-audit",
+                        "changes": {"title": "Новый заголовок"},
+                    },
+                },
+            )
+            assert edit_resp.status == 200
+            edit_payload = await edit_resp.json()
+            edited_plan = edit_payload.get("active_plan")
+            assert isinstance(edited_plan, dict)
+            assert edited_plan.get("status") == "draft"
+            edited_revision = edited_plan.get("plan_revision")
+            assert isinstance(edited_revision, int)
+            assert edited_revision > approved_revision
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_ask_mode_does_not_hard_block_action_intent() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -1340,7 +1489,7 @@ def test_ui_chat_send_ask_mode_blocks_action_intent() -> None:
             assert isinstance(last, dict)
             content = last.get("content")
             assert isinstance(content, str)
-            assert "ASK_MODE_NO_ACTIONS" in content
+            assert "ASK_MODE_NO_ACTIONS" not in content
         finally:
             await client.close()
 
@@ -2060,7 +2209,7 @@ def test_ui_workspace_write_requires_approval_and_emits_decision_packet() -> Non
     asyncio.run(run())
 
 
-def test_ui_decision_respond_approve_is_blocked_in_emergency_lockdown() -> None:
+def test_ui_decision_respond_approve_once_executes_workspace_tool() -> None:
     async def run() -> None:
         agent = WorkspaceDecisionAgent()
         client = await _create_client(agent)
@@ -2091,15 +2240,111 @@ def test_ui_decision_respond_approve_is_blocked_in_emergency_lockdown() -> None:
                 json={
                     "session_id": session_id,
                     "decision_id": decision_id,
-                    "choice": "approve",
+                    "choice": "approve_once",
                 },
             )
-            assert approve_resp.status == 409
+            assert approve_resp.status == 200
             approve_payload = await approve_resp.json()
-            error = approve_payload.get("error")
-            assert isinstance(error, dict)
-            assert error.get("code") == "decision_resume_disabled_emergency"
-            assert len(agent.tool_calls) == 0
+            assert approve_payload.get("status") == "resolved"
+            assert len(agent.tool_calls) == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_approve_once_does_not_persist_category() -> None:
+    async def run() -> None:
+        agent = WorkspaceDecisionAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            first_run = await client.post(
+                "/ui/api/workspace/run",
+                headers={"X-Slavik-Session": session_id},
+                json={"path": "main.py"},
+            )
+            assert first_run.status == 202
+            first_payload = await first_run.json()
+            first_decision = first_payload.get("decision")
+            assert isinstance(first_decision, dict)
+            decision_id = first_decision.get("id")
+            assert isinstance(decision_id, str)
+
+            approve_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_once",
+                },
+            )
+            assert approve_resp.status == 200
+
+            second_run = await client.post(
+                "/ui/api/workspace/run",
+                headers={"X-Slavik-Session": session_id},
+                json={"path": "main.py"},
+            )
+            assert second_run.status == 202
+            second_payload = await second_run.json()
+            second_decision = second_payload.get("decision")
+            assert isinstance(second_decision, dict)
+            assert second_decision.get("status") == "pending"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_approve_session_persists_category() -> None:
+    async def run() -> None:
+        agent = WorkspaceDecisionAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            first_run = await client.post(
+                "/ui/api/workspace/run",
+                headers={"X-Slavik-Session": session_id},
+                json={"path": "main.py"},
+            )
+            assert first_run.status == 202
+            first_payload = await first_run.json()
+            first_decision = first_payload.get("decision")
+            assert isinstance(first_decision, dict)
+            decision_id = first_decision.get("id")
+            assert isinstance(decision_id, str)
+
+            approve_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_session",
+                },
+            )
+            assert approve_resp.status == 200
+
+            second_run = await client.post(
+                "/ui/api/workspace/run",
+                headers={"X-Slavik-Session": session_id},
+                json={"path": "main.py"},
+            )
+            assert second_run.status == 200
+            second_payload = await second_run.json()
+            assert second_payload.get("exit_code") == 0
         finally:
             await client.close()
 
@@ -2185,11 +2430,9 @@ def test_ui_decision_respond_ignores_client_control_fields_or_rejects() -> None:
                     "edited_action": {"args": {"path": "evil.py"}},
                 },
             )
-            assert response.status == 400
+            assert response.status == 200
             payload = await response.json()
-            error = payload.get("error")
-            assert isinstance(error, dict)
-            assert error.get("code") == "invalid_request_error"
+            assert payload.get("status") == "rejected"
             assert len(agent.tool_calls) == 0
         finally:
             await client.close()

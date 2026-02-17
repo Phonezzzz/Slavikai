@@ -441,6 +441,7 @@ const parseUiDecision = (value: unknown): UiDecision | null => {
   const candidate = value as {
     id?: unknown;
     kind?: unknown;
+    decision_type?: unknown;
     status?: unknown;
     blocking?: unknown;
     reason?: unknown;
@@ -505,6 +506,10 @@ const parseUiDecision = (value: unknown): UiDecision | null => {
   return {
     id: candidate.id.trim(),
     kind: candidate.kind,
+    decision_type:
+      candidate.decision_type === 'tool_approval' || candidate.decision_type === 'plan_execute'
+        ? candidate.decision_type
+        : null,
     status: candidate.status,
     blocking: candidate.blocking === true,
     reason: candidate.reason,
@@ -534,6 +539,7 @@ const parsePlanEnvelope = (value: unknown): PlanEnvelope | null => {
   const candidate = value as {
     plan_id?: unknown;
     plan_hash?: unknown;
+    plan_revision?: unknown;
     status?: unknown;
     goal?: unknown;
     scope_in?: unknown;
@@ -566,6 +572,12 @@ const parsePlanEnvelope = (value: unknown): PlanEnvelope | null => {
     || candidate.status === 'cancelled'
       ? candidate.status
       : 'draft';
+  const planRevision =
+    typeof candidate.plan_revision === 'number'
+    && Number.isFinite(candidate.plan_revision)
+    && candidate.plan_revision > 0
+      ? Math.floor(candidate.plan_revision)
+      : 1;
   const normalizeStringList = (input: unknown): string[] =>
     Array.isArray(input)
       ? input.filter((item): item is string => typeof item === 'string')
@@ -576,13 +588,14 @@ const parsePlanEnvelope = (value: unknown): PlanEnvelope | null => {
     .map((step) => {
       const rawStatus = step.status;
       const stepStatus: PlanStepStatus =
-        rawStatus === 'pending'
-        || rawStatus === 'running'
-        || rawStatus === 'passed'
+        rawStatus === 'todo'
+        || rawStatus === 'doing'
+        || rawStatus === 'waiting_approval'
+        || rawStatus === 'blocked'
+        || rawStatus === 'done'
         || rawStatus === 'failed'
-        || rawStatus === 'skipped'
           ? rawStatus
-          : 'pending';
+          : 'todo';
       return {
         step_id: typeof step.step_id === 'string' ? step.step_id : '',
         title: typeof step.title === 'string' ? step.title : '',
@@ -597,6 +610,7 @@ const parsePlanEnvelope = (value: unknown): PlanEnvelope | null => {
   return {
     plan_id: candidate.plan_id,
     plan_hash: candidate.plan_hash,
+    plan_revision: planRevision,
     status,
     goal: candidate.goal,
     scope_in: normalizeStringList(candidate.scope_in),
@@ -1393,7 +1407,12 @@ export default function App() {
 
   const executePlanRemote = async (
     sessionId: string,
-  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+  ): Promise<{
+    mode: SessionMode;
+    activePlan: PlanEnvelope | null;
+    activeTask: TaskExecutionState | null;
+    decision: UiDecision | null;
+  }> => {
     const response = await fetch('/ui/api/plan/execute', {
       method: 'POST',
       headers: {
@@ -1403,12 +1422,17 @@ export default function App() {
     });
     const payload: unknown = await response.json();
     if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to execute plan.'));
+      const error = (payload as { error?: { code?: unknown } }).error;
+      const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : null;
+      if (code !== 'switch_to_act_required') {
+        throw new Error(extractErrorMessage(payload, 'Failed to execute plan.'));
+      }
     }
     return {
       mode: parseSessionMode((payload as { mode?: unknown }).mode),
       activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
       activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+      decision: parseUiDecision((payload as { decision?: unknown }).decision),
     };
   };
 
@@ -1688,6 +1712,17 @@ export default function App() {
           setActivePlan(parsePlanEnvelope(workflow.active_plan));
           setActiveTask(parseTaskExecution(workflow.active_task));
         }
+        return;
+      }
+      if (envelope.type === 'session.workflow') {
+        const workflow = payload as {
+          mode?: unknown;
+          active_plan?: unknown;
+          active_task?: unknown;
+        };
+        setSessionMode(parseSessionMode(workflow.mode));
+        setActivePlan(parsePlanEnvelope(workflow.active_plan));
+        setActiveTask(parseTaskExecution(workflow.active_task));
         return;
       }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
@@ -2284,6 +2319,9 @@ export default function App() {
       setSessionMode(updated.mode);
       setActivePlan(updated.activePlan);
       setActiveTask(updated.activeTask);
+      if (updated.decision) {
+        setPendingDecision(updated.decision);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to execute plan.';
       setModeError(message);
@@ -2371,8 +2409,8 @@ export default function App() {
   };
 
   const handleDecisionRespond = async (
-    choice: 'approve' | 'reject' | 'edit',
-    editedAction?: Record<string, unknown> | null,
+    choice: 'approve_once' | 'approve_session' | 'reject' | 'edit_and_approve' | 'edit_plan',
+    editedPayload?: Record<string, unknown> | null,
   ) => {
     if (!selectedConversation || !pendingDecision) {
       return;
@@ -2390,7 +2428,8 @@ export default function App() {
           session_id: selectedConversation,
           decision_id: pendingDecision.id,
           choice,
-          edited_action: choice === 'edit' ? (editedAction ?? {}) : null,
+          edited_action: choice === 'edit_and_approve' ? (editedPayload ?? {}) : null,
+          edited_plan: choice === 'edit_plan' ? (editedPayload ?? {}) : null,
         }),
       });
       const payload: unknown = await response.json();

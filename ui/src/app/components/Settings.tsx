@@ -615,6 +615,47 @@ export function Settings({
     setEmbeddingsOpenaiModel(parsed.embeddingsOpenaiModel);
   };
 
+  const applySessionSecurityPayload = (payload: unknown): void => {
+    if (!payload || typeof payload !== 'object') {
+      return;
+    }
+    const toolsStateRaw = (payload as { tools_state?: unknown }).tools_state;
+    if (toolsStateRaw && typeof toolsStateRaw === 'object') {
+      const nextToolsState: Record<ToolKey, boolean> = { ...DEFAULT_TOOLS_STATE };
+      for (const [key, value] of Object.entries(toolsStateRaw as Record<string, unknown>)) {
+        if (isToolKey(key) && typeof value === 'boolean') {
+          nextToolsState[key] = value;
+        }
+      }
+      setToolsState(nextToolsState);
+    }
+    const policyRaw = (payload as { policy?: unknown }).policy;
+    if (policyRaw && typeof policyRaw === 'object') {
+      const profileRaw = (policyRaw as { profile?: unknown }).profile;
+      const yoloArmedRaw = (policyRaw as { yolo_armed?: unknown }).yolo_armed;
+      const yoloArmedAtRaw = (policyRaw as { yolo_armed_at?: unknown }).yolo_armed_at;
+      if (isPolicyProfile(profileRaw)) {
+        setPolicyProfile(profileRaw);
+      }
+      setYoloArmed(yoloArmedRaw === true);
+      setYoloArmedAt(
+        typeof yoloArmedAtRaw === 'string' && yoloArmedAtRaw.trim() ? yoloArmedAtRaw.trim() : null,
+      );
+    }
+  };
+
+  const loadSessionSecurity = async (): Promise<void> => {
+    if (!sessionId) {
+      return;
+    }
+    const response = await fetch('/ui/api/session/security', { headers: requestHeaders });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to load session security.'));
+    }
+    applySessionSecurityPayload(payload);
+  };
+
   const loadSettings = async () => {
     setLoading(true);
     setStatus(null);
@@ -625,38 +666,14 @@ export function Settings({
         fetch('/ui/api/settings', { headers: requestHeaders }),
         fetch('/ui/api/models', { headers: requestHeaders }),
       ];
-      if (sessionId) {
-        requests.push(fetch('/ui/api/workspace/root', { headers: requestHeaders }));
-      }
-      const [settingsResponse, providerRuntimeResponse, sessionRootResponse] = await Promise.all(requests);
+      const [settingsResponse, providerRuntimeResponse] = await Promise.all(requests);
       const settingsPayload: unknown = await settingsResponse.json();
       if (!settingsResponse.ok) {
         throw new Error(extractErrorMessage(settingsPayload, 'Failed to load settings.'));
       }
       const parsed = parseSettingsPayload(settingsPayload);
       applyParsedSettings(parsed);
-      if (sessionId) {
-        if (!sessionRootResponse) {
-          throw new Error('Failed to load session policy.');
-        }
-        const rootPayload: unknown = await sessionRootResponse.json();
-        if (!sessionRootResponse.ok) {
-          throw new Error(extractErrorMessage(rootPayload, 'Failed to load session policy.'));
-        }
-        const policyRaw = (rootPayload as { policy?: unknown }).policy;
-        if (policyRaw && typeof policyRaw === 'object') {
-          const profileRaw = (policyRaw as { profile?: unknown }).profile;
-          const yoloArmedRaw = (policyRaw as { yolo_armed?: unknown }).yolo_armed;
-          const yoloArmedAtRaw = (policyRaw as { yolo_armed_at?: unknown }).yolo_armed_at;
-          if (isPolicyProfile(profileRaw)) {
-            setPolicyProfile(profileRaw);
-          }
-          setYoloArmed(yoloArmedRaw === true);
-          setYoloArmedAt(
-            typeof yoloArmedAtRaw === 'string' && yoloArmedAtRaw.trim() ? yoloArmedAtRaw.trim() : null,
-          );
-        }
-      }
+      await loadSessionSecurity();
       const providerRuntimePayload: unknown = await providerRuntimeResponse.json();
       if (!providerRuntimeResponse.ok) {
         throw new Error(extractErrorMessage(providerRuntimePayload, 'Failed to load provider runtime status.'));
@@ -764,6 +781,7 @@ export function Settings({
       }
       const parsed = parseSettingsPayload(body);
       applyParsedSettings(parsed);
+      await loadSessionSecurity();
       setStatus('Saved');
       onSaved?.();
     } catch (error) {
@@ -778,6 +796,10 @@ export function Settings({
     if (loading || saving || savingTools || savingPolicy) {
       return;
     }
+    if (!sessionId) {
+      setStatus('Выберите активную сессию для изменения tools.');
+      return;
+    }
     const previousState = toolsState;
     const nextValue = !previousState[tool];
     const nextState: Record<ToolKey, boolean> = {
@@ -788,7 +810,7 @@ export function Settings({
     setSavingTools(true);
     setStatus(null);
     try {
-      const response = await fetch('/ui/api/settings', {
+      const response = await fetch('/ui/api/session/security', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -806,8 +828,7 @@ export function Settings({
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to update tools settings.'));
       }
-      const parsed = parseSettingsPayload(payload);
-      applyParsedSettings(parsed);
+      applySessionSecurityPayload(payload);
       setStatus(`Tool "${TOOL_LABELS[tool]}" updated.`);
       onSaved?.();
     } catch (error) {
@@ -876,41 +897,35 @@ export function Settings({
     setSavingPolicy(true);
     setStatus(null);
     try {
-      const response = await fetch('/ui/api/session/policy', {
+      const response = await fetch('/ui/api/session/security', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...requestHeaders,
         },
         body: JSON.stringify({
-          policy_profile: policyProfile,
-          confirm_yolo: wantsYolo ? true : undefined,
+          policy: {
+            profile: policyProfile,
+            yolo_armed: wantsYolo,
+            yolo_confirm: wantsYolo ? true : false,
+            yolo_confirm_text: wantsYolo ? yoloConfirmText.trim() : '',
+          },
         }),
       });
       const payload: unknown = await response.json();
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to apply policy profile.'));
       }
+      applySessionSecurityPayload(payload);
       const policy = (payload as { policy?: unknown }).policy;
-      if (!policy || typeof policy !== 'object') {
-        throw new Error('Invalid policy response.');
-      }
-      const profileRaw = (policy as { profile?: unknown }).profile;
-      const yoloArmedRaw = (policy as { yolo_armed?: unknown }).yolo_armed;
-      const yoloArmedAtRaw = (policy as { yolo_armed_at?: unknown }).yolo_armed_at;
-      if (!isPolicyProfile(profileRaw)) {
-        throw new Error('Invalid policy profile in response.');
-      }
-      setPolicyProfile(profileRaw);
-      setYoloArmed(yoloArmedRaw === true);
-      setYoloArmedAt(
-        typeof yoloArmedAtRaw === 'string' && yoloArmedAtRaw.trim() ? yoloArmedAtRaw.trim() : null,
-      );
+      const profileRaw = policy && typeof policy === 'object'
+        ? (policy as { profile?: unknown }).profile
+        : null;
       if (!wantsYolo) {
         setYoloConfirmText('');
         setYoloSecondConfirm(false);
       }
-      setStatus(`Policy profile updated: ${policyProfileLabel(profileRaw)}.`);
+      setStatus(`Policy profile updated: ${policyProfileLabel(isPolicyProfile(profileRaw) ? profileRaw : policyProfile)}.`);
       onSaved?.();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to apply policy profile.';

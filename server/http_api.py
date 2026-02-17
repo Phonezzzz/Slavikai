@@ -274,7 +274,14 @@ UI_DECISION_STATUSES: Final[set[str]] = {
     "executing",
     "resolved",
 }
-UI_DECISION_RESPONSES: Final[set[str]] = {"approve", "reject"}
+UI_DECISION_RESPONSES: Final[set[str]] = {
+    "approve",
+    "approve_once",
+    "approve_session",
+    "edit_and_approve",
+    "edit_plan",
+    "reject",
+}
 UI_DECISION_EDITABLE_FIELDS: Final[set[str]] = {"details", "args", "query", "branch", "repo_url"}
 UI_SETTINGS_USER_ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = {
     "personalization",
@@ -316,6 +323,9 @@ PLAN_AUDIT_MAX_READ_FILES: Final[int] = 15
 PLAN_AUDIT_MAX_TOTAL_BYTES: Final[int] = 300_000
 PLAN_AUDIT_MAX_SEARCH_CALLS: Final[int] = 10
 PLAN_AUDIT_TIMEOUT_SECONDS: Final[int] = 20
+PLAN_MAX_STEPS: Final[int] = 50
+PLAN_MAX_PAYLOAD_BYTES: Final[int] = 64 * 1024
+PLAN_MAX_TEXT_FIELD_CHARS: Final[int] = 4000
 _ASK_ACTION_INTENT_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(^/|\\b(сделай|измени|запусти|выполни|удали|установи|run|execute|modify|edit|delete|install)\\b)",
     re.IGNORECASE,
@@ -396,6 +406,7 @@ class AgentProtocol(Protocol):
     def respond(self, messages: list[LLMMessage]) -> str: ...
 
     def update_tools_enabled(self, state: dict[str, bool]) -> None: ...
+    def apply_runtime_tools_enabled(self, state: dict[str, bool]) -> None: ...
 
     def call_tool(
         self,
@@ -1391,9 +1402,14 @@ def _normalize_plan_payload(raw: object) -> dict[str, JSONValue] | None:
             normalized = _normalize_plan_step(item)
             if normalized is not None:
                 steps.append(normalized)
+    plan_revision_raw = raw.get("plan_revision")
+    plan_revision = (
+        plan_revision_raw if isinstance(plan_revision_raw, int) and plan_revision_raw > 0 else 1
+    )
     normalized_plan: dict[str, JSONValue] = {
         "plan_id": plan_id_raw.strip(),
         "plan_hash": "",
+        "plan_revision": plan_revision,
         "status": status,
         "goal": goal,
         "scope_in": _normalize_string_list(raw.get("scope_in")),
@@ -1479,12 +1495,87 @@ def _build_stop_text(*, happened: str, why: str, steps: list[str], code: str) ->
     return "\n".join(lines)
 
 
+def _normalize_tools_state_payload(raw: object) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, bool] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        if key not in DEFAULT_TOOLS_STATE:
+            continue
+        if isinstance(value, bool):
+            normalized[key] = value
+    return normalized
+
+
+def _build_effective_tools_state(
+    *,
+    session_override: dict[str, bool] | None,
+) -> dict[str, bool]:
+    defaults = _load_tools_state()
+    effective = dict(defaults)
+    if isinstance(session_override, dict):
+        for key, value in session_override.items():
+            if key in DEFAULT_TOOLS_STATE and isinstance(value, bool):
+                effective[key] = value
+    return effective
+
+
+async def _load_effective_session_security(
+    *,
+    hub: UIHub,
+    session_id: str,
+) -> tuple[dict[str, bool], dict[str, JSONValue]]:
+    policy = await hub.get_session_policy(session_id)
+    profile_raw = policy.get("profile")
+    profile = _normalize_policy_profile(profile_raw)
+    session_tools_override = await hub.get_session_tools_state(session_id)
+    effective_tools = _build_effective_tools_state(session_override=session_tools_override)
+    yolo_armed = policy.get("yolo_armed") is True
+    yolo_armed_at_raw = policy.get("yolo_armed_at")
+    yolo_armed_at = (
+        yolo_armed_at_raw.strip()
+        if isinstance(yolo_armed_at_raw, str) and yolo_armed_at_raw.strip()
+        else None
+    )
+    if not yolo_armed:
+        yolo_armed_at = None
+    effective_policy: dict[str, JSONValue] = {
+        "profile": profile,
+        "yolo_armed": yolo_armed,
+        "yolo_armed_at": yolo_armed_at,
+    }
+    return effective_tools, effective_policy
+
+
+def _plan_revision_value(plan: dict[str, JSONValue]) -> int:
+    raw = plan.get("plan_revision")
+    if isinstance(raw, int) and raw > 0:
+        return raw
+    return 1
+
+
+def _increment_plan_revision(plan: dict[str, JSONValue]) -> int:
+    next_value = _plan_revision_value(plan) + 1
+    plan["plan_revision"] = next_value
+    return next_value
+
+
 async def _apply_agent_runtime_state(
     *,
     agent: AgentProtocol,
     hub: UIHub,
     session_id: str,
 ) -> tuple[str, dict[str, JSONValue] | None, dict[str, JSONValue] | None]:
+    effective_tools, _ = await _load_effective_session_security(
+        hub=hub,
+        session_id=session_id,
+    )
+    runtime_tools_setter = getattr(agent, "apply_runtime_tools_enabled", None)
+    if callable(runtime_tools_setter):
+        runtime_tools_setter(effective_tools)
+
     workflow = await hub.get_session_workflow(session_id)
     mode = _normalize_mode_value(workflow.get("mode"), default="ask")
     active_plan = _normalize_plan_payload(workflow.get("active_plan"))
@@ -1624,6 +1715,7 @@ def _normalize_ui_decision(
     now = _utc_now_iso()
 
     kind_raw = raw.get("kind")
+    decision_type_raw = raw.get("decision_type")
     status_raw = raw.get("status")
     reason_raw = raw.get("reason")
     summary_raw = raw.get("summary")
@@ -1682,6 +1774,11 @@ def _normalize_ui_decision(
         return {
             "id": decision_id,
             "kind": kind,
+            "decision_type": (
+                decision_type_raw.strip()
+                if isinstance(decision_type_raw, str) and decision_type_raw.strip()
+                else None
+            ),
             "status": status,
             "blocking": blocking,
             "reason": reason,
@@ -1704,6 +1801,11 @@ def _normalize_ui_decision(
     return {
         "id": decision_id,
         "kind": "decision",
+        "decision_type": (
+            decision_type_raw.strip()
+            if isinstance(decision_type_raw, str) and decision_type_raw.strip()
+            else None
+        ),
         "status": "pending",
         "blocking": True,
         "reason": reason,
@@ -1768,6 +1870,7 @@ def _build_ui_approval_decision(
     return {
         "id": f"decision-{uuid.uuid4().hex}",
         "kind": "approval",
+        "decision_type": "tool_approval",
         "status": "pending",
         "blocking": True,
         "reason": reason,
@@ -1775,9 +1878,23 @@ def _build_ui_approval_decision(
         "proposed_action": proposed_action,
         "options": [
             {
-                "id": "approve",
-                "title": "Approve",
-                "action": "approve",
+                "id": "approve_once",
+                "title": "Approve once",
+                "action": "approve_once",
+                "payload": {},
+                "risk": "medium",
+            },
+            {
+                "id": "approve_session",
+                "title": "Approve session",
+                "action": "approve_session",
+                "payload": {},
+                "risk": "high",
+            },
+            {
+                "id": "edit_and_approve",
+                "title": "Edit and approve",
+                "action": "edit_and_approve",
                 "payload": {},
                 "risk": "medium",
             },
@@ -1789,8 +1906,78 @@ def _build_ui_approval_decision(
                 "risk": "low",
             },
         ],
-        "default_option_id": "approve",
+        "default_option_id": "approve_once",
         "context": context_payload,
+        "created_at": now,
+        "updated_at": now,
+        "resolved_at": None,
+    }
+
+
+def _build_plan_execute_decision(
+    *,
+    session_id: str,
+    plan: dict[str, JSONValue],
+    mode: str,
+    active_task: dict[str, JSONValue] | None,
+) -> dict[str, JSONValue]:
+    now = _utc_now_iso()
+    plan_id_raw = plan.get("plan_id")
+    plan_id = plan_id_raw if isinstance(plan_id_raw, str) else ""
+    revision = _plan_revision_value(plan)
+    return {
+        "id": f"decision-{uuid.uuid4().hex}",
+        "kind": "decision",
+        "decision_type": "plan_execute",
+        "status": "pending",
+        "blocking": True,
+        "reason": "switch_to_act_required",
+        "summary": "Для выполнения плана нужно подтверждение перехода в Act.",
+        "proposed_action": {
+            "plan_id": plan_id,
+            "plan_revision": revision,
+            "mode": mode,
+        },
+        "options": [
+            {
+                "id": "approve_once",
+                "title": "Switch to Act and run",
+                "action": "approve_once",
+                "payload": {},
+                "risk": "medium",
+            },
+            {
+                "id": "edit_plan",
+                "title": "Edit plan",
+                "action": "edit_plan",
+                "payload": {},
+                "risk": "low",
+            },
+            {
+                "id": "reject",
+                "title": "Reject",
+                "action": "reject",
+                "payload": {},
+                "risk": "low",
+            },
+        ],
+        "default_option_id": "approve_once",
+        "context": {
+            "session_id": session_id,
+            "decision_type": "plan_execute",
+            "source_endpoint": "plan.execute",
+            "plan_id": plan_id,
+            "plan_revision": revision,
+            "resume_payload": {
+                "plan_id": plan_id,
+                "plan_revision": revision,
+            },
+            "workflow": _decision_workflow_context(
+                mode=mode,
+                active_plan=plan,
+                active_task=active_task,
+            ),
+        },
         "created_at": now,
         "updated_at": now,
         "resolved_at": None,
@@ -1818,6 +2005,54 @@ def _decision_with_status(
         updated["resolved_at"] = _utc_now_iso()
         updated["blocking"] = False
     return updated
+
+
+def _decision_type_value(decision: dict[str, JSONValue]) -> str:
+    decision_type_raw = decision.get("decision_type")
+    if isinstance(decision_type_raw, str) and decision_type_raw.strip():
+        return decision_type_raw.strip()
+    kind_raw = decision.get("kind")
+    if kind_raw == "approval":
+        return "tool_approval"
+    return "decision"
+
+
+def _decision_categories(decision: dict[str, JSONValue]) -> set[ApprovalCategory]:
+    proposed_raw = decision.get("proposed_action")
+    proposed = proposed_raw if isinstance(proposed_raw, dict) else {}
+    categories_raw = proposed.get("required_categories")
+    if not isinstance(categories_raw, list):
+        return set()
+    normalized: set[ApprovalCategory] = set()
+    for item in categories_raw:
+        if not isinstance(item, str):
+            continue
+        category = _CATEGORY_MAP.get(item)
+        if category is not None:
+            normalized.add(category)
+    return normalized
+
+
+def _decision_mismatch_response(
+    *,
+    expected_id: str,
+    actual_decision: dict[str, JSONValue] | None,
+) -> web.Response:
+    actual_id_raw = actual_decision.get("id") if isinstance(actual_decision, dict) else None
+    actual_status_raw = actual_decision.get("status") if isinstance(actual_decision, dict) else None
+    actual_id = actual_id_raw if isinstance(actual_id_raw, str) else None
+    actual_status = actual_status_raw if isinstance(actual_status_raw, str) else "missing"
+    return _error_response(
+        status=409,
+        message="Decision id mismatch.",
+        error_type="invalid_request_error",
+        code="decision_id_mismatch",
+        details={
+            "expected_id": expected_id,
+            "actual_id": actual_id,
+            "actual_status": actual_status,
+        },
+    )
 
 
 def _normalize_json_value(value: object) -> JSONValue:
@@ -2841,6 +3076,22 @@ def _parse_imported_session(raw: object, *, principal_id: str) -> PersistedSessi
         if parsed_message is None:
             return None
         messages.append(parsed_message)
+    policy_raw = raw.get("policy")
+    policy = policy_raw if isinstance(policy_raw, dict) else {}
+    policy_profile = _normalize_policy_profile(policy.get("profile"))
+    yolo_armed = policy.get("yolo_armed") is True
+    yolo_armed_at_raw = policy.get("yolo_armed_at")
+    yolo_armed_at = (
+        yolo_armed_at_raw.strip()
+        if isinstance(yolo_armed_at_raw, str) and yolo_armed_at_raw.strip()
+        else None
+    )
+    workspace_root_raw = raw.get("workspace_root")
+    workspace_root = (
+        workspace_root_raw.strip()
+        if isinstance(workspace_root_raw, str) and workspace_root_raw.strip()
+        else None
+    )
     return PersistedSession(
         session_id=session_id,
         principal_id=principal_id,
@@ -2849,6 +3100,11 @@ def _parse_imported_session(raw: object, *, principal_id: str) -> PersistedSessi
         status="ok",
         decision=None,
         messages=messages,
+        workspace_root=workspace_root,
+        policy_profile=policy_profile,
+        yolo_armed=yolo_armed,
+        yolo_armed_at=yolo_armed_at,
+        tools_state=_normalize_tools_state_payload(raw.get("tools_state")),
     )
 
 
@@ -2874,6 +3130,13 @@ def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONVal
         "selected_model": selected_model,
         "title_override": session.title_override,
         "folder_id": session.folder_id,
+        "workspace_root": session.workspace_root,
+        "policy": {
+            "profile": _normalize_policy_profile(session.policy_profile),
+            "yolo_armed": bool(session.yolo_armed),
+            "yolo_armed_at": session.yolo_armed_at,
+        },
+        "tools_state": dict(session.tools_state) if isinstance(session.tools_state, dict) else None,
         "mode": _normalize_mode_value(session.mode, default="ask"),
         "active_plan": (
             _normalize_plan_payload(session.active_plan)
@@ -3068,12 +3331,220 @@ async def handle_ui_workspace_root_get(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
     root_path = await _workspace_root_for_session(hub, session_id)
-    policy = await hub.get_session_policy(session_id)
+    _, policy = await _load_effective_session_security(hub=hub, session_id=session_id)
     response = _json_response(
         {
             "session_id": session_id,
             "root_path": str(root_path),
             "policy": policy,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_session_security_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    workspace_root = await _workspace_root_for_session(hub, session_id)
+    effective_tools, effective_policy = await _load_effective_session_security(
+        hub=hub,
+        session_id=session_id,
+    )
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "tools_state": effective_tools,
+            "policy": effective_policy,
+            "workspace_root": str(workspace_root),
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_session_security_post(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    invalid_top_keys = sorted(
+        {str(key).strip() for key in payload if str(key).strip() not in {"tools", "policy"}}
+    )
+    if invalid_top_keys:
+        return _error_response(
+            status=400,
+            message=f"Неподдерживаемые поля: {', '.join(invalid_top_keys)}.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    if "policy" in payload:
+        policy_raw = payload.get("policy")
+        if not isinstance(policy_raw, dict):
+            return _error_response(
+                status=400,
+                message="policy должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        profile: str | None = None
+        yolo_armed: bool | None = None
+        yolo_armed_at: str | None = None
+
+        if "profile" in policy_raw:
+            profile_raw = policy_raw.get("profile")
+            if (
+                not isinstance(profile_raw, str)
+                or profile_raw.strip().lower() not in POLICY_PROFILES
+            ):
+                return _error_response(
+                    status=400,
+                    message="policy.profile должен быть sandbox|index|yolo.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            profile = profile_raw.strip().lower()
+
+        if "yolo_armed" in policy_raw:
+            yolo_armed_raw = policy_raw.get("yolo_armed")
+            if not isinstance(yolo_armed_raw, bool):
+                return _error_response(
+                    status=400,
+                    message="policy.yolo_armed должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            yolo_armed = yolo_armed_raw
+
+        if profile == "yolo" or yolo_armed is True:
+            confirm_raw = policy_raw.get("yolo_confirm")
+            confirm_text_raw = policy_raw.get("yolo_confirm_text")
+            confirm_ok = (
+                confirm_raw is True
+                and isinstance(confirm_text_raw, str)
+                and confirm_text_raw.strip().upper() == "YOLO"
+            )
+            if not confirm_ok:
+                return _error_response(
+                    status=400,
+                    message=(
+                        "Для включения YOLO требуется подтверждение "
+                        "(yolo_confirm=true, yolo_confirm_text='YOLO')."
+                    ),
+                    error_type="invalid_request_error",
+                    code="yolo_confirmation_required",
+                )
+            if yolo_armed is None:
+                yolo_armed = True
+
+        workspace_root = await _workspace_root_for_session(hub, session_id)
+        current_policy = await hub.get_session_policy(session_id)
+        current_profile = _normalize_policy_profile(current_policy.get("profile"))
+        target_profile = profile or current_profile
+        try:
+            _resolve_workspace_root_candidate(
+                str(workspace_root),
+                policy_profile=target_profile,
+            )
+        except ValueError as exc:
+            return _error_response(
+                status=409,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="policy_root_incompatible",
+                details={
+                    "session_id": session_id,
+                    "workspace_root": str(workspace_root),
+                    "policy_profile": target_profile,
+                },
+            )
+
+        if yolo_armed is True:
+            yolo_armed_at = _utc_now_iso()
+        if yolo_armed is False:
+            yolo_armed_at = None
+        await hub.set_session_policy(
+            session_id,
+            profile=profile,
+            yolo_armed=yolo_armed,
+            yolo_armed_at=yolo_armed_at,
+        )
+
+    if "tools" in payload:
+        tools_raw = payload.get("tools")
+        if not isinstance(tools_raw, dict):
+            return _error_response(
+                status=400,
+                message="tools должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        state_raw = tools_raw.get("state")
+        if not isinstance(state_raw, dict):
+            return _error_response(
+                status=400,
+                message="tools.state должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        unknown_tools = sorted(
+            {str(key).strip() for key in state_raw if str(key).strip() not in DEFAULT_TOOLS_STATE}
+        )
+        if unknown_tools:
+            return _error_response(
+                status=400,
+                message=f"Неизвестные tools ключи: {', '.join(unknown_tools)}.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        normalized_tools = _normalize_tools_state_payload(state_raw)
+        if len(normalized_tools) != len(state_raw):
+            return _error_response(
+                status=400,
+                message="tools.state должен быть bool map.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        await hub.set_session_tools_state(
+            session_id,
+            tools_state=normalized_tools,
+            merge=True,
+        )
+
+    effective_tools, effective_policy = await _load_effective_session_security(
+        hub=hub,
+        session_id=session_id,
+    )
+    workspace_root = await _workspace_root_for_session(hub, session_id)
+    response = _json_response(
+        {
+            "session_id": session_id,
+            "tools_state": effective_tools,
+            "policy": effective_policy,
+            "workspace_root": str(workspace_root),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -3168,6 +3639,14 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
         return session_error
     if session_id is None:
         return _session_forbidden_response()
+    workflow = await hub.get_session_workflow(session_id)
+    if _normalize_mode_value(workflow.get("mode"), default="ask") == "plan":
+        return _error_response(
+            status=409,
+            message="PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only действия.",
+            error_type="invalid_request_error",
+            code="PLAN_READ_ONLY_BLOCK",
+        )
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -3192,9 +3671,9 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    policy = await hub.get_session_policy(session_id)
-    profile_raw = policy.get("profile")
-    profile = profile_raw if isinstance(profile_raw, str) else DEFAULT_POLICY_PROFILE
+    _, effective_policy = await _load_effective_session_security(hub=hub, session_id=session_id)
+    profile_raw = effective_policy.get("profile")
+    profile = _normalize_policy_profile(profile_raw)
     try:
         target_root = _resolve_workspace_root_candidate(path_raw.strip(), policy_profile=profile)
     except ValueError as exc:
@@ -3288,6 +3767,14 @@ async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
         return session_error
     if session_id is None:
         return _session_forbidden_response()
+    workflow = await hub.get_session_workflow(session_id)
+    if _normalize_mode_value(workflow.get("mode"), default="ask") == "plan":
+        return _error_response(
+            status=409,
+            message="PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only действия.",
+            error_type="invalid_request_error",
+            code="PLAN_READ_ONLY_BLOCK",
+        )
     root_path = await _workspace_root_for_session(hub, session_id)
     try:
         stats = _index_workspace_root(root_path)
@@ -3576,6 +4063,7 @@ def _build_plan_draft(
     plan: dict[str, JSONValue] = {
         "plan_id": f"plan-{uuid.uuid4().hex}",
         "plan_hash": "",
+        "plan_revision": 1,
         "status": "draft",
         "goal": goal,
         "scope_in": [],
@@ -3609,6 +4097,10 @@ def _plan_with_status(
     if status == "approved":
         updated["approved_at"] = _utc_now_iso()
         updated["approved_by"] = "user"
+    elif status == "draft":
+        updated["approved_at"] = None
+        updated["approved_by"] = None
+    _increment_plan_revision(updated)
     updated["plan_hash"] = _plan_hash_payload(updated)
     return updated
 
@@ -3648,8 +4140,271 @@ def _plan_mark_step(
             next_steps.append(candidate)
     updated["steps"] = next_steps
     updated["updated_at"] = _utc_now_iso()
+    _increment_plan_revision(updated)
     updated["plan_hash"] = _plan_hash_payload(updated)
     return updated
+
+
+def _validate_text_limit(value: str, *, field: str) -> None:
+    if len(value) > PLAN_MAX_TEXT_FIELD_CHARS:
+        raise ValueError(f"{field} превышает лимит {PLAN_MAX_TEXT_FIELD_CHARS} символов.")
+
+
+def _find_forbidden_plan_key(value: JSONValue) -> str | None:
+    forbidden = {
+        "args",
+        "command",
+        "exec",
+        "tool_name",
+        "source_endpoint",
+        "resume_payload",
+        "edited_action",
+    }
+    stack: list[tuple[JSONValue, str]] = [(value, "$")]
+    while stack:
+        current, path = stack.pop()
+        if isinstance(current, dict):
+            for key, nested in current.items():
+                lowered = key.strip().lower()
+                next_path = f"{path}.{key}"
+                if lowered in forbidden:
+                    return next_path
+                stack.append((nested, next_path))
+        elif isinstance(current, list):
+            for index, nested in enumerate(current):
+                stack.append((nested, f"{path}[{index}]"))
+    return None
+
+
+def _normalize_plan_step_insert(raw: object) -> dict[str, JSONValue]:
+    if not isinstance(raw, dict):
+        raise ValueError("step должен быть объектом.")
+    allowed_fields = {
+        "step_id",
+        "title",
+        "description",
+        "intent",
+        "allowed_tool_kinds",
+        "acceptance_checks",
+        "status",
+        "evidence",
+    }
+    unexpected = sorted({str(key) for key in raw if str(key) not in allowed_fields})
+    if unexpected:
+        raise ValueError(f"step содержит неожиданные поля: {', '.join(unexpected)}.")
+    step_id_raw = raw.get("step_id")
+    title_raw = raw.get("title")
+    description_raw = raw.get("description")
+    intent_raw = raw.get("intent")
+    if not isinstance(step_id_raw, str) or not step_id_raw.strip():
+        raise ValueError("step.step_id обязателен.")
+    if not isinstance(title_raw, str) or not title_raw.strip():
+        raise ValueError("step.title обязателен.")
+    if isinstance(description_raw, str):
+        description = description_raw
+    elif isinstance(intent_raw, str):
+        description = intent_raw
+    else:
+        description = ""
+    status_raw = raw.get("status")
+    status = (
+        status_raw if isinstance(status_raw, str) and status_raw in PLAN_STEP_STATUSES else "todo"
+    )
+    _validate_text_limit(step_id_raw.strip(), field="step.step_id")
+    _validate_text_limit(title_raw.strip(), field="step.title")
+    _validate_text_limit(description, field="step.description")
+    return {
+        "step_id": step_id_raw.strip(),
+        "title": title_raw.strip(),
+        "description": description,
+        "allowed_tool_kinds": _normalize_string_list(raw.get("allowed_tool_kinds")),
+        "acceptance_checks": _normalize_string_list(raw.get("acceptance_checks")),
+        "status": status,
+        "evidence": (
+            _normalize_json_value(raw.get("evidence"))
+            if isinstance(raw.get("evidence"), dict)
+            else None
+        ),
+    }
+
+
+def _normalize_plan_step_changes(raw: object) -> dict[str, JSONValue]:
+    if not isinstance(raw, dict):
+        raise ValueError("changes должен быть объектом.")
+    allowed_fields = {
+        "title",
+        "description",
+        "intent",
+        "allowed_tool_kinds",
+        "acceptance_checks",
+        "status",
+        "evidence",
+    }
+    unexpected = sorted({str(key) for key in raw if str(key) not in allowed_fields})
+    if unexpected:
+        raise ValueError(f"changes содержит неожиданные поля: {', '.join(unexpected)}.")
+    normalized: dict[str, JSONValue] = {}
+    if "title" in raw:
+        title_raw = raw.get("title")
+        if not isinstance(title_raw, str) or not title_raw.strip():
+            raise ValueError("changes.title должен быть непустой строкой.")
+        _validate_text_limit(title_raw.strip(), field="changes.title")
+        normalized["title"] = title_raw.strip()
+    if "description" in raw or "intent" in raw:
+        source = raw.get("description") if "description" in raw else raw.get("intent")
+        if not isinstance(source, str):
+            raise ValueError("changes.description/intent должен быть строкой.")
+        _validate_text_limit(source, field="changes.description")
+        normalized["description"] = source
+    if "allowed_tool_kinds" in raw:
+        normalized["allowed_tool_kinds"] = _normalize_string_list(raw.get("allowed_tool_kinds"))
+    if "acceptance_checks" in raw:
+        normalized["acceptance_checks"] = _normalize_string_list(raw.get("acceptance_checks"))
+    if "status" in raw:
+        status_raw = raw.get("status")
+        if not isinstance(status_raw, str) or status_raw not in PLAN_STEP_STATUSES:
+            raise ValueError(
+                "changes.status должен быть todo|doing|waiting_approval|blocked|done|failed."
+            )
+        normalized["status"] = status_raw
+    if "evidence" in raw:
+        evidence_raw = raw.get("evidence")
+        if evidence_raw is None:
+            normalized["evidence"] = None
+        elif isinstance(evidence_raw, dict):
+            normalized["evidence"] = _normalize_json_value(evidence_raw)
+        else:
+            raise ValueError("changes.evidence должен быть объектом или null.")
+    return normalized
+
+
+def _validate_plan_document(plan: dict[str, JSONValue]) -> None:
+    encoded = json.dumps(plan, ensure_ascii=False)
+    if len(encoded.encode("utf-8")) > PLAN_MAX_PAYLOAD_BYTES:
+        raise ValueError(f"plan payload превышает лимит {PLAN_MAX_PAYLOAD_BYTES} bytes.")
+    allowed_top = {
+        "plan_id",
+        "plan_hash",
+        "plan_revision",
+        "status",
+        "goal",
+        "scope_in",
+        "scope_out",
+        "assumptions",
+        "inputs_needed",
+        "audit_log",
+        "steps",
+        "exit_criteria",
+        "created_at",
+        "updated_at",
+        "approved_at",
+        "approved_by",
+    }
+    unexpected_top = sorted({str(key) for key in plan if str(key) not in allowed_top})
+    if unexpected_top:
+        raise ValueError(f"plan содержит неожиданные поля: {', '.join(unexpected_top)}.")
+    forbidden_path = _find_forbidden_plan_key(plan)
+    if forbidden_path is not None:
+        raise ValueError(f"plan содержит запрещённый ключ: {forbidden_path}.")
+    goal_raw = plan.get("goal")
+    if isinstance(goal_raw, str):
+        _validate_text_limit(goal_raw, field="plan.goal")
+    steps_raw = plan.get("steps")
+    if not isinstance(steps_raw, list):
+        raise ValueError("plan.steps должен быть списком.")
+    if len(steps_raw) > PLAN_MAX_STEPS:
+        raise ValueError(f"steps превышает лимит {PLAN_MAX_STEPS}.")
+    seen_ids: set[str] = set()
+    for item in steps_raw:
+        if not isinstance(item, dict):
+            raise ValueError("steps содержит не-объект.")
+        step = _normalize_plan_step_insert(item)
+        step_id = step["step_id"]
+        if isinstance(step_id, str):
+            if step_id in seen_ids:
+                raise ValueError(f"step_id должен быть уникальным: {step_id}")
+            seen_ids.add(step_id)
+
+
+def _plan_apply_edit_operation(
+    *,
+    plan: dict[str, JSONValue],
+    operation: dict[str, JSONValue],
+) -> dict[str, JSONValue]:
+    op_raw = operation.get("op")
+    if not isinstance(op_raw, str) or not op_raw.strip():
+        raise ValueError("operation.op обязателен.")
+    op = op_raw.strip()
+    steps_raw = plan.get("steps")
+    if not isinstance(steps_raw, list):
+        raise ValueError("plan.steps должен быть списком.")
+    steps: list[dict[str, JSONValue]] = [dict(item) for item in steps_raw if isinstance(item, dict)]
+
+    if op == "insert_step":
+        step = _normalize_plan_step_insert(operation.get("step"))
+        index_raw = operation.get("index")
+        index = len(steps)
+        if isinstance(index_raw, int):
+            index = max(0, min(index_raw, len(steps)))
+        steps.insert(index, step)
+    elif op == "delete_step":
+        step_id_raw = operation.get("step_id")
+        if not isinstance(step_id_raw, str) or not step_id_raw.strip():
+            raise ValueError("operation.step_id обязателен.")
+        filtered_steps = [item for item in steps if item.get("step_id") != step_id_raw.strip()]
+        if len(filtered_steps) == len(steps):
+            raise ValueError("step_id не найден.")
+        steps = filtered_steps
+    elif op == "reorder_steps":
+        order_raw = operation.get("step_ids")
+        if not isinstance(order_raw, list) or not order_raw:
+            raise ValueError("operation.step_ids должен быть непустым списком.")
+        order = [item.strip() for item in order_raw if isinstance(item, str) and item.strip()]
+        if len(order) != len(steps):
+            raise ValueError("operation.step_ids должен содержать все шаги.")
+        by_id = {
+            item.get("step_id"): item for item in steps if isinstance(item.get("step_id"), str)
+        }
+        if len(by_id) != len(steps):
+            raise ValueError("Некорректные шаги в плане.")
+        reordered: list[dict[str, JSONValue]] = []
+        for step_id in order:
+            candidate = by_id.get(step_id)
+            if candidate is None:
+                raise ValueError("operation.step_ids содержит неизвестный step_id.")
+            reordered.append(dict(candidate))
+        steps = reordered
+    elif op == "update_step":
+        step_id_raw = operation.get("step_id")
+        if not isinstance(step_id_raw, str) or not step_id_raw.strip():
+            raise ValueError("operation.step_id обязателен.")
+        changes = _normalize_plan_step_changes(operation.get("changes"))
+        updated = False
+        next_steps: list[dict[str, JSONValue]] = []
+        for item in steps:
+            candidate = dict(item)
+            if candidate.get("step_id") == step_id_raw.strip():
+                candidate.update(changes)
+                updated = True
+            next_steps.append(candidate)
+        if not updated:
+            raise ValueError("step_id не найден.")
+        steps = next_steps
+    else:
+        raise ValueError(
+            "operation.op должен быть insert_step|delete_step|reorder_steps|update_step."
+        )
+
+    updated_plan = dict(plan)
+    updated_plan["steps"] = steps
+    updated_plan["status"] = "draft"
+    updated_plan["approved_at"] = None
+    updated_plan["approved_by"] = None
+    updated_plan["updated_at"] = _utc_now_iso()
+    _increment_plan_revision(updated_plan)
+    _validate_plan_document(updated_plan)
+    updated_plan["plan_hash"] = _plan_hash_payload(updated_plan)
+    return updated_plan
 
 
 def _find_next_todo_step(plan: dict[str, JSONValue]) -> dict[str, JSONValue] | None:
@@ -4074,7 +4829,7 @@ async def handle_ui_status(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
     workspace_root = await _workspace_root_for_session(hub, session_id)
-    policy = await hub.get_session_policy(session_id)
+    effective_tools, policy = await _load_effective_session_security(hub=hub, session_id=session_id)
     workflow = await hub.get_session_workflow(session_id)
     decision = _normalize_ui_decision(
         await hub.get_session_decision(session_id),
@@ -4089,6 +4844,7 @@ async def handle_ui_status(request: web.Request) -> web.Response:
             "selected_model": selected_model,
             "workspace_root": str(workspace_root),
             "policy": policy,
+            "tools_state": effective_tools,
             "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
             "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
             "active_task": _normalize_task_payload(workflow.get("active_task")),
@@ -4322,6 +5078,105 @@ async def handle_ui_plan_approve(request: web.Request) -> web.Response:
     return response
 
 
+async def handle_ui_plan_edit(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    workflow = await hub.get_session_workflow(session_id)
+    mode = _normalize_mode_value(workflow.get("mode"), default="ask")
+    if mode != "plan":
+        return _error_response(
+            status=409,
+            message="Plan edit доступен только в plan-режиме.",
+            error_type="invalid_request_error",
+            code="mode_not_plan",
+        )
+    current_plan = _normalize_plan_payload(workflow.get("active_plan"))
+    if current_plan is None:
+        return _error_response(
+            status=404,
+            message="План не найден.",
+            error_type="invalid_request_error",
+            code="plan_not_found",
+        )
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    revision_raw = payload.get("plan_revision")
+    if not isinstance(revision_raw, int) or revision_raw <= 0:
+        return _error_response(
+            status=400,
+            message="plan_revision обязателен и должен быть положительным int.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    current_revision = _plan_revision_value(current_plan)
+    if revision_raw != current_revision:
+        return _error_response(
+            status=409,
+            message="plan_revision mismatch.",
+            error_type="invalid_request_error",
+            code="plan_revision_mismatch",
+            details={
+                "expected_revision": current_revision,
+                "actual_revision": revision_raw,
+            },
+        )
+    operation_raw = payload.get("operation")
+    if not isinstance(operation_raw, dict):
+        return _error_response(
+            status=400,
+            message="operation обязателен и должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    operation = {str(key): _normalize_json_value(value) for key, value in operation_raw.items()}
+    try:
+        updated_plan = _plan_apply_edit_operation(plan=current_plan, operation=operation)
+    except ValueError as exc:
+        return _error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    await hub.set_session_workflow(
+        session_id,
+        mode="plan",
+        active_plan=updated_plan,
+        active_task=None,
+    )
+    await hub.set_session_decision(session_id, None)
+    updated = await hub.get_session_workflow(session_id)
+    response = _json_response(
+        {
+            "ok": True,
+            "session_id": session_id,
+            "mode": _normalize_mode_value(updated.get("mode"), default="plan"),
+            "active_plan": _normalize_plan_payload(updated.get("active_plan")),
+            "active_task": _normalize_task_payload(updated.get("active_task")),
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
 async def handle_ui_plan_execute(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
@@ -4330,7 +5185,9 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
     workflow = await hub.get_session_workflow(session_id)
+    mode = _normalize_mode_value(workflow.get("mode"), default="ask")
     plan = _normalize_plan_payload(workflow.get("active_plan"))
+    active_task = _normalize_task_payload(workflow.get("active_task"))
     if plan is None:
         return _error_response(
             status=404,
@@ -4351,19 +5208,59 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    expected_hash = payload.get("plan_hash")
-    actual_hash = plan.get("plan_hash")
+    expected_revision = payload.get("plan_revision")
+    actual_revision = _plan_revision_value(plan)
     if (
-        isinstance(expected_hash, str)
-        and expected_hash.strip()
-        and isinstance(actual_hash, str)
-        and expected_hash.strip() != actual_hash
+        isinstance(expected_revision, int)
+        and expected_revision > 0
+        and expected_revision != actual_revision
     ):
         return _error_response(
             status=409,
-            message="plan_hash mismatch.",
+            message="plan_revision mismatch.",
             error_type="invalid_request_error",
-            code="plan_hash_mismatch",
+            code="plan_revision_mismatch",
+            details={"expected_revision": expected_revision, "actual_revision": actual_revision},
+        )
+
+    if mode == "plan":
+        decision = _build_plan_execute_decision(
+            session_id=session_id,
+            plan=plan,
+            mode=mode,
+            active_task=active_task,
+        )
+        await hub.set_session_decision(session_id, decision)
+        response = _json_response(
+            {
+                "error": {
+                    "message": "Switch to Act required before execution.",
+                    "type": "invalid_request_error",
+                    "code": "switch_to_act_required",
+                    "trace_id": None,
+                    "details": {
+                        "session_id": session_id,
+                        "plan_id": plan.get("plan_id"),
+                        "plan_revision": actual_revision,
+                    },
+                },
+                "session_id": session_id,
+                "decision": _normalize_ui_decision(decision, session_id=session_id),
+                "mode": mode,
+                "active_plan": plan,
+                "active_task": active_task,
+            },
+            status=409,
+        )
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
+
+    if mode != "act":
+        return _error_response(
+            status=409,
+            message="Выполнение возможно только в act-режиме.",
+            error_type="invalid_request_error",
+            code="mode_not_act",
         )
 
     task: dict[str, JSONValue] = {
@@ -4376,6 +5273,7 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
         "updated_at": _utc_now_iso(),
     }
     running_plan = _plan_with_status(plan, status="running")
+    await hub.set_session_decision(session_id, None)
     await hub.set_session_workflow(
         session_id,
         mode="act",
@@ -5869,6 +6767,8 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
 
 async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
+    session_store: SessionApprovalStore = request.app["session_store"]
+    agent_lock: asyncio.Lock = request.app["agent_lock"]
 
     try:
         payload = await request.json()
@@ -5886,26 +6786,15 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_json",
         )
-    allowed_keys = {"session_id", "decision_id", "choice"}
-    rejected_control_keys = {
-        "edited_action",
-        "context",
-        "proposed_action",
-        "resume_payload",
-        "source_endpoint",
-    }
+    allowed_keys = {"session_id", "decision_id", "choice", "edited_action", "edited_plan"}
     forbidden_keys = sorted(
-        {
-            str(key).strip()
-            for key in payload
-            if str(key).strip() in rejected_control_keys or str(key).strip() not in allowed_keys
-        }
+        {str(key).strip() for key in payload if str(key).strip() not in allowed_keys}
     )
     if forbidden_keys:
         return _error_response(
             status=400,
             message=(
-                "Допустимы только session_id, decision_id, choice. "
+                "Допустимы session_id, decision_id, choice, edited_action, edited_plan. "
                 f"Запрещённые поля: {', '.join(forbidden_keys)}."
             ),
             error_type="invalid_request_error",
@@ -5939,7 +6828,25 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         )
     session_id = session_id_raw.strip()
     decision_id = decision_id_raw.strip()
-    choice = choice_raw
+    choice = "approve_once" if choice_raw == "approve" else choice_raw
+    edited_action_raw = payload.get("edited_action")
+    edited_plan_raw = payload.get("edited_plan")
+    if edited_action_raw is not None and not isinstance(edited_action_raw, dict):
+        return _error_response(
+            status=400,
+            message="edited_action должен быть объектом или null.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if edited_plan_raw is not None and not isinstance(edited_plan_raw, dict):
+        return _error_response(
+            status=400,
+            message="edited_plan должен быть объектом или null.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    edited_action = edited_action_raw if isinstance(edited_action_raw, dict) else None
+    edited_plan = edited_plan_raw if isinstance(edited_plan_raw, dict) else None
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -5957,11 +6864,9 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         )
     current_id = current_decision.get("id")
     if not isinstance(current_id, str) or current_id != decision_id:
-        return _error_response(
-            status=409,
-            message="Decision id mismatch.",
-            error_type="invalid_request_error",
-            code="decision_id_mismatch",
+        return _decision_mismatch_response(
+            expected_id=decision_id,
+            actual_decision=current_decision,
         )
     current_status = current_decision.get("status")
     if current_status != "pending":
@@ -5976,6 +6881,304 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "resume": None,
             }
         )
+    decision_type = _decision_type_value(current_decision)
+    if decision_type == "tool_approval":
+        context_raw = current_decision.get("context")
+        context = context_raw if isinstance(context_raw, dict) else {}
+        source_endpoint_raw = context.get("source_endpoint")
+        source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
+        if source_endpoint == "workspace.tool" and not _decision_categories(current_decision):
+            return _error_response(
+                status=404,
+                message="Pending decision not found.",
+                error_type="invalid_request_error",
+                code="decision_not_found",
+            )
+    if decision_type == "plan_execute":
+        if choice not in {"approve_once", "edit_plan", "reject"}:
+            return _error_response(
+                status=400,
+                message="Для plan_execute доступны approve_once|edit_plan|reject.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+    elif choice in {"edit_plan"}:
+        return _error_response(
+            status=400,
+            message="edit_plan доступен только для plan_execute decision.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    else:
+        if choice not in {"approve_once", "approve_session", "edit_and_approve", "reject"}:
+            return _error_response(
+                status=400,
+                message=(
+                    "Для tool decision доступны "
+                    "approve_once|approve_session|edit_and_approve|reject."
+                ),
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+
+    async def _resolve_tool_decision() -> dict[str, JSONValue]:
+        context_raw = current_decision.get("context")
+        context = context_raw if isinstance(context_raw, dict) else {}
+        source_endpoint_raw = context.get("source_endpoint")
+        source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
+        resume_payload_raw = context.get("resume_payload")
+        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+
+        required_categories = _decision_categories(current_decision)
+        if choice == "approve_session" and required_categories:
+            await session_store.approve(session_id, required_categories)
+        approved_categories = await session_store.get_categories(session_id)
+        one_call_categories = (
+            approved_categories | required_categories
+            if choice in {"approve_once", "edit_and_approve"}
+            else approved_categories
+        )
+
+        if source_endpoint == "workspace.root_select":
+            if choice == "edit_and_approve":
+                return {
+                    "ok": False,
+                    "error": "edit_and_approve поддерживается только для workspace.tool.",
+                    "source_endpoint": source_endpoint,
+                }
+            root_raw = resume_payload.get("root_path")
+            if not isinstance(root_raw, str) or not root_raw.strip():
+                return {
+                    "ok": False,
+                    "error": "resume_payload.root_path is missing.",
+                    "source_endpoint": source_endpoint,
+                }
+            _, effective_policy = await _load_effective_session_security(
+                hub=hub,
+                session_id=session_id,
+            )
+            profile = _normalize_policy_profile(effective_policy.get("profile"))
+            try:
+                target_root = _resolve_workspace_root_candidate(
+                    root_raw.strip(),
+                    policy_profile=profile,
+                )
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "source_endpoint": source_endpoint,
+                }
+            await hub.set_workspace_root(session_id, str(target_root))
+            return {
+                "ok": True,
+                "source_endpoint": source_endpoint,
+                "data": {"root_path": str(target_root)},
+            }
+
+        if source_endpoint != "workspace.tool":
+            return {
+                "ok": False,
+                "error": f"decision_resume_not_supported: {source_endpoint or 'unknown'}",
+                "source_endpoint": source_endpoint,
+            }
+
+        tool_name_raw = resume_payload.get("tool_name")
+        if not isinstance(tool_name_raw, str) or not tool_name_raw.strip():
+            return {
+                "ok": False,
+                "error": "resume_payload.tool_name is missing.",
+                "source_endpoint": source_endpoint,
+            }
+        tool_name = tool_name_raw.strip()
+        args_raw = resume_payload.get("args")
+        args = args_raw if isinstance(args_raw, dict) else {}
+        raw_input_raw = resume_payload.get("raw_input")
+        raw_input = raw_input_raw if isinstance(raw_input_raw, str) else f"decision:{tool_name}"
+
+        if choice == "edit_and_approve":
+            if edited_action is None:
+                return {
+                    "ok": False,
+                    "error": "edited_action обязателен для edit_and_approve.",
+                    "source_endpoint": source_endpoint,
+                }
+            invalid_edit_keys = sorted({str(key) for key in edited_action if str(key) != "args"})
+            if invalid_edit_keys:
+                return {
+                    "ok": False,
+                    "error": (
+                        "edit_and_approve может менять только args. "
+                        f"Запрещённые поля: {', '.join(invalid_edit_keys)}."
+                    ),
+                    "source_endpoint": source_endpoint,
+                }
+            edited_args_raw = edited_action.get("args")
+            if edited_args_raw is not None and not isinstance(edited_args_raw, dict):
+                return {
+                    "ok": False,
+                    "error": "edited_action.args должен быть объектом.",
+                    "source_endpoint": source_endpoint,
+                }
+            if isinstance(edited_args_raw, dict):
+                args = edited_args_raw
+
+        try:
+            agent = await _resolve_agent(request)
+        except ModelNotAllowedError as exc:
+            return {
+                "ok": False,
+                "error": f"model_not_allowed: {exc.model_id}",
+                "source_endpoint": source_endpoint,
+            }
+        if agent is None:
+            return {
+                "ok": False,
+                "error": "model_not_selected",
+                "source_endpoint": source_endpoint,
+            }
+        session_root = await _workspace_root_for_session(hub, session_id)
+        async with agent_lock:
+            set_runtime_workspace_root(session_root)
+            try:
+                await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                agent.set_session_context(session_id, one_call_categories)
+                try:
+                    result = agent.call_tool(
+                        tool_name,
+                        args={
+                            str(key): _normalize_json_value(value) for key, value in args.items()
+                        },
+                        raw_input=raw_input,
+                    )
+                except ApprovalRequired as exc:
+                    approval_payload = _serialize_approval_request(exc.request)
+                    return {
+                        "ok": False,
+                        "error": "approval_required",
+                        "approval_request": approval_payload,
+                        "source_endpoint": source_endpoint,
+                        "tool_name": tool_name,
+                    }
+            finally:
+                set_runtime_workspace_root(None)
+        if not result.ok:
+            return {
+                "ok": False,
+                "error": result.error or "tool failed",
+                "source_endpoint": source_endpoint,
+                "tool_name": tool_name,
+            }
+        return {
+            "ok": True,
+            "source_endpoint": source_endpoint,
+            "tool_name": tool_name,
+            "data": _normalize_json_value(result.data),
+        }
+
+    async def _resolve_plan_execute_decision() -> dict[str, JSONValue]:
+        workflow = await hub.get_session_workflow(session_id)
+        mode = _normalize_mode_value(workflow.get("mode"), default="ask")
+        plan = _normalize_plan_payload(workflow.get("active_plan"))
+        task = _normalize_task_payload(workflow.get("active_task"))
+        if plan is None:
+            return {"ok": False, "error": "plan_not_found"}
+        if choice == "edit_plan":
+            if mode != "plan":
+                return {"ok": False, "error": "mode_not_plan"}
+            if edited_plan is None:
+                return {"ok": False, "error": "edited_plan обязателен для edit_plan."}
+            revision_raw = edited_plan.get("plan_revision")
+            if not isinstance(revision_raw, int) or revision_raw <= 0:
+                return {"ok": False, "error": "edited_plan.plan_revision обязателен."}
+            current_revision = _plan_revision_value(plan)
+            if revision_raw != current_revision:
+                return {
+                    "ok": False,
+                    "error": "plan_revision_mismatch",
+                    "details": {
+                        "expected_revision": current_revision,
+                        "actual_revision": revision_raw,
+                    },
+                }
+            operation_raw = edited_plan.get("operation")
+            if not isinstance(operation_raw, dict):
+                return {"ok": False, "error": "edited_plan.operation обязателен."}
+            operation = {
+                str(key): _normalize_json_value(value) for key, value in operation_raw.items()
+            }
+            try:
+                updated_plan = _plan_apply_edit_operation(plan=plan, operation=operation)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            await hub.set_session_workflow(
+                session_id,
+                mode="plan",
+                active_plan=updated_plan,
+                active_task=None,
+            )
+            return {
+                "ok": True,
+                "action": "edit_plan",
+                "plan_id": updated_plan.get("plan_id"),
+                "plan_revision": _plan_revision_value(updated_plan),
+            }
+
+        if mode != "plan":
+            return {"ok": False, "error": "switch_to_act_required"}
+        if plan.get("status") != "approved":
+            return {"ok": False, "error": "plan_not_approved"}
+        decision_context_raw = current_decision.get("context")
+        decision_context = decision_context_raw if isinstance(decision_context_raw, dict) else {}
+        resume_payload_raw = decision_context.get("resume_payload")
+        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+        expected_revision_raw = resume_payload.get("plan_revision")
+        if isinstance(expected_revision_raw, int) and expected_revision_raw > 0:
+            current_revision = _plan_revision_value(plan)
+            if expected_revision_raw != current_revision:
+                return {
+                    "ok": False,
+                    "error": "plan_revision_mismatch",
+                    "details": {
+                        "expected_revision": expected_revision_raw,
+                        "actual_revision": current_revision,
+                    },
+                }
+        running_plan = _plan_with_status(plan, status="running")
+        task_payload: dict[str, JSONValue] = {
+            "task_id": f"task-{uuid.uuid4().hex}",
+            "plan_id": running_plan.get("plan_id"),
+            "plan_hash": running_plan.get("plan_hash"),
+            "current_step_id": None,
+            "status": "running",
+            "started_at": _utc_now_iso(),
+            "updated_at": _utc_now_iso(),
+        }
+        await hub.set_session_workflow(
+            session_id,
+            mode="act",
+            active_plan=running_plan,
+            active_task=task_payload,
+        )
+        plan_id_raw = task_payload.get("plan_id")
+        task_id_raw = task_payload.get("task_id")
+        if isinstance(plan_id_raw, str) and isinstance(task_id_raw, str):
+            asyncio.create_task(
+                _run_plan_runner(
+                    app=request.app,
+                    session_id=session_id,
+                    plan_id=plan_id_raw,
+                    task_id=task_id_raw,
+                )
+            )
+        return {
+            "ok": True,
+            "action": "approve_once",
+            "plan_id": running_plan.get("plan_id"),
+            "task_id": task_payload.get("task_id"),
+            "mode": "act",
+            "previous_task": task,
+        }
 
     if choice == "reject":
         rejected = _decision_with_status(current_decision, status="rejected", resolved=True)
@@ -5987,26 +7190,9 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         )
         normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
         if not updated:
-            if normalized_latest is not None:
-                latest_status_raw = normalized_latest.get("status")
-                latest_status = (
-                    latest_status_raw if isinstance(latest_status_raw, str) else "unknown"
-                )
-                return _json_response(
-                    {
-                        "ok": True,
-                        "decision": normalized_latest,
-                        "status": latest_status,
-                        "resume_started": False,
-                        "already_resolved": latest_status in {"resolved", "rejected"},
-                        "resume": None,
-                    }
-                )
-            return _error_response(
-                status=409,
-                message="Decision is not pending.",
-                error_type="invalid_request_error",
-                code="decision_not_pending",
+            return _decision_mismatch_response(
+                expected_id=decision_id,
+                actual_decision=normalized_latest,
             )
         normalized = (
             normalized_latest
@@ -6028,11 +7214,58 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             }
         )
 
-    return _error_response(
-        status=409,
-        message="Decision resume disabled by emergency lockdown.",
-        error_type="invalid_request_error",
-        code="decision_resume_disabled_emergency",
+    executing = _decision_with_status(current_decision, status="executing")
+    updated, latest = await hub.transition_session_decision(
+        session_id,
+        expected_id=decision_id,
+        expected_status="pending",
+        next_decision=executing,
+    )
+    normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
+    if not updated:
+        return _decision_mismatch_response(
+            expected_id=decision_id,
+            actual_decision=normalized_latest,
+        )
+
+    if decision_type == "plan_execute":
+        resume = await _resolve_plan_execute_decision()
+    else:
+        resume = await _resolve_tool_decision()
+
+    if decision_type == "tool_approval":
+        await _set_current_plan_step_status(
+            hub=hub,
+            session_id=session_id,
+            status="done" if resume.get("ok") is True else "blocked",
+        )
+
+    resolved = _decision_with_status(executing, status="resolved", resolved=True)
+    updated_resolved, latest_resolved = await hub.transition_session_decision(
+        session_id,
+        expected_id=decision_id,
+        expected_status="executing",
+        next_decision=resolved,
+    )
+    normalized_resolved = _normalize_ui_decision(latest_resolved, session_id=session_id)
+    if not updated_resolved:
+        return _decision_mismatch_response(
+            expected_id=decision_id,
+            actual_decision=normalized_resolved,
+        )
+    workflow = await hub.get_session_workflow(session_id)
+    return _json_response(
+        {
+            "ok": True,
+            "decision": normalized_resolved,
+            "status": "resolved",
+            "resume_started": True,
+            "already_resolved": True,
+            "resume": resume,
+            "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
+            "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
+            "active_task": _normalize_task_payload(workflow.get("active_task")),
+        }
     )
 
 
@@ -6168,70 +7401,6 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             if isinstance(user_message_id_raw, str) and user_message_id_raw
             else None
         )
-
-        if mode == "ask" and _request_likely_action_intent(content_raw):
-            stop_text = _build_stop_text(
-                happened="Запрос на действие заблокирован в ask-режиме.",
-                why="В ask режиме запрещены tool actions и исполнение команд.",
-                steps=[
-                    "Переключитесь в Plan для read-only аудита.",
-                    "Сформируйте и approve план.",
-                    "Перейдите в Act для выполнения плана.",
-                ],
-                code="ASK_MODE_NO_ACTIONS",
-            )
-            chat_stream_id = uuid.uuid4().hex
-            await _publish_chat_stream_from_text(
-                hub,
-                session_id=session_id,
-                stream_id=chat_stream_id,
-                content=stop_text,
-            )
-            await hub.set_session_output(session_id, stop_text)
-            assistant_message = hub.create_message(
-                role="assistant",
-                content=stop_text,
-                trace_id=None,
-                parent_user_message_id=user_message_id,
-            )
-            await hub.append_message(session_id, assistant_message)
-            messages = await hub.get_messages(session_id)
-            output_payload = await hub.get_session_output(session_id)
-            files_payload = await hub.get_session_files(session_id)
-            artifacts_payload = await hub.get_session_artifacts(session_id)
-            current_decision = await hub.get_session_decision(session_id)
-            current_model = await hub.get_session_model(session_id)
-            current_workflow = await hub.get_session_workflow(session_id)
-            response = _json_response(
-                {
-                    "session_id": session_id,
-                    "messages": messages,
-                    "output": output_payload,
-                    "files": files_payload or [],
-                    "artifacts": artifacts_payload or [],
-                    "display": {
-                        "target": "chat",
-                        "artifact_id": None,
-                        "forced": force_canvas,
-                    },
-                    "decision": _normalize_ui_decision(current_decision, session_id=session_id),
-                    "selected_model": current_model,
-                    "trace_id": None,
-                    "approval_request": None,
-                    "mwv_report": None,
-                    "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
-                    "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
-                    "active_task": _normalize_task_payload(current_workflow.get("active_task")),
-                }
-            )
-            response.headers[UI_SESSION_HEADER] = session_id
-            await _publish_agent_activity(
-                hub,
-                session_id=session_id,
-                phase="response.ready",
-                detail="chat",
-            )
-            return response
 
         if not attachments and _request_likely_web_intent(content_raw):
             guidance_text = (
@@ -6748,16 +7917,6 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
         active_plan = _normalize_plan_payload(workflow.get("active_plan"))
         active_task = _normalize_task_payload(workflow.get("active_task"))
-        if mode == "ask":
-            return _error_response(
-                status=409,
-                message=(
-                    "ASK_MODE_NO_ACTIONS: project команды отключены в ask-режиме. "
-                    "Переключитесь в plan/act."
-                ),
-                error_type="invalid_request_error",
-                code="ASK_MODE_NO_ACTIONS",
-            )
         await hub.set_session_status(session_id, "busy")
         status_opened = True
         await _publish_agent_activity(
@@ -7292,6 +8451,18 @@ async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
     initial_status_event = await hub.get_session_status_event(session_id)
     initial_status_payload = json.dumps(initial_status_event, ensure_ascii=False)
     await response.write(f"data: {initial_status_payload}\n\n".encode())
+    initial_workflow = await hub.get_session_workflow(session_id)
+    initial_workflow_event = {
+        "type": "session.workflow",
+        "payload": {
+            "session_id": session_id,
+            "mode": _normalize_mode_value(initial_workflow.get("mode"), default="ask"),
+            "active_plan": _normalize_plan_payload(initial_workflow.get("active_plan")),
+            "active_task": _normalize_task_payload(initial_workflow.get("active_task")),
+        },
+    }
+    initial_workflow_payload = json.dumps(initial_workflow_event, ensure_ascii=False)
+    await response.write(f"data: {initial_workflow_payload}\n\n".encode())
 
     try:
         while True:
@@ -7703,42 +8874,6 @@ async def handle_approve_session(request: web.Request) -> web.Response:
     )
 
 
-def _reset_workspace_session_defaults_on_boot(storage: UISessionStorage) -> int:
-    sessions = storage.load_sessions()
-    updated = 0
-    for session in sessions:
-        if session.workspace_root is None:
-            continue
-        storage.save_session(
-            PersistedSession(
-                session_id=session.session_id,
-                principal_id=session.principal_id,
-                created_at=session.created_at,
-                updated_at=session.updated_at,
-                status=session.status,
-                decision=session.decision,
-                messages=list(session.messages),
-                model_provider=session.model_provider,
-                model_id=session.model_id,
-                title_override=session.title_override,
-                folder_id=session.folder_id,
-                output_text=session.output_text,
-                output_updated_at=session.output_updated_at,
-                files=list(session.files),
-                artifacts=list(session.artifacts),
-                workspace_root=None,
-                policy_profile=session.policy_profile,
-                yolo_armed=session.yolo_armed,
-                yolo_armed_at=session.yolo_armed_at,
-                mode=session.mode,
-                active_plan=session.active_plan,
-                active_task=session.active_task,
-            )
-        )
-        updated += 1
-    return updated
-
-
 def create_app(
     *,
     agent: AgentProtocol | None = None,
@@ -7772,9 +8907,6 @@ def create_app(
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         Path(__file__).resolve().parent.parent / ".run" / "ui_sessions.db",
     )
-    reset_count = _reset_workspace_session_defaults_on_boot(resolved_ui_storage)
-    if reset_count > 0:
-        logger.info("Workspace defaults reset on startup", extra={"sessions_reset": reset_count})
     app["ui_hub"] = UIHub(storage=resolved_ui_storage)
     dist_path = Path(__file__).resolve().parent.parent / "ui" / "dist"
     app["ui_dist_path"] = dist_path
@@ -7795,6 +8927,7 @@ def create_app(
     app.router.add_post("/ui/api/mode", handle_ui_mode)
     app.router.add_post("/ui/api/plan/draft", handle_ui_plan_draft)
     app.router.add_post("/ui/api/plan/approve", handle_ui_plan_approve)
+    app.router.add_post("/ui/api/plan/edit", handle_ui_plan_edit)
     app.router.add_post("/ui/api/plan/execute", handle_ui_plan_execute)
     app.router.add_post("/ui/api/plan/cancel", handle_ui_plan_cancel)
     app.router.add_get("/ui/api/settings", handle_ui_settings)
@@ -7830,6 +8963,8 @@ def create_app(
     app.router.add_patch("/ui/api/sessions/{session_id}/title", handle_ui_session_title_update)
     app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)
     app.router.add_post("/ui/api/session-model", handle_ui_session_model)
+    app.router.add_get("/ui/api/session/security", handle_ui_session_security_get)
+    app.router.add_post("/ui/api/session/security", handle_ui_session_security_post)
     app.router.add_post("/ui/api/session/policy", handle_ui_session_policy)
     app.router.add_get("/ui/api/workspace/root", handle_ui_workspace_root_get)
     app.router.add_get("/ui/api/workspace/settings", handle_ui_workspace_root_get)

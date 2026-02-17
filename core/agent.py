@@ -364,15 +364,25 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
     def get_available_tool_keys(self) -> list[str]:
         return [key for key in self.tools_enabled.keys() if key != "safe_mode"]
 
-    def update_tools_enabled(self, state: dict[str, bool]) -> None:
+    def update_tools_enabled(self, state: dict[str, bool], *, persist: bool = True) -> None:
         self.tools_enabled.update(state)
-        save_tools_config(ToolsConfig(**self.tools_enabled))
-        self.tracer.log("tools_updated", "Инструменты обновлены", {"tools": self.tools_enabled})
+        if persist:
+            save_tools_config(ToolsConfig(**self.tools_enabled))
+            self.tracer.log("tools_updated", "Инструменты обновлены", {"tools": self.tools_enabled})
+        else:
+            self.tracer.log(
+                "tools_runtime_updated",
+                "Runtime-инструменты обновлены",
+                {"tools": self.tools_enabled},
+            )
         for name, enabled in state.items():
             if name in self.tool_registry.list_tools():
                 self.tool_registry.set_enabled(name, enabled)
         if state.get("safe_mode") is not None:
             self._apply_safe_mode(state["safe_mode"])
+
+    def apply_runtime_tools_enabled(self, state: dict[str, bool]) -> None:
+        self.update_tools_enabled(state, persist=False)
 
     def get_embeddings_model(self) -> str:
         return self.vectors.model_name

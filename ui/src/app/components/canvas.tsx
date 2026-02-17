@@ -155,8 +155,8 @@ interface CanvasProps {
   decisionBusy?: boolean;
   decisionError?: string | null;
   onDecisionRespond?: (
-    choice: "approve" | "reject" | "edit",
-    editedAction?: Record<string, unknown> | null,
+    choice: 'approve_once' | 'approve_session' | 'edit_and_approve' | 'edit_plan' | 'reject',
+    editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
 }
 

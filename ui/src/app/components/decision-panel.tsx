@@ -3,7 +3,12 @@ import { Check, ChevronDown, Pencil, X } from 'lucide-react';
 
 import type { UiDecision } from '../types';
 
-type DecisionRespondChoice = 'approve' | 'reject' | 'edit';
+type DecisionRespondChoice =
+  | 'approve_once'
+  | 'approve_session'
+  | 'edit_and_approve'
+  | 'edit_plan'
+  | 'reject';
 
 type DecisionPanelProps = {
   decision: UiDecision;
@@ -11,42 +16,37 @@ type DecisionPanelProps = {
   error: string | null;
   onRespond: (
     choice: DecisionRespondChoice,
-    editedAction?: Record<string, unknown> | null,
+    editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
 };
 
 export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPanelProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [editMode, setEditMode] = useState(false);
+  const [editAction, setEditAction] = useState<'edit_and_approve' | 'edit_plan'>('edit_and_approve');
   const [editValue, setEditValue] = useState<string>(() =>
     JSON.stringify(decision.proposed_action ?? {}, null, 2),
   );
   const [editError, setEditError] = useState<string | null>(null);
 
   const supportsEdit = useMemo(() => {
-    return decision.options.some((option) => option.id === 'edit' || option.action === 'edit');
+    return decision.options.some(
+      (option) => option.action === 'edit_and_approve' || option.action === 'edit_plan',
+    );
   }, [decision.options]);
-
-  const handleApprove = () => {
-    void onRespond('approve', null);
-  };
-
-  const handleReject = () => {
-    void onRespond('reject', null);
-  };
 
   const handleApplyEdit = () => {
     try {
       const parsed = JSON.parse(editValue) as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        setEditError('edited_action должен быть JSON-объектом.');
+        setEditError('Редактирование требует JSON-объект.');
         return;
       }
       setEditError(null);
-      void onRespond('edit', parsed as Record<string, unknown>);
+      void onRespond(editAction, parsed as Record<string, unknown>);
       setEditMode(false);
     } catch {
-      setEditError('Некорректный JSON в edited_action.');
+      setEditError('Некорректный JSON.');
     }
   };
 
@@ -95,41 +95,47 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
         {error ? <p className="mt-3 text-xs text-rose-300">{error}</p> : null}
 
         <div className="mt-3 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleApprove}
-            disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-            title="Approve"
-            aria-label="Approve"
-          >
-            <Check className="h-3.5 w-3.5" />
-            <span>Approve</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleReject}
-            disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#3a3a44] px-3 py-1.5 text-xs font-medium text-[#d4d4db] hover:bg-[#1b1b22] disabled:cursor-not-allowed disabled:opacity-50"
-            title="Reject"
-            aria-label="Reject"
-          >
-            <X className="h-3.5 w-3.5" />
-            <span>Reject</span>
-          </button>
-          {supportsEdit ? (
-            <button
-              type="button"
-              onClick={editMode ? handleApplyEdit : () => setEditMode(true)}
-              disabled={busy}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[#3a3a44] px-3 py-1.5 text-xs font-medium text-[#d4d4db] hover:bg-[#1b1b22] disabled:cursor-not-allowed disabled:opacity-50"
-              title="Edit"
-              aria-label="Edit"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-              <span>{editMode ? 'Apply edit' : 'Edit'}</span>
-            </button>
-          ) : null}
+          {decision.options.map((option) => {
+            const action = option.action;
+            const isEditAction = action === 'edit_and_approve' || action === 'edit_plan';
+            const baseClass =
+              action === 'approve_once' || action === 'approve_session'
+                ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                : 'border border-[#3a3a44] text-[#d4d4db] hover:bg-[#1b1b22]';
+            const icon = action === 'reject'
+              ? <X className="h-3.5 w-3.5" />
+              : isEditAction
+                ? <Pencil className="h-3.5 w-3.5" />
+                : <Check className="h-3.5 w-3.5" />;
+            const onClick = () => {
+              if (isEditAction) {
+                setEditAction(action);
+                if (editMode && editAction === action) {
+                  handleApplyEdit();
+                  return;
+                }
+                setEditMode(true);
+                return;
+              }
+              void onRespond(action as DecisionRespondChoice, null);
+            };
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={onClick}
+                disabled={busy}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50 ${baseClass}`}
+                title={option.title}
+                aria-label={option.title}
+              >
+                {icon}
+                <span>
+                  {isEditAction && editMode && editAction === action ? 'Apply edit' : option.title}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>

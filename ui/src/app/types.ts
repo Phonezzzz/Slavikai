@@ -29,6 +29,7 @@ export type UiDecisionOption = {
 export type UiDecision = {
   id: string;
   kind: 'approval' | 'decision';
+  decision_type: 'tool_approval' | 'plan_execute' | null;
   status: UiDecisionStatus;
   blocking: boolean;
   reason: string;
@@ -44,7 +45,7 @@ export type UiDecision = {
 
 export type SessionMode = 'ask' | 'plan' | 'act';
 
-export type PlanStepStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
+export type PlanStepStatus = 'todo' | 'doing' | 'waiting_approval' | 'blocked' | 'done' | 'failed';
 
 export type PlanStatus = 'draft' | 'approved' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -63,6 +64,7 @@ export type PlanStep = {
 export type PlanEnvelope = {
   plan_id: string;
   plan_hash: string;
+  plan_revision: number;
   status: PlanStatus;
   goal: string;
   scope_in: string[];

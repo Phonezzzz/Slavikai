@@ -183,6 +183,7 @@ class _SessionState:
     policy_profile: PolicyProfile = "sandbox"
     yolo_armed: bool = False
     yolo_armed_at: str | None = None
+    tools_state: dict[str, bool] | None = None
     mode: SessionMode = "ask"
     active_plan: dict[str, JSONValue] | None = None
     active_task: dict[str, JSONValue] | None = None
@@ -519,6 +520,9 @@ class UIHub:
                         policy_profile=state.policy_profile,
                         yolo_armed=state.yolo_armed,
                         yolo_armed_at=state.yolo_armed_at,
+                        tools_state=(
+                            dict(state.tools_state) if isinstance(state.tools_state, dict) else None
+                        ),
                         mode=state.mode,
                         active_plan=(
                             dict(state.active_plan) if state.active_plan is not None else None
@@ -584,6 +588,9 @@ class UIHub:
                     policy_profile=self._normalize_policy_profile(item.policy_profile),
                     yolo_armed=bool(item.yolo_armed),
                     yolo_armed_at=item.yolo_armed_at,
+                    tools_state=(
+                        dict(item.tools_state) if isinstance(item.tools_state, dict) else None
+                    ),
                     mode=self._normalize_mode(item.mode),
                     active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
                     active_task=(dict(item.active_task) if item.active_task is not None else None),
@@ -625,6 +632,9 @@ class UIHub:
                     "yolo_armed": state.yolo_armed,
                     "yolo_armed_at": state.yolo_armed_at,
                 },
+                "tools_state": (
+                    dict(state.tools_state) if isinstance(state.tools_state, dict) else None
+                ),
                 "mode": state.mode,
                 "active_plan": dict(state.active_plan) if state.active_plan is not None else None,
                 "active_task": dict(state.active_task) if state.active_task is not None else None,
@@ -720,6 +730,44 @@ class UIHub:
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
             return True
+
+    async def get_session_tools_state(self, session_id: str) -> dict[str, bool] | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or not isinstance(state.tools_state, dict):
+                return None
+            return dict(state.tools_state)
+
+    async def set_session_tools_state(
+        self,
+        session_id: str,
+        *,
+        tools_state: dict[str, bool] | None,
+        merge: bool = True,
+    ) -> dict[str, bool] | None:
+        normalized = self._normalize_tools_state(tools_state)
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+            current = dict(state.tools_state) if isinstance(state.tools_state, dict) else {}
+            next_value: dict[str, bool] | None
+            if normalized is None:
+                next_value = None if not merge else (current or None)
+            elif merge:
+                merged = dict(current)
+                merged.update(normalized)
+                next_value = merged or None
+            else:
+                next_value = dict(normalized)
+            if state.tools_state == next_value:
+                return dict(next_value) if isinstance(next_value, dict) else None
+            state.tools_state = dict(next_value) if isinstance(next_value, dict) else None
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            return dict(state.tools_state) if isinstance(state.tools_state, dict) else None
 
     async def set_session_model(self, session_id: str, provider: str, model_id: str) -> None:
         async with self._lock:
@@ -1057,6 +1105,18 @@ class UIHub:
             normalized[str(key)] = item
         return normalized
 
+    def _normalize_tools_state(
+        self,
+        value: dict[str, bool] | None,
+    ) -> dict[str, bool] | None:
+        if not isinstance(value, dict):
+            return None
+        normalized: dict[str, bool] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and isinstance(item, bool):
+                normalized[key] = item
+        return normalized or None
+
     def _publish_to_subscribers(
         self,
         subscribers: list[asyncio.Queue[dict[str, JSONValue]]],
@@ -1094,6 +1154,9 @@ class UIHub:
                 policy_profile=self._normalize_policy_profile(item.policy_profile),
                 yolo_armed=bool(item.yolo_armed),
                 yolo_armed_at=item.yolo_armed_at,
+                tools_state=(
+                    dict(item.tools_state) if isinstance(item.tools_state, dict) else None
+                ),
                 mode=self._normalize_mode(item.mode),
                 active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
                 active_task=(dict(item.active_task) if item.active_task is not None else None),
@@ -1136,6 +1199,9 @@ class UIHub:
                 policy_profile=state.policy_profile,
                 yolo_armed=state.yolo_armed,
                 yolo_armed_at=state.yolo_armed_at,
+                tools_state=(
+                    dict(state.tools_state) if isinstance(state.tools_state, dict) else None
+                ),
                 mode=state.mode,
                 active_plan=(dict(state.active_plan) if state.active_plan is not None else None),
                 active_task=(dict(state.active_task) if state.active_task is not None else None),

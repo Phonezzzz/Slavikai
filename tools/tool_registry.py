@@ -196,8 +196,6 @@ class ToolRegistry:
         tool_name: str,
         capability: ToolCapability,
     ) -> str | None:
-        if self._mode == "ask":
-            return "ASK_MODE_NO_ACTIONS: действия отключены в ask-режиме. Переключитесь в plan/act."
         if self._mode == "plan" and capability != "read":
             return "PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only инструменты."
         if self._mode != "act" or not self._enforce_plan_guard:

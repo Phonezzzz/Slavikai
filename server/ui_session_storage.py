@@ -32,6 +32,7 @@ class PersistedSession:
     policy_profile: str | None = None
     yolo_armed: bool = False
     yolo_armed_at: str | None = None
+    tools_state: dict[str, bool] | None = None
     mode: str = "ask"
     active_plan: dict[str, JSONValue] | None = None
     active_task: dict[str, JSONValue] | None = None
@@ -107,6 +108,9 @@ class InMemoryUISessionStorage:
             policy_profile=session.policy_profile,
             yolo_armed=session.yolo_armed,
             yolo_armed_at=session.yolo_armed_at,
+            tools_state=(
+                dict(session.tools_state) if isinstance(session.tools_state, dict) else None
+            ),
             mode=session.mode,
             active_plan=(dict(session.active_plan) if session.active_plan is not None else None),
             active_task=(dict(session.active_task) if session.active_task is not None else None),
@@ -136,6 +140,7 @@ class SQLiteUISessionStorage:
                     , model_provider, model_id, title_override, folder_id
                     , output_text, output_updated_at, files_json, artifacts_json
                     , workspace_root, policy_profile, yolo_armed, yolo_armed_at
+                    , tools_state_json
                     , mode, active_plan_json, active_task_json
                 FROM ui_sessions
                 """,
@@ -164,6 +169,7 @@ class SQLiteUISessionStorage:
                         policy_profile=_optional_str(row["policy_profile"]),
                         yolo_armed=bool(int(row["yolo_armed"] or 0)),
                         yolo_armed_at=_optional_str(row["yolo_armed_at"]),
+                        tools_state=self._decode_tools_state(row["tools_state_json"]),
                         mode=self._decode_mode(row["mode"]),
                         active_plan=self._decode_json_object(row["active_plan_json"]),
                         active_task=self._decode_json_object(row["active_task_json"]),
@@ -194,11 +200,12 @@ class SQLiteUISessionStorage:
                     policy_profile,
                     yolo_armed,
                     yolo_armed_at,
+                    tools_state_json,
                     mode,
                     active_plan_json,
                     active_task_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     principal_id=excluded.principal_id,
@@ -218,6 +225,7 @@ class SQLiteUISessionStorage:
                     policy_profile=excluded.policy_profile,
                     yolo_armed=excluded.yolo_armed,
                     yolo_armed_at=excluded.yolo_armed_at,
+                    tools_state_json=excluded.tools_state_json,
                     mode=excluded.mode,
                     active_plan_json=excluded.active_plan_json,
                     active_task_json=excluded.active_task_json
@@ -241,6 +249,7 @@ class SQLiteUISessionStorage:
                     session.policy_profile,
                     1 if session.yolo_armed else 0,
                     session.yolo_armed_at,
+                    self._encode_tools_state(session.tools_state),
                     self._normalize_mode(session.mode),
                     self._encode_json_object(session.active_plan),
                     self._encode_json_object(session.active_task),
@@ -379,6 +388,7 @@ class SQLiteUISessionStorage:
                     policy_profile TEXT,
                     yolo_armed INTEGER NOT NULL DEFAULT 0,
                     yolo_armed_at TEXT,
+                    tools_state_json TEXT,
                     mode TEXT NOT NULL DEFAULT 'ask',
                     active_plan_json TEXT,
                     active_task_json TEXT
@@ -506,6 +516,24 @@ class SQLiteUISessionStorage:
     def _encode_artifacts(self, value: list[dict[str, JSONValue]]) -> str:
         return json.dumps(value, ensure_ascii=False)
 
+    def _decode_tools_state(self, value: object) -> dict[str, bool] | None:
+        if not isinstance(value, str):
+            return None
+        parsed = safe_json_loads(value)
+        if not isinstance(parsed, dict):
+            return None
+        decoded: dict[str, bool] = {}
+        for key, item in parsed.items():
+            if isinstance(key, str) and isinstance(item, bool):
+                decoded[key] = item
+        return decoded or None
+
+    def _encode_tools_state(self, value: dict[str, bool] | None) -> str | None:
+        if not isinstance(value, dict):
+            return None
+        normalized = {str(key): bool(item) for key, item in value.items() if isinstance(item, bool)}
+        return json.dumps(normalized, ensure_ascii=False)
+
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         existing = {
             str(row["name"])
@@ -538,6 +566,8 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN yolo_armed INTEGER NOT NULL DEFAULT 0")
         if "yolo_armed_at" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN yolo_armed_at TEXT")
+        if "tools_state_json" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN tools_state_json TEXT")
         if "mode" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'ask'")
         if "active_plan_json" not in existing:
