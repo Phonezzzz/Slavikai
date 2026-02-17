@@ -3080,6 +3080,86 @@ async def handle_ui_workspace_root_get(request: web.Request) -> web.Response:
     return response
 
 
+async def handle_ui_session_policy(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return _error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    policy_profile_raw = payload.get("policy_profile")
+    if not isinstance(policy_profile_raw, str) or not policy_profile_raw.strip():
+        return _error_response(
+            status=400,
+            message="policy_profile обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    policy_profile = policy_profile_raw.strip().lower()
+    if policy_profile not in POLICY_PROFILES:
+        return _error_response(
+            status=400,
+            message="policy_profile должен быть sandbox|index|yolo.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if policy_profile == "yolo" and payload.get("confirm_yolo") is not True:
+        return _error_response(
+            status=409,
+            message="Для policy_profile=yolo требуется confirm_yolo=true.",
+            error_type="invalid_request_error",
+            code="YOLO_CONFIRM_REQUIRED",
+        )
+    workspace_root = await _workspace_root_for_session(hub, session_id)
+    try:
+        _resolve_workspace_root_candidate(str(workspace_root), policy_profile=policy_profile)
+    except ValueError as exc:
+        return _error_response(
+            status=409,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="policy_root_incompatible",
+            details={
+                "session_id": session_id,
+                "workspace_root": str(workspace_root),
+                "policy_profile": policy_profile,
+            },
+        )
+    yolo_armed = policy_profile == "yolo"
+    updated = await hub.set_session_policy(
+        session_id,
+        profile=policy_profile,
+        yolo_armed=yolo_armed,
+        yolo_armed_at=(_utc_now_iso() if yolo_armed else None),
+    )
+    response = _json_response(
+        {
+            "ok": True,
+            "session_id": session_id,
+            "policy": updated,
+            "workspace_root": str(workspace_root),
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
 async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_store: SessionApprovalStore = request.app["session_store"]
@@ -7627,7 +7707,7 @@ def _reset_workspace_session_defaults_on_boot(storage: UISessionStorage) -> int:
     sessions = storage.load_sessions()
     updated = 0
     for session in sessions:
-        if session.workspace_root is None and session.policy_profile == DEFAULT_POLICY_PROFILE:
+        if session.workspace_root is None:
             continue
         storage.save_session(
             PersistedSession(
@@ -7647,7 +7727,7 @@ def _reset_workspace_session_defaults_on_boot(storage: UISessionStorage) -> int:
                 files=list(session.files),
                 artifacts=list(session.artifacts),
                 workspace_root=None,
-                policy_profile=DEFAULT_POLICY_PROFILE,
+                policy_profile=session.policy_profile,
                 yolo_armed=session.yolo_armed,
                 yolo_armed_at=session.yolo_armed_at,
                 mode=session.mode,
@@ -7750,6 +7830,7 @@ def create_app(
     app.router.add_patch("/ui/api/sessions/{session_id}/title", handle_ui_session_title_update)
     app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)
     app.router.add_post("/ui/api/session-model", handle_ui_session_model)
+    app.router.add_post("/ui/api/session/policy", handle_ui_session_policy)
     app.router.add_get("/ui/api/workspace/root", handle_ui_workspace_root_get)
     app.router.add_get("/ui/api/workspace/settings", handle_ui_workspace_root_get)
     app.router.add_post("/ui/api/workspace/root/select", handle_ui_workspace_root_select)

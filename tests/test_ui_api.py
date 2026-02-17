@@ -553,6 +553,27 @@ async def _create_client(agent: DummyAgent) -> TestClient:
     return client
 
 
+async def _set_session_policy_via_api(
+    client: TestClient,
+    *,
+    session_id: str,
+    policy_profile: str,
+    confirm_yolo: bool | None = None,
+) -> tuple[int, dict[str, JSONValue]]:
+    payload: dict[str, JSONValue] = {
+        "policy_profile": policy_profile,
+    }
+    if confirm_yolo is not None:
+        payload["confirm_yolo"] = confirm_yolo
+    response = await client.post(
+        "/ui/api/session/policy",
+        headers={"X-Slavik-Session": session_id},
+        json=payload,
+    )
+    body = await response.json()
+    return response.status, body if isinstance(body, dict) else {}
+
+
 def test_ui_api_requires_bearer_by_default() -> None:
     async def run() -> None:
         app = create_app(
@@ -607,8 +628,15 @@ def test_ui_workspace_root_select_rejects_outside_workspace_in_sandbox() -> None
             session_id = session_raw.get("session_id")
             assert isinstance(session_id, str)
 
-            hub: UIHub = client.server.app["ui_hub"]
-            await hub.set_session_policy(session_id, profile="sandbox")
+            status, policy_payload = await _set_session_policy_via_api(
+                client,
+                session_id=session_id,
+                policy_profile="sandbox",
+            )
+            assert status == 200
+            policy = policy_payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("profile") == "sandbox"
 
             response = await client.post(
                 "/ui/api/workspace/root/select",
@@ -640,21 +668,32 @@ def test_ui_workspace_root_select_applies_without_approval_in_index(tmp_path) ->
             session_id = session_raw.get("session_id")
             assert isinstance(session_id, str)
 
-            hub: UIHub = client.server.app["ui_hub"]
-            await hub.set_session_policy(session_id, profile="index")
-
             outside_home = tmp_path / "outside-index-root"
             outside_home.mkdir(parents=True, exist_ok=True)
+            next_outside_home = tmp_path / "outside-index-next"
+            next_outside_home.mkdir(parents=True, exist_ok=True)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(outside_home))
+
+            status, policy_payload = await _set_session_policy_via_api(
+                client,
+                session_id=session_id,
+                policy_profile="index",
+            )
+            assert status == 200
+            policy = policy_payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("profile") == "index"
 
             response = await client.post(
                 "/ui/api/workspace/root/select",
                 headers={"X-Slavik-Session": session_id},
-                json={"root_path": str(outside_home)},
+                json={"root_path": str(next_outside_home)},
             )
             assert response.status == 200
             payload = await response.json()
             assert payload.get("applied") is True
-            assert payload.get("root_path") == str(outside_home)
+            assert payload.get("root_path") == str(next_outside_home)
             assert payload.get("decision") is None
         finally:
             await client.close()
@@ -674,8 +713,16 @@ def test_ui_workspace_root_select_requires_approval_in_yolo() -> None:
             session_id = session_raw.get("session_id")
             assert isinstance(session_id, str)
 
-            hub: UIHub = client.server.app["ui_hub"]
-            await hub.set_session_policy(session_id, profile="yolo")
+            status, policy_payload = await _set_session_policy_via_api(
+                client,
+                session_id=session_id,
+                policy_profile="yolo",
+                confirm_yolo=True,
+            )
+            assert status == 200
+            policy = policy_payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("profile") == "yolo"
 
             response = await client.post(
                 "/ui/api/workspace/root/select",
@@ -690,6 +737,129 @@ def test_ui_workspace_root_select_requires_approval_in_yolo() -> None:
             assert isinstance(proposed_action, dict)
             required_categories = proposed_action.get("required_categories")
             assert required_categories == ["FS_OUTSIDE_WORKSPACE"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_policy_rejects_unknown_profile() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+            status, payload = await _set_session_policy_via_api(
+                client,
+                session_id=session_id,
+                policy_profile="invalid",
+            )
+            assert status == 400
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_policy_set_updates_session_state() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            status, payload = await _set_session_policy_via_api(
+                client,
+                session_id=session_id,
+                policy_profile="yolo",
+                confirm_yolo=True,
+            )
+            assert status == 200
+            policy = payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("profile") == "yolo"
+
+            hub: UIHub = client.server.app["ui_hub"]
+            stored_policy = await hub.get_session_policy(session_id)
+            assert stored_policy.get("profile") == "yolo"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_policy_requires_confirm_for_yolo() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+            status, payload = await _set_session_policy_via_api(
+                client,
+                session_id=session_id,
+                policy_profile="yolo",
+            )
+            assert status == 409
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "YOLO_CONFIRM_REQUIRED"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_policy_conflict_when_root_incompatible(tmp_path, monkeypatch) -> None:
+    async def run() -> None:
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir(parents=True, exist_ok=True)
+        inside_home = fake_home / "project"
+        inside_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("server.http_api.Path.home", lambda: fake_home)
+
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(inside_home))
+
+            status, payload = await _set_session_policy_via_api(
+                client,
+                session_id=session_id,
+                policy_profile="index",
+            )
+            assert status == 409
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "policy_root_incompatible"
+
+            policy = await hub.get_session_policy(session_id)
+            assert policy.get("profile") == "sandbox"
         finally:
             await client.close()
 
@@ -868,7 +1038,7 @@ def test_ui_settings_unauthorized_logs_snapshot(monkeypatch) -> None:
     assert any("settings_snapshot" in item or "settings_snapshot_error" in item for item in records)
 
 
-def test_create_app_resets_workspace_defaults_on_boot(tmp_path) -> None:
+def test_create_app_resets_workspace_root_but_keeps_policy_on_boot(tmp_path) -> None:
     db_path = tmp_path / "ui_sessions.db"
     storage = SQLiteUISessionStorage(db_path)
     storage.save_session(
@@ -896,7 +1066,7 @@ def test_create_app_resets_workspace_defaults_on_boot(tmp_path) -> None:
     assert len(sessions) == 1
     restored = sessions[0]
     assert restored.workspace_root is None
-    assert restored.policy_profile == "sandbox"
+    assert restored.policy_profile == "yolo"
 
 
 async def _read_first_sse_event(response) -> dict[str, object]:
@@ -2709,6 +2879,64 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             assert isinstance(selected_from_status, dict)
             assert selected_from_status.get("provider") == "local"
             assert selected_from_status.get("model") == selected_model
+        finally:
+            await client_after.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_policy_persist_after_restart(tmp_path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "ui_sessions.db"
+
+        storage_before = SQLiteUISessionStorage(db_path)
+        app_before = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=storage_before,
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server_before = TestServer(app_before)
+        client_before = TestClient(server_before, headers=TEST_AUTH_HEADERS)
+        await client_before.start_server()
+        session_id: str | None = None
+        try:
+            create_resp = await client_before.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id_raw = session_raw.get("session_id")
+            assert isinstance(session_id_raw, str)
+            session_id = session_id_raw
+            status, payload = await _set_session_policy_via_api(
+                client_before,
+                session_id=session_id,
+                policy_profile="yolo",
+                confirm_yolo=True,
+            )
+            assert status == 200
+            policy = payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("profile") == "yolo"
+        finally:
+            await client_before.close()
+
+        assert isinstance(session_id, str)
+        storage_after = SQLiteUISessionStorage(db_path)
+        app_after = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=storage_after,
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server_after = TestServer(app_after)
+        client_after = TestClient(server_after, headers=TEST_AUTH_HEADERS)
+        await client_after.start_server()
+        try:
+            hub: UIHub = client_after.server.app["ui_hub"]
+            restored_policy = await hub.get_session_policy(session_id)
+            assert restored_policy.get("profile") == "yolo"
         finally:
             await client_after.close()
 
