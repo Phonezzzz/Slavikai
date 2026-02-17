@@ -7,6 +7,7 @@ def register_routes(app: web.Application) -> None:
     from server import http_api as api
     from server.http.handlers import (
         chat,
+        decision,
         events,
         memory,
         models,
@@ -68,7 +69,7 @@ def register_routes(app: web.Application) -> None:
         "/ui/api/sessions/{session_id}/files",
         sessions.handle_ui_session_files_get,
     )
-    app.router.add_post("/ui/api/decision/respond", api.handle_ui_decision_respond)
+    app.router.add_post("/ui/api/decision/respond", decision.handle_ui_decision_respond)
     app.router.add_get(
         "/ui/api/sessions/{session_id}/files/download",
         sessions.handle_ui_session_file_download,
