@@ -5,7 +5,7 @@ from aiohttp import web
 
 def register_routes(app: web.Application) -> None:
     from server import http_api as api
-    from server.http.handlers import sessions, workflow, workspace
+    from server.http.handlers import plan, sessions, workflow, workspace
 
     app.router.add_get("/v1/models", api.handle_models)
     app.router.add_post("/v1/chat/completions", api.handle_chat_completions)
@@ -25,11 +25,11 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/ui/api/status", workflow.handle_ui_status)
     app.router.add_get("/ui/api/state", workflow.handle_ui_state)
     app.router.add_post("/ui/api/mode", workflow.handle_ui_mode)
-    app.router.add_post("/ui/api/plan/draft", api.handle_ui_plan_draft)
-    app.router.add_post("/ui/api/plan/approve", api.handle_ui_plan_approve)
-    app.router.add_post("/ui/api/plan/edit", api.handle_ui_plan_edit)
-    app.router.add_post("/ui/api/plan/execute", api.handle_ui_plan_execute)
-    app.router.add_post("/ui/api/plan/cancel", api.handle_ui_plan_cancel)
+    app.router.add_post("/ui/api/plan/draft", plan.handle_ui_plan_draft)
+    app.router.add_post("/ui/api/plan/approve", plan.handle_ui_plan_approve)
+    app.router.add_post("/ui/api/plan/edit", plan.handle_ui_plan_edit)
+    app.router.add_post("/ui/api/plan/execute", plan.handle_ui_plan_execute)
+    app.router.add_post("/ui/api/plan/cancel", plan.handle_ui_plan_cancel)
     app.router.add_get("/ui/api/settings", api.handle_ui_settings)
     app.router.add_post("/ui/api/settings", api.handle_ui_settings_update)
     app.router.add_get("/ui/api/memory/conflicts", api.handle_ui_memory_conflicts)
