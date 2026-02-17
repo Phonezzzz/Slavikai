@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+from typing import Literal, cast
+
 from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
+from config.memory_config import MemoryConfig
+from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server import http_api as api
 from server.http.common.responses import error_response, json_response
+
+logger = logging.getLogger("SlavikAI.HttpAPI")
 
 
 def _openai_error_message(response: object) -> str | None:
@@ -24,6 +32,578 @@ def _openai_error_message(response: object) -> str | None:
         return None
     normalized = message_raw.strip()
     return normalized or None
+
+
+async def handle_ui_settings(request: web.Request) -> web.Response:
+    del request
+    try:
+        payload = api._build_settings_payload()
+        logger.info(
+            "Settings payload prepared",
+            extra={
+                "path": "/ui/api/settings",
+                "reason": "success",
+                "settings_snapshot": payload,
+            },
+        )
+        return json_response(payload)
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=500,
+            message=f"Не удалось загрузить settings: {exc}",
+            error_type="internal_error",
+            code="settings_load_failed",
+        )
+
+
+async def handle_ui_settings_update(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    forbidden_key = api._user_plane_forbidden_settings_key(payload)
+    if forbidden_key is not None:
+        return error_response(
+            status=403,
+            message=f"Control-plane поле запрещено в user-plane: {forbidden_key}",
+            error_type="forbidden",
+            code="security_fields_forbidden",
+        )
+
+    next_embeddings_settings: UIEmbeddingsSettings | None = None
+
+    personalization_raw = payload.get("personalization")
+    if personalization_raw is not None:
+        if not isinstance(personalization_raw, dict):
+            return error_response(
+                status=400,
+                message="personalization должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        tone, system_prompt = api._load_personalization_settings()
+        if "tone" in personalization_raw:
+            tone_raw = personalization_raw.get("tone")
+            if not isinstance(tone_raw, str):
+                return error_response(
+                    status=400,
+                    message="personalization.tone должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            normalized_tone = tone_raw.strip()
+            if not normalized_tone:
+                return error_response(
+                    status=400,
+                    message="personalization.tone не должен быть пустым.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            tone = normalized_tone
+        if "system_prompt" in personalization_raw:
+            prompt_raw = personalization_raw.get("system_prompt")
+            if not isinstance(prompt_raw, str):
+                return error_response(
+                    status=400,
+                    message="personalization.system_prompt должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            system_prompt = prompt_raw
+        api._save_personalization_settings(tone=tone, system_prompt=system_prompt)
+
+    composer_raw = payload.get("composer")
+    if composer_raw is not None:
+        if not isinstance(composer_raw, dict):
+            return error_response(
+                status=400,
+                message="composer должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        long_paste_to_file_enabled, long_paste_threshold_chars = api._load_composer_settings()
+        if "long_paste_to_file_enabled" in composer_raw:
+            enabled_raw = composer_raw.get("long_paste_to_file_enabled")
+            if not isinstance(enabled_raw, bool):
+                return error_response(
+                    status=400,
+                    message="composer.long_paste_to_file_enabled должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            long_paste_to_file_enabled = enabled_raw
+        if "long_paste_threshold_chars" in composer_raw:
+            threshold_raw = composer_raw.get("long_paste_threshold_chars")
+            if isinstance(threshold_raw, bool) or not isinstance(threshold_raw, int):
+                return error_response(
+                    status=400,
+                    message="composer.long_paste_threshold_chars должен быть int.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if (
+                threshold_raw < api.MIN_LONG_PASTE_THRESHOLD_CHARS
+                or threshold_raw > api.MAX_LONG_PASTE_THRESHOLD_CHARS
+            ):
+                return error_response(
+                    status=400,
+                    message=(
+                        "composer.long_paste_threshold_chars вне диапазона "
+                        f"{api.MIN_LONG_PASTE_THRESHOLD_CHARS}..{api.MAX_LONG_PASTE_THRESHOLD_CHARS}."
+                    ),
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            long_paste_threshold_chars = threshold_raw
+        api._save_composer_settings(
+            long_paste_to_file_enabled=long_paste_to_file_enabled,
+            long_paste_threshold_chars=long_paste_threshold_chars,
+        )
+
+    memory_raw = payload.get("memory")
+    if memory_raw is not None:
+        if not isinstance(memory_raw, dict):
+            return error_response(
+                status=400,
+                message="memory должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        current_memory = api._load_memory_config_runtime()
+        auto_save_dialogue = current_memory.auto_save_dialogue
+        inbox_max_items = current_memory.inbox_max_items
+        inbox_ttl_days = current_memory.inbox_ttl_days
+        inbox_writes_per_minute = current_memory.inbox_writes_per_minute
+        embeddings_settings = api._load_embeddings_settings()
+        if "auto_save_dialogue" in memory_raw:
+            raw_auto_save = memory_raw.get("auto_save_dialogue")
+            if not isinstance(raw_auto_save, bool):
+                return error_response(
+                    status=400,
+                    message="memory.auto_save_dialogue должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            auto_save_dialogue = raw_auto_save
+        if "inbox_max_items" in memory_raw:
+            raw_value = memory_raw.get("inbox_max_items")
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+                return error_response(
+                    status=400,
+                    message="memory.inbox_max_items должен быть положительным int.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            inbox_max_items = raw_value
+        if "inbox_ttl_days" in memory_raw:
+            raw_value = memory_raw.get("inbox_ttl_days")
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+                return error_response(
+                    status=400,
+                    message="memory.inbox_ttl_days должен быть положительным int.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            inbox_ttl_days = raw_value
+        if "inbox_writes_per_minute" in memory_raw:
+            raw_value = memory_raw.get("inbox_writes_per_minute")
+            if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+                return error_response(
+                    status=400,
+                    message="memory.inbox_writes_per_minute должен быть положительным int.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            inbox_writes_per_minute = raw_value
+        if "embeddings" in memory_raw:
+            embeddings_raw = memory_raw.get("embeddings")
+            if not isinstance(embeddings_raw, dict):
+                return error_response(
+                    status=400,
+                    message="memory.embeddings должен быть объектом.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            provider = embeddings_settings.provider
+            local_model = embeddings_settings.local_model
+            openai_model = embeddings_settings.openai_model
+
+            if "provider" in embeddings_raw:
+                provider_raw = embeddings_raw.get("provider")
+                if not isinstance(provider_raw, str):
+                    return error_response(
+                        status=400,
+                        message="memory.embeddings.provider должен быть строкой.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                normalized_provider = provider_raw.strip().lower()
+                if normalized_provider not in {"local", "openai"}:
+                    return error_response(
+                        status=400,
+                        message="memory.embeddings.provider должен быть local|openai.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                provider = cast(Literal["local", "openai"], normalized_provider)
+
+            if "local_model" in embeddings_raw:
+                local_model_raw = embeddings_raw.get("local_model")
+                if not isinstance(local_model_raw, str):
+                    return error_response(
+                        status=400,
+                        message="memory.embeddings.local_model должен быть строкой.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                normalized_local = local_model_raw.strip()
+                if not normalized_local:
+                    return error_response(
+                        status=400,
+                        message="memory.embeddings.local_model не должен быть пустым.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                local_model = normalized_local
+
+            if "openai_model" in embeddings_raw:
+                openai_model_raw = embeddings_raw.get("openai_model")
+                if not isinstance(openai_model_raw, str):
+                    return error_response(
+                        status=400,
+                        message="memory.embeddings.openai_model должен быть строкой.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                normalized_openai = openai_model_raw.strip()
+                if not normalized_openai:
+                    return error_response(
+                        status=400,
+                        message="memory.embeddings.openai_model не должен быть пустым.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                openai_model = normalized_openai
+
+            embeddings_settings = UIEmbeddingsSettings(
+                provider=provider,
+                local_model=local_model,
+                openai_model=openai_model,
+            )
+            api._save_embeddings_settings(embeddings_settings)
+            next_embeddings_settings = embeddings_settings
+
+        if "embeddings_model" in memory_raw:
+            raw_model = memory_raw.get("embeddings_model")
+            if not isinstance(raw_model, str):
+                return error_response(
+                    status=400,
+                    message="memory.embeddings_model должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            normalized_model = raw_model.strip()
+            if not normalized_model:
+                return error_response(
+                    status=400,
+                    message="memory.embeddings_model не должен быть пустым.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            embeddings_settings = UIEmbeddingsSettings(
+                provider="local",
+                local_model=normalized_model,
+                openai_model=embeddings_settings.openai_model,
+            )
+            api._save_embeddings_settings(embeddings_settings)
+            next_embeddings_settings = embeddings_settings
+        api._save_memory_config_runtime(
+            MemoryConfig(
+                auto_save_dialogue=auto_save_dialogue,
+                inbox_max_items=inbox_max_items,
+                inbox_ttl_days=inbox_ttl_days,
+                inbox_writes_per_minute=inbox_writes_per_minute,
+            ),
+        )
+
+    providers_raw = payload.get("providers")
+    if providers_raw is not None:
+        if not isinstance(providers_raw, dict):
+            return error_response(
+                status=400,
+                message="providers должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        next_api_keys = api._load_provider_api_keys()
+        changed_providers: set[str] = set()
+        for provider, provider_payload in providers_raw.items():
+            if provider not in api.API_KEY_SETTINGS_PROVIDERS:
+                return error_response(
+                    status=400,
+                    message=f"Неизвестный provider: {provider}",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if provider_payload is None:
+                next_api_keys.pop(provider, None)
+                changed_providers.add(provider)
+                continue
+            api_key_raw: object | None = None
+            if isinstance(provider_payload, dict):
+                api_key_raw = provider_payload.get("api_key")
+            elif isinstance(provider_payload, str):
+                api_key_raw = provider_payload
+            else:
+                return error_response(
+                    status=400,
+                    message=f"providers.{provider} должен быть объектом или строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if api_key_raw is None:
+                next_api_keys.pop(provider, None)
+                changed_providers.add(provider)
+                continue
+            if not isinstance(api_key_raw, str):
+                return error_response(
+                    status=400,
+                    message=f"providers.{provider}.api_key должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            normalized_key = api_key_raw.strip()
+            if normalized_key:
+                next_api_keys[provider] = normalized_key
+                changed_providers.add(provider)
+            else:
+                next_api_keys.pop(provider, None)
+                changed_providers.add(provider)
+        api._save_provider_api_keys(next_api_keys)
+        if changed_providers:
+            next_runtime_checks = api._load_provider_runtime_checks()
+            for provider_name in changed_providers:
+                if provider_name in api.SUPPORTED_MODEL_PROVIDERS:
+                    models, error_text = api._fetch_provider_models(provider_name)
+                    del models
+                    next_runtime_checks[provider_name] = {
+                        "api_key_valid": error_text is None,
+                        "last_check_error": error_text,
+                        "last_checked_at": api._utc_now_iso(),
+                    }
+                    continue
+                next_runtime_checks[provider_name] = {
+                    "api_key_valid": None,
+                    "last_check_error": None,
+                    "last_checked_at": api._utc_now_iso(),
+                }
+            api._save_provider_runtime_checks(next_runtime_checks)
+
+    if next_embeddings_settings is not None:
+        agent_lock = request.app["agent_lock"]
+        try:
+            agent = await api._resolve_agent(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to resolve agent for embeddings update",
+                exc_info=True,
+                extra={"error": str(exc)},
+            )
+            agent = None
+        if agent is not None:
+            embeddings_model_for_agent = (
+                next_embeddings_settings.local_model
+                if next_embeddings_settings.provider == "local"
+                else next_embeddings_settings.openai_model
+            )
+            set_embeddings_config = getattr(agent, "set_embeddings_config", None)
+            set_embeddings_model = getattr(agent, "set_embeddings_model", None)
+            if callable(set_embeddings_config):
+                async with agent_lock:
+                    set_embeddings_config(
+                        provider=next_embeddings_settings.provider,
+                        local_model=next_embeddings_settings.local_model,
+                        openai_model=next_embeddings_settings.openai_model,
+                        openai_api_key=api._resolve_provider_api_key("openai"),
+                    )
+            elif callable(set_embeddings_model):
+                async with agent_lock:
+                    set_embeddings_model(embeddings_model_for_agent)
+
+    return json_response(api._build_settings_payload())
+
+
+async def handle_admin_security_settings_update(request: web.Request) -> web.Response:
+    admin_error = api._require_admin_bearer(request)
+    if admin_error is not None:
+        return admin_error
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    invalid_keys = sorted(
+        {
+            str(key).strip()
+            for key in payload
+            if str(key).strip() not in api.UI_SETTINGS_ADMIN_ALLOWED_TOP_LEVEL_KEYS
+        }
+    )
+    if invalid_keys:
+        return error_response(
+            status=400,
+            message=f"Неподдерживаемые control-plane поля: {', '.join(invalid_keys)}.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if not payload:
+        return error_response(
+            status=400,
+            message="Нужно передать control-plane изменения (tools и/или policy).",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    next_policy_profile: str | None = None
+    policy_raw = payload.get("policy")
+    if policy_raw is not None:
+        if not isinstance(policy_raw, dict):
+            return error_response(
+                status=400,
+                message="policy должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        profile, yolo_armed, yolo_armed_at = api._load_policy_settings()
+        if "profile" in policy_raw:
+            profile = api._normalize_policy_profile(policy_raw.get("profile"))
+        if "yolo_armed" in policy_raw:
+            yolo_armed_raw = policy_raw.get("yolo_armed")
+            if not isinstance(yolo_armed_raw, bool):
+                return error_response(
+                    status=400,
+                    message="policy.yolo_armed должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            yolo_armed = yolo_armed_raw
+        if profile == "yolo" or yolo_armed:
+            confirm_raw = policy_raw.get("yolo_confirm")
+            confirm_text_raw = policy_raw.get("yolo_confirm_text")
+            confirm_ok = (
+                confirm_raw is True
+                and isinstance(confirm_text_raw, str)
+                and confirm_text_raw.strip().upper() == "YOLO"
+            )
+            if not confirm_ok:
+                return error_response(
+                    status=400,
+                    message=(
+                        "Для включения YOLO требуется подтверждение "
+                        "(yolo_confirm=true, yolo_confirm_text='YOLO')."
+                    ),
+                    error_type="invalid_request_error",
+                    code="yolo_confirmation_required",
+                )
+        if yolo_armed:
+            yolo_armed_at = api._utc_now_iso()
+        else:
+            yolo_armed_at = None
+        api._save_policy_settings(
+            profile=profile,
+            yolo_armed=yolo_armed,
+            yolo_armed_at=yolo_armed_at,
+        )
+        next_policy_profile = profile
+
+    next_tools_state: dict[str, bool] | None = None
+    if next_policy_profile is not None:
+        profile_base = api._tools_state_for_profile(next_policy_profile, api._load_tools_state())
+        api._save_tools_state(profile_base)
+        next_tools_state = dict(profile_base)
+
+    tools_raw = payload.get("tools")
+    if tools_raw is not None:
+        if not isinstance(tools_raw, dict):
+            return error_response(
+                status=400,
+                message="tools должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        state_raw = tools_raw.get("state", tools_raw)
+        if not isinstance(state_raw, dict):
+            return error_response(
+                status=400,
+                message="tools.state должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        current_state = (
+            next_tools_state if next_tools_state is not None else api._load_tools_state()
+        )
+        known_tool_keys = set(current_state.keys())
+        next_state = dict(current_state)
+        for key, raw_value in state_raw.items():
+            if not isinstance(key, str) or key not in known_tool_keys:
+                return error_response(
+                    status=400,
+                    message=f"Неизвестный tools ключ: {key}",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if not isinstance(raw_value, bool):
+                return error_response(
+                    status=400,
+                    message=f"tools.{key} должен быть bool.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            next_state[key] = raw_value
+        api._save_tools_state(next_state)
+        next_tools_state = dict(next_state)
+
+    if next_tools_state is not None:
+        agent_lock: asyncio.Lock = request.app["agent_lock"]
+        try:
+            agent = await api._resolve_agent(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to resolve agent for control-plane tools update",
+                exc_info=True,
+                extra={"error": str(exc)},
+            )
+            agent = None
+        if agent is not None:
+            update_tools_enabled = getattr(agent, "update_tools_enabled", None)
+            if callable(update_tools_enabled):
+                async with agent_lock:
+                    update_tools_enabled(next_tools_state)
+
+    return json_response(api._build_settings_payload())
 
 
 async def handle_ui_stt_transcribe(request: web.Request) -> web.Response:

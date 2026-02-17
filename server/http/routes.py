@@ -27,7 +27,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/slavik/approve-session", slavik.handle_approve_session)
     app.router.add_post(
         "/slavik/admin/settings/security",
-        api.handle_admin_security_settings_update,
+        settings.handle_admin_security_settings_update,
     )
     app.router.add_get("/", workspace.handle_ui_index)
     app.router.add_get("/workspace", workspace.handle_workspace_index)
@@ -42,8 +42,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/plan/edit", plan.handle_ui_plan_edit)
     app.router.add_post("/ui/api/plan/execute", plan.handle_ui_plan_execute)
     app.router.add_post("/ui/api/plan/cancel", plan.handle_ui_plan_cancel)
-    app.router.add_get("/ui/api/settings", api.handle_ui_settings)
-    app.router.add_post("/ui/api/settings", api.handle_ui_settings_update)
+    app.router.add_get("/ui/api/settings", settings.handle_ui_settings)
+    app.router.add_post("/ui/api/settings", settings.handle_ui_settings_update)
     app.router.add_get("/ui/api/memory/conflicts", memory.handle_ui_memory_conflicts)
     app.router.add_post(
         "/ui/api/memory/conflicts/resolve",
