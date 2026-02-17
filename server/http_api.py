@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -50,8 +49,7 @@ from core.mwv.models import MWV_REPORT_PREFIX
 from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
-from memory.vector_index import VectorIndex
-from server.http.common import github_import
+from server.http.common import github_import, workspace_index
 from server.http.common.responses import (
     error_response as _error_response,
 )
@@ -3139,94 +3137,20 @@ def _resolve_workspace_root_candidate(path_raw: str, *, policy_profile: str) -> 
     raise ValueError(f"Неизвестный policy profile: {policy_profile}")
 
 
-def _env_flag_enabled(name: str, *, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def _is_index_enabled() -> bool:
-    return _env_flag_enabled(INDEX_ENABLED_ENV, default=True)
-
-
 def _index_workspace_root(root: Path) -> dict[str, JSONValue]:
-    if not _is_index_enabled():
-        return {
-            "ok": False,
-            "message": "INDEX disabled",
-            "root_path": str(root),
-            "indexed_code": 0,
-            "indexed_docs": 0,
-            "skipped": 0,
-        }
-
-    embeddings = _load_embeddings_settings()
-    vector_index = VectorIndex(
-        "memory/vectors.db",
-        provider=embeddings.provider,
-        local_model=embeddings.local_model,
-        openai_model=embeddings.openai_model,
-        openai_api_key=_resolve_provider_api_key("openai"),
+    return workspace_index.index_workspace_root(
+        root=root,
+        load_embeddings_settings=_load_embeddings_settings,
+        resolve_provider_api_key=_resolve_provider_api_key,
+        index_enabled_env=INDEX_ENABLED_ENV,
+        ignored_dirs=WORKSPACE_INDEX_IGNORED_DIRS,
+        allowed_extensions=WORKSPACE_INDEX_ALLOWED_EXTENSIONS,
+        max_file_bytes=WORKSPACE_INDEX_MAX_FILE_BYTES,
     )
-    vector_index.ensure_runtime_ready()
-    indexed_code = 0
-    indexed_docs = 0
-    skipped = 0
-    for current_root, dirs, files in os.walk(root):
-        dirs[:] = [name for name in dirs if name not in WORKSPACE_INDEX_IGNORED_DIRS]
-        current = Path(current_root)
-        for filename in files:
-            full_path = current / filename
-            if filename.endswith(".sqlite"):
-                skipped += 1
-                continue
-            suffix = full_path.suffix.lower()
-            if suffix not in WORKSPACE_INDEX_ALLOWED_EXTENSIONS:
-                skipped += 1
-                continue
-            try:
-                if full_path.stat().st_size > WORKSPACE_INDEX_MAX_FILE_BYTES:
-                    skipped += 1
-                    continue
-                content = full_path.read_text(encoding="utf-8", errors="ignore")
-            except Exception:  # noqa: BLE001
-                skipped += 1
-                continue
-            namespace = "code" if suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".sh"} else "docs"
-            vector_index.upsert_text(str(full_path), content, namespace=namespace)
-            if namespace == "code":
-                indexed_code += 1
-            else:
-                indexed_docs += 1
-    return {
-        "ok": True,
-        "message": None,
-        "root_path": str(root),
-        "indexed_code": indexed_code,
-        "indexed_docs": indexed_docs,
-        "skipped": skipped,
-    }
 
 
 def _workspace_git_diff(root: Path) -> tuple[str, str | None]:
-    result = subprocess.run(
-        ["git", "-C", str(root), "diff", "--no-ext-diff", "--", "."],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "not a git repository" in stderr.lower():
-            return "", None
-        return "", stderr or "git diff failed"
-    return result.stdout, None
+    return workspace_index.workspace_git_diff(root)
 
 
 def _run_plan_readonly_audit(
