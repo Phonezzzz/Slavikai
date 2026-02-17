@@ -4,7 +4,6 @@ from aiohttp import web
 
 
 def register_routes(app: web.Application) -> None:
-    from server import http_api as api
     from server.http.handlers import (
         chat,
         decision,
@@ -12,9 +11,11 @@ def register_routes(app: web.Application) -> None:
         memory,
         models,
         plan,
+        project,
         sessions,
         settings,
         slavik,
+        ui_chat,
         workflow,
         workspace,
     )
@@ -103,6 +104,6 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/ui/api/workspace/file", workspace.handle_ui_workspace_file_get)
     app.router.add_put("/ui/api/workspace/file", workspace.handle_ui_workspace_file_put)
     app.router.add_post("/ui/api/workspace/run", workspace.handle_ui_workspace_run)
-    app.router.add_post("/ui/api/chat/send", api.handle_ui_chat_send)
-    app.router.add_post("/ui/api/tools/project", api.handle_ui_project_command)
+    app.router.add_post("/ui/api/chat/send", ui_chat.handle_ui_chat_send)
+    app.router.add_post("/ui/api/tools/project", project.handle_ui_project_command)
     app.router.add_get("/ui/api/events/stream", events.handle_ui_events_stream)
