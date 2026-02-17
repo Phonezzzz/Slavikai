@@ -4075,32 +4075,6 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
     next_mode = _normalize_mode_value(mode_raw, default="ask")
-    workflow = await hub.get_session_workflow(session_id)
-    current_mode = _normalize_mode_value(workflow.get("mode"), default="ask")
-    active_plan = _normalize_plan_payload(workflow.get("active_plan"))
-    if next_mode == "act" and current_mode != "plan":
-        return _error_response(
-            status=409,
-            message="В act можно перейти только из plan-режима.",
-            error_type="invalid_request_error",
-            code="mode_transition_not_allowed",
-        )
-    if current_mode == "plan" and next_mode == "act":
-        confirm = payload.get("confirm") is True
-        if not confirm:
-            return _error_response(
-                status=409,
-                message="Для перехода plan->act нужен confirm=true.",
-                error_type="invalid_request_error",
-                code="mode_confirm_required",
-            )
-        if active_plan is None or active_plan.get("status") != "approved":
-            return _error_response(
-                status=409,
-                message="Нужен approved план для перехода в act.",
-                error_type="invalid_request_error",
-                code="plan_not_approved",
-            )
     if next_mode == "ask":
         await hub.set_session_workflow(
             session_id,
@@ -5789,6 +5763,7 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
 
 async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
+    session_store: SessionApprovalStore = request.app["session_store"]
 
     try:
         payload = await request.json()
@@ -5948,11 +5923,177 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             }
         )
 
-    return _error_response(
-        status=409,
-        message="Decision resume disabled by emergency lockdown.",
-        error_type="invalid_request_error",
-        code="decision_resume_disabled_emergency",
+    executing = _decision_with_status(current_decision, status="executing", resolved=False)
+    updated, latest = await hub.transition_session_decision(
+        session_id,
+        expected_id=decision_id,
+        expected_status="pending",
+        next_decision=executing,
+    )
+    normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
+    if not updated:
+        if normalized_latest is not None:
+            latest_status_raw = normalized_latest.get("status")
+            latest_status = latest_status_raw if isinstance(latest_status_raw, str) else "unknown"
+            return _json_response(
+                {
+                    "ok": True,
+                    "decision": normalized_latest,
+                    "status": latest_status,
+                    "resume_started": False,
+                    "already_resolved": latest_status in {"resolved", "rejected"},
+                    "resume": None,
+                }
+            )
+        return _error_response(
+            status=409,
+            message="Decision is not pending.",
+            error_type="invalid_request_error",
+            code="decision_not_pending",
+        )
+
+    proposal_raw = current_decision.get("proposed_action")
+    proposal = proposal_raw if isinstance(proposal_raw, dict) else {}
+    required_categories_raw = proposal.get("required_categories")
+    required_categories: set[ApprovalCategory] = set()
+    if isinstance(required_categories_raw, list):
+        for item in required_categories_raw:
+            if isinstance(item, str) and item in ALL_CATEGORIES:
+                required_categories.add(cast(ApprovalCategory, item))
+    category_raw = proposal.get("category")
+    if isinstance(category_raw, str) and category_raw in ALL_CATEGORIES:
+        required_categories.add(cast(ApprovalCategory, category_raw))
+    if required_categories:
+        await session_store.approve(session_id, required_categories)
+
+    resume_result: dict[str, JSONValue] | None = None
+    resume_started = False
+    resume_error: str | None = None
+
+    context_raw = current_decision.get("context")
+    context = context_raw if isinstance(context_raw, dict) else {}
+    source_endpoint_raw = context.get("source_endpoint")
+    source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
+    resume_payload_raw = context.get("resume_payload")
+    resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+
+    if source_endpoint == "workspace.root_select":
+        root_path_raw = resume_payload.get("root_path")
+        if not isinstance(root_path_raw, str) or not root_path_raw.strip():
+            resume_error = "resume_payload.root_path обязателен."
+        else:
+            await hub.set_workspace_root(session_id, root_path_raw.strip())
+            resume_started = True
+            resume_result = {
+                "ok": True,
+                "source_endpoint": source_endpoint,
+                "data": {"root_path": root_path_raw.strip()},
+            }
+    elif source_endpoint == "workspace.tool":
+        tool_name_raw = resume_payload.get("tool_name")
+        raw_input_raw = resume_payload.get("raw_input")
+        args_raw = resume_payload.get("args")
+        if (
+            not isinstance(tool_name_raw, str)
+            or not tool_name_raw.strip()
+            or not isinstance(raw_input_raw, str)
+        ):
+            resume_error = "Некорректный resume_payload для workspace.tool."
+        else:
+            try:
+                agent = await _resolve_agent(request)
+            except ModelNotAllowedError as exc:
+                return _model_not_allowed_response(exc.model_id)
+            if agent is None:
+                return _model_not_selected_response()
+            approved_categories = await session_store.get_categories(session_id)
+            tool_result_or_error = await _call_workspace_tool(
+                request=request,
+                agent=agent,
+                session_id=session_id,
+                approved_categories=approved_categories,
+                tool_name=tool_name_raw.strip(),
+                args=args_raw if isinstance(args_raw, dict) else {},
+                raw_input=raw_input_raw,
+            )
+            resume_started = True
+            if isinstance(tool_result_or_error, web.Response):
+                if tool_result_or_error.status == 202:
+                    latest_decision = _normalize_ui_decision(
+                        await hub.get_session_decision(session_id),
+                        session_id=session_id,
+                    )
+                    pending_status_raw = (
+                        latest_decision.get("status") if isinstance(latest_decision, dict) else None
+                    )
+                    pending_status = (
+                        pending_status_raw if isinstance(pending_status_raw, str) else "pending"
+                    )
+                    return _json_response(
+                        {
+                            "ok": True,
+                            "decision": latest_decision,
+                            "status": pending_status,
+                            "resume_started": True,
+                            "already_resolved": False,
+                            "resume": {
+                                "ok": False,
+                                "source_endpoint": source_endpoint,
+                                "error": "Требуется дополнительное подтверждение.",
+                            },
+                        }
+                    )
+                resume_error = "Не удалось продолжить выполнение после approve."
+            else:
+                tool_result = tool_result_or_error
+                if not tool_result.ok:
+                    resume_error = (
+                        tool_result.error or "Ошибка выполнения инструмента после approve."
+                    )
+                else:
+                    resume_result = {
+                        "ok": True,
+                        "source_endpoint": source_endpoint,
+                        "tool_name": tool_name_raw.strip(),
+                        "data": dict(tool_result.data),
+                    }
+
+    if resume_error is not None:
+        rejected = _decision_with_status(executing, status="rejected", resolved=True)
+        await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="executing",
+            next_decision=rejected,
+        )
+        return _error_response(
+            status=409,
+            message=resume_error,
+            error_type="invalid_request_error",
+            code="decision_resume_failed",
+        )
+
+    resolved = _decision_with_status(executing, status="resolved", resolved=True)
+    _, latest = await hub.transition_session_decision(
+        session_id,
+        expected_id=decision_id,
+        expected_status="executing",
+        next_decision=resolved,
+    )
+    normalized = _normalize_ui_decision(latest, session_id=session_id)
+    if normalized is None:
+        normalized = _normalize_ui_decision(resolved, session_id=session_id)
+    resolved_status_raw = normalized.get("status") if isinstance(normalized, dict) else None
+    resolved_status = resolved_status_raw if isinstance(resolved_status_raw, str) else "resolved"
+    return _json_response(
+        {
+            "ok": True,
+            "decision": normalized,
+            "status": resolved_status,
+            "resume_started": resume_started,
+            "already_resolved": resolved_status in {"resolved", "rejected"},
+            "resume": resume_result,
+        }
     )
 
 

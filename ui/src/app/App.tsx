@@ -2371,8 +2371,7 @@ export default function App() {
   };
 
   const handleDecisionRespond = async (
-    choice: 'approve' | 'reject' | 'edit',
-    editedAction?: Record<string, unknown> | null,
+    choice: 'approve' | 'reject',
   ) => {
     if (!selectedConversation || !pendingDecision) {
       return;
@@ -2390,7 +2389,6 @@ export default function App() {
           session_id: selectedConversation,
           decision_id: pendingDecision.id,
           choice,
-          edited_action: choice === 'edit' ? (editedAction ?? {}) : null,
         }),
       });
       const payload: unknown = await response.json();
@@ -2526,8 +2524,8 @@ export default function App() {
             decision={pendingDecision}
             decisionBusy={decisionBusy}
             decisionError={decisionError}
-            onDecisionRespond={(choice, editedAction) => {
-              void handleDecisionRespond(choice, editedAction);
+            onDecisionRespond={(choice) => {
+              void handleDecisionRespond(choice);
             }}
             refreshToken={workspaceRefreshToken}
           />
@@ -2561,8 +2559,8 @@ export default function App() {
               decision={pendingDecision}
               decisionBusy={decisionBusy}
               decisionError={decisionError}
-              onDecisionRespond={(choice, editedAction) => {
-                void handleDecisionRespond(choice, editedAction);
+              onDecisionRespond={(choice) => {
+                void handleDecisionRespond(choice);
               }}
             />
 

@@ -56,8 +56,7 @@ type WorkspaceAssistantPanelProps = {
   decisionBusy: boolean;
   decisionError: string | null;
   onDecisionRespond?: (
-    choice: 'approve' | 'reject' | 'edit',
-    editedAction?: Record<string, unknown> | null,
+    choice: 'approve' | 'reject',
   ) => Promise<void> | void;
   messages: CanvasMessage[];
   terminalPendingText: string | null;
@@ -457,11 +456,11 @@ export function WorkspaceAssistantPanel({
             decision={decision}
             busy={decisionBusy}
             error={decisionError}
-            onRespond={(choice, editedAction) => {
+            onRespond={(choice) => {
               if (!onDecisionRespond) {
                 return;
               }
-              void onDecisionRespond(choice, editedAction);
+              void onDecisionRespond(choice);
             }}
           />
         </div>

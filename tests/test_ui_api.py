@@ -1062,11 +1062,10 @@ def test_ui_state_and_mode_transitions() -> None:
                 headers={"X-Slavik-Session": session_id},
                 json={"mode": "act", "confirm": True},
             )
-            assert to_act.status == 409
-            error_payload = await to_act.json()
-            error = error_payload.get("error")
-            assert isinstance(error, dict)
-            assert error.get("code") == "plan_not_approved"
+            assert to_act.status == 200
+            to_act_payload = await to_act.json()
+            assert to_act_payload.get("mode") == "act"
+            assert to_act_payload.get("active_task") is None
         finally:
             await client.close()
 
@@ -1890,7 +1889,7 @@ def test_ui_workspace_write_requires_approval_and_emits_decision_packet() -> Non
     asyncio.run(run())
 
 
-def test_ui_decision_respond_approve_is_blocked_in_emergency_lockdown() -> None:
+def test_ui_decision_respond_approve_resumes_workspace_tool() -> None:
     async def run() -> None:
         agent = WorkspaceDecisionAgent()
         client = await _create_client(agent)
@@ -1924,12 +1923,16 @@ def test_ui_decision_respond_approve_is_blocked_in_emergency_lockdown() -> None:
                     "choice": "approve",
                 },
             )
-            assert approve_resp.status == 409
+            assert approve_resp.status == 200
             approve_payload = await approve_resp.json()
-            error = approve_payload.get("error")
-            assert isinstance(error, dict)
-            assert error.get("code") == "decision_resume_disabled_emergency"
-            assert len(agent.tool_calls) == 0
+            assert approve_payload.get("status") == "resolved"
+            decision_after = approve_payload.get("decision")
+            assert isinstance(decision_after, dict)
+            assert decision_after.get("status") == "resolved"
+            assert len(agent.tool_calls) == 1
+            tool_name, tool_args = agent.tool_calls[0]
+            assert tool_name == "workspace_write"
+            assert tool_args.get("path") == "main.py"
         finally:
             await client.close()
 

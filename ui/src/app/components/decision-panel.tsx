@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
-import { Check, ChevronDown, Pencil, X } from 'lucide-react';
+import { useState } from 'react';
+import { Check, ChevronDown, X } from 'lucide-react';
 
 import type { UiDecision } from '../types';
 
-type DecisionRespondChoice = 'approve' | 'reject' | 'edit';
+type DecisionRespondChoice = 'approve' | 'reject';
 
 type DecisionPanelProps = {
   decision: UiDecision;
@@ -11,43 +11,18 @@ type DecisionPanelProps = {
   error: string | null;
   onRespond: (
     choice: DecisionRespondChoice,
-    editedAction?: Record<string, unknown> | null,
   ) => Promise<void> | void;
 };
 
 export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPanelProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [editMode, setEditMode] = useState(false);
-  const [editValue, setEditValue] = useState<string>(() =>
-    JSON.stringify(decision.proposed_action ?? {}, null, 2),
-  );
-  const [editError, setEditError] = useState<string | null>(null);
-
-  const supportsEdit = useMemo(() => {
-    return decision.options.some((option) => option.id === 'edit' || option.action === 'edit');
-  }, [decision.options]);
 
   const handleApprove = () => {
-    void onRespond('approve', null);
+    void onRespond('approve');
   };
 
   const handleReject = () => {
-    void onRespond('reject', null);
-  };
-
-  const handleApplyEdit = () => {
-    try {
-      const parsed = JSON.parse(editValue) as unknown;
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        setEditError('edited_action должен быть JSON-объектом.');
-        return;
-      }
-      setEditError(null);
-      void onRespond('edit', parsed as Record<string, unknown>);
-      setEditMode(false);
-    } catch {
-      setEditError('Некорректный JSON в edited_action.');
-    }
+    void onRespond('reject');
   };
 
   return (
@@ -79,19 +54,6 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
           </div>
         ) : null}
 
-        {supportsEdit && editMode ? (
-          <div className="mt-3 space-y-2">
-            <textarea
-              value={editValue}
-              onChange={(event) => setEditValue(event.target.value)}
-              rows={6}
-              className="w-full rounded-lg border border-[#2a2a30] bg-[#0f0f14] px-3 py-2 font-mono text-[12px] text-[#d7d7de] outline-none focus:border-[#3a3a44]"
-              disabled={busy}
-            />
-            {editError ? <p className="text-xs text-rose-300">{editError}</p> : null}
-          </div>
-        ) : null}
-
         {error ? <p className="mt-3 text-xs text-rose-300">{error}</p> : null}
 
         <div className="mt-3 flex items-center gap-2">
@@ -117,19 +79,6 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
             <X className="h-3.5 w-3.5" />
             <span>Reject</span>
           </button>
-          {supportsEdit ? (
-            <button
-              type="button"
-              onClick={editMode ? handleApplyEdit : () => setEditMode(true)}
-              disabled={busy}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[#3a3a44] px-3 py-1.5 text-xs font-medium text-[#d4d4db] hover:bg-[#1b1b22] disabled:cursor-not-allowed disabled:opacity-50"
-              title="Edit"
-              aria-label="Edit"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-              <span>{editMode ? 'Apply edit' : 'Edit'}</span>
-            </button>
-          ) : null}
         </div>
       </div>
     </div>

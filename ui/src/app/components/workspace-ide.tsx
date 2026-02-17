@@ -68,8 +68,7 @@ type WorkspaceIdeProps = {
   decisionBusy?: boolean;
   decisionError?: string | null;
   onDecisionRespond?: (
-    choice: 'approve' | 'reject' | 'edit',
-    editedAction?: Record<string, unknown> | null,
+    choice: 'approve' | 'reject',
   ) => Promise<void> | void;
   refreshToken?: number;
 };
