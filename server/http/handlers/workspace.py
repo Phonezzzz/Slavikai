@@ -4,11 +4,15 @@ from pathlib import Path
 
 from aiohttp import web
 
+from config.model_whitelist import ModelNotAllowedError
 from config.tools_config import DEFAULT_TOOLS_STATE
+from core.approval_policy import ApprovalCategory, ApprovalRequired
+from server import http_api as api
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     POLICY_PROFILES,
     UI_SESSION_HEADER,
+    AgentProtocol,
     _build_ui_approval_decision,
     _decision_workflow_context,
     _index_workspace_root,
@@ -28,7 +32,8 @@ from server.http_api import (
     _workspace_root_for_session,
 )
 from server.ui_hub import UIHub
-from shared.models import JSONValue
+from shared.models import JSONValue, ToolResult
+from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
 
 
 async def handle_ui_redirect(request: web.Request) -> web.StreamResponse:
@@ -232,6 +237,348 @@ async def handle_ui_workspace_git_diff(request: web.Request) -> web.Response:
             "diff": diff,
             "error": error,
             "ok": error is None,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def _resolve_workspace_session(
+    request: web.Request,
+) -> tuple[AgentProtocol | None, str | None, set[ApprovalCategory], web.Response | None]:
+    hub: UIHub = request.app["ui_hub"]
+    session_store = request.app["session_store"]
+    agent = await api._resolve_agent(request)
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return agent, None, set(), session_error
+    if session_id is None:
+        return agent, None, set(), _session_forbidden_response()
+    approved_categories = await session_store.get_categories(session_id)
+    return agent, session_id, approved_categories, None
+
+
+async def _call_workspace_tool(
+    *,
+    request: web.Request,
+    agent: AgentProtocol,
+    session_id: str,
+    approved_categories: set[ApprovalCategory],
+    tool_name: str,
+    args: dict[str, JSONValue] | None = None,
+    raw_input: str,
+) -> ToolResult | web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    agent_lock = request.app["agent_lock"]
+    session_root = await _workspace_root_for_session(hub, session_id)
+    async with agent_lock:
+        set_runtime_workspace_root(session_root)
+        try:
+            try:
+                await api._apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                agent.set_session_context(session_id, approved_categories)
+            except Exception:  # noqa: BLE001
+                api.logger.debug(
+                    "Failed to set session context for workspace tool call",
+                    exc_info=True,
+                )
+            try:
+                return agent.call_tool(
+                    tool_name,
+                    args=args or {},
+                    raw_input=raw_input,
+                )
+            except ApprovalRequired as exc:
+                approval_payload = api._serialize_approval_request(exc.request)
+                workflow = await hub.get_session_workflow(session_id)
+                mode = _normalize_mode_value(workflow.get("mode"), default="ask")
+                active_plan = _normalize_plan_payload(workflow.get("active_plan"))
+                active_task = _normalize_task_payload(workflow.get("active_task"))
+                approval_request_payload: dict[str, JSONValue] = approval_payload or {}
+                decision = _build_ui_approval_decision(
+                    approval_request=approval_request_payload,
+                    session_id=session_id,
+                    source_endpoint="workspace.tool",
+                    resume_payload={
+                        "tool_name": tool_name,
+                        "args": dict(args or {}),
+                        "raw_input": raw_input,
+                        "session_id": session_id,
+                    },
+                    workflow_context=_decision_workflow_context(
+                        mode=mode,
+                        active_plan=active_plan,
+                        active_task=active_task,
+                    ),
+                )
+                await _set_current_plan_step_status(
+                    hub=hub,
+                    session_id=session_id,
+                    status="waiting_approval",
+                )
+                await hub.set_session_decision(session_id, decision)
+                normalized_decision = _normalize_ui_decision(decision, session_id=session_id)
+                response = json_response(
+                    {
+                        "session_id": session_id,
+                        "decision": normalized_decision,
+                        "approval_request": approval_payload,
+                    },
+                    status=202,
+                )
+                response.headers[UI_SESSION_HEADER] = session_id
+                return response
+        finally:
+            set_runtime_workspace_root(None)
+
+
+async def handle_ui_workspace_tree(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    try:
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
+    except ModelNotAllowedError as exc:
+        return api._model_not_allowed_response(exc.model_id)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    if agent is None:
+        return api._model_not_selected_response()
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_list",
+        raw_input="ui:workspace_list",
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
+        return error_response(
+            status=400,
+            message=tool_result.error or "Не удалось получить структуру workspace.",
+            error_type="invalid_request_error",
+            code="workspace_list_failed",
+        )
+    tree_raw = tool_result.data.get("tree")
+    tree: list[JSONValue] = tree_raw if isinstance(tree_raw, list) else []
+    root_path = await _workspace_root_for_session(hub, session_id)
+    response = json_response({"session_id": session_id, "tree": tree, "root_path": str(root_path)})
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_file_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    try:
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
+    except ModelNotAllowedError as exc:
+        return api._model_not_allowed_response(exc.model_id)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    if agent is None:
+        return api._model_not_selected_response()
+    path_raw = request.query.get("path", "")
+    path_value = path_raw.strip()
+    if not path_value:
+        return error_response(
+            status=400,
+            message="path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_read",
+        args={"path": path_value},
+        raw_input=f"ui:workspace_read {path_value}",
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
+        return error_response(
+            status=400,
+            message=tool_result.error or "Не удалось прочитать файл.",
+            error_type="invalid_request_error",
+            code="workspace_read_failed",
+        )
+    content_raw = tool_result.data.get("output")
+    if not isinstance(content_raw, str):
+        content_raw = ""
+    response = json_response(
+        {
+            "session_id": session_id,
+            "path": path_value,
+            "content": content_raw,
+            "root_path": str(await _workspace_root_for_session(hub, session_id)),
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    try:
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
+    except ModelNotAllowedError as exc:
+        return api._model_not_allowed_response(exc.model_id)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    if agent is None:
+        return api._model_not_selected_response()
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    path_raw = payload.get("path")
+    content_raw = payload.get("content")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return error_response(
+            status=400,
+            message="path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if not isinstance(content_raw, str):
+        return error_response(
+            status=400,
+            message="content должен быть строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    path_value = path_raw.strip()
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_write",
+        args={"path": path_value, "content": content_raw},
+        raw_input=f"ui:workspace_write {path_value}",
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
+        return error_response(
+            status=400,
+            message=tool_result.error or "Не удалось сохранить файл.",
+            error_type="invalid_request_error",
+            code="workspace_write_failed",
+        )
+    response = json_response(
+        {
+            "session_id": session_id,
+            "path": path_value,
+            "saved": True,
+            "root_path": str(await _workspace_root_for_session(hub, session_id)),
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_run(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    try:
+        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+            request
+        )
+    except ModelNotAllowedError as exc:
+        return api._model_not_allowed_response(exc.model_id)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    if agent is None:
+        return api._model_not_selected_response()
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    path_raw = payload.get("path")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return error_response(
+            status=400,
+            message="path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    path_value = path_raw.strip()
+    tool_result_or_error = await _call_workspace_tool(
+        request=request,
+        agent=agent,
+        session_id=session_id,
+        approved_categories=approved_categories,
+        tool_name="workspace_run",
+        args={"path": path_value},
+        raw_input=f"ui:workspace_run {path_value}",
+    )
+    if isinstance(tool_result_or_error, web.Response):
+        return tool_result_or_error
+    tool_result = tool_result_or_error
+    if not tool_result.ok:
+        return error_response(
+            status=400,
+            message=tool_result.error or "Не удалось выполнить файл.",
+            error_type="invalid_request_error",
+            code="workspace_run_failed",
+        )
+    stdout_raw = tool_result.data.get("output")
+    stderr_raw = tool_result.data.get("stderr")
+    exit_code_raw = tool_result.data.get("exit_code")
+    stdout = stdout_raw if isinstance(stdout_raw, str) else ""
+    stderr = stderr_raw if isinstance(stderr_raw, str) else ""
+    exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 0
+    response = json_response(
+        {
+            "session_id": session_id,
+            "path": path_value,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "root_path": str(await _workspace_root_for_session(hub, session_id)),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
