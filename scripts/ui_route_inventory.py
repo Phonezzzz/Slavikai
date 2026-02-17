@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 ROUTE_PATTERN = re.compile(
-    r'add_(?P<method>get|post|put|patch|delete)\(\s*"(?P<path>/ui/api/[^"]+)"\s*,\s*api\.(?P<handler>[A-Za-z0-9_]+)',
+    r'add_(?P<method>get|post|put|patch|delete)\(\s*"(?P<path>/ui/api/[^"]+)"\s*,\s*[A-Za-z0-9_]+\.(?P<handler>[A-Za-z0-9_]+)',
 )
 UI_PATH_PATTERN = re.compile(r"/ui/api/[A-Za-z0-9_./${}-]+")
 PLACEHOLDER_PATTERN = re.compile(r"\$\{[^}]+\}|\{[^}]+\}")
