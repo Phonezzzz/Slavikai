@@ -9,16 +9,26 @@ from server.http.common.responses import error_response, json_response
 from server.http_api import (
     POLICY_PROFILES,
     UI_SESSION_HEADER,
+    _build_ui_approval_decision,
+    _decision_workflow_context,
+    _index_workspace_root,
     _load_effective_session_security,
+    _normalize_mode_value,
+    _normalize_plan_payload,
     _normalize_policy_profile,
+    _normalize_task_payload,
     _normalize_tools_state_payload,
+    _normalize_ui_decision,
     _resolve_ui_session_id_for_principal,
     _resolve_workspace_root_candidate,
     _session_forbidden_response,
+    _set_current_plan_step_status,
     _utc_now_iso,
+    _workspace_git_diff,
     _workspace_root_for_session,
 )
 from server.ui_hub import UIHub
+from shared.models import JSONValue
 
 
 async def handle_ui_redirect(request: web.Request) -> web.StreamResponse:
@@ -33,6 +43,199 @@ async def handle_ui_index(request: web.Request) -> web.FileResponse:
 
 async def handle_workspace_index(request: web.Request) -> web.FileResponse:
     return await handle_ui_index(request)
+
+
+async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_store = request.app["session_store"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    workflow = await hub.get_session_workflow(session_id)
+    if _normalize_mode_value(workflow.get("mode"), default="ask") == "plan":
+        return error_response(
+            status=409,
+            message="PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only действия.",
+            error_type="invalid_request_error",
+            code="PLAN_READ_ONLY_BLOCK",
+        )
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    path_raw = payload.get("root_path")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return error_response(
+            status=400,
+            message="root_path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    _, effective_policy = await _load_effective_session_security(hub=hub, session_id=session_id)
+    profile_raw = effective_policy.get("profile")
+    profile = _normalize_policy_profile(profile_raw)
+    try:
+        target_root = _resolve_workspace_root_candidate(path_raw.strip(), policy_profile=profile)
+    except ValueError as exc:
+        return error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    current_root = await _workspace_root_for_session(hub, session_id)
+    if current_root == target_root:
+        response = json_response(
+            {
+                "session_id": session_id,
+                "root_path": str(current_root),
+                "applied": True,
+            }
+        )
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
+
+    require_approval = profile == "yolo"
+    required_category = "FS_OUTSIDE_WORKSPACE"
+    approved = await session_store.get_categories(session_id)
+    if not require_approval or required_category in approved:
+        await hub.set_workspace_root(session_id, str(target_root))
+        response = json_response(
+            {
+                "session_id": session_id,
+                "root_path": str(target_root),
+                "applied": True,
+            }
+        )
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
+
+    approval_request: dict[str, JSONValue] = {
+        "category": required_category,
+        "required_categories": [required_category],
+        "tool": "workspace_root_select",
+        "prompt": {
+            "what": "Сменить Workspace Root",
+            "why": "Требуется подтверждение смены рабочей директории.",
+            "risk": "Доступ к другой директории проекта.",
+            "changes": [str(target_root)],
+        },
+        "details": {
+            "root_path": str(target_root),
+            "policy_profile": profile,
+        },
+    }
+    workflow = await hub.get_session_workflow(session_id)
+    mode = _normalize_mode_value(workflow.get("mode"), default="ask")
+    active_plan = _normalize_plan_payload(workflow.get("active_plan"))
+    active_task = _normalize_task_payload(workflow.get("active_task"))
+    decision = _build_ui_approval_decision(
+        approval_request=approval_request,
+        session_id=session_id,
+        source_endpoint="workspace.root_select",
+        resume_payload={
+            "root_path": str(target_root),
+            "session_id": session_id,
+        },
+        workflow_context=_decision_workflow_context(
+            mode=mode,
+            active_plan=active_plan,
+            active_task=active_task,
+        ),
+    )
+    await _set_current_plan_step_status(
+        hub=hub,
+        session_id=session_id,
+        status="waiting_approval",
+    )
+    await hub.set_session_decision(session_id, decision)
+    response = json_response(
+        {
+            "session_id": session_id,
+            "decision": _normalize_ui_decision(decision, session_id=session_id),
+        },
+        status=202,
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    workflow = await hub.get_session_workflow(session_id)
+    if _normalize_mode_value(workflow.get("mode"), default="ask") == "plan":
+        return error_response(
+            status=409,
+            message="PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only действия.",
+            error_type="invalid_request_error",
+            code="PLAN_READ_ONLY_BLOCK",
+        )
+    root_path = await _workspace_root_for_session(hub, session_id)
+    try:
+        stats = _index_workspace_root(root_path)
+    except ValueError as exc:
+        return error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="workspace_index_failed",
+        )
+    except RuntimeError as exc:
+        return error_response(
+            status=500,
+            message=str(exc),
+            error_type="internal_error",
+            code="workspace_index_failed",
+        )
+    response = json_response(
+        {
+            "session_id": session_id,
+            **stats,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_git_diff(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    root_path = await _workspace_root_for_session(hub, session_id)
+    diff, error = _workspace_git_diff(root_path)
+    response = json_response(
+        {
+            "session_id": session_id,
+            "root_path": str(root_path),
+            "diff": diff,
+            "error": error,
+            "ok": error is None,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
 
 
 async def handle_ui_workspace_root_get(request: web.Request) -> web.Response:
