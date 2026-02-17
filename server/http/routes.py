@@ -13,6 +13,7 @@ def register_routes(app: web.Application) -> None:
         models,
         plan,
         sessions,
+        settings,
         slavik,
         workflow,
         workspace,
@@ -48,7 +49,7 @@ def register_routes(app: web.Application) -> None:
         "/ui/api/memory/conflicts/resolve",
         memory.handle_ui_memory_conflicts_resolve,
     )
-    app.router.add_post("/ui/api/stt/transcribe", api.handle_ui_stt_transcribe)
+    app.router.add_post("/ui/api/stt/transcribe", settings.handle_ui_stt_transcribe)
     app.router.add_get("/ui/api/settings/chats/export", sessions.handle_ui_chats_export)
     app.router.add_post("/ui/api/settings/chats/import", sessions.handle_ui_chats_import)
     app.router.add_get("/ui/api/models", sessions.handle_ui_models)

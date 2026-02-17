@@ -23,7 +23,6 @@ from urllib.parse import urlparse
 
 import requests
 from aiohttp import web
-from aiohttp.multipart import BodyPartReader
 
 from config.http_server_config import (
     DEFAULT_MAX_REQUEST_BYTES,
@@ -401,6 +400,18 @@ class AgentProtocol(Protocol):
         labels: list[FeedbackLabel],
         free_text: str | None,
     ) -> None: ...
+
+
+class RequestsModuleProtocol(Protocol):
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = ...,
+        data: dict[str, str] | None = ...,
+        files: dict[str, tuple[str, bytes, str]] | None = ...,
+        timeout: int | float | None = ...,
+    ) -> requests.Response: ...
 
 
 def _model_not_selected_response() -> web.Response:
@@ -877,6 +888,10 @@ def _parse_trace_log(path: Path) -> list[TraceRecord]:
 
 def _trace_log_path() -> Path:
     return TRACE_LOG
+
+
+def _requests_module() -> RequestsModuleProtocol:
+    return requests
 
 
 def _build_trace_groups(records: list[TraceRecord]) -> list[TraceGroup]:
@@ -4445,163 +4460,6 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
                     update_tools_enabled(next_tools_state)
 
     return _json_response(_build_settings_payload())
-
-
-def _openai_error_message(response: requests.Response) -> str | None:
-    try:
-        payload = response.json()
-    except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(payload, dict):
-        return None
-    error_raw = payload.get("error")
-    if not isinstance(error_raw, dict):
-        return None
-    message_raw = error_raw.get("message")
-    if not isinstance(message_raw, str):
-        return None
-    normalized = message_raw.strip()
-    return normalized or None
-
-
-async def handle_ui_stt_transcribe(request: web.Request) -> web.Response:
-    api_key = _resolve_provider_api_key("openai")
-    if not api_key:
-        return _error_response(
-            status=409,
-            message="Не задан OpenAI API key для STT (settings.providers.openai.api_key).",
-            error_type="configuration_error",
-            code="stt_api_key_missing",
-        )
-
-    try:
-        reader = await request.multipart()
-    except Exception:  # noqa: BLE001
-        return _error_response(
-            status=400,
-            message="Ожидался multipart/form-data с полем audio.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-
-    audio_bytes: bytes | None = None
-    audio_filename = "recording.webm"
-    audio_content_type = "application/octet-stream"
-    language = "ru"
-    while True:
-        part = await reader.next()
-        if part is None:
-            break
-        if not isinstance(part, BodyPartReader):
-            continue
-        name = str(getattr(part, "name", "") or "").strip()
-        if not name:
-            continue
-        if name == "language":
-            try:
-                language_raw = await part.text()
-            except Exception:  # noqa: BLE001
-                language_raw = ""
-            normalized_language = language_raw.strip()
-            if normalized_language:
-                language = normalized_language
-            continue
-        if name != "audio":
-            continue
-        audio_filename_raw = getattr(part, "filename", None)
-        if isinstance(audio_filename_raw, str) and audio_filename_raw.strip():
-            audio_filename = audio_filename_raw.strip()
-        part_content_type = part.headers.get("Content-Type")
-        if isinstance(part_content_type, str) and part_content_type.strip():
-            audio_content_type = part_content_type.strip()
-        chunks: list[bytes] = []
-        total_size = 0
-        while True:
-            chunk = await part.read_chunk()
-            if not chunk:
-                break
-            total_size += len(chunk)
-            if total_size > MAX_STT_AUDIO_BYTES:
-                return _error_response(
-                    status=413,
-                    message="Аудиофайл слишком большой.",
-                    error_type="invalid_request_error",
-                    code="payload_too_large",
-                )
-            chunks.append(chunk)
-        if chunks:
-            audio_bytes = b"".join(chunks)
-
-    if audio_bytes is None:
-        return _error_response(
-            status=400,
-            message="Поле audio обязательно.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-
-    try:
-        response = requests.post(
-            OPENAI_STT_ENDPOINT,
-            headers={"Authorization": f"Bearer {api_key}"},
-            data={
-                "model": "whisper-1",
-                "language": language,
-                "response_format": "json",
-            },
-            files={"file": (audio_filename, audio_bytes, audio_content_type)},
-            timeout=MODEL_FETCH_TIMEOUT,
-        )
-    except Exception:  # noqa: BLE001
-        return _error_response(
-            status=502,
-            message="Не удалось связаться с STT-провайдером.",
-            error_type="upstream_error",
-            code="upstream_error",
-        )
-
-    if response.status_code >= 400:
-        upstream_message = _openai_error_message(response)
-        if response.status_code in {400, 415, 422}:
-            return _error_response(
-                status=400,
-                message=upstream_message or "Неподдерживаемый формат аудио.",
-                error_type="invalid_request_error",
-                code="unsupported_audio_format",
-            )
-        return _error_response(
-            status=502,
-            message=upstream_message or "STT-провайдер вернул ошибку.",
-            error_type="upstream_error",
-            code="upstream_error",
-        )
-
-    try:
-        payload = response.json()
-    except Exception:  # noqa: BLE001
-        payload = None
-    if not isinstance(payload, dict):
-        return _error_response(
-            status=502,
-            message="STT-провайдер вернул неожиданный ответ.",
-            error_type="upstream_error",
-            code="upstream_error",
-        )
-    text_raw = payload.get("text")
-    if not isinstance(text_raw, str) or not text_raw.strip():
-        return _error_response(
-            status=502,
-            message="STT-провайдер не вернул текст распознавания.",
-            error_type="upstream_error",
-            code="upstream_error",
-        )
-    return _json_response(
-        {
-            "text": text_raw.strip(),
-            "model": "whisper-1",
-            "language": language,
-        }
-    )
 
 
 async def handle_ui_chat_send(request: web.Request) -> web.Response:
