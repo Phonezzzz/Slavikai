@@ -115,7 +115,11 @@ test: venv
 	"$(VENV_PY)" -m pytest $(PYTEST_ARGS)
 
 .PHONY: check
-check: lint format-check type ui-type test
+check: check-no-legacy-ui lint format-check type ui-type test
+
+.PHONY: check-no-legacy-ui
+check-no-legacy-ui:
+	./scripts/check_no_legacy_ui.sh
 
 .PHONY: guard-main
 guard-main:
