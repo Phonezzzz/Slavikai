@@ -621,16 +621,42 @@ export function Settings({
     setProviderRuntimeLoading(true);
     setProviderRuntimeError(null);
     try {
-      const [settingsResponse, providerRuntimeResponse] = await Promise.all([
+      const requests: Promise<Response>[] = [
         fetch('/ui/api/settings', { headers: requestHeaders }),
         fetch('/ui/api/models', { headers: requestHeaders }),
-      ]);
+      ];
+      if (sessionId) {
+        requests.push(fetch('/ui/api/workspace/root', { headers: requestHeaders }));
+      }
+      const [settingsResponse, providerRuntimeResponse, sessionRootResponse] = await Promise.all(requests);
       const settingsPayload: unknown = await settingsResponse.json();
       if (!settingsResponse.ok) {
         throw new Error(extractErrorMessage(settingsPayload, 'Failed to load settings.'));
       }
       const parsed = parseSettingsPayload(settingsPayload);
       applyParsedSettings(parsed);
+      if (sessionId) {
+        if (!sessionRootResponse) {
+          throw new Error('Failed to load session policy.');
+        }
+        const rootPayload: unknown = await sessionRootResponse.json();
+        if (!sessionRootResponse.ok) {
+          throw new Error(extractErrorMessage(rootPayload, 'Failed to load session policy.'));
+        }
+        const policyRaw = (rootPayload as { policy?: unknown }).policy;
+        if (policyRaw && typeof policyRaw === 'object') {
+          const profileRaw = (policyRaw as { profile?: unknown }).profile;
+          const yoloArmedRaw = (policyRaw as { yolo_armed?: unknown }).yolo_armed;
+          const yoloArmedAtRaw = (policyRaw as { yolo_armed_at?: unknown }).yolo_armed_at;
+          if (isPolicyProfile(profileRaw)) {
+            setPolicyProfile(profileRaw);
+          }
+          setYoloArmed(yoloArmedRaw === true);
+          setYoloArmedAt(
+            typeof yoloArmedAtRaw === 'string' && yoloArmedAtRaw.trim() ? yoloArmedAtRaw.trim() : null,
+          );
+        }
+      }
       const providerRuntimePayload: unknown = await providerRuntimeResponse.json();
       if (!providerRuntimeResponse.ok) {
         throw new Error(extractErrorMessage(providerRuntimePayload, 'Failed to load provider runtime status.'));
@@ -834,6 +860,10 @@ export function Settings({
     if (loading || saving || savingTools || savingPolicy) {
       return;
     }
+    if (!sessionId) {
+      setStatus('Выберите активную сессию для применения session policy.');
+      return;
+    }
     const wantsYolo = policyProfile === 'yolo';
     if (wantsYolo && yoloConfirmText.trim().toUpperCase() !== 'YOLO') {
       setStatus('Для YOLO введите подтверждение: YOLO');
@@ -846,32 +876,41 @@ export function Settings({
     setSavingPolicy(true);
     setStatus(null);
     try {
-      const response = await fetch('/ui/api/settings', {
+      const response = await fetch('/ui/api/session/policy', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...requestHeaders,
         },
         body: JSON.stringify({
-          policy: {
-            profile: policyProfile,
-            yolo_armed: wantsYolo,
-            yolo_confirm: wantsYolo ? true : undefined,
-            yolo_confirm_text: wantsYolo ? yoloConfirmText.trim() : undefined,
-          },
+          policy_profile: policyProfile,
+          confirm_yolo: wantsYolo ? true : undefined,
         }),
       });
       const payload: unknown = await response.json();
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to apply policy profile.'));
       }
-      const parsed = parseSettingsPayload(payload);
-      applyParsedSettings(parsed);
+      const policy = (payload as { policy?: unknown }).policy;
+      if (!policy || typeof policy !== 'object') {
+        throw new Error('Invalid policy response.');
+      }
+      const profileRaw = (policy as { profile?: unknown }).profile;
+      const yoloArmedRaw = (policy as { yolo_armed?: unknown }).yolo_armed;
+      const yoloArmedAtRaw = (policy as { yolo_armed_at?: unknown }).yolo_armed_at;
+      if (!isPolicyProfile(profileRaw)) {
+        throw new Error('Invalid policy profile in response.');
+      }
+      setPolicyProfile(profileRaw);
+      setYoloArmed(yoloArmedRaw === true);
+      setYoloArmedAt(
+        typeof yoloArmedAtRaw === 'string' && yoloArmedAtRaw.trim() ? yoloArmedAtRaw.trim() : null,
+      );
       if (!wantsYolo) {
         setYoloConfirmText('');
         setYoloSecondConfirm(false);
       }
-      setStatus(`Policy profile updated: ${policyProfileLabel(parsed.policyProfile)}.`);
+      setStatus(`Policy profile updated: ${policyProfileLabel(profileRaw)}.`);
       onSaved?.();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to apply policy profile.';
@@ -1274,7 +1313,7 @@ export function Settings({
                       </p>
                       <section className="space-y-3 border border-zinc-800 p-4">
                         <div>
-                          <h3 className="text-sm font-medium text-zinc-100">Policy profile</h3>
+                          <h3 className="text-sm font-medium text-zinc-100">Session policy profile</h3>
                           <p className="mt-1 text-xs text-zinc-400">
                             Определяет базовые ограничения доступа: Sandbox / Index / YOLO.
                           </p>
@@ -1294,7 +1333,7 @@ export function Settings({
                             onClick={() => {
                               void handleApplyPolicy();
                             }}
-                            disabled={savingPolicy || saving || loading || savingTools}
+                            disabled={savingPolicy || saving || loading || savingTools || !sessionId}
                             className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
                           >
                             {savingPolicy ? 'Applying...' : 'Apply policy'}
