@@ -5,14 +5,14 @@ from aiohttp import web
 
 def register_routes(app: web.Application) -> None:
     from server import http_api as api
-    from server.http.handlers import plan, sessions, workflow, workspace
+    from server.http.handlers import plan, sessions, slavik, workflow, workspace
 
     app.router.add_get("/v1/models", api.handle_models)
     app.router.add_post("/v1/chat/completions", api.handle_chat_completions)
-    app.router.add_get("/slavik/trace/{trace_id}", api.handle_trace)
-    app.router.add_get("/slavik/tool-calls/{trace_id}", api.handle_tool_calls)
-    app.router.add_post("/slavik/feedback", api.handle_feedback)
-    app.router.add_post("/slavik/approve-session", api.handle_approve_session)
+    app.router.add_get("/slavik/trace/{trace_id}", slavik.handle_trace)
+    app.router.add_get("/slavik/tool-calls/{trace_id}", slavik.handle_tool_calls)
+    app.router.add_post("/slavik/feedback", slavik.handle_feedback)
+    app.router.add_post("/slavik/approve-session", slavik.handle_approve_session)
     app.router.add_post(
         "/slavik/admin/settings/security",
         api.handle_admin_security_settings_update,
