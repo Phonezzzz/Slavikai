@@ -5,7 +5,7 @@ from aiohttp import web
 
 def register_routes(app: web.Application) -> None:
     from server import http_api as api
-    from server.http.handlers import plan, sessions, slavik, workflow, workspace
+    from server.http.handlers import events, memory, plan, sessions, slavik, workflow, workspace
 
     app.router.add_get("/v1/models", api.handle_models)
     app.router.add_post("/v1/chat/completions", api.handle_chat_completions)
@@ -32,10 +32,10 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/plan/cancel", plan.handle_ui_plan_cancel)
     app.router.add_get("/ui/api/settings", api.handle_ui_settings)
     app.router.add_post("/ui/api/settings", api.handle_ui_settings_update)
-    app.router.add_get("/ui/api/memory/conflicts", api.handle_ui_memory_conflicts)
+    app.router.add_get("/ui/api/memory/conflicts", memory.handle_ui_memory_conflicts)
     app.router.add_post(
         "/ui/api/memory/conflicts/resolve",
-        api.handle_ui_memory_conflicts_resolve,
+        memory.handle_ui_memory_conflicts_resolve,
     )
     app.router.add_post("/ui/api/stt/transcribe", api.handle_ui_stt_transcribe)
     app.router.add_get("/ui/api/settings/chats/export", sessions.handle_ui_chats_export)
@@ -93,4 +93,4 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/workspace/run", workspace.handle_ui_workspace_run)
     app.router.add_post("/ui/api/chat/send", api.handle_ui_chat_send)
     app.router.add_post("/ui/api/tools/project", api.handle_ui_project_command)
-    app.router.add_get("/ui/api/events/stream", api.handle_ui_events_stream)
+    app.router.add_get("/ui/api/events/stream", events.handle_ui_events_stream)
