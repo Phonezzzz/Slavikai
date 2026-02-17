@@ -60,6 +60,12 @@ from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
 from memory.vector_index import VectorIndex
+from server.http.common.responses import (
+    error_response as _error_response,
+)
+from server.http.common.responses import (
+    json_response as _json_response,
+)
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession, SQLiteUISessionStorage, UISessionStorage
@@ -224,27 +230,6 @@ _ARTIFACT_FILE_EXTENSIONS: Final[set[str]] = {
     "yaml",
     "yml",
 }
-_EXT_TO_TYPE: Final[dict[str, str]] = {
-    "bash": "SH",
-    "c": "TXT",
-    "cpp": "TXT",
-    "py": "PY",
-    "js": "JS",
-    "jsx": "JS",
-    "ts": "TS",
-    "tsx": "TS",
-    "json": "JSON",
-    "html": "HTML",
-    "css": "CSS",
-    "md": "MD",
-    "txt": "TXT",
-    "sh": "SH",
-    "yaml": "TXT",
-    "yml": "TXT",
-    "toml": "TXT",
-    "xml": "TXT",
-    "sql": "TXT",
-}
 _EXT_TO_MIME: Final[dict[str, str]] = {
     "bash": "text/x-shellscript",
     "c": "text/plain",
@@ -275,7 +260,6 @@ UI_DECISION_STATUSES: Final[set[str]] = {
     "resolved",
 }
 UI_DECISION_RESPONSES: Final[set[str]] = {
-    "approve",
     "approve_once",
     "approve_session",
     "edit_and_approve",
@@ -423,29 +407,6 @@ class AgentProtocol(Protocol):
         labels: list[FeedbackLabel],
         free_text: str | None,
     ) -> None: ...
-
-
-def _json_response(payload: dict[str, JSONValue], *, status: int = 200) -> web.Response:
-    return web.json_response(payload, status=status)
-
-
-def _error_response(
-    *,
-    status: int,
-    message: str,
-    error_type: str,
-    code: str,
-    trace_id: str | None = None,
-    details: dict[str, JSONValue] | None = None,
-) -> web.Response:
-    error_payload: dict[str, JSONValue] = {
-        "message": message,
-        "type": error_type,
-        "code": code,
-        "trace_id": trace_id,
-        "details": details or {},
-    }
-    return _json_response({"error": error_payload}, status=status)
 
 
 def _model_not_selected_response() -> web.Response:
@@ -1476,25 +1437,6 @@ def _normalize_task_payload(raw: object) -> dict[str, JSONValue] | None:
     }
 
 
-def _build_stop_text(*, happened: str, why: str, steps: list[str], code: str) -> str:
-    next_steps = steps[:3] if steps else ["Повторите запрос после корректировки режима."]
-    lines = [
-        f"Что случилось: {happened}",
-        f"Почему: {why}",
-        "Что делать дальше:",
-    ]
-    for item in next_steps:
-        lines.append(f"- {item}")
-    report = {
-        "route": "chat",
-        "trace_id": None,
-        "stop_reason_code": code,
-        "next_steps": next_steps,
-    }
-    lines.append(f"MWV_REPORT_JSON={json.dumps(report, ensure_ascii=False)}")
-    return "\n".join(lines)
-
-
 def _normalize_tools_state_payload(raw: object) -> dict[str, bool]:
     if not isinstance(raw, dict):
         return {}
@@ -1591,13 +1533,6 @@ async def _apply_agent_runtime_state(
             ),
         )
     return mode, active_plan, active_task
-
-
-def _request_likely_action_intent(user_input: str) -> bool:
-    normalized = user_input.strip()
-    if not normalized:
-        return False
-    return bool(_ASK_ACTION_INTENT_PATTERN.search(normalized))
 
 
 def _decision_workflow_context(
@@ -2212,12 +2147,6 @@ def _safe_zip_entry_name(file_name: str) -> str:
             safe = f"file{safe}"
         safe_parts.append(safe or "file")
     return "/".join(safe_parts)
-
-
-def _artifact_type_from_ext(ext: str | None) -> str:
-    if not ext:
-        return "TXT"
-    return _EXT_TO_TYPE.get(ext.lower(), "TXT")
 
 
 def _artifact_mime_from_ext(ext: str | None) -> str:
@@ -2977,14 +2906,6 @@ def _build_settings_payload() -> dict[str, JSONValue]:
     }
 
 
-def _normalize_import_status(raw: object) -> str:
-    if isinstance(raw, str):
-        normalized = raw.strip().lower()
-        if normalized in {"ok", "busy", "error"}:
-            return normalized
-    return "ok"
-
-
 def _parse_imported_message(raw: object) -> dict[str, JSONValue] | None:
     if not isinstance(raw, dict):
         return None
@@ -3544,86 +3465,6 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
             "session_id": session_id,
             "tools_state": effective_tools,
             "policy": effective_policy,
-            "workspace_root": str(workspace_root),
-        }
-    )
-    response.headers[UI_SESSION_HEADER] = session_id
-    return response
-
-
-async def handle_ui_session_policy(request: web.Request) -> web.Response:
-    hub: UIHub = request.app["ui_hub"]
-    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
-    if session_error is not None:
-        return session_error
-    if session_id is None:
-        return _session_forbidden_response()
-    try:
-        payload = await request.json()
-    except Exception as exc:  # noqa: BLE001
-        return _error_response(
-            status=400,
-            message=f"Некорректный JSON: {exc}",
-            error_type="invalid_request_error",
-            code="invalid_json",
-        )
-    if not isinstance(payload, dict):
-        return _error_response(
-            status=400,
-            message="JSON должен быть объектом.",
-            error_type="invalid_request_error",
-            code="invalid_json",
-        )
-    policy_profile_raw = payload.get("policy_profile")
-    if not isinstance(policy_profile_raw, str) or not policy_profile_raw.strip():
-        return _error_response(
-            status=400,
-            message="policy_profile обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-    policy_profile = policy_profile_raw.strip().lower()
-    if policy_profile not in POLICY_PROFILES:
-        return _error_response(
-            status=400,
-            message="policy_profile должен быть sandbox|index|yolo.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-    if policy_profile == "yolo" and payload.get("confirm_yolo") is not True:
-        return _error_response(
-            status=409,
-            message="Для policy_profile=yolo требуется confirm_yolo=true.",
-            error_type="invalid_request_error",
-            code="YOLO_CONFIRM_REQUIRED",
-        )
-    workspace_root = await _workspace_root_for_session(hub, session_id)
-    try:
-        _resolve_workspace_root_candidate(str(workspace_root), policy_profile=policy_profile)
-    except ValueError as exc:
-        return _error_response(
-            status=409,
-            message=str(exc),
-            error_type="invalid_request_error",
-            code="policy_root_incompatible",
-            details={
-                "session_id": session_id,
-                "workspace_root": str(workspace_root),
-                "policy_profile": policy_profile,
-            },
-        )
-    yolo_armed = policy_profile == "yolo"
-    updated = await hub.set_session_policy(
-        session_id,
-        profile=policy_profile,
-        yolo_armed=yolo_armed,
-        yolo_armed_at=(_utc_now_iso() if yolo_armed else None),
-    )
-    response = _json_response(
-        {
-            "ok": True,
-            "session_id": session_id,
-            "policy": updated,
             "workspace_root": str(workspace_root),
         }
     )
@@ -6822,13 +6663,15 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     if not isinstance(choice_raw, str) or choice_raw not in UI_DECISION_RESPONSES:
         return _error_response(
             status=400,
-            message="choice должен быть approve|reject.",
+            message=(
+                "choice должен быть approve_once|approve_session|edit_and_approve|edit_plan|reject."
+            ),
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
     session_id = session_id_raw.strip()
     decision_id = decision_id_raw.strip()
-    choice = "approve_once" if choice_raw == "approve" else choice_raw
+    choice = choice_raw
     edited_action_raw = payload.get("edited_action")
     edited_plan_raw = payload.get("edited_plan")
     if edited_action_raw is not None and not isinstance(edited_action_raw, dict):
@@ -8910,74 +8753,9 @@ def create_app(
     app["ui_hub"] = UIHub(storage=resolved_ui_storage)
     dist_path = Path(__file__).resolve().parent.parent / "ui" / "dist"
     app["ui_dist_path"] = dist_path
-    app.router.add_get("/v1/models", handle_models)
-    app.router.add_post("/v1/chat/completions", handle_chat_completions)
-    app.router.add_get("/slavik/trace/{trace_id}", handle_trace)
-    app.router.add_get("/slavik/tool-calls/{trace_id}", handle_tool_calls)
-    app.router.add_post("/slavik/feedback", handle_feedback)
-    app.router.add_post("/slavik/approve-session", handle_approve_session)
-    app.router.add_post("/slavik/admin/settings/security", handle_admin_security_settings_update)
-    app.router.add_get("/", handle_ui_index)
-    app.router.add_get("/workspace", handle_workspace_index)
-    app.router.add_get("/ui", handle_ui_redirect)
-    app.router.add_get("/ui/", handle_ui_index)
-    app.router.add_get("/ui/workspace", handle_workspace_index)
-    app.router.add_get("/ui/api/status", handle_ui_status)
-    app.router.add_get("/ui/api/state", handle_ui_state)
-    app.router.add_post("/ui/api/mode", handle_ui_mode)
-    app.router.add_post("/ui/api/plan/draft", handle_ui_plan_draft)
-    app.router.add_post("/ui/api/plan/approve", handle_ui_plan_approve)
-    app.router.add_post("/ui/api/plan/edit", handle_ui_plan_edit)
-    app.router.add_post("/ui/api/plan/execute", handle_ui_plan_execute)
-    app.router.add_post("/ui/api/plan/cancel", handle_ui_plan_cancel)
-    app.router.add_get("/ui/api/settings", handle_ui_settings)
-    app.router.add_post("/ui/api/settings", handle_ui_settings_update)
-    app.router.add_get("/ui/api/memory/conflicts", handle_ui_memory_conflicts)
-    app.router.add_post("/ui/api/memory/conflicts/resolve", handle_ui_memory_conflicts_resolve)
-    app.router.add_post("/ui/api/stt/transcribe", handle_ui_stt_transcribe)
-    app.router.add_get("/ui/api/settings/chats/export", handle_ui_chats_export)
-    app.router.add_post("/ui/api/settings/chats/import", handle_ui_chats_import)
-    app.router.add_get("/ui/api/models", handle_ui_models)
-    app.router.add_get("/ui/api/folders", handle_ui_folders_list)
-    app.router.add_post("/ui/api/folders", handle_ui_folders_create)
-    app.router.add_get("/ui/api/sessions", handle_ui_sessions_list)
-    app.router.add_post("/ui/api/sessions", handle_ui_sessions_create)
-    app.router.add_get("/ui/api/sessions/{session_id}", handle_ui_session_get)
-    app.router.add_get("/ui/api/sessions/{session_id}/history", handle_ui_session_history_get)
-    app.router.add_get("/ui/api/sessions/{session_id}/output", handle_ui_session_output_get)
-    app.router.add_get("/ui/api/sessions/{session_id}/files", handle_ui_session_files_get)
-    app.router.add_post("/ui/api/decision/respond", handle_ui_decision_respond)
-    app.router.add_get(
-        "/ui/api/sessions/{session_id}/files/download",
-        handle_ui_session_file_download,
-    )
-    app.router.add_get(
-        "/ui/api/sessions/{session_id}/artifacts/download-all",
-        handle_ui_session_artifacts_download_all,
-    )
-    app.router.add_get(
-        "/ui/api/sessions/{session_id}/artifacts/{artifact_id}/download",
-        handle_ui_session_artifact_download,
-    )
-    app.router.add_delete("/ui/api/sessions/{session_id}", handle_ui_session_delete)
-    app.router.add_patch("/ui/api/sessions/{session_id}/title", handle_ui_session_title_update)
-    app.router.add_put("/ui/api/sessions/{session_id}/folder", handle_ui_session_folder_update)
-    app.router.add_post("/ui/api/session-model", handle_ui_session_model)
-    app.router.add_get("/ui/api/session/security", handle_ui_session_security_get)
-    app.router.add_post("/ui/api/session/security", handle_ui_session_security_post)
-    app.router.add_post("/ui/api/session/policy", handle_ui_session_policy)
-    app.router.add_get("/ui/api/workspace/root", handle_ui_workspace_root_get)
-    app.router.add_get("/ui/api/workspace/settings", handle_ui_workspace_root_get)
-    app.router.add_post("/ui/api/workspace/root/select", handle_ui_workspace_root_select)
-    app.router.add_post("/ui/api/workspace/index", handle_ui_workspace_index_run)
-    app.router.add_get("/ui/api/workspace/git-diff", handle_ui_workspace_git_diff)
-    app.router.add_get("/ui/api/workspace/tree", handle_ui_workspace_tree)
-    app.router.add_get("/ui/api/workspace/file", handle_ui_workspace_file_get)
-    app.router.add_put("/ui/api/workspace/file", handle_ui_workspace_file_put)
-    app.router.add_post("/ui/api/workspace/run", handle_ui_workspace_run)
-    app.router.add_post("/ui/api/chat/send", handle_ui_chat_send)
-    app.router.add_post("/ui/api/tools/project", handle_ui_project_command)
-    app.router.add_get("/ui/api/events/stream", handle_ui_events_stream)
+    from server.http.routes import register_routes
+
+    register_routes(app)
     assets_path = dist_path / "assets"
     if assets_path.exists():
         app.router.add_static("/ui/assets/", assets_path)

@@ -2367,7 +2367,7 @@ export default function App() {
       ? `${normalizedRepoUrl} --branch ${normalizedBranch}`
       : normalizedRepoUrl;
 
-    const response = await fetch('/ui/api/project/command', {
+    const response = await fetch('/ui/api/tools/project', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
