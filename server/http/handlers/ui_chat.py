@@ -8,6 +8,14 @@ from typing import Literal
 from aiohttp import web
 
 from config.model_whitelist import ModelNotAllowedError
+from server.http.common.chat_payload import (
+    _extract_decision_payload,
+    _normalize_trace_id,
+    _parse_ui_chat_attachments,
+    _request_likely_web_intent,
+    _split_response_and_report,
+    _ui_messages_to_llm,
+)
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     CANVAS_STATUS_CHARS_STEP,
@@ -22,7 +30,6 @@ from server.http_api import (
     _canvas_summary_title_from_artifact,
     _decision_is_pending_blocking,
     _decision_workflow_context,
-    _extract_decision_payload,
     _extract_files_from_tool_calls,
     _extract_named_files_from_output,
     _model_not_allowed_response,
@@ -30,9 +37,7 @@ from server.http_api import (
     _normalize_mode_value,
     _normalize_plan_payload,
     _normalize_task_payload,
-    _normalize_trace_id,
     _normalize_ui_decision,
-    _parse_ui_chat_attachments,
     _publish_agent_activity,
     _publish_canvas_stream,
     _publish_chat_stream_delta,
@@ -40,7 +45,6 @@ from server.http_api import (
     _publish_chat_stream_from_text,
     _publish_chat_stream_start,
     _request_likely_canvas,
-    _request_likely_web_intent,
     _resolve_agent,
     _resolve_provider_api_key,
     _resolve_ui_session_id_for_principal,
@@ -49,11 +53,9 @@ from server.http_api import (
     _set_current_plan_step_status,
     _should_render_result_in_canvas,
     _split_chat_stream_chunks,
-    _split_response_and_report,
     _stream_preview_indicates_canvas,
     _stream_preview_ready_for_chat,
     _tool_calls_for_trace_id,
-    _ui_messages_to_llm,
 )
 from server.ui_hub import UIHub
 from shared.models import JSONValue

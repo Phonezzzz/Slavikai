@@ -6,6 +6,12 @@ from aiohttp import web
 
 from config.model_whitelist import ModelNotAllowedError
 from server import http_api as api
+from server.http.common.chat_payload import (
+    _extract_decision_payload,
+    _normalize_trace_id,
+    _split_response_and_report,
+    _ui_messages_to_llm,
+)
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     UI_GITHUB_REQUIRED_CATEGORIES,
@@ -17,13 +23,11 @@ from server.http_api import (
     _build_ui_approval_decision,
     _decision_is_pending_blocking,
     _decision_workflow_context,
-    _extract_decision_payload,
     _model_not_allowed_response,
     _model_not_selected_response,
     _normalize_mode_value,
     _normalize_plan_payload,
     _normalize_task_payload,
-    _normalize_trace_id,
     _normalize_ui_decision,
     _parse_github_import_args,
     _publish_agent_activity,
@@ -33,8 +37,6 @@ from server.http_api import (
     _serialize_approval_request,
     _session_forbidden_response,
     _set_current_plan_step_status,
-    _split_response_and_report,
-    _ui_messages_to_llm,
 )
 from server.ui_hub import UIHub
 from shared.models import JSONValue
