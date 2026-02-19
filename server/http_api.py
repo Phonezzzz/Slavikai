@@ -49,7 +49,7 @@ from core.mwv.models import MWV_REPORT_PREFIX
 from core.tracer import TRACE_LOG, TraceRecord
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
-from server.http.common import github_import, workspace_index, workspace_paths
+from server.http.common import github_import, workflow_state, workspace_index, workspace_paths
 from server.http.common.responses import (
     error_response as _error_response,
 )
@@ -1278,172 +1278,47 @@ def _utc_now_iso() -> str:
 
 
 def _normalize_mode_value(value: object, *, default: str = "ask") -> str:
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in SESSION_MODES:
-            return normalized
-    return default
+    return workflow_state.normalize_mode_value(
+        value,
+        default=default,
+        session_modes=SESSION_MODES,
+    )
 
 
 def _normalize_string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    normalized: list[str] = []
-    for item in value:
-        if isinstance(item, str):
-            cleaned = item.strip()
-            if cleaned:
-                normalized.append(cleaned)
-    return normalized
+    return workflow_state.normalize_string_list(value)
 
 
 def _normalize_plan_step(step: object) -> dict[str, JSONValue] | None:
-    if not isinstance(step, dict):
-        return None
-    step_id_raw = step.get("step_id")
-    title_raw = step.get("title")
-    description_raw = step.get("description")
-    if not isinstance(step_id_raw, str) or not step_id_raw.strip():
-        return None
-    if not isinstance(title_raw, str) or not title_raw.strip():
-        return None
-    if not isinstance(description_raw, str):
-        return None
-    status_raw = step.get("status")
-    status = (
-        status_raw if isinstance(status_raw, str) and status_raw in PLAN_STEP_STATUSES else "todo"
+    return workflow_state.normalize_plan_step(
+        step,
+        plan_step_statuses=PLAN_STEP_STATUSES,
     )
-    evidence_raw = step.get("evidence")
-    evidence = _normalize_json_value(evidence_raw) if isinstance(evidence_raw, dict) else None
-    return {
-        "step_id": step_id_raw.strip(),
-        "title": title_raw.strip(),
-        "description": description_raw,
-        "allowed_tool_kinds": _normalize_string_list(step.get("allowed_tool_kinds")),
-        "acceptance_checks": _normalize_string_list(step.get("acceptance_checks")),
-        "status": status,
-        "evidence": evidence,
-    }
 
 
 def _plan_hash_payload(plan: dict[str, JSONValue]) -> str:
-    steps_raw = plan.get("steps")
-    step_items = steps_raw if isinstance(steps_raw, list) else []
-    payload = {
-        "goal": plan.get("goal"),
-        "scope_in": plan.get("scope_in"),
-        "scope_out": plan.get("scope_out"),
-        "assumptions": plan.get("assumptions"),
-        "inputs_needed": plan.get("inputs_needed"),
-        "steps": [
-            {
-                "step_id": item.get("step_id"),
-                "title": item.get("title"),
-                "description": item.get("description"),
-                "allowed_tool_kinds": item.get("allowed_tool_kinds"),
-                "acceptance_checks": item.get("acceptance_checks"),
-            }
-            for item in step_items
-            if isinstance(item, dict)
-        ],
-        "exit_criteria": plan.get("exit_criteria"),
-    }
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return workflow_state.plan_hash_payload(plan)
 
 
 def _normalize_plan_payload(raw: object) -> dict[str, JSONValue] | None:
-    if not isinstance(raw, dict):
-        return None
-    plan_id_raw = raw.get("plan_id")
-    if not isinstance(plan_id_raw, str) or not plan_id_raw.strip():
-        return None
-    status_raw = raw.get("status")
-    status = status_raw if isinstance(status_raw, str) and status_raw in PLAN_STATUSES else "draft"
-    goal_raw = raw.get("goal")
-    goal = goal_raw if isinstance(goal_raw, str) else ""
-    created_at_raw = raw.get("created_at")
-    updated_at_raw = raw.get("updated_at")
-    now = _utc_now_iso()
-    steps_raw = raw.get("steps")
-    steps: list[dict[str, JSONValue]] = []
-    if isinstance(steps_raw, list):
-        for item in steps_raw:
-            normalized = _normalize_plan_step(item)
-            if normalized is not None:
-                steps.append(normalized)
-    plan_revision_raw = raw.get("plan_revision")
-    plan_revision = (
-        plan_revision_raw if isinstance(plan_revision_raw, int) and plan_revision_raw > 0 else 1
+    return workflow_state.normalize_plan_payload(
+        raw,
+        plan_statuses=PLAN_STATUSES,
+        plan_step_statuses=PLAN_STEP_STATUSES,
+        utc_now_iso=_utc_now_iso,
+        normalize_plan_step_fn=_normalize_plan_step,
+        normalize_string_list_fn=_normalize_string_list,
+        normalize_json_value_fn=_normalize_json_value,
+        plan_hash_payload_fn=_plan_hash_payload,
     )
-    normalized_plan: dict[str, JSONValue] = {
-        "plan_id": plan_id_raw.strip(),
-        "plan_hash": "",
-        "plan_revision": plan_revision,
-        "status": status,
-        "goal": goal,
-        "scope_in": _normalize_string_list(raw.get("scope_in")),
-        "scope_out": _normalize_string_list(raw.get("scope_out")),
-        "assumptions": _normalize_string_list(raw.get("assumptions")),
-        "inputs_needed": _normalize_string_list(raw.get("inputs_needed")),
-        "audit_log": (
-            [_normalize_json_value(item) for item in raw.get("audit_log", [])]
-            if isinstance(raw.get("audit_log"), list)
-            else []
-        ),
-        "steps": steps,
-        "exit_criteria": _normalize_string_list(raw.get("exit_criteria")),
-        "created_at": (
-            created_at_raw if isinstance(created_at_raw, str) and created_at_raw.strip() else now
-        ),
-        "updated_at": (
-            updated_at_raw if isinstance(updated_at_raw, str) and updated_at_raw.strip() else now
-        ),
-        "approved_at": raw.get("approved_at") if isinstance(raw.get("approved_at"), str) else None,
-        "approved_by": raw.get("approved_by") if isinstance(raw.get("approved_by"), str) else None,
-    }
-    normalized_plan["plan_hash"] = _plan_hash_payload(normalized_plan)
-    return normalized_plan
 
 
 def _normalize_task_payload(raw: object) -> dict[str, JSONValue] | None:
-    if not isinstance(raw, dict):
-        return None
-    task_id_raw = raw.get("task_id")
-    plan_id_raw = raw.get("plan_id")
-    plan_hash_raw = raw.get("plan_hash")
-    if not isinstance(task_id_raw, str) or not task_id_raw.strip():
-        return None
-    if not isinstance(plan_id_raw, str) or not plan_id_raw.strip():
-        return None
-    if not isinstance(plan_hash_raw, str) or not plan_hash_raw.strip():
-        return None
-    status_raw = raw.get("status")
-    status = (
-        status_raw if isinstance(status_raw, str) and status_raw in TASK_STATUSES else "running"
+    return workflow_state.normalize_task_payload(
+        raw,
+        task_statuses=TASK_STATUSES,
+        utc_now_iso=_utc_now_iso,
     )
-    current_step_raw = raw.get("current_step_id")
-    current_step = (
-        current_step_raw.strip()
-        if isinstance(current_step_raw, str) and current_step_raw.strip()
-        else None
-    )
-    started_at_raw = raw.get("started_at")
-    updated_at_raw = raw.get("updated_at")
-    now = _utc_now_iso()
-    return {
-        "task_id": task_id_raw.strip(),
-        "plan_id": plan_id_raw.strip(),
-        "plan_hash": plan_hash_raw.strip(),
-        "current_step_id": current_step,
-        "status": status,
-        "started_at": (
-            started_at_raw if isinstance(started_at_raw, str) and started_at_raw.strip() else now
-        ),
-        "updated_at": (
-            updated_at_raw if isinstance(updated_at_raw, str) and updated_at_raw.strip() else now
-        ),
-    }
 
 
 def _normalize_tools_state_payload(raw: object) -> dict[str, bool]:
@@ -1501,16 +1376,11 @@ async def _load_effective_session_security(
 
 
 def _plan_revision_value(plan: dict[str, JSONValue]) -> int:
-    raw = plan.get("plan_revision")
-    if isinstance(raw, int) and raw > 0:
-        return raw
-    return 1
+    return workflow_state.plan_revision_value(plan)
 
 
 def _increment_plan_revision(plan: dict[str, JSONValue]) -> int:
-    next_value = _plan_revision_value(plan) + 1
-    plan["plan_revision"] = next_value
-    return next_value
+    return workflow_state.increment_plan_revision(plan)
 
 
 async def _apply_agent_runtime_state(
@@ -1550,31 +1420,11 @@ def _decision_workflow_context(
     active_plan: dict[str, JSONValue] | None,
     active_task: dict[str, JSONValue] | None,
 ) -> dict[str, JSONValue]:
-    step_id: str | None = None
-    task_id: str | None = None
-    if isinstance(active_task, dict):
-        step_raw = active_task.get("current_step_id")
-        task_raw = active_task.get("task_id")
-        if isinstance(step_raw, str) and step_raw.strip():
-            step_id = step_raw.strip()
-        if isinstance(task_raw, str) and task_raw.strip():
-            task_id = task_raw.strip()
-    plan_id: str | None = None
-    plan_hash: str | None = None
-    if isinstance(active_plan, dict):
-        plan_id_raw = active_plan.get("plan_id")
-        plan_hash_raw = active_plan.get("plan_hash")
-        if isinstance(plan_id_raw, str) and plan_id_raw.strip():
-            plan_id = plan_id_raw.strip()
-        if isinstance(plan_hash_raw, str) and plan_hash_raw.strip():
-            plan_hash = plan_hash_raw.strip()
-    return {
-        "mode": mode,
-        "plan_id": plan_id,
-        "plan_hash": plan_hash,
-        "task_id": task_id,
-        "step_id": step_id,
-    }
+    return workflow_state.decision_workflow_context(
+        mode=mode,
+        active_plan=active_plan,
+        active_task=active_task,
+    )
 
 
 async def _set_current_plan_step_status(
@@ -2000,18 +1850,7 @@ def _decision_mismatch_response(
 
 
 def _normalize_json_value(value: object) -> JSONValue:
-    if value is None:
-        return None
-    if isinstance(value, (str, bool, int, float)):
-        return value
-    if isinstance(value, list):
-        return [_normalize_json_value(item) for item in value]
-    if isinstance(value, dict):
-        normalized: dict[str, JSONValue] = {}
-        for key, item in value.items():
-            normalized[str(key)] = _normalize_json_value(item)
-        return normalized
-    return str(value)
+    return workflow_state.normalize_json_value(value)
 
 
 def _split_response_and_report(response_text: str) -> tuple[str, dict[str, JSONValue] | None]:
