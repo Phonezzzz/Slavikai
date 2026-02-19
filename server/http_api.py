@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
@@ -44,6 +42,7 @@ from server.http.common import (
     workflow_state,
     workspace_index,
     workspace_paths,
+    workspace_runtime,
 )
 from server.http.common import (
     streaming as _streaming,
@@ -427,39 +426,21 @@ def _save_memory_config_runtime(config: MemoryConfig) -> None:
 
 
 def _resolve_workspace_file(path_raw: str) -> Path:
-    normalized = path_raw.strip()
-    if not normalized:
-        raise ValueError("path required")
-    candidate = (WORKSPACE_ROOT / normalized).resolve()
-    try:
-        candidate.relative_to(WORKSPACE_ROOT)
-    except ValueError as exc:
-        raise ValueError("path outside workspace") from exc
-    if not candidate.exists() or not candidate.is_file():
-        raise FileNotFoundError("file not found")
-    if candidate.stat().st_size > MAX_DOWNLOAD_BYTES:
-        raise ValueError("file too large")
-    return candidate
+    return workspace_runtime._resolve_workspace_file(
+        path_raw,
+        workspace_root=WORKSPACE_ROOT,
+        max_download_bytes=MAX_DOWNLOAD_BYTES,
+    )
 
 
 def _artifact_file_payload(
     artifact: dict[str, JSONValue],
 ) -> tuple[str, str, str]:
-    artifact_kind = artifact.get("artifact_kind")
-    if artifact_kind != "file":
-        raise ValueError("artifact is not file")
-    file_name_raw = artifact.get("file_name")
-    file_content_raw = artifact.get("file_content")
-    file_ext_raw = artifact.get("file_ext")
-    if not isinstance(file_name_raw, str) or not file_name_raw.strip():
-        raise ValueError("artifact file_name missing")
-    if not isinstance(file_content_raw, str):
-        raise ValueError("artifact file_content missing")
-    ext = file_ext_raw.strip().lower() if isinstance(file_ext_raw, str) else ""
-    file_name = _sanitize_download_filename(file_name_raw)
-    inferred_ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-    mime = _artifact_mime_from_ext(ext or inferred_ext)
-    return file_name, file_content_raw, mime
+    return workspace_runtime._artifact_file_payload(
+        artifact,
+        sanitize_download_filename_fn=_sanitize_download_filename,
+        artifact_mime_from_ext_fn=_artifact_mime_from_ext,
+    )
 
 
 def _serialize_approval_request(
@@ -1038,55 +1019,14 @@ def _run_plan_readonly_audit(
     *,
     root: Path,
 ) -> tuple[list[dict[str, JSONValue]], dict[str, int]]:
-    started = time.monotonic()
-    audit_entries: list[dict[str, JSONValue]] = []
-    read_files = 0
-    total_bytes = 0
-    search_calls = 0
-    for current_root, dirs, files in os.walk(root):
-        if time.monotonic() - started > PLAN_AUDIT_TIMEOUT_SECONDS:
-            break
-        dirs[:] = [name for name in dirs if name not in WORKSPACE_INDEX_IGNORED_DIRS]
-        current = Path(current_root)
-        for filename in files:
-            if read_files >= PLAN_AUDIT_MAX_READ_FILES:
-                break
-            if time.monotonic() - started > PLAN_AUDIT_TIMEOUT_SECONDS:
-                break
-            if filename.endswith(".sqlite"):
-                continue
-            full_path = current / filename
-            suffix = full_path.suffix.lower()
-            if suffix and suffix not in WORKSPACE_INDEX_ALLOWED_EXTENSIONS:
-                continue
-            try:
-                raw = full_path.read_bytes()
-            except Exception:  # noqa: BLE001
-                continue
-            if not raw:
-                continue
-            next_size = min(len(raw), 4000)
-            if total_bytes + next_size > PLAN_AUDIT_MAX_TOTAL_BYTES:
-                break
-            preview = raw[:next_size].decode("utf-8", errors="ignore")
-            rel_path = str(full_path.relative_to(root))
-            audit_entries.append(
-                {
-                    "kind": "read_file",
-                    "path": rel_path,
-                    "bytes": next_size,
-                    "preview": preview[:240],
-                }
-            )
-            total_bytes += next_size
-            read_files += 1
-        if read_files >= PLAN_AUDIT_MAX_READ_FILES or total_bytes >= PLAN_AUDIT_MAX_TOTAL_BYTES:
-            break
-    return audit_entries, {
-        "read_files": read_files,
-        "total_bytes": total_bytes,
-        "search_calls": search_calls,
-    }
+    return workspace_runtime._run_plan_readonly_audit(
+        root=root,
+        plan_audit_timeout_seconds=PLAN_AUDIT_TIMEOUT_SECONDS,
+        workspace_index_ignored_dirs=WORKSPACE_INDEX_IGNORED_DIRS,
+        workspace_index_allowed_extensions=WORKSPACE_INDEX_ALLOWED_EXTENSIONS,
+        plan_audit_max_total_bytes=PLAN_AUDIT_MAX_TOTAL_BYTES,
+        plan_audit_max_read_files=PLAN_AUDIT_MAX_READ_FILES,
+    )
 
 
 _build_default_plan_steps = _workflow_runtime.build_default_plan_steps
