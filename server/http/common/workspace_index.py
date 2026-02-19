@@ -4,10 +4,42 @@ import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from memory.vector_index import VectorIndex
 from shared.models import JSONValue
+
+DEFAULT_IGNORED_DIRS: Final[set[str]] = {
+    "venv",
+    "__pycache__",
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".cache",
+}
+DEFAULT_ALLOWED_EXTENSIONS: Final[set[str]] = {
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".json",
+    ".md",
+    ".txt",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".html",
+    ".css",
+    ".sql",
+    ".sh",
+}
+DEFAULT_MAX_FILE_BYTES: Final[int] = 1_000_000
 
 
 def env_flag_enabled(name: str, *, default: bool) -> bool:
