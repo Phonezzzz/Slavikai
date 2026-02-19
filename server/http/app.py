@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from aiohttp import web
 
@@ -16,12 +16,10 @@ from config.http_server_config import (
     resolve_http_server_config,
 )
 from server import http_api as api
+from server.http.common.runtime_contract import AgentProtocol, SessionApprovalStore
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
-
-if TYPE_CHECKING:
-    from server.http_api import AgentProtocol
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
@@ -57,7 +55,7 @@ def create_app(
         app["agent"] = agent
         app["agent_provider"] = LazyAgentProvider.from_instance(agent)
     app["agent_lock"] = asyncio.Lock()
-    app["session_store"] = api.SessionApprovalStore()
+    app["session_store"] = SessionApprovalStore()
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )

@@ -9,10 +9,10 @@ from config.tools_config import DEFAULT_TOOLS_STATE
 from core.approval_policy import ApprovalCategory, ApprovalRequired
 from server import http_api as api
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import AgentProtocol
 from server.http_api import (
     POLICY_PROFILES,
     UI_SESSION_HEADER,
-    AgentProtocol,
     _build_ui_approval_decision,
     _decision_workflow_context,
     _index_workspace_root,
