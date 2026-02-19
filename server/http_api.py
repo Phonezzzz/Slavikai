@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import logging
 import os
@@ -15,12 +14,8 @@ import requests
 from aiohttp import web
 
 from config.http_server_config import (
-    DEFAULT_MAX_REQUEST_BYTES,
     HttpAuthConfig,
     HttpServerConfig,
-    ensure_http_auth_boot_config,
-    resolve_http_auth_config,
-    resolve_http_server_config,
 )
 from config.memory_config import MemoryConfig, load_memory_config, save_memory_config
 from config.tools_config import (
@@ -105,7 +100,7 @@ from server.http.common.responses import (
 )
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
-from server.ui_session_storage import PersistedSession, SQLiteUISessionStorage, UISessionStorage
+from server.ui_session_storage import PersistedSession, UISessionStorage
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
 from shared.sanitize import safe_json_loads
@@ -1596,57 +1591,26 @@ def create_app(
     ui_storage: UISessionStorage | None = None,
     auth_config: HttpAuthConfig | None = None,
 ) -> web.Application:
-    config_max_bytes = max_request_bytes or DEFAULT_MAX_REQUEST_BYTES
-    resolved_auth_config = auth_config or resolve_http_auth_config()
-    app = web.Application(
-        client_max_size=config_max_bytes,
-        middlewares=[auth_gate_middleware],
+    from server.http.app import create_app as _create_app
+
+    return _create_app(
+        agent=agent,
+        max_request_bytes=max_request_bytes,
+        ui_storage=ui_storage,
+        auth_config=auth_config,
     )
-    app["auth_config"] = resolved_auth_config
-    app["http_api_logger"] = logger
-    app["settings_snapshot_builder"] = _build_settings_payload
-    if agent is None:
-
-        def _factory() -> AgentProtocol:
-            module = importlib.import_module("core.agent")
-            agent_factory = getattr(module, "Agent", None)
-            if not callable(agent_factory):
-                raise RuntimeError("Agent class not found in core.agent")
-            return cast(AgentProtocol, agent_factory())
-
-        app["agent"] = None
-        app["agent_provider"] = LazyAgentProvider(factory=_factory)
-    else:
-        app["agent"] = agent
-        app["agent_provider"] = LazyAgentProvider.from_instance(agent)
-    app["agent_lock"] = asyncio.Lock()
-    app["session_store"] = SessionApprovalStore()
-    resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
-        Path(__file__).resolve().parent.parent / ".run" / "ui_sessions.db",
-    )
-    app["ui_hub"] = UIHub(storage=resolved_ui_storage)
-    dist_path = Path(__file__).resolve().parent.parent / "ui" / "dist"
-    app["ui_dist_path"] = dist_path
-    from server.http.routes import register_routes
-
-    register_routes(app)
-    assets_path = dist_path / "assets"
-    if assets_path.exists():
-        app.router.add_static("/ui/assets/", assets_path)
-    else:
-        logger.warning("UI assets directory missing at %s; skipping static assets.", assets_path)
-    return app
 
 
 def run_server(config: HttpServerConfig) -> None:
-    ensure_http_auth_boot_config()
-    app = create_app(max_request_bytes=config.max_request_bytes)
-    web.run_app(app, host=config.host, port=config.port)
+    from server.http.app import run_server as _run_server
+
+    _run_server(config)
 
 
 def main() -> None:
-    config = resolve_http_server_config()
-    run_server(config)
+    from server.http.app import main as _main
+
+    _main()
 
 
 __all__ = ["create_app", "main", "run_server"]
