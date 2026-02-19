@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import time
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
@@ -61,6 +60,9 @@ from server.http.common import (
 )
 from server.http.common import (
     ui_settings as _ui_settings,
+)
+from server.http.common import (
+    workflow_runtime as _workflow_runtime,
 )
 from server.http.common.auth import (
     AUTH_PROTECTED_PREFIXES as AUTH_PROTECTED_PREFIXES,
@@ -678,30 +680,21 @@ def _normalize_task_payload(raw: object) -> dict[str, JSONValue] | None:
 
 
 def _normalize_tools_state_payload(raw: object) -> dict[str, bool]:
-    if not isinstance(raw, dict):
-        return {}
-    normalized: dict[str, bool] = {}
-    for key, value in raw.items():
-        if not isinstance(key, str):
-            continue
-        if key not in DEFAULT_TOOLS_STATE:
-            continue
-        if isinstance(value, bool):
-            normalized[key] = value
-    return normalized
+    return _workflow_runtime.normalize_tools_state_payload(
+        raw,
+        default_tools_state_keys=set(DEFAULT_TOOLS_STATE.keys()),
+    )
 
 
 def _build_effective_tools_state(
     *,
     session_override: dict[str, bool] | None,
 ) -> dict[str, bool]:
-    defaults = _load_tools_state()
-    effective = dict(defaults)
-    if isinstance(session_override, dict):
-        for key, value in session_override.items():
-            if key in DEFAULT_TOOLS_STATE and isinstance(value, bool):
-                effective[key] = value
-    return effective
+    return _workflow_runtime.build_effective_tools_state(
+        session_override=session_override,
+        load_tools_state_fn=_load_tools_state,
+        default_tools_state_keys=set(DEFAULT_TOOLS_STATE.keys()),
+    )
 
 
 async def _load_effective_session_security(
@@ -709,26 +702,14 @@ async def _load_effective_session_security(
     hub: UIHub,
     session_id: str,
 ) -> tuple[dict[str, bool], dict[str, JSONValue]]:
-    policy = await hub.get_session_policy(session_id)
-    profile_raw = policy.get("profile")
-    profile = _normalize_policy_profile(profile_raw)
-    session_tools_override = await hub.get_session_tools_state(session_id)
-    effective_tools = _build_effective_tools_state(session_override=session_tools_override)
-    yolo_armed = policy.get("yolo_armed") is True
-    yolo_armed_at_raw = policy.get("yolo_armed_at")
-    yolo_armed_at = (
-        yolo_armed_at_raw.strip()
-        if isinstance(yolo_armed_at_raw, str) and yolo_armed_at_raw.strip()
-        else None
+    return await _workflow_runtime.load_effective_session_security(
+        hub=hub,
+        session_id=session_id,
+        normalize_policy_profile_fn=_normalize_policy_profile,
+        build_effective_tools_state_fn=lambda override: _build_effective_tools_state(
+            session_override=override
+        ),
     )
-    if not yolo_armed:
-        yolo_armed_at = None
-    effective_policy: dict[str, JSONValue] = {
-        "profile": profile,
-        "yolo_armed": yolo_armed,
-        "yolo_armed_at": yolo_armed_at,
-    }
-    return effective_tools, effective_policy
 
 
 def _plan_revision_value(plan: dict[str, JSONValue]) -> int:
@@ -745,29 +726,24 @@ async def _apply_agent_runtime_state(
     hub: UIHub,
     session_id: str,
 ) -> tuple[str, dict[str, JSONValue] | None, dict[str, JSONValue] | None]:
-    effective_tools, _ = await _load_effective_session_security(
+    async def _security_loader(
+        loader_hub: _workflow_runtime.WorkflowHubProtocol,
+        loader_session_id: str,
+    ) -> tuple[dict[str, bool], dict[str, JSONValue]]:
+        return await _load_effective_session_security(
+            hub=cast(UIHub, loader_hub),
+            session_id=loader_session_id,
+        )
+
+    return await _workflow_runtime.apply_agent_runtime_state(
+        agent=agent,
         hub=hub,
         session_id=session_id,
+        load_effective_session_security_fn=_security_loader,
+        normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),
+        normalize_plan_payload_fn=_normalize_plan_payload,
+        normalize_task_payload_fn=_normalize_task_payload,
     )
-    runtime_tools_setter = getattr(agent, "apply_runtime_tools_enabled", None)
-    if callable(runtime_tools_setter):
-        runtime_tools_setter(effective_tools)
-
-    workflow = await hub.get_session_workflow(session_id)
-    mode = _normalize_mode_value(workflow.get("mode"), default="ask")
-    active_plan = _normalize_plan_payload(workflow.get("active_plan"))
-    active_task = _normalize_task_payload(workflow.get("active_task"))
-    runtime_setter = getattr(agent, "set_runtime_state", None)
-    if callable(runtime_setter):
-        runtime_setter(
-            mode=mode,
-            active_plan=active_plan,
-            active_task=active_task,
-            enforce_plan_guard=(
-                mode == "act" and active_plan is not None and active_task is not None
-            ),
-        )
-    return mode, active_plan, active_task
 
 
 def _decision_workflow_context(
@@ -1453,43 +1429,7 @@ def _run_plan_readonly_audit(
     }
 
 
-def _build_default_plan_steps() -> list[dict[str, JSONValue]]:
-    return [
-        {
-            "step_id": "step-1-audit",
-            "title": "Аудит контекста",
-            "description": "Проверить релевантные файлы и текущее состояние проекта.",
-            "allowed_tool_kinds": ["workspace_list", "workspace_read", "project"],
-            "acceptance_checks": ["Понять текущее поведение и ограничения"],
-            "status": "todo",
-            "evidence": None,
-        },
-        {
-            "step_id": "step-2-implement",
-            "title": "Изменения",
-            "description": "Внести изменения по задаче и синхронизировать артефакты.",
-            "allowed_tool_kinds": [
-                "workspace_read",
-                "workspace_write",
-                "workspace_patch",
-                "project",
-                "shell",
-                "fs",
-            ],
-            "acceptance_checks": ["Изменения применены в нужных файлах"],
-            "status": "todo",
-            "evidence": None,
-        },
-        {
-            "step_id": "step-3-verify",
-            "title": "Проверка",
-            "description": "Запустить проверки и убедиться, что задача закрыта.",
-            "allowed_tool_kinds": ["workspace_read", "workspace_run", "shell", "project"],
-            "acceptance_checks": ["make check или эквивалентные проверки зелёные"],
-            "status": "todo",
-            "evidence": None,
-        },
-    ]
+_build_default_plan_steps = _workflow_runtime.build_default_plan_steps
 
 
 def _build_plan_draft(
@@ -1497,31 +1437,13 @@ def _build_plan_draft(
     goal: str,
     audit_log: list[dict[str, JSONValue]],
 ) -> dict[str, JSONValue]:
-    now = _utc_now_iso()
-    plan: dict[str, JSONValue] = {
-        "plan_id": f"plan-{uuid.uuid4().hex}",
-        "plan_hash": "",
-        "plan_revision": 1,
-        "status": "draft",
-        "goal": goal,
-        "scope_in": [],
-        "scope_out": [],
-        "assumptions": [],
-        "inputs_needed": [],
-        "audit_log": audit_log,
-        "steps": _build_default_plan_steps(),
-        "exit_criteria": [
-            "Целевое изменение внедрено",
-            "Регрессии не обнаружены",
-            "Результат проверен",
-        ],
-        "created_at": now,
-        "updated_at": now,
-        "approved_at": None,
-        "approved_by": None,
-    }
-    plan["plan_hash"] = _plan_hash_payload(plan)
-    return plan
+    return _workflow_runtime.build_plan_draft(
+        goal=goal,
+        audit_log=audit_log,
+        utc_now_iso_fn=_utc_now_iso,
+        plan_hash_payload_fn=_plan_hash_payload,
+        build_default_plan_steps_fn=_build_default_plan_steps,
+    )
 
 
 def _plan_with_status(
@@ -1529,18 +1451,13 @@ def _plan_with_status(
     *,
     status: str,
 ) -> dict[str, JSONValue]:
-    updated = dict(plan)
-    updated["status"] = status
-    updated["updated_at"] = _utc_now_iso()
-    if status == "approved":
-        updated["approved_at"] = _utc_now_iso()
-        updated["approved_by"] = "user"
-    elif status == "draft":
-        updated["approved_at"] = None
-        updated["approved_by"] = None
-    _increment_plan_revision(updated)
-    updated["plan_hash"] = _plan_hash_payload(updated)
-    return updated
+    return _workflow_runtime.plan_with_status(
+        plan,
+        status=status,
+        utc_now_iso_fn=_utc_now_iso,
+        increment_plan_revision_fn=_increment_plan_revision,
+        plan_hash_payload_fn=_plan_hash_payload,
+    )
 
 
 def _task_with_status(
@@ -1549,11 +1466,12 @@ def _task_with_status(
     status: str,
     current_step_id: str | None = None,
 ) -> dict[str, JSONValue]:
-    updated = dict(task)
-    updated["status"] = status
-    updated["current_step_id"] = current_step_id
-    updated["updated_at"] = _utc_now_iso()
-    return updated
+    return _workflow_runtime.task_with_status(
+        task,
+        status=status,
+        current_step_id=current_step_id,
+        utc_now_iso_fn=_utc_now_iso,
+    )
 
 
 def _plan_mark_step(
@@ -1646,72 +1564,29 @@ async def _run_plan_runner(
     plan_id: str,
     task_id: str,
 ) -> None:
-    hub: UIHub = app["ui_hub"]
-    while True:
-        workflow = await hub.get_session_workflow(session_id)
-        plan = _normalize_plan_payload(workflow.get("active_plan"))
-        task = _normalize_task_payload(workflow.get("active_task"))
-        mode = _normalize_mode_value(workflow.get("mode"), default="ask")
-        if (
-            plan is None
-            or task is None
-            or task.get("task_id") != task_id
-            or plan.get("plan_id") != plan_id
-            or task.get("status") != "running"
-            or mode != "act"
-        ):
-            return
-
-        current_step_id_raw = task.get("current_step_id")
-        current_step_id = current_step_id_raw if isinstance(current_step_id_raw, str) else None
-        if current_step_id is None:
-            next_step = _find_next_todo_step(plan)
-            if next_step is None:
-                completed_plan = _plan_with_status(plan, status="completed")
-                completed_task = _task_with_status(task, status="completed", current_step_id=None)
-                await hub.set_session_workflow(
-                    session_id,
-                    mode="act",
-                    active_plan=completed_plan,
-                    active_task=completed_task,
-                )
-                return
-            step_id_raw = next_step.get("step_id")
-            step_id = step_id_raw if isinstance(step_id_raw, str) else None
-            if step_id is None:
-                failed_plan = _plan_with_status(plan, status="failed")
-                failed_task = _task_with_status(task, status="failed", current_step_id=None)
-                await hub.set_session_workflow(
-                    session_id,
-                    mode="act",
-                    active_plan=failed_plan,
-                    active_task=failed_task,
-                )
-                return
-            plan = _plan_mark_step(plan, step_id=step_id, status="doing")
-            task = _task_with_status(task, status="running", current_step_id=step_id)
-            await hub.set_session_workflow(
-                session_id,
-                mode="act",
-                active_plan=plan,
-                active_task=task,
-            )
-            await asyncio.sleep(0)
-            continue
-
-        evidence: dict[str, JSONValue] = {
-            "runner": "skeleton",
-            "completed_at": _utc_now_iso(),
-        }
-        plan = _plan_mark_step(plan, step_id=current_step_id, status="done", evidence=evidence)
-        task = _task_with_status(task, status="running", current_step_id=None)
-        await hub.set_session_workflow(
-            session_id,
-            mode="act",
-            active_plan=plan,
-            active_task=task,
-        )
-        await asyncio.sleep(0)
+    return await _workflow_runtime.run_plan_runner(
+        app=app,
+        session_id=session_id,
+        plan_id=plan_id,
+        task_id=task_id,
+        normalize_plan_payload_fn=_normalize_plan_payload,
+        normalize_task_payload_fn=_normalize_task_payload,
+        normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),
+        find_next_todo_step_fn=_find_next_todo_step,
+        plan_with_status_fn=lambda plan, status: _plan_with_status(plan, status=status),
+        task_with_status_fn=lambda task, status, current_step_id: _task_with_status(
+            task,
+            status=status,
+            current_step_id=current_step_id,
+        ),
+        plan_mark_step_fn=lambda plan, step_id, status, evidence: _plan_mark_step(
+            plan,
+            step_id=step_id,
+            status=status,
+            evidence=evidence,
+        ),
+        utc_now_iso_fn=_utc_now_iso,
+    )
 
 
 def create_app(
