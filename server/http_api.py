@@ -52,6 +52,7 @@ from llm.types import ModelConfig
 from server.http.common import (
     decision_flow,
     github_import,
+    plan_edit,
     workflow_state,
     workspace_index,
     workspace_paths,
@@ -2869,205 +2870,59 @@ def _plan_mark_step(
     status: str,
     evidence: dict[str, JSONValue] | None = None,
 ) -> dict[str, JSONValue]:
-    updated = dict(plan)
-    steps_raw = updated.get("steps")
-    next_steps: list[dict[str, JSONValue]] = []
-    if isinstance(steps_raw, list):
-        for item in steps_raw:
-            if not isinstance(item, dict):
-                continue
-            candidate = dict(item)
-            current_id = candidate.get("step_id")
-            if isinstance(current_id, str) and current_id == step_id:
-                candidate["status"] = status if status in PLAN_STEP_STATUSES else "blocked"
-                candidate["evidence"] = evidence
-            next_steps.append(candidate)
-    updated["steps"] = next_steps
-    updated["updated_at"] = _utc_now_iso()
-    _increment_plan_revision(updated)
-    updated["plan_hash"] = _plan_hash_payload(updated)
-    return updated
+    return plan_edit.plan_mark_step(
+        plan,
+        step_id=step_id,
+        status=status,
+        evidence=evidence,
+        plan_step_statuses=PLAN_STEP_STATUSES,
+        utc_now_iso=_utc_now_iso,
+        increment_plan_revision_fn=_increment_plan_revision,
+        plan_hash_payload_fn=_plan_hash_payload,
+    )
 
 
 def _validate_text_limit(value: str, *, field: str) -> None:
-    if len(value) > PLAN_MAX_TEXT_FIELD_CHARS:
-        raise ValueError(f"{field} превышает лимит {PLAN_MAX_TEXT_FIELD_CHARS} символов.")
+    plan_edit.validate_text_limit(
+        value,
+        field=field,
+        max_chars=PLAN_MAX_TEXT_FIELD_CHARS,
+    )
 
 
 def _find_forbidden_plan_key(value: JSONValue) -> str | None:
-    forbidden = {
-        "args",
-        "command",
-        "exec",
-        "tool_name",
-        "source_endpoint",
-        "resume_payload",
-        "edited_action",
-    }
-    stack: list[tuple[JSONValue, str]] = [(value, "$")]
-    while stack:
-        current, path = stack.pop()
-        if isinstance(current, dict):
-            for key, nested in current.items():
-                lowered = key.strip().lower()
-                next_path = f"{path}.{key}"
-                if lowered in forbidden:
-                    return next_path
-                stack.append((nested, next_path))
-        elif isinstance(current, list):
-            for index, nested in enumerate(current):
-                stack.append((nested, f"{path}[{index}]"))
-    return None
+    return plan_edit.find_forbidden_plan_key(value)
 
 
 def _normalize_plan_step_insert(raw: object) -> dict[str, JSONValue]:
-    if not isinstance(raw, dict):
-        raise ValueError("step должен быть объектом.")
-    allowed_fields = {
-        "step_id",
-        "title",
-        "description",
-        "intent",
-        "allowed_tool_kinds",
-        "acceptance_checks",
-        "status",
-        "evidence",
-    }
-    unexpected = sorted({str(key) for key in raw if str(key) not in allowed_fields})
-    if unexpected:
-        raise ValueError(f"step содержит неожиданные поля: {', '.join(unexpected)}.")
-    step_id_raw = raw.get("step_id")
-    title_raw = raw.get("title")
-    description_raw = raw.get("description")
-    intent_raw = raw.get("intent")
-    if not isinstance(step_id_raw, str) or not step_id_raw.strip():
-        raise ValueError("step.step_id обязателен.")
-    if not isinstance(title_raw, str) or not title_raw.strip():
-        raise ValueError("step.title обязателен.")
-    if isinstance(description_raw, str):
-        description = description_raw
-    elif isinstance(intent_raw, str):
-        description = intent_raw
-    else:
-        description = ""
-    status_raw = raw.get("status")
-    status = (
-        status_raw if isinstance(status_raw, str) and status_raw in PLAN_STEP_STATUSES else "todo"
+    return plan_edit.normalize_plan_step_insert(
+        raw,
+        plan_step_statuses=PLAN_STEP_STATUSES,
+        normalize_string_list_fn=_normalize_string_list,
+        normalize_json_value_fn=_normalize_json_value,
+        validate_text_limit_fn=lambda value, field: _validate_text_limit(value, field=field),
     )
-    _validate_text_limit(step_id_raw.strip(), field="step.step_id")
-    _validate_text_limit(title_raw.strip(), field="step.title")
-    _validate_text_limit(description, field="step.description")
-    return {
-        "step_id": step_id_raw.strip(),
-        "title": title_raw.strip(),
-        "description": description,
-        "allowed_tool_kinds": _normalize_string_list(raw.get("allowed_tool_kinds")),
-        "acceptance_checks": _normalize_string_list(raw.get("acceptance_checks")),
-        "status": status,
-        "evidence": (
-            _normalize_json_value(raw.get("evidence"))
-            if isinstance(raw.get("evidence"), dict)
-            else None
-        ),
-    }
 
 
 def _normalize_plan_step_changes(raw: object) -> dict[str, JSONValue]:
-    if not isinstance(raw, dict):
-        raise ValueError("changes должен быть объектом.")
-    allowed_fields = {
-        "title",
-        "description",
-        "intent",
-        "allowed_tool_kinds",
-        "acceptance_checks",
-        "status",
-        "evidence",
-    }
-    unexpected = sorted({str(key) for key in raw if str(key) not in allowed_fields})
-    if unexpected:
-        raise ValueError(f"changes содержит неожиданные поля: {', '.join(unexpected)}.")
-    normalized: dict[str, JSONValue] = {}
-    if "title" in raw:
-        title_raw = raw.get("title")
-        if not isinstance(title_raw, str) or not title_raw.strip():
-            raise ValueError("changes.title должен быть непустой строкой.")
-        _validate_text_limit(title_raw.strip(), field="changes.title")
-        normalized["title"] = title_raw.strip()
-    if "description" in raw or "intent" in raw:
-        source = raw.get("description") if "description" in raw else raw.get("intent")
-        if not isinstance(source, str):
-            raise ValueError("changes.description/intent должен быть строкой.")
-        _validate_text_limit(source, field="changes.description")
-        normalized["description"] = source
-    if "allowed_tool_kinds" in raw:
-        normalized["allowed_tool_kinds"] = _normalize_string_list(raw.get("allowed_tool_kinds"))
-    if "acceptance_checks" in raw:
-        normalized["acceptance_checks"] = _normalize_string_list(raw.get("acceptance_checks"))
-    if "status" in raw:
-        status_raw = raw.get("status")
-        if not isinstance(status_raw, str) or status_raw not in PLAN_STEP_STATUSES:
-            raise ValueError(
-                "changes.status должен быть todo|doing|waiting_approval|blocked|done|failed."
-            )
-        normalized["status"] = status_raw
-    if "evidence" in raw:
-        evidence_raw = raw.get("evidence")
-        if evidence_raw is None:
-            normalized["evidence"] = None
-        elif isinstance(evidence_raw, dict):
-            normalized["evidence"] = _normalize_json_value(evidence_raw)
-        else:
-            raise ValueError("changes.evidence должен быть объектом или null.")
-    return normalized
+    return plan_edit.normalize_plan_step_changes(
+        raw,
+        plan_step_statuses=PLAN_STEP_STATUSES,
+        normalize_string_list_fn=_normalize_string_list,
+        normalize_json_value_fn=_normalize_json_value,
+        validate_text_limit_fn=lambda value, field: _validate_text_limit(value, field=field),
+    )
 
 
 def _validate_plan_document(plan: dict[str, JSONValue]) -> None:
-    encoded = json.dumps(plan, ensure_ascii=False)
-    if len(encoded.encode("utf-8")) > PLAN_MAX_PAYLOAD_BYTES:
-        raise ValueError(f"plan payload превышает лимит {PLAN_MAX_PAYLOAD_BYTES} bytes.")
-    allowed_top = {
-        "plan_id",
-        "plan_hash",
-        "plan_revision",
-        "status",
-        "goal",
-        "scope_in",
-        "scope_out",
-        "assumptions",
-        "inputs_needed",
-        "audit_log",
-        "steps",
-        "exit_criteria",
-        "created_at",
-        "updated_at",
-        "approved_at",
-        "approved_by",
-    }
-    unexpected_top = sorted({str(key) for key in plan if str(key) not in allowed_top})
-    if unexpected_top:
-        raise ValueError(f"plan содержит неожиданные поля: {', '.join(unexpected_top)}.")
-    forbidden_path = _find_forbidden_plan_key(plan)
-    if forbidden_path is not None:
-        raise ValueError(f"plan содержит запрещённый ключ: {forbidden_path}.")
-    goal_raw = plan.get("goal")
-    if isinstance(goal_raw, str):
-        _validate_text_limit(goal_raw, field="plan.goal")
-    steps_raw = plan.get("steps")
-    if not isinstance(steps_raw, list):
-        raise ValueError("plan.steps должен быть списком.")
-    if len(steps_raw) > PLAN_MAX_STEPS:
-        raise ValueError(f"steps превышает лимит {PLAN_MAX_STEPS}.")
-    seen_ids: set[str] = set()
-    for item in steps_raw:
-        if not isinstance(item, dict):
-            raise ValueError("steps содержит не-объект.")
-        step = _normalize_plan_step_insert(item)
-        step_id = step["step_id"]
-        if isinstance(step_id, str):
-            if step_id in seen_ids:
-                raise ValueError(f"step_id должен быть уникальным: {step_id}")
-            seen_ids.add(step_id)
+    plan_edit.validate_plan_document(
+        plan,
+        plan_max_payload_bytes=PLAN_MAX_PAYLOAD_BYTES,
+        plan_max_steps=PLAN_MAX_STEPS,
+        validate_text_limit_fn=lambda value, field: _validate_text_limit(value, field=field),
+        find_forbidden_plan_key_fn=_find_forbidden_plan_key,
+        normalize_plan_step_insert_fn=_normalize_plan_step_insert,
+    )
 
 
 def _plan_apply_edit_operation(
@@ -3075,93 +2930,20 @@ def _plan_apply_edit_operation(
     plan: dict[str, JSONValue],
     operation: dict[str, JSONValue],
 ) -> dict[str, JSONValue]:
-    op_raw = operation.get("op")
-    if not isinstance(op_raw, str) or not op_raw.strip():
-        raise ValueError("operation.op обязателен.")
-    op = op_raw.strip()
-    steps_raw = plan.get("steps")
-    if not isinstance(steps_raw, list):
-        raise ValueError("plan.steps должен быть списком.")
-    steps: list[dict[str, JSONValue]] = [dict(item) for item in steps_raw if isinstance(item, dict)]
-
-    if op == "insert_step":
-        step = _normalize_plan_step_insert(operation.get("step"))
-        index_raw = operation.get("index")
-        index = len(steps)
-        if isinstance(index_raw, int):
-            index = max(0, min(index_raw, len(steps)))
-        steps.insert(index, step)
-    elif op == "delete_step":
-        step_id_raw = operation.get("step_id")
-        if not isinstance(step_id_raw, str) or not step_id_raw.strip():
-            raise ValueError("operation.step_id обязателен.")
-        filtered_steps = [item for item in steps if item.get("step_id") != step_id_raw.strip()]
-        if len(filtered_steps) == len(steps):
-            raise ValueError("step_id не найден.")
-        steps = filtered_steps
-    elif op == "reorder_steps":
-        order_raw = operation.get("step_ids")
-        if not isinstance(order_raw, list) or not order_raw:
-            raise ValueError("operation.step_ids должен быть непустым списком.")
-        order = [item.strip() for item in order_raw if isinstance(item, str) and item.strip()]
-        if len(order) != len(steps):
-            raise ValueError("operation.step_ids должен содержать все шаги.")
-        by_id = {
-            item.get("step_id"): item for item in steps if isinstance(item.get("step_id"), str)
-        }
-        if len(by_id) != len(steps):
-            raise ValueError("Некорректные шаги в плане.")
-        reordered: list[dict[str, JSONValue]] = []
-        for step_id in order:
-            candidate = by_id.get(step_id)
-            if candidate is None:
-                raise ValueError("operation.step_ids содержит неизвестный step_id.")
-            reordered.append(dict(candidate))
-        steps = reordered
-    elif op == "update_step":
-        step_id_raw = operation.get("step_id")
-        if not isinstance(step_id_raw, str) or not step_id_raw.strip():
-            raise ValueError("operation.step_id обязателен.")
-        changes = _normalize_plan_step_changes(operation.get("changes"))
-        updated = False
-        next_steps: list[dict[str, JSONValue]] = []
-        for item in steps:
-            candidate = dict(item)
-            if candidate.get("step_id") == step_id_raw.strip():
-                candidate.update(changes)
-                updated = True
-            next_steps.append(candidate)
-        if not updated:
-            raise ValueError("step_id не найден.")
-        steps = next_steps
-    else:
-        raise ValueError(
-            "operation.op должен быть insert_step|delete_step|reorder_steps|update_step."
-        )
-
-    updated_plan = dict(plan)
-    updated_plan["steps"] = steps
-    updated_plan["status"] = "draft"
-    updated_plan["approved_at"] = None
-    updated_plan["approved_by"] = None
-    updated_plan["updated_at"] = _utc_now_iso()
-    _increment_plan_revision(updated_plan)
-    _validate_plan_document(updated_plan)
-    updated_plan["plan_hash"] = _plan_hash_payload(updated_plan)
-    return updated_plan
+    return plan_edit.plan_apply_edit_operation(
+        plan=plan,
+        operation=operation,
+        normalize_plan_step_insert_fn=_normalize_plan_step_insert,
+        normalize_plan_step_changes_fn=_normalize_plan_step_changes,
+        utc_now_iso=_utc_now_iso,
+        increment_plan_revision_fn=_increment_plan_revision,
+        validate_plan_document_fn=_validate_plan_document,
+        plan_hash_payload_fn=_plan_hash_payload,
+    )
 
 
 def _find_next_todo_step(plan: dict[str, JSONValue]) -> dict[str, JSONValue] | None:
-    steps_raw = plan.get("steps")
-    if not isinstance(steps_raw, list):
-        return None
-    for item in steps_raw:
-        if not isinstance(item, dict):
-            continue
-        status = item.get("status")
-        if status == "todo":
-            return item
-    return None
+    return plan_edit.find_next_todo_step(plan)
 
 
 async def _run_plan_runner(
