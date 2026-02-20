@@ -9,7 +9,6 @@ from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ApprovalRequired
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
-    UI_DECISION_RESPONSES,
     _apply_agent_runtime_state,
     _decision_categories,
     _decision_mismatch_response,
@@ -92,18 +91,16 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    if not isinstance(choice_raw, str) or choice_raw not in UI_DECISION_RESPONSES:
+    if not isinstance(choice_raw, str) or not choice_raw.strip():
         return error_response(
             status=400,
-            message=(
-                "choice должен быть approve_once|approve_session|edit_and_approve|edit_plan|reject."
-            ),
+            message="choice обязателен.",
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
     session_id = session_id_raw.strip()
     decision_id = decision_id_raw.strip()
-    choice = choice_raw
+    choice = choice_raw.strip()
     edited_action_raw = payload.get("edited_action")
     edited_plan_raw = payload.get("edited_plan")
     if edited_action_raw is not None and not isinstance(edited_action_raw, dict):
@@ -157,6 +154,17 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             }
         )
     decision_type = _decision_type_value(current_decision)
+    if decision_type == "runtime_packet":
+        return error_response(
+            status=409,
+            message=(
+                "runtime_packet decision должен обрабатываться через "
+                "POST /ui/api/decision/runtime/respond."
+            ),
+            error_type="invalid_request_error",
+            code="decision_type_not_supported",
+            details={"decision_type": decision_type},
+        )
     if decision_type == "tool_approval":
         context_raw = current_decision.get("context")
         context = context_raw if isinstance(context_raw, dict) else {}
@@ -177,6 +185,14 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+    elif decision_type != "tool_approval":
+        return error_response(
+            status=409,
+            message=f"Unsupported decision_type: {decision_type}.",
+            error_type="invalid_request_error",
+            code="decision_type_not_supported",
+            details={"decision_type": decision_type},
+        )
     elif choice in {"edit_plan"}:
         return error_response(
             status=400,

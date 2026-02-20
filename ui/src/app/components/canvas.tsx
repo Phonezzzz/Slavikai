@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 
 import BrainLogo from "../../assets/brain.png";
-import type { UiDecision } from "../types";
+import type { UiDecision, UiDecisionRespondChoice } from "../types";
 import { DecisionPanel } from "./decision-panel";
 
 // ====== Types ======
@@ -155,7 +155,7 @@ interface CanvasProps {
   decisionBusy?: boolean;
   decisionError?: string | null;
   onDecisionRespond?: (
-    choice: 'approve_once' | 'approve_session' | 'edit_and_approve' | 'edit_plan' | 'reject',
+    choice: UiDecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
 }

@@ -586,3 +586,203 @@ def test_imported_forged_decision_cannot_trigger_tool_execution() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_decision_respond_rejects_runtime_packet_on_legacy_endpoint() -> None:
+    async def run() -> None:
+        client = await _create_client(DecisionEchoAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "trigger runtime decision"},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            decision = send_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            legacy_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "reject",
+                },
+            )
+            assert legacy_resp.status == 409
+            legacy_payload = await legacy_resp.json()
+            error = legacy_payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "decision_type_not_supported"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_runtime_decision_respond_ask_user_resolves_packet() -> None:
+    async def run() -> None:
+        client = await _create_client(DecisionEchoAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "ask user action"},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            decision = send_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            respond_resp = await client.post(
+                "/ui/api/decision/runtime/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "action": "ask_user",
+                },
+            )
+            assert respond_resp.status == 200
+            respond_payload = await respond_resp.json()
+            assert respond_payload.get("resume_started") is False
+            decision_payload = respond_payload.get("decision")
+            assert isinstance(decision_payload, dict)
+            assert decision_payload.get("status") == "resolved"
+            resume = respond_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+            assert resume.get("action") == "ask_user"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_runtime_decision_respond_proceed_safe_uses_runtime_safe_mode_once() -> None:
+    class RuntimeProceedSafeAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.respond_calls = 0
+            self.safe_mode_samples: list[bool] = []
+            self.tools_enabled = {"safe_mode": True}
+
+        def apply_runtime_tools_enabled(self, state: dict[str, bool]) -> None:
+            self.tools_enabled.update(state)
+
+        def respond(self, messages) -> str:
+            del messages
+            self.safe_mode_samples.append(bool(self.tools_enabled.get("safe_mode", False)))
+            if self.respond_calls == 0:
+                self.respond_calls += 1
+                return json.dumps(
+                    {
+                        "id": "runtime-packet",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "reason": "verifier_fail",
+                        "summary": "Нужно решение пользователя",
+                        "context": {"session_id": self._session_id or "", "user_input": "retry me"},
+                        "options": [
+                            {
+                                "id": "ask_user",
+                                "title": "Ask user",
+                                "action": "ask_user",
+                                "payload": {},
+                                "risk": "low",
+                            },
+                            {
+                                "id": "proceed_safe",
+                                "title": "Proceed safely",
+                                "action": "proceed_safe",
+                                "payload": {},
+                                "risk": "low",
+                            },
+                            {
+                                "id": "retry",
+                                "title": "Retry",
+                                "action": "retry",
+                                "payload": {},
+                                "risk": "medium",
+                            },
+                            {
+                                "id": "abort",
+                                "title": "Abort",
+                                "action": "abort",
+                                "payload": {},
+                                "risk": "low",
+                            },
+                        ],
+                        "default_option_id": "ask_user",
+                    }
+                )
+            self.respond_calls += 1
+            return "safe-rerun-ok"
+
+    async def run() -> None:
+        agent = RuntimeProceedSafeAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            security_resp = await client.post(
+                "/ui/api/session/security",
+                headers={"X-Slavik-Session": session_id},
+                json={"tools": {"state": {"safe_mode": False}}},
+            )
+            assert security_resp.status == 200
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "run with safe override"},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            decision = send_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            respond_resp = await client.post(
+                "/ui/api/decision/runtime/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "action": "proceed_safe",
+                },
+            )
+            assert respond_resp.status == 200
+            respond_payload = await respond_resp.json()
+            resume = respond_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+            assert resume.get("action") == "proceed_safe"
+            assert agent.safe_mode_samples[:2] == [False, True]
+            assert agent.tools_enabled.get("safe_mode") is False
+        finally:
+            await client.close()
+
+    asyncio.run(run())

@@ -829,7 +829,18 @@ export function Settings({
         throw new Error(extractErrorMessage(payload, 'Failed to update tools settings.'));
       }
       applySessionSecurityPayload(payload);
-      setStatus(`Tool "${TOOL_LABELS[tool]}" updated.`);
+      let readbackError: string | null = null;
+      try {
+        await loadSessionSecurity();
+      } catch (error) {
+        readbackError =
+          error instanceof Error ? error.message : 'Failed to re-read session security.';
+      }
+      setStatus(
+        readbackError
+          ? `Tool "${TOOL_LABELS[tool]}" updated, но read-back не удался: ${readbackError}`
+          : `Tool "${TOOL_LABELS[tool]}" updated.`,
+      );
       onSaved?.();
     } catch (error) {
       setToolsState(previousState);
@@ -917,6 +928,13 @@ export function Settings({
         throw new Error(extractErrorMessage(payload, 'Failed to apply policy profile.'));
       }
       applySessionSecurityPayload(payload);
+      let readbackError: string | null = null;
+      try {
+        await loadSessionSecurity();
+      } catch (error) {
+        readbackError =
+          error instanceof Error ? error.message : 'Failed to re-read session security.';
+      }
       const policy = (payload as { policy?: unknown }).policy;
       const profileRaw = policy && typeof policy === 'object'
         ? (policy as { profile?: unknown }).profile
@@ -925,7 +943,12 @@ export function Settings({
         setYoloConfirmText('');
         setYoloSecondConfirm(false);
       }
-      setStatus(`Policy profile updated: ${policyProfileLabel(isPolicyProfile(profileRaw) ? profileRaw : policyProfile)}.`);
+      const updatedLabel = policyProfileLabel(isPolicyProfile(profileRaw) ? profileRaw : policyProfile);
+      setStatus(
+        readbackError
+          ? `Policy profile updated: ${updatedLabel}, но read-back не удался: ${readbackError}`
+          : `Policy profile updated: ${updatedLabel}.`,
+      );
       onSaved?.();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to apply policy profile.';
@@ -1326,6 +1349,16 @@ export function Settings({
                       <p className="text-sm text-zinc-400">
                         Tools are applied live to the active agent. Safe mode can still block risky tools.
                       </p>
+                      <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 text-xs text-zinc-300">
+                        <div>
+                          Active session: <span className="font-mono text-zinc-100">{sessionId ?? 'none'}</span>
+                        </div>
+                        {!sessionId ? (
+                          <div className="mt-1 text-amber-300">
+                            Выберите активную сессию: без неё apply tools/policy заблокирован.
+                          </div>
+                        ) : null}
+                      </div>
                       <section className="space-y-3 border border-zinc-800 p-4">
                         <div>
                           <h3 className="text-sm font-medium text-zinc-100">Session policy profile</h3>
@@ -1384,6 +1417,18 @@ export function Settings({
                           {yoloArmed ? ' | YOLO active' : ''}
                           {yoloArmedAt ? ` | armed at ${yoloArmedAt}` : ''}
                         </div>
+                      </section>
+
+                      <section className="space-y-2 border border-zinc-800 p-4 text-xs text-zinc-300">
+                        <h3 className="text-sm font-medium text-zinc-100">Audio runtime contract (MVP)</h3>
+                        <p>
+                          STT: backend endpoint{' '}
+                          <span className="font-mono">{'/ui/api/stt/transcribe'}</span> с OpenAI API key.
+                        </p>
+                        <p>TTS: browser <span className="font-mono">speechSynthesis</span>, без server-side model/voice settings.</p>
+                        <p className="text-zinc-400">
+                          Отдельные настройки voice/model для аудио пока не поддерживаются.
+                        </p>
                       </section>
 
                       <div className="divide-y divide-zinc-800 border border-zinc-800">

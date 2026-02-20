@@ -26,10 +26,23 @@ export type UiDecisionOption = {
   risk: string;
 };
 
+export type UiDecisionType = 'tool_approval' | 'plan_execute' | 'runtime_packet' | null;
+
+export type UiDecisionRespondChoice =
+  | 'approve_once'
+  | 'approve_session'
+  | 'edit_and_approve'
+  | 'edit_plan'
+  | 'reject'
+  | 'ask_user'
+  | 'proceed_safe'
+  | 'retry'
+  | 'abort';
+
 export type UiDecision = {
   id: string;
   kind: 'approval' | 'decision';
-  decision_type: 'tool_approval' | 'plan_execute' | null;
+  decision_type: UiDecisionType;
   status: UiDecisionStatus;
   blocking: boolean;
   reason: string;

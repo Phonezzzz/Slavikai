@@ -436,6 +436,32 @@ async def _publish_agent_activity(
         logger.debug("Failed to publish agent activity event", exc_info=True)
 
 
+async def _emit_status(
+    hub: UIHub,
+    *,
+    session_id: str,
+    phase: str,
+    text: str,
+    transient: bool = True,
+) -> None:
+    status_event = await hub.get_session_status_event(session_id)
+    payload_raw = status_event.get("payload")
+    payload = payload_raw if isinstance(payload_raw, dict) else {}
+    next_payload: dict[str, JSONValue] = {
+        "session_id": session_id,
+        "state": payload.get("state") if isinstance(payload.get("state"), str) else "ok",
+        "ok": payload.get("ok") is not False,
+        "phase": phase.strip() or "progress",
+        "text": text.strip(),
+        "transient": transient,
+    }
+    event: dict[str, JSONValue] = {"type": "status", "payload": next_payload}
+    try:
+        await hub.publish(session_id, event)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to publish status event", exc_info=True)
+
+
 async def _run_plan_runner(
     *,
     app: web.Application,

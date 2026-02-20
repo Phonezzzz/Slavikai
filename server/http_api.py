@@ -430,6 +430,7 @@ def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONVal
 
 
 _publish_agent_activity = _ui_runtime._publish_agent_activity
+_emit_status = _ui_runtime._emit_status
 
 _WORKSPACE_RUNTIME = workspace_runtime_bindings.WorkspaceRuntimeBindings(
     workspace_root_getter=lambda: WORKSPACE_ROOT,

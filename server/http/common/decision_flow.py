@@ -6,6 +6,42 @@ from collections.abc import Callable
 from core.approval_policy import ApprovalCategory
 from shared.models import JSONValue
 
+RUNTIME_PACKET_ACTIONS: set[str] = {
+    "ask_user",
+    "proceed_safe",
+    "retry",
+    "adjust_threshold",
+    "create_candidate",
+    "select_skill",
+    "abort",
+}
+
+
+def _has_runtime_packet_actions(options: list[dict[str, JSONValue]]) -> bool:
+    if not options:
+        return False
+    for option in options:
+        action_raw = option.get("action")
+        action = action_raw if isinstance(action_raw, str) else ""
+        if action not in RUNTIME_PACKET_ACTIONS:
+            return False
+    return True
+
+
+def _decision_type_or_default(
+    *,
+    decision_type_raw: object,
+    kind: str | None,
+    options: list[dict[str, JSONValue]],
+) -> str | None:
+    if isinstance(decision_type_raw, str) and decision_type_raw.strip():
+        return decision_type_raw.strip()
+    if _has_runtime_packet_actions(options):
+        return "runtime_packet"
+    if kind == "approval":
+        return "tool_approval"
+    return None
+
 
 def normalize_ui_decision_options(
     raw: object,
@@ -95,6 +131,11 @@ def normalize_ui_decision(
     elif options:
         first_id = options[0].get("id")
         default_option_id = first_id if isinstance(first_id, str) else None
+    inferred_decision_type = _decision_type_or_default(
+        decision_type_raw=decision_type_raw,
+        kind=kind_raw if isinstance(kind_raw, str) else None,
+        options=options,
+    )
 
     if (
         isinstance(kind_raw, str)
@@ -127,11 +168,7 @@ def normalize_ui_decision(
         return {
             "id": decision_id,
             "kind": kind,
-            "decision_type": (
-                decision_type_raw.strip()
-                if isinstance(decision_type_raw, str) and decision_type_raw.strip()
-                else None
-            ),
+            "decision_type": inferred_decision_type,
             "status": status,
             "blocking": blocking,
             "reason": reason,
@@ -153,11 +190,7 @@ def normalize_ui_decision(
     return {
         "id": decision_id,
         "kind": "decision",
-        "decision_type": (
-            decision_type_raw.strip()
-            if isinstance(decision_type_raw, str) and decision_type_raw.strip()
-            else None
-        ),
+        "decision_type": inferred_decision_type,
         "status": "pending",
         "blocking": True,
         "reason": reason,
@@ -369,6 +402,14 @@ def decision_type_value(decision: dict[str, JSONValue]) -> str:
     decision_type_raw = decision.get("decision_type")
     if isinstance(decision_type_raw, str) and decision_type_raw.strip():
         return decision_type_raw.strip()
+    options_raw = decision.get("options")
+    options = options_raw if isinstance(options_raw, list) else []
+    normalized_options: list[dict[str, JSONValue]] = []
+    for item in options:
+        if isinstance(item, dict):
+            normalized_options.append(item)
+    if _has_runtime_packet_actions(normalized_options):
+        return "runtime_packet"
     kind_raw = decision.get("kind")
     if kind_raw == "approval":
         return "tool_approval"

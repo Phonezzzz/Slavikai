@@ -30,6 +30,7 @@ from server.http_api import (
     _canvas_summary_title_from_artifact,
     _decision_is_pending_blocking,
     _decision_workflow_context,
+    _emit_status,
     _extract_files_from_tool_calls,
     _extract_named_files_from_output,
     _model_not_allowed_response,
@@ -175,6 +176,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
 
         await hub.set_session_status(session_id, "busy")
         status_opened = True
+        await _emit_status(
+            hub,
+            session_id=session_id,
+            phase="request.received",
+            text="Запрос получен…",
+        )
         await _publish_agent_activity(
             hub,
             session_id=session_id,
@@ -261,6 +268,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             phase="context.prepared",
             detail="chat",
         )
+        await _emit_status(
+            hub,
+            session_id=session_id,
+            phase="context.prepared",
+            text="Собираю контекст…",
+        )
 
         mwv_report: dict[str, JSONValue] | None = None
         trace_id: str | None = None
@@ -304,6 +317,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 session_id=session_id,
                 phase="agent.respond.start",
                 detail="chat",
+            )
+            await _emit_status(
+                hub,
+                session_id=session_id,
+                phase="agent.respond.start",
+                text="Готовлю ответ…",
             )
             request_prefers_canvas = force_canvas or _request_likely_canvas(content_raw)
             response_raw: str
@@ -479,6 +498,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 status="waiting_approval",
             )
             await hub.set_session_decision(session_id, ui_decision)
+            await _emit_status(
+                hub,
+                session_id=session_id,
+                phase="approval.required",
+                text="Требуется подтверждение действия.",
+            )
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -627,6 +652,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             phase="response.ready",
             detail="chat",
         )
+        await _emit_status(
+            hub,
+            session_id=session_id,
+            phase="response.ready",
+            text="",
+        )
         return response
     except Exception as exc:  # noqa: BLE001
         error = True
@@ -636,6 +667,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 session_id=session_id,
                 phase="error",
                 detail=f"chat: {exc}",
+            )
+            await _emit_status(
+                hub,
+                session_id=session_id,
+                phase="error",
+                text="Ошибка выполнения запроса.",
             )
             await hub.set_session_status(session_id, "error")
         return error_response(

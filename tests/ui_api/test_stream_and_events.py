@@ -169,6 +169,61 @@ def test_ui_events_stream_includes_agent_activity() -> None:
     asyncio.run(run())
 
 
+def test_ui_events_stream_status_progress_is_transient_and_not_message() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "check transient status"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            messages_raw = send_payload.get("messages")
+            assert isinstance(messages_raw, list)
+            message_contents = [
+                item.get("content")
+                for item in messages_raw
+                if isinstance(item, dict) and isinstance(item.get("content"), str)
+            ]
+            status_events = await _read_sse_events(stream_resp, max_events=32)
+            progress_events = [
+                event
+                for event in status_events
+                if event.get("type") == "status"
+                and isinstance(event.get("payload"), dict)
+                and isinstance((event.get("payload") or {}).get("phase"), str)
+            ]
+            assert progress_events
+            assert any(
+                (event.get("payload") or {}).get("transient") is True
+                for event in progress_events
+                if isinstance(event.get("payload"), dict)
+            )
+            assert "Готовлю ответ…" not in message_contents
+            assert "Собираю контекст…" not in message_contents
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_events_stream_includes_canvas_stream_events() -> None:
     async def run() -> None:
         client = await _create_client(LongCodeAgent())
@@ -384,6 +439,16 @@ def test_session_ownership_enforced_for_stream_workspace_decision_delete_files_o
                 },
             )
             await assert_forbidden(decision_resp)
+            runtime_decision_resp = await client.post(
+                "/ui/api/decision/runtime/respond",
+                headers=foreign_payload,
+                json={
+                    "session_id": session_id,
+                    "decision_id": "non-existent-decision",
+                    "action": "abort",
+                },
+            )
+            await assert_forbidden(runtime_decision_resp)
 
             delete_resp = await client.delete(
                 f"/ui/api/sessions/{session_id}",

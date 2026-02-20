@@ -29,6 +29,7 @@ import type {
   SessionSummary,
   TaskExecutionState,
   UiDecision,
+  UiDecisionRespondChoice,
 } from './types';
 
 const SESSION_HEADER = 'X-Slavik-Session';
@@ -507,7 +508,9 @@ const parseUiDecision = (value: unknown): UiDecision | null => {
     id: candidate.id.trim(),
     kind: candidate.kind,
     decision_type:
-      candidate.decision_type === 'tool_approval' || candidate.decision_type === 'plan_execute'
+      candidate.decision_type === 'tool_approval'
+      || candidate.decision_type === 'plan_execute'
+      || candidate.decision_type === 'runtime_packet'
         ? candidate.decision_type
         : null,
     status: candidate.status,
@@ -1664,6 +1667,12 @@ export default function App() {
         return;
       }
       const payload = envelope.payload as {
+        session_id?: unknown;
+        state?: unknown;
+        phase?: unknown;
+        text?: unknown;
+        transient?: unknown;
+        detail?: unknown;
         artifact_id?: unknown;
         stream_id?: unknown;
         delta?: unknown;
@@ -1711,6 +1720,46 @@ export default function App() {
           setSessionMode(parseSessionMode(workflow.mode));
           setActivePlan(parsePlanEnvelope(workflow.active_plan));
           setActiveTask(parseTaskExecution(workflow.active_task));
+        }
+        return;
+      }
+      if (envelope.type === 'status') {
+        const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+        const state = typeof payload.state === 'string' ? payload.state.trim() : '';
+        if (text) {
+          setStatusMessage(text);
+          return;
+        }
+        if (state === 'ok') {
+          setStatusMessage(null);
+        }
+        return;
+      }
+      if (envelope.type === 'agent.activity') {
+        const phase = typeof payload.phase === 'string' ? payload.phase.trim() : '';
+        const detail = typeof payload.detail === 'string' ? payload.detail.trim() : '';
+        if (phase === 'response.ready') {
+          setStatusMessage(null);
+          return;
+        }
+        if (phase === 'error') {
+          setStatusMessage(detail || 'Ошибка выполнения запроса.');
+          return;
+        }
+        if (phase === 'approval.required') {
+          setStatusMessage('Требуется подтверждение действия.');
+          return;
+        }
+        if (phase === 'agent.respond.start') {
+          setStatusMessage('Готовлю ответ…');
+          return;
+        }
+        if (phase === 'context.prepared') {
+          setStatusMessage('Собираю контекст…');
+          return;
+        }
+        if (phase === 'request.received') {
+          setStatusMessage('Запрос получен…');
         }
         return;
       }
@@ -2409,28 +2458,51 @@ export default function App() {
   };
 
   const handleDecisionRespond = async (
-    choice: 'approve_once' | 'approve_session' | 'reject' | 'edit_and_approve' | 'edit_plan',
+    choice: UiDecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
   ) => {
     if (!selectedConversation || !pendingDecision) {
       return;
     }
+    const decisionType = pendingDecision.decision_type;
+    const isRuntimeDecision = decisionType === 'runtime_packet';
+    const isRuntimeAction =
+      choice === 'ask_user' || choice === 'proceed_safe' || choice === 'retry' || choice === 'abort';
+    if (isRuntimeDecision && !isRuntimeAction) {
+      setDecisionError('Для runtime decision доступны ask_user|proceed_safe|retry|abort.');
+      return;
+    }
+    if (!isRuntimeDecision && isRuntimeAction) {
+      setDecisionError('Runtime action доступен только для runtime_packet.');
+      return;
+    }
     setDecisionBusy(true);
     setDecisionError(null);
     try {
-      const response = await fetch('/ui/api/decision/respond', {
+      const endpoint = isRuntimeDecision
+        ? '/ui/api/decision/runtime/respond'
+        : '/ui/api/decision/respond';
+      const requestBody = isRuntimeDecision
+        ? {
+            session_id: selectedConversation,
+            decision_id: pendingDecision.id,
+            action: choice,
+            payload: editedPayload ?? null,
+          }
+        : {
+            session_id: selectedConversation,
+            decision_id: pendingDecision.id,
+            choice,
+            edited_action: choice === 'edit_and_approve' ? (editedPayload ?? {}) : null,
+            edited_plan: choice === 'edit_plan' ? (editedPayload ?? {}) : null,
+          };
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           [SESSION_HEADER]: selectedConversation,
         },
-        body: JSON.stringify({
-          session_id: selectedConversation,
-          decision_id: pendingDecision.id,
-          choice,
-          edited_action: choice === 'edit_and_approve' ? (editedPayload ?? {}) : null,
-          edited_plan: choice === 'edit_plan' ? (editedPayload ?? {}) : null,
-        }),
+        body: JSON.stringify(requestBody),
       });
       const payload: unknown = await response.json();
       if (!response.ok) {
@@ -2444,6 +2516,7 @@ export default function App() {
           data?: unknown;
           source_endpoint?: unknown;
           tool_name?: unknown;
+          action?: unknown;
           error?: unknown;
         };
         if (resume.source_endpoint === 'workspace.tool') {
@@ -2481,6 +2554,17 @@ export default function App() {
               typeof resume.error === 'string' && resume.error.trim()
                 ? resume.error
                 : `Project command (${toolName}) failed.`;
+            setStatusMessage(errorText);
+          }
+        } else if (resume.source_endpoint === 'runtime.packet') {
+          if (resume.ok === true) {
+            const actionLabel = typeof resume.action === 'string' ? resume.action : 'runtime';
+            setStatusMessage(`Runtime decision выполнен: ${actionLabel}.`);
+          } else {
+            const errorText =
+              typeof resume.error === 'string' && resume.error.trim()
+                ? resume.error
+                : 'Runtime decision failed.';
             setStatusMessage(errorText);
           }
         } else {

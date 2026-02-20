@@ -15,7 +15,13 @@ import {
   Volume2,
 } from 'lucide-react';
 
-import type { PlanEnvelope, SessionMode, TaskExecutionState, UiDecision } from '../../app/types';
+import type {
+  PlanEnvelope,
+  SessionMode,
+  TaskExecutionState,
+  UiDecision,
+  UiDecisionRespondChoice,
+} from '../../app/types';
 import type { CanvasMessage, CanvasSendPayload } from '../../app/components/canvas';
 import { DecisionPanel } from '../../app/components/decision-panel';
 import { PlanPanel } from '../../app/components/plan-panel';
@@ -56,7 +62,7 @@ type WorkspaceAssistantPanelProps = {
   decisionBusy: boolean;
   decisionError: string | null;
   onDecisionRespond?: (
-    choice: 'approve_once' | 'approve_session' | 'edit_and_approve' | 'edit_plan' | 'reject',
+    choice: UiDecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
   messages: CanvasMessage[];

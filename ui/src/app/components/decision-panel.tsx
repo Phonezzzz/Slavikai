@@ -1,21 +1,29 @@
 import { useMemo, useState } from 'react';
 import { Check, ChevronDown, Pencil, X } from 'lucide-react';
 
-import type { UiDecision } from '../types';
+import type { UiDecision, UiDecisionRespondChoice } from '../types';
 
-type DecisionRespondChoice =
-  | 'approve_once'
-  | 'approve_session'
-  | 'edit_and_approve'
-  | 'edit_plan'
-  | 'reject';
+const KNOWN_DECISION_CHOICES = new Set<UiDecisionRespondChoice>([
+  'approve_once',
+  'approve_session',
+  'edit_and_approve',
+  'edit_plan',
+  'reject',
+  'ask_user',
+  'proceed_safe',
+  'retry',
+  'abort',
+]);
+
+const isDecisionRespondChoice = (value: string): value is UiDecisionRespondChoice =>
+  KNOWN_DECISION_CHOICES.has(value as UiDecisionRespondChoice);
 
 type DecisionPanelProps = {
   decision: UiDecision;
   busy: boolean;
   error: string | null;
   onRespond: (
-    choice: DecisionRespondChoice,
+    choice: UiDecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
 };
@@ -98,16 +106,21 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
           {decision.options.map((option) => {
             const action = option.action;
             const isEditAction = action === 'edit_and_approve' || action === 'edit_plan';
+            const isKnownAction = isDecisionRespondChoice(action);
+            const isAbortAction = action === 'abort';
             const baseClass =
               action === 'approve_once' || action === 'approve_session'
                 ? 'bg-emerald-600 text-white hover:bg-emerald-500'
                 : 'border border-[#3a3a44] text-[#d4d4db] hover:bg-[#1b1b22]';
-            const icon = action === 'reject'
+            const icon = action === 'reject' || isAbortAction
               ? <X className="h-3.5 w-3.5" />
               : isEditAction
                 ? <Pencil className="h-3.5 w-3.5" />
                 : <Check className="h-3.5 w-3.5" />;
             const onClick = () => {
+              if (!isKnownAction) {
+                return;
+              }
               if (isEditAction) {
                 setEditAction(action);
                 if (editMode && editAction === action) {
@@ -117,16 +130,16 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
                 setEditMode(true);
                 return;
               }
-              void onRespond(action as DecisionRespondChoice, null);
+              void onRespond(action, null);
             };
             return (
               <button
                 key={option.id}
                 type="button"
                 onClick={onClick}
-                disabled={busy}
+                disabled={busy || !isKnownAction}
                 className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50 ${baseClass}`}
-                title={option.title}
+                title={isKnownAction ? option.title : `${option.title} (не поддерживается в UI v2)`}
                 aria-label={option.title}
               >
                 {icon}
