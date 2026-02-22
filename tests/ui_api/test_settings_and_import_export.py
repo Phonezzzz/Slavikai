@@ -108,10 +108,10 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
         "server.http_api.save_tools_config",
         lambda config: save_tools_config_to_path(config, path=tools_path),
     )
-    monkeypatch.setattr(
-        "server.http_api._fetch_provider_models",
-        lambda provider: (["ok-model"], None),
-    )
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -137,11 +137,6 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
                             "local_model": "test-embeddings-v1",
                             "openai_model": "text-embedding-3-small",
                         },
-                    },
-                    "providers": {
-                        "xai": {"api_key": "xai-test-key"},
-                        "openrouter": {"api_key": "or-test-key"},
-                        "openai": {"api_key": "openai-test-key"},
                     },
                 },
             )
@@ -183,39 +178,23 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             }
             xai_provider = provider_by_name.get("xai")
             assert isinstance(xai_provider, dict)
-            assert xai_provider.get("api_key_set") is True
-            assert xai_provider.get("api_key_source") == "settings"
-            assert xai_provider.get("api_key_valid") is True
-            assert xai_provider.get("last_check_error") is None
-            assert isinstance(xai_provider.get("last_checked_at"), str)
+            assert xai_provider.get("api_key_set") is False
+            assert xai_provider.get("api_key_source") == "missing"
             assert "api_key_value" not in xai_provider
             openrouter_provider = provider_by_name.get("openrouter")
             assert isinstance(openrouter_provider, dict)
-            assert openrouter_provider.get("api_key_set") is True
-            assert openrouter_provider.get("api_key_source") == "settings"
-            assert openrouter_provider.get("api_key_valid") is True
-            assert openrouter_provider.get("last_check_error") is None
-            assert isinstance(openrouter_provider.get("last_checked_at"), str)
+            assert openrouter_provider.get("api_key_set") is False
+            assert openrouter_provider.get("api_key_source") == "missing"
             assert "api_key_value" not in openrouter_provider
 
             saved_payload = json.loads(ui_settings_path.read_text(encoding="utf-8"))
             assert isinstance(saved_payload, dict)
-            providers_blob = saved_payload.get("providers")
-            assert isinstance(providers_blob, dict)
-            xai_saved = providers_blob.get("xai")
-            assert isinstance(xai_saved, dict)
-            assert xai_saved.get("api_key") == "xai-test-key"
-            openrouter_saved = providers_blob.get("openrouter")
-            assert isinstance(openrouter_saved, dict)
-            assert openrouter_saved.get("api_key") == "or-test-key"
+            assert "providers" not in saved_payload
             openai_provider = provider_by_name.get("openai")
             assert isinstance(openai_provider, dict)
-            assert openai_provider.get("api_key_set") is True
-            assert openai_provider.get("api_key_source") == "settings"
+            assert openai_provider.get("api_key_set") is False
+            assert openai_provider.get("api_key_source") == "missing"
             assert "api_key_value" not in openai_provider
-            openai_saved = providers_blob.get("openai")
-            assert isinstance(openai_saved, dict)
-            assert openai_saved.get("api_key") == "openai-test-key"
         finally:
             await client.close()
 
@@ -223,11 +202,6 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
 
 
 def test_user_plane_settings_allows_only_whitelisted_fields(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "server.http_api._fetch_provider_models",
-        lambda provider: (["ok-model"], None),
-    )
-
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -237,7 +211,6 @@ def test_user_plane_settings_allows_only_whitelisted_fields(monkeypatch) -> None
                     "personalization": {"tone": "strict"},
                     "composer": {"long_paste_threshold_chars": 25000},
                     "memory": {"inbox_max_items": 101},
-                    "providers": {"xai": {"api_key": "xai-whitelist-key"}},
                 },
             )
             assert allowed_resp.status == 200
@@ -251,6 +224,57 @@ def test_user_plane_settings_allows_only_whitelisted_fields(monkeypatch) -> None
             error = forbidden_payload.get("error")
             assert isinstance(error, dict)
             assert error.get("code") == "security_fields_forbidden"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_settings_update_rejects_providers_payload() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post(
+                "/ui/api/settings",
+                json={"providers": {"xai": {"api_key": "xai-secret"}}},
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_settings_update_drops_legacy_provider_api_keys(tmp_path, monkeypatch) -> None:
+    ui_settings_path = tmp_path / "ui_settings.json"
+    ui_settings_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "xai": {"api_key": "legacy-xai"},
+                    "openrouter": {"api_key": "legacy-openrouter"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post(
+                "/ui/api/settings",
+                json={"personalization": {"tone": "strict"}},
+            )
+            assert response.status == 200
+            persisted = json.loads(ui_settings_path.read_text(encoding="utf-8"))
+            assert isinstance(persisted, dict)
+            assert "providers" not in persisted
         finally:
             await client.close()
 
@@ -286,6 +310,8 @@ def test_ui_settings_no_api_key_leak(monkeypatch, tmp_path) -> None:
             for provider in providers:
                 assert isinstance(provider, dict)
                 assert "api_key_value" not in provider
+                source = provider.get("api_key_source")
+                assert source in {"env", "missing"}
         finally:
             await client.close()
 
@@ -391,7 +417,9 @@ def test_ui_settings_update_rejects_invalid_composer_threshold() -> None:
     asyncio.run(run())
 
 
-def test_settings_update_applies_embeddings_config_live() -> None:
+def test_settings_update_applies_embeddings_config_live(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-env-test-key")
+
     async def run() -> None:
         agent = LiveEmbeddingsAgent()
         client = await _create_client(agent)
@@ -406,7 +434,6 @@ def test_settings_update_applies_embeddings_config_live() -> None:
                             "openai_model": "text-embedding-3-small",
                         }
                     },
-                    "providers": {"openai": {"api_key": "openai-test-key"}},
                 },
             )
             assert response.status == 200
@@ -427,7 +454,7 @@ def test_settings_update_applies_embeddings_config_live() -> None:
                 "provider": "openai",
                 "local_model": "all-MiniLM-L6-v2",
                 "openai_model": "text-embedding-3-small",
-                "openai_api_key": "openai-test-key",
+                "openai_api_key": "openai-env-test-key",
             }
         finally:
             await client.close()
@@ -466,10 +493,8 @@ def test_ui_memory_conflicts_endpoints() -> None:
 
 def test_ui_stt_transcribe_success(monkeypatch, tmp_path) -> None:
     ui_settings_path = tmp_path / "ui_settings.json"
-    ui_settings_path.write_text(
-        json.dumps({"providers": {"openai": {"api_key": "openai-test-key"}}}),
-        encoding="utf-8",
-    )
+    ui_settings_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-env-test-key")
     monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
     monkeypatch.setattr(
         "server.http_api.requests.post",
@@ -528,10 +553,8 @@ def test_ui_stt_transcribe_requires_openai_key(monkeypatch, tmp_path) -> None:
 
 def test_ui_stt_transcribe_handles_unsupported_format(monkeypatch, tmp_path) -> None:
     ui_settings_path = tmp_path / "ui_settings.json"
-    ui_settings_path.write_text(
-        json.dumps({"providers": {"openai": {"api_key": "openai-test-key"}}}),
-        encoding="utf-8",
-    )
+    ui_settings_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-env-test-key")
     monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
     monkeypatch.setattr(
         "server.http_api.requests.post",
@@ -563,8 +586,9 @@ def test_ui_stt_transcribe_handles_unsupported_format(monkeypatch, tmp_path) -> 
     asyncio.run(run())
 
 
-def test_ui_chat_send_uses_api_key_from_settings(monkeypatch, tmp_path) -> None:
+def test_ui_chat_send_uses_api_key_from_env(monkeypatch, tmp_path) -> None:
     ui_settings_path = tmp_path / "ui_settings.json"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-env-test-key")
     monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", ui_settings_path)
     monkeypatch.setattr(
         "server.http_api._fetch_provider_models",
@@ -577,12 +601,6 @@ def test_ui_chat_send_uses_api_key_from_settings(monkeypatch, tmp_path) -> None:
         agent = CaptureConfigAgent()
         client = await _create_client(agent)
         try:
-            settings_resp = await client.post(
-                "/ui/api/settings",
-                json={"providers": {"openrouter": {"api_key": "or-ui-test-key"}}},
-            )
-            assert settings_resp.status == 200
-
             create_resp = await client.post("/ui/api/sessions")
             assert create_resp.status == 200
             create_payload = await create_resp.json()
@@ -607,7 +625,7 @@ def test_ui_chat_send_uses_api_key_from_settings(monkeypatch, tmp_path) -> None:
             assert send_resp.status == 200
             assert agent.last_provider == "openrouter"
             assert agent.last_model == "grok-4x"
-            assert agent.last_api_key == "or-ui-test-key"
+            assert agent.last_api_key == "or-env-test-key"
         finally:
             await client.close()
 

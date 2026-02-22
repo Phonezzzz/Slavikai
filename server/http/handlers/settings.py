@@ -81,6 +81,23 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             error_type="forbidden",
             code="security_fields_forbidden",
         )
+    try:
+        api._drop_legacy_provider_api_keys()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=500,
+            message=f"Не удалось очистить legacy providers API keys: {exc}",
+            error_type="internal_error",
+            code="settings_update_failed",
+        )
+
+    if "providers" in payload:
+        return error_response(
+            status=400,
+            message="Поле providers больше не поддерживается. Используйте env-переменные API keys.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
 
     next_embeddings_settings: UIEmbeddingsSettings | None = None
 
@@ -338,79 +355,6 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             ),
         )
 
-    providers_raw = payload.get("providers")
-    if providers_raw is not None:
-        if not isinstance(providers_raw, dict):
-            return error_response(
-                status=400,
-                message="providers должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        next_api_keys = api._load_provider_api_keys()
-        changed_providers: set[str] = set()
-        for provider, provider_payload in providers_raw.items():
-            if provider not in api.API_KEY_SETTINGS_PROVIDERS:
-                return error_response(
-                    status=400,
-                    message=f"Неизвестный provider: {provider}",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            if provider_payload is None:
-                next_api_keys.pop(provider, None)
-                changed_providers.add(provider)
-                continue
-            api_key_raw: object | None = None
-            if isinstance(provider_payload, dict):
-                api_key_raw = provider_payload.get("api_key")
-            elif isinstance(provider_payload, str):
-                api_key_raw = provider_payload
-            else:
-                return error_response(
-                    status=400,
-                    message=f"providers.{provider} должен быть объектом или строкой.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            if api_key_raw is None:
-                next_api_keys.pop(provider, None)
-                changed_providers.add(provider)
-                continue
-            if not isinstance(api_key_raw, str):
-                return error_response(
-                    status=400,
-                    message=f"providers.{provider}.api_key должен быть строкой.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            normalized_key = api_key_raw.strip()
-            if normalized_key:
-                next_api_keys[provider] = normalized_key
-                changed_providers.add(provider)
-            else:
-                next_api_keys.pop(provider, None)
-                changed_providers.add(provider)
-        api._save_provider_api_keys(next_api_keys)
-        if changed_providers:
-            next_runtime_checks = api._load_provider_runtime_checks()
-            for provider_name in changed_providers:
-                if provider_name in api.SUPPORTED_MODEL_PROVIDERS:
-                    models, error_text = api._fetch_provider_models(provider_name)
-                    del models
-                    next_runtime_checks[provider_name] = {
-                        "api_key_valid": error_text is None,
-                        "last_check_error": error_text,
-                        "last_checked_at": api._utc_now_iso(),
-                    }
-                    continue
-                next_runtime_checks[provider_name] = {
-                    "api_key_valid": None,
-                    "last_check_error": None,
-                    "last_checked_at": api._utc_now_iso(),
-                }
-            api._save_provider_runtime_checks(next_runtime_checks)
-
     if next_embeddings_settings is not None:
         agent_lock = request.app["agent_lock"]
         try:
@@ -611,7 +555,7 @@ async def handle_ui_stt_transcribe(request: web.Request) -> web.Response:
     if not api_key:
         return error_response(
             status=409,
-            message="Не задан OpenAI API key для STT (settings.providers.openai.api_key).",
+            message="Не задан OpenAI API key для STT (env OPENAI_API_KEY).",
             error_type="configuration_error",
             code="stt_api_key_missing",
         )

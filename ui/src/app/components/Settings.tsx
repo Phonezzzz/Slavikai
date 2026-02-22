@@ -13,7 +13,7 @@ interface SettingsProps {
 type SettingsTab = 'api' | 'personalization' | 'memory' | 'tools' | 'import';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'openai';
 type ModelProvider = 'xai' | 'openrouter' | 'local';
-type ApiKeySource = 'settings' | 'env' | 'missing';
+type ApiKeySource = 'env' | 'missing';
 type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt' | 'safe_mode';
 type PolicyProfile = 'sandbox' | 'index' | 'yolo';
 type EmbeddingsProvider = 'local' | 'openai';
@@ -38,7 +38,6 @@ type ProviderRuntimeByModel = Record<ModelProvider, ProviderRuntimeState | null>
 
 type ParsedSettings = {
   providers: ProviderSettings[];
-  apiKeys: Record<ApiKeyProvider, string>;
   toolsState: Record<ToolKey, boolean>;
   policyProfile: PolicyProfile;
   yoloArmed: boolean;
@@ -89,12 +88,6 @@ const PROVIDER_LABELS: Record<ApiKeyProvider, string> = {
   openai: 'OpenAI',
 };
 
-const DEFAULT_API_KEYS: Record<ApiKeyProvider, string> = {
-  xai: '',
-  openrouter: '',
-  local: '',
-  openai: '',
-};
 const DEFAULT_LONG_PASTE_TO_FILE_ENABLED = true;
 const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
 const DEFAULT_POLICY_PROFILE: PolicyProfile = 'sandbox';
@@ -159,7 +152,7 @@ const isApiKeyProvider = (value: unknown): value is ApiKeyProvider =>
   value === 'xai' || value === 'openrouter' || value === 'local' || value === 'openai';
 
 const isApiKeySource = (value: unknown): value is ApiKeySource =>
-  value === 'settings' || value === 'env' || value === 'missing';
+  value === 'env' || value === 'missing';
 
 const isModelProvider = (value: unknown): value is ModelProvider =>
   value === 'xai' || value === 'openrouter' || value === 'local';
@@ -194,7 +187,6 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
 const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   const defaults: ParsedSettings = {
     providers: DEFAULT_PROVIDER_SETTINGS,
-    apiKeys: DEFAULT_API_KEYS,
     toolsState: DEFAULT_TOOLS_STATE,
     policyProfile: DEFAULT_POLICY_PROFILE,
     yoloArmed: false,
@@ -300,12 +292,6 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
       DEFAULT_PROVIDER_SETTINGS.find((item) => item.provider === provider) ||
       DEFAULT_PROVIDER_SETTINGS[0],
   );
-  const parsedApiKeys: Record<ApiKeyProvider, string> = {
-    xai: '',
-    openrouter: '',
-    local: '',
-    openai: '',
-  };
   const tools = (settings as { tools?: unknown }).tools;
   const policy = (settings as { policy?: unknown }).policy;
   const memory = (settings as { memory?: unknown }).memory;
@@ -371,7 +357,6 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
 
   return {
     providers,
-    apiKeys: parsedApiKeys,
     toolsState,
     policyProfile,
     yoloArmed,
@@ -456,20 +441,7 @@ const parseMemoryConflictsPayload = (payload: unknown): MemoryConflict[] => {
   return conflicts;
 };
 
-const providerPlaceholder = (provider: ProviderSettings): string => {
-  if (provider.api_key_source === 'settings') {
-    return `Stored in settings. Paste new ${provider.provider} key or leave empty and Save to clear.`;
-  }
-  if (provider.api_key_source === 'env') {
-    return `Using ${provider.api_key_env}. Paste key here to override in UI.`;
-  }
-  return `Paste ${provider.provider} API key`;
-};
-
 const sourceLabel = (source: ApiKeySource): string => {
-  if (source === 'settings') {
-    return 'settings';
-  }
   if (source === 'env') {
     return 'env';
   }
@@ -548,18 +520,8 @@ export function Settings({
   sessionId = null,
   sessionHeader = 'X-Slavik-Session',
 }: SettingsProps) {
-  const EMPTY_PROVIDER_DIRTY: Record<ApiKeyProvider, boolean> = {
-    xai: false,
-    openrouter: false,
-    local: false,
-    openai: false,
-  };
   const [activeTab, setActiveTab] = useState<SettingsTab>('api');
   const [selectedProvider, setSelectedProvider] = useState<ModelProvider>('local');
-  const [apiKeys, setApiKeys] = useState<Record<ApiKeyProvider, string>>(DEFAULT_API_KEYS);
-  const [providerDirty, setProviderDirty] = useState<Record<ApiKeyProvider, boolean>>(
-    EMPTY_PROVIDER_DIRTY,
-  );
   const [toolsState, setToolsState] = useState<Record<ToolKey, boolean>>(DEFAULT_TOOLS_STATE);
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>(DEFAULT_POLICY_PROFILE);
   const [yoloArmed, setYoloArmed] = useState(false);
@@ -600,8 +562,6 @@ export function Settings({
 
   const applyParsedSettings = (parsed: ParsedSettings): void => {
     setProviders(parsed.providers);
-    setApiKeys(parsed.apiKeys);
-    setProviderDirty(EMPTY_PROVIDER_DIRTY);
     setToolsState(parsed.toolsState);
     setPolicyProfile(parsed.policyProfile);
     setYoloArmed(parsed.yoloArmed);
@@ -731,21 +691,6 @@ export function Settings({
     setSaving(true);
     setStatus(null);
     try {
-      const providersPayload: Record<string, { api_key: string } | null> = {};
-      let hasProviderChanges = false;
-      for (const provider of API_KEY_PROVIDERS) {
-        if (!providerDirty[provider]) {
-          continue;
-        }
-        const key = apiKeys[provider].trim();
-        if (key) {
-          providersPayload[provider] = { api_key: key };
-        } else {
-          providersPayload[provider] = null;
-        }
-        hasProviderChanges = true;
-      }
-
       const payload: Record<string, unknown> = {
         personalization: {
           tone: tone.trim() || 'balanced',
@@ -763,9 +708,6 @@ export function Settings({
           },
         },
       };
-      if (hasProviderChanges) {
-        payload.providers = providersPayload;
-      }
 
       const response = await fetch('/ui/api/settings', {
         method: 'POST',
@@ -1102,17 +1044,10 @@ export function Settings({
                                 Runtime: {runtimeDetail}
                               </div>
                             ) : null}
+                            <div className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-zinc-400">
+                              API keys are env-only and cannot be edited in UI.
+                            </div>
                           </div>
-                          <input
-                            type="password"
-                            value={apiKeys[provider.provider]}
-                            onChange={(event) => {
-                              setApiKeys((prev) => ({ ...prev, [provider.provider]: event.target.value }));
-                              setProviderDirty((prev) => ({ ...prev, [provider.provider]: true }));
-                            }}
-                            placeholder={providerPlaceholder(provider)}
-                            className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
-                          />
                         </div>
                         );
                       })}
@@ -1213,7 +1148,7 @@ export function Settings({
                         <div>
                           <h3 className="text-sm font-medium text-zinc-100">Embeddings provider</h3>
                           <p className="mt-1 text-xs text-zinc-400">
-                            Для индексации и semantic search. Ключ берется из OpenAI provider settings.
+                            Для индексации и semantic search. Ключ берется из env (OPENAI_API_KEY).
                           </p>
                         </div>
                         <div className="grid grid-cols-2 gap-2">

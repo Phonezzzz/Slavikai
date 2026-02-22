@@ -393,23 +393,8 @@ def _load_provider_api_keys(
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
 ) -> dict[str, str]:
-    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
-    providers_raw = payload.get("providers")
-    if not isinstance(providers_raw, dict):
-        return {}
-    api_keys: dict[str, str] = {}
-    for provider in API_KEY_SETTINGS_PROVIDERS:
-        entry = providers_raw.get(provider)
-        key_raw: object | None = None
-        if isinstance(entry, dict):
-            key_raw = entry.get("api_key")
-        elif isinstance(entry, str):
-            key_raw = entry
-        if isinstance(key_raw, str):
-            normalized = key_raw.strip()
-            if normalized:
-                api_keys[provider] = normalized
-    return api_keys
+    del ui_settings_path
+    return {}
 
 
 def _save_provider_api_keys(
@@ -417,20 +402,20 @@ def _save_provider_api_keys(
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
 ) -> None:
+    del api_keys
+    _drop_legacy_provider_api_keys(ui_settings_path=ui_settings_path)
+
+
+def _drop_legacy_provider_api_keys(
+    *,
+    ui_settings_path: Path = UI_SETTINGS_PATH,
+) -> bool:
     payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
-    providers_payload: dict[str, object] = {}
-    for provider in sorted(API_KEY_SETTINGS_PROVIDERS):
-        key_raw = api_keys.get(provider)
-        if not isinstance(key_raw, str):
-            continue
-        normalized = key_raw.strip()
-        if normalized:
-            providers_payload[provider] = {"api_key": normalized}
-    if providers_payload:
-        payload["providers"] = providers_payload
-    else:
-        payload.pop("providers", None)
+    if "providers" not in payload:
+        return False
+    payload.pop("providers", None)
     _save_ui_settings_blob(payload, ui_settings_path=ui_settings_path)
+    return True
 
 
 def _load_provider_runtime_checks(
@@ -498,14 +483,7 @@ def _resolve_provider_api_key(
     settings_api_keys: dict[str, str] | None = None,
     ui_settings_path: Path = UI_SETTINGS_PATH,
 ) -> str | None:
-    saved = (
-        settings_api_keys
-        if settings_api_keys is not None
-        else _load_provider_api_keys(ui_settings_path=ui_settings_path)
-    )
-    from_settings = saved.get(provider, "").strip()
-    if from_settings:
-        return from_settings
+    del settings_api_keys, ui_settings_path
     return _load_provider_env_api_key(provider)
 
 
@@ -514,15 +492,8 @@ def _provider_api_key_source(
     *,
     settings_api_keys: dict[str, str] | None = None,
     ui_settings_path: Path = UI_SETTINGS_PATH,
-) -> Literal["settings", "env", "missing"]:
-    saved = (
-        settings_api_keys
-        if settings_api_keys is not None
-        else _load_provider_api_keys(ui_settings_path=ui_settings_path)
-    )
-    from_settings = saved.get(provider, "").strip()
-    if from_settings:
-        return "settings"
+) -> Literal["env", "missing"]:
+    del settings_api_keys, ui_settings_path
     if _load_provider_env_api_key(provider) is not None:
         return "env"
     return "missing"
@@ -535,7 +506,6 @@ def _provider_settings_payload(
     local_endpoint = (
         os.getenv("LOCAL_LLM_URL", DEFAULT_LOCAL_ENDPOINT).strip() or DEFAULT_LOCAL_ENDPOINT
     )
-    saved_api_keys = _load_provider_api_keys(ui_settings_path=ui_settings_path)
     runtime_checks = _load_provider_runtime_checks(ui_settings_path=ui_settings_path)
 
     def _runtime_status(provider: str) -> dict[str, JSONValue]:
@@ -553,15 +523,10 @@ def _provider_settings_payload(
         {
             "provider": "xai",
             "api_key_env": "XAI_API_KEY",
-            "api_key_set": _resolve_provider_api_key(
-                "xai",
-                settings_api_keys=saved_api_keys,
-                ui_settings_path=ui_settings_path,
-            )
+            "api_key_set": _resolve_provider_api_key("xai", ui_settings_path=ui_settings_path)
             is not None,
             "api_key_source": _provider_api_key_source(
                 "xai",
-                settings_api_keys=saved_api_keys,
                 ui_settings_path=ui_settings_path,
             ),
             "endpoint": XAI_MODELS_ENDPOINT,
@@ -572,13 +537,11 @@ def _provider_settings_payload(
             "api_key_env": "OPENROUTER_API_KEY",
             "api_key_set": _resolve_provider_api_key(
                 "openrouter",
-                settings_api_keys=saved_api_keys,
                 ui_settings_path=ui_settings_path,
             )
             is not None,
             "api_key_source": _provider_api_key_source(
                 "openrouter",
-                settings_api_keys=saved_api_keys,
                 ui_settings_path=ui_settings_path,
             ),
             "endpoint": OPENROUTER_MODELS_ENDPOINT,
@@ -589,13 +552,11 @@ def _provider_settings_payload(
             "api_key_env": "LOCAL_LLM_API_KEY",
             "api_key_set": _resolve_provider_api_key(
                 "local",
-                settings_api_keys=saved_api_keys,
                 ui_settings_path=ui_settings_path,
             )
             is not None,
             "api_key_source": _provider_api_key_source(
                 "local",
-                settings_api_keys=saved_api_keys,
                 ui_settings_path=ui_settings_path,
             ),
             "endpoint": local_endpoint,
@@ -606,13 +567,11 @@ def _provider_settings_payload(
             "api_key_env": "OPENAI_API_KEY",
             "api_key_set": _resolve_provider_api_key(
                 "openai",
-                settings_api_keys=saved_api_keys,
                 ui_settings_path=ui_settings_path,
             )
             is not None,
             "api_key_source": _provider_api_key_source(
                 "openai",
-                settings_api_keys=saved_api_keys,
                 ui_settings_path=ui_settings_path,
             ),
             "endpoint": OPENAI_STT_ENDPOINT,

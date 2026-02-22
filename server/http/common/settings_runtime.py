@@ -111,6 +111,9 @@ class SettingsRuntimeBindings:
     def save_provider_api_keys(self, api_keys: dict[str, str]) -> None:
         ui_settings._save_provider_api_keys(api_keys, ui_settings_path=self._ui_settings_path())
 
+    def drop_legacy_provider_api_keys(self) -> bool:
+        return ui_settings._drop_legacy_provider_api_keys(ui_settings_path=self._ui_settings_path())
+
     def load_provider_runtime_checks(self) -> dict[str, dict[str, JSONValue]]:
         return ui_settings._load_provider_runtime_checks(ui_settings_path=self._ui_settings_path())
 
@@ -137,7 +140,7 @@ class SettingsRuntimeBindings:
         provider: str,
         *,
         settings_api_keys: dict[str, str] | None = None,
-    ) -> Literal["settings", "env", "missing"]:
+    ) -> Literal["env", "missing"]:
         return ui_settings._provider_api_key_source(
             provider,
             settings_api_keys=settings_api_keys,
