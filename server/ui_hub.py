@@ -13,6 +13,7 @@ from server.ui_session_storage import (
     PersistedSession,
     UISessionStorage,
 )
+from shared.auto_models import normalize_auto_state
 from shared.models import JSONValue
 
 
@@ -22,7 +23,7 @@ def _utc_iso_now() -> str:
 
 SessionStatus = Literal["ok", "busy", "error"]
 PolicyProfile = Literal["sandbox", "index", "yolo"]
-SessionMode = Literal["ask", "plan", "act"]
+SessionMode = Literal["ask", "plan", "act", "auto"]
 SessionAccess = Literal["owned", "forbidden", "missing"]
 _UNSET: object = object()
 DEFAULT_LEGACY_PRINCIPAL_ID = "legacy"
@@ -187,6 +188,7 @@ class _SessionState:
     mode: SessionMode = "ask"
     active_plan: dict[str, JSONValue] | None = None
     active_task: dict[str, JSONValue] | None = None
+    auto_state: dict[str, JSONValue] | None = None
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
 
@@ -530,6 +532,9 @@ class UIHub:
                         active_task=(
                             dict(state.active_task) if state.active_task is not None else None
                         ),
+                        auto_state=(
+                            dict(state.auto_state) if isinstance(state.auto_state, dict) else None
+                        ),
                     ),
                 )
             items.sort(
@@ -594,6 +599,7 @@ class UIHub:
                     mode=self._normalize_mode(item.mode),
                     active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
                     active_task=(dict(item.active_task) if item.active_task is not None else None),
+                    auto_state=normalize_auto_state(item.auto_state),
                     created_at=created_at,
                     updated_at=restored_updated_at,
                 )
@@ -638,6 +644,7 @@ class UIHub:
                 "mode": state.mode,
                 "active_plan": dict(state.active_plan) if state.active_plan is not None else None,
                 "active_task": dict(state.active_task) if state.active_task is not None else None,
+                "auto_state": dict(state.auto_state) if state.auto_state is not None else None,
             }
 
     async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
@@ -845,6 +852,7 @@ class UIHub:
                 "mode": state.mode,
                 "active_plan": dict(state.active_plan) if state.active_plan is not None else None,
                 "active_task": dict(state.active_task) if state.active_task is not None else None,
+                "auto_state": dict(state.auto_state) if state.auto_state is not None else None,
             }
 
     async def set_session_workflow(
@@ -854,6 +862,7 @@ class UIHub:
         mode: str | None = None,
         active_plan: dict[str, JSONValue] | None | object = _UNSET,
         active_task: dict[str, JSONValue] | None | object = _UNSET,
+        auto_state: dict[str, JSONValue] | None | object = _UNSET,
     ) -> dict[str, JSONValue]:
         async with self._lock:
             state = self._sessions.get(session_id)
@@ -876,11 +885,17 @@ class UIHub:
                 if state.active_task != next_task:
                     state.active_task = next_task
                     changed = True
+            if auto_state is not _UNSET:
+                next_auto_state = normalize_auto_state(auto_state)
+                if state.auto_state != next_auto_state:
+                    state.auto_state = next_auto_state
+                    changed = True
             payload: dict[str, JSONValue] = {
                 "session_id": session_id,
                 "mode": state.mode,
                 "active_plan": (dict(state.active_plan) if state.active_plan is not None else None),
                 "active_task": (dict(state.active_task) if state.active_task is not None else None),
+                "auto_state": (dict(state.auto_state) if state.auto_state is not None else None),
             }
             if not changed:
                 subscribers: list[asyncio.Queue[dict[str, JSONValue]]] = []
@@ -1090,6 +1105,8 @@ class UIHub:
             return "plan"
         if normalized == "act":
             return "act"
+        if normalized == "auto":
+            return "auto"
         return "ask"
 
     def _normalize_optional_object(
@@ -1160,6 +1177,7 @@ class UIHub:
                 mode=self._normalize_mode(item.mode),
                 active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
                 active_task=(dict(item.active_task) if item.active_task is not None else None),
+                auto_state=normalize_auto_state(item.auto_state),
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
@@ -1205,6 +1223,7 @@ class UIHub:
                 mode=state.mode,
                 active_plan=(dict(state.active_plan) if state.active_plan is not None else None),
                 active_task=(dict(state.active_task) if state.active_task is not None else None),
+                auto_state=(dict(state.auto_state) if state.auto_state is not None else None),
             ),
         )
 

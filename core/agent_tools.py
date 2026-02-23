@@ -104,7 +104,11 @@ class AgentToolsMixin:
     runtime_mode: str
     runtime_active_plan: dict[str, JSONValue] | None
     runtime_active_task: dict[str, JSONValue] | None
+    runtime_auto_state: dict[str, JSONValue] | None
     runtime_plan_guard_enabled: bool
+    last_auto_state: dict[str, JSONValue] | None
+    last_approval_source_endpoint: str | None
+    last_approval_resume_payload: dict[str, JSONValue] | None
 
     def _inc_metric(self, name: str) -> None:
         current = self._skill_metrics.get(name, 0) + 1
@@ -126,7 +130,7 @@ class AgentToolsMixin:
         try:
             if cmd == "auto":
                 goal = " ".join(args)
-                result = self.handle_auto_command(goal)
+                result = self.handle_auto_command(goal, command_lane=True)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
                 return response
@@ -269,8 +273,6 @@ class AgentToolsMixin:
     def _should_record_in_history(self, content: str) -> bool:
         if content.startswith("/"):
             return False
-        if content.lower().startswith("авто"):
-            return False
         return True
 
     def _append_short_term(
@@ -298,6 +300,8 @@ class AgentToolsMixin:
 
     def _reset_approval_state(self) -> None:
         self.last_approval_request = None
+        self.last_approval_source_endpoint = None
+        self.last_approval_resume_payload = None
 
     def _record_decision_packet(self, packet: DecisionPacket) -> None:
         self.last_decision_packet = packet
@@ -337,11 +341,13 @@ class AgentToolsMixin:
         mode: str,
         active_plan: dict[str, JSONValue] | None,
         active_task: dict[str, JSONValue] | None,
+        auto_state: dict[str, JSONValue] | None = None,
         enforce_plan_guard: bool,
     ) -> None:
         self.runtime_mode = mode.strip().lower() if isinstance(mode, str) else "ask"
         self.runtime_active_plan = dict(active_plan) if isinstance(active_plan, dict) else None
         self.runtime_active_task = dict(active_task) if isinstance(active_task, dict) else None
+        self.runtime_auto_state = dict(auto_state) if isinstance(auto_state, dict) else None
         self.runtime_plan_guard_enabled = bool(enforce_plan_guard)
 
     def _approval_context(self, *, safe_mode_override: bool | None = None) -> ApprovalContext:
@@ -835,10 +841,33 @@ class AgentToolsMixin:
             },
         )
 
-    def handle_auto_command(self, goal: str) -> str:
-        """Создаёт подагентов и выполняет задачу параллельно."""
-        self.tracer.log("auto_invoke", f"Создание автоагентов для: {goal}")
-        return self.auto_agent.auto_execute(goal)
+    def handle_auto_command(self, goal: str, *, command_lane: bool = False) -> str:
+        goal_clean = goal.strip() or "auto run"
+        self.tracer.log("auto_invoke", f"Planner->Coder->Verifier: {goal_clean}")
+        outcome = self.auto_agent.run_outcome(goal_clean)
+        if command_lane:
+            return self._strip_report_block(outcome.text)
+        return outcome.text
+
+    def resume_auto_run(self, run_id: str) -> str | None:
+        run_id_clean = run_id.strip()
+        if not run_id_clean:
+            return None
+        outcome = self.auto_agent.resume_outcome(run_id_clean)
+        if outcome is None:
+            return None
+        return outcome.text
+
+    def cancel_auto_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "cancelled_by_user",
+    ) -> dict[str, JSONValue] | None:
+        run_id_clean = run_id.strip()
+        if not run_id_clean:
+            return None
+        return self.auto_agent.cancel_run(run_id_clean, reason=reason)
 
     def save_to_memory(self, prompt: str, answer: str) -> None:
         item = MemoryRecord(
@@ -903,6 +932,10 @@ class AgentToolsMixin:
             plan_summary="Ручной command lane без MWV-плана.",
             execution_summary=response or "Командный ответ сформирован.",
         )
+
+    def _strip_report_block(self, text: str) -> str:
+        lines = [line for line in text.splitlines() if not line.startswith(MWV_REPORT_PREFIX)]
+        return "\n".join(lines).strip()
 
     def _format_report_block(
         self,
@@ -1063,6 +1096,8 @@ class AgentToolsMixin:
         raw_input: str,
         record_in_history: bool = False,
         command_lane: bool = False,
+        source_endpoint: str | None = None,
+        resume_payload: dict[str, JSONValue] | None = None,
     ) -> str:
         self.last_approval_request = request
         required = ", ".join(request.required_categories) if request.required_categories else "n/a"
@@ -1070,6 +1105,18 @@ class AgentToolsMixin:
         if command_lane:
             why_parts.append("mode=command_lane (без MWV)")
         route = "command" if command_lane else "mwv"
+        next_source = source_endpoint.strip() if isinstance(source_endpoint, str) else ""
+        next_resume = dict(resume_payload) if isinstance(resume_payload, dict) else {}
+        if not command_lane and self.runtime_mode == "auto":
+            route = "auto"
+            if not next_source:
+                next_source = "auto.run"
+            if not next_resume and isinstance(self.last_auto_state, dict):
+                run_id_raw = self.last_auto_state.get("run_id")
+                if isinstance(run_id_raw, str) and run_id_raw.strip():
+                    next_resume = {"run_id": run_id_raw.strip()}
+        self.last_approval_source_endpoint = next_source or None
+        self.last_approval_resume_payload = next_resume or None
         error_text = self._format_stop_response(
             what="Требуется подтверждение действия",
             why="; ".join(why_parts),

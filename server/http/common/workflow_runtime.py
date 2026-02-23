@@ -10,6 +10,13 @@ from aiohttp import web
 
 from shared.models import JSONValue
 
+WorkflowRuntimeState = tuple[
+    str,
+    dict[str, JSONValue] | None,
+    dict[str, JSONValue] | None,
+    dict[str, JSONValue] | None,
+]
+
 
 class WorkflowHubProtocol(Protocol):
     async def get_session_policy(self, session_id: str) -> dict[str, JSONValue]: ...
@@ -25,6 +32,7 @@ class WorkflowHubProtocol(Protocol):
         mode: str | None = None,
         active_plan: dict[str, JSONValue] | None | object = None,
         active_task: dict[str, JSONValue] | None | object = None,
+        auto_state: dict[str, JSONValue] | None | object = None,
     ) -> dict[str, JSONValue]: ...
 
 
@@ -102,7 +110,8 @@ async def apply_agent_runtime_state(
     normalize_mode_value_fn: Callable[[object], str],
     normalize_plan_payload_fn: Callable[[object], dict[str, JSONValue] | None],
     normalize_task_payload_fn: Callable[[object], dict[str, JSONValue] | None],
-) -> tuple[str, dict[str, JSONValue] | None, dict[str, JSONValue] | None]:
+    normalize_auto_state_fn: Callable[[object], dict[str, JSONValue] | None],
+) -> WorkflowRuntimeState:
     effective_tools, _ = await load_effective_session_security_fn(hub, session_id)
     runtime_tools_setter = getattr(agent, "apply_runtime_tools_enabled", None)
     if callable(runtime_tools_setter):
@@ -112,17 +121,19 @@ async def apply_agent_runtime_state(
     mode = normalize_mode_value_fn(workflow.get("mode"))
     active_plan = normalize_plan_payload_fn(workflow.get("active_plan"))
     active_task = normalize_task_payload_fn(workflow.get("active_task"))
+    auto_state = normalize_auto_state_fn(workflow.get("auto_state"))
     runtime_setter = getattr(agent, "set_runtime_state", None)
     if callable(runtime_setter):
         runtime_setter(
             mode=mode,
             active_plan=active_plan,
             active_task=active_task,
+            auto_state=auto_state,
             enforce_plan_guard=(
                 mode == "act" and active_plan is not None and active_task is not None
             ),
         )
-    return mode, active_plan, active_task
+    return mode, active_plan, active_task, auto_state
 
 
 def build_default_plan_steps() -> list[dict[str, JSONValue]]:

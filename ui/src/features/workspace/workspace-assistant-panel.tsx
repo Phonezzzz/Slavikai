@@ -15,7 +15,7 @@ import {
   Volume2,
 } from 'lucide-react';
 
-import type { PlanEnvelope, SessionMode, TaskExecutionState, UiDecision } from '../../app/types';
+import type { AutoState, PlanEnvelope, SessionMode, TaskExecutionState, UiDecision } from '../../app/types';
 import type { CanvasMessage, CanvasSendPayload } from '../../app/components/canvas';
 import { DecisionPanel } from '../../app/components/decision-panel';
 import { PlanPanel } from '../../app/components/plan-panel';
@@ -45,6 +45,7 @@ type WorkspaceAssistantPanelProps = {
   onSelectModel: (provider: string, model: string) => void;
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
+  autoState: AutoState | null;
   modeBusy: boolean;
   modeError: string | null;
   onChangeMode: (mode: SessionMode) => Promise<void>;
@@ -81,6 +82,7 @@ export function WorkspaceAssistantPanel({
   onSelectModel,
   activePlan,
   activeTask,
+  autoState,
   modeBusy,
   modeError,
   onChangeMode,
@@ -441,6 +443,7 @@ export function WorkspaceAssistantPanel({
         mode={mode}
         plan={activePlan}
         task={activeTask}
+        autoState={autoState}
         busy={modeBusy}
         error={modeError}
         onChangeMode={onChangeMode}

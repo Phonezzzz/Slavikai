@@ -43,7 +43,37 @@ export type UiDecision = {
   resolved_at: string | null;
 };
 
-export type SessionMode = 'ask' | 'plan' | 'act';
+export type SessionMode = 'ask' | 'plan' | 'act' | 'auto';
+
+export type AutoRunStatus =
+  | 'idle'
+  | 'planning'
+  | 'coding'
+  | 'merging'
+  | 'verifying'
+  | 'waiting_approval'
+  | 'completed'
+  | 'failed_conflict'
+  | 'failed_verifier'
+  | 'failed_worker'
+  | 'failed_internal'
+  | 'cancelled';
+
+export type AutoState = {
+  run_id: string;
+  status: AutoRunStatus;
+  goal: string;
+  pool_size: number;
+  started_at: string;
+  updated_at: string;
+  planner: Record<string, unknown>;
+  plan: Record<string, unknown> | null;
+  coders: Array<Record<string, unknown>>;
+  merge: Record<string, unknown>;
+  verifier: Record<string, unknown> | null;
+  approval: Record<string, unknown> | null;
+  error: string | null;
+};
 
 export type PlanStepStatus = 'todo' | 'doing' | 'waiting_approval' | 'blocked' | 'done' | 'failed';
 

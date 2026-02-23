@@ -102,6 +102,10 @@ def _parse_imported_session(
     principal_id: str,
     normalize_policy_profile_fn: Callable[[object], str],
     normalize_tools_state_payload_fn: Callable[[object], dict[str, bool]],
+    normalize_mode_value_fn: Callable[[object], str],
+    normalize_plan_payload_fn: Callable[[object], dict[str, JSONValue] | None],
+    normalize_task_payload_fn: Callable[[object], dict[str, JSONValue] | None],
+    normalize_auto_state_fn: Callable[[object], dict[str, JSONValue] | None],
     utc_iso_fn: Callable[[], str] = _utc_iso,
 ) -> PersistedSession | None:
     if not isinstance(raw, dict):
@@ -158,6 +162,10 @@ def _parse_imported_session(
         yolo_armed=yolo_armed,
         yolo_armed_at=yolo_armed_at,
         tools_state=normalize_tools_state_payload_fn(raw.get("tools_state")),
+        mode=normalize_mode_value_fn(raw.get("mode")),
+        active_plan=normalize_plan_payload_fn(raw.get("active_plan")),
+        active_task=normalize_task_payload_fn(raw.get("active_task")),
+        auto_state=normalize_auto_state_fn(raw.get("auto_state")),
     )
 
 
@@ -168,6 +176,7 @@ def _serialize_persisted_session(
     normalize_mode_value_fn: Callable[[object], str],
     normalize_plan_payload_fn: Callable[[object], dict[str, JSONValue] | None],
     normalize_task_payload_fn: Callable[[object], dict[str, JSONValue] | None],
+    normalize_auto_state_fn: Callable[[object], dict[str, JSONValue] | None],
 ) -> dict[str, JSONValue]:
     selected_model: dict[str, JSONValue] | None = None
     if session.model_provider and session.model_id:
@@ -207,6 +216,9 @@ def _serialize_persisted_session(
             normalize_task_payload_fn(session.active_task)
             if session.active_task is not None
             else None
+        ),
+        "auto_state": (
+            normalize_auto_state_fn(session.auto_state) if session.auto_state is not None else None
         ),
     }
     return payload

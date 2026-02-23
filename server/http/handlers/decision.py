@@ -17,6 +17,7 @@ from server.http_api import (
     _decision_with_status,
     _ensure_session_owned,
     _load_effective_session_security,
+    _normalize_auto_state,
     _normalize_json_value,
     _normalize_mode_value,
     _normalize_plan_payload,
@@ -251,6 +252,110 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "data": {"root_path": str(target_root)},
             }
 
+        if source_endpoint == "auto.run":
+            run_id_raw = resume_payload.get("run_id")
+            run_id = (
+                run_id_raw.strip() if isinstance(run_id_raw, str) and run_id_raw.strip() else ""
+            )
+            if not run_id:
+                return {
+                    "ok": False,
+                    "error": "resume_payload.run_id is missing.",
+                    "source_endpoint": source_endpoint,
+                }
+            try:
+                agent = await _resolve_agent(request)
+            except ModelNotAllowedError as exc:
+                return {
+                    "ok": False,
+                    "error": f"model_not_allowed: {exc.model_id}",
+                    "source_endpoint": source_endpoint,
+                }
+            if agent is None:
+                return {
+                    "ok": False,
+                    "error": "model_not_selected",
+                    "source_endpoint": source_endpoint,
+                }
+            response_text: str | None = None
+            async with agent_lock:
+                await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                agent.set_session_context(session_id, one_call_categories)
+                resume_method = getattr(agent, "resume_auto_run", None)
+                if not callable(resume_method):
+                    return {
+                        "ok": False,
+                        "error": "auto_resume_not_supported",
+                        "source_endpoint": source_endpoint,
+                    }
+                try:
+                    response_text = resume_method(run_id)
+                except ApprovalRequired as exc:
+                    approval_payload = _serialize_approval_request(exc.request)
+                    return {
+                        "ok": False,
+                        "error": "approval_required",
+                        "approval_request": approval_payload,
+                        "source_endpoint": source_endpoint,
+                    }
+            if not isinstance(response_text, str) or not response_text.strip():
+                return {
+                    "ok": False,
+                    "error": "auto_run_not_found",
+                    "source_endpoint": source_endpoint,
+                }
+            auto_state = _normalize_auto_state(getattr(agent, "last_auto_state", None))
+            if auto_state is not None:
+                await hub.set_session_workflow(session_id, auto_state=auto_state)
+            drain_auto_progress = getattr(agent, "drain_auto_progress_events", None)
+            if callable(drain_auto_progress):
+                drained = drain_auto_progress()
+                if isinstance(drained, list):
+                    for item in drained:
+                        normalized_progress = _normalize_auto_state(item)
+                        if normalized_progress is None:
+                            continue
+                        await hub.publish(
+                            session_id,
+                            {
+                                "type": "auto.progress",
+                                "payload": {
+                                    "session_id": session_id,
+                                    "auto_state": normalized_progress,
+                                },
+                            },
+                        )
+            await hub.set_session_output(session_id, response_text)
+            trace_id_raw = getattr(agent, "last_chat_interaction_id", None)
+            trace_id = (
+                trace_id_raw if isinstance(trace_id_raw, str) and trace_id_raw.strip() else None
+            )
+            parent_message_id_raw = resume_payload.get("user_message_id")
+            parent_message_id = (
+                parent_message_id_raw.strip()
+                if isinstance(parent_message_id_raw, str) and parent_message_id_raw.strip()
+                else None
+            )
+            assistant_message = hub.create_message(
+                role="assistant",
+                content=response_text,
+                trace_id=trace_id,
+                parent_user_message_id=parent_message_id,
+            )
+            await hub.append_message(session_id, assistant_message)
+            auto_status_raw = auto_state.get("status") if isinstance(auto_state, dict) else None
+            auto_status = auto_status_raw if isinstance(auto_status_raw, str) else "unknown"
+            return {
+                "ok": True,
+                "source_endpoint": source_endpoint,
+                "data": {
+                    "run_id": run_id,
+                    "status": auto_status,
+                    "output": response_text,
+                    "auto_state": auto_state,
+                },
+            }
+
         if source_endpoint != "workspace.tool":
             return {
                 "ok": False,
@@ -456,6 +561,12 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         }
 
     if choice == "reject":
+        context_raw = current_decision.get("context")
+        context = context_raw if isinstance(context_raw, dict) else {}
+        source_endpoint_raw = context.get("source_endpoint")
+        source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
+        resume_payload_raw = context.get("resume_payload")
+        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
         rejected = _decision_with_status(current_decision, status="rejected", resolved=True)
         updated, latest = await hub.transition_session_decision(
             session_id,
@@ -478,6 +589,52 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         resolved_status = (
             resolved_status_raw if isinstance(resolved_status_raw, str) else "rejected"
         )
+        resume_payload_response: dict[str, JSONValue] | None = None
+        if source_endpoint == "auto.run":
+            run_id_raw = resume_payload.get("run_id")
+            run_id = (
+                run_id_raw.strip() if isinstance(run_id_raw, str) and run_id_raw.strip() else ""
+            )
+            if run_id:
+                try:
+                    agent = await _resolve_agent(request)
+                except ModelNotAllowedError:
+                    agent = None
+                if agent is not None:
+                    async with agent_lock:
+                        await _apply_agent_runtime_state(
+                            agent=agent,
+                            hub=hub,
+                            session_id=session_id,
+                        )
+                        cancel_method = getattr(agent, "cancel_auto_run", None)
+                        if callable(cancel_method):
+                            cancelled = cancel_method(run_id, reason="rejected_by_user")
+                            cancelled_state = _normalize_auto_state(cancelled)
+                            if cancelled_state is not None:
+                                await hub.set_session_workflow(
+                                    session_id,
+                                    auto_state=cancelled_state,
+                                )
+                                await hub.publish(
+                                    session_id,
+                                    {
+                                        "type": "auto.progress",
+                                        "payload": {
+                                            "session_id": session_id,
+                                            "auto_state": cancelled_state,
+                                        },
+                                    },
+                                )
+                                resume_payload_response = {
+                                    "ok": True,
+                                    "source_endpoint": source_endpoint,
+                                    "data": {
+                                        "run_id": run_id,
+                                        "status": "cancelled",
+                                    },
+                                }
+        workflow = await hub.get_session_workflow(session_id)
         return json_response(
             {
                 "ok": True,
@@ -485,7 +642,11 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "status": resolved_status,
                 "resume_started": False,
                 "already_resolved": resolved_status in {"resolved", "rejected"},
-                "resume": None,
+                "resume": resume_payload_response,
+                "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
+                "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
+                "active_task": _normalize_task_payload(workflow.get("active_task")),
+                "auto_state": _normalize_auto_state(workflow.get("auto_state")),
             }
         )
 
@@ -540,5 +701,6 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
             "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
             "active_task": _normalize_task_payload(workflow.get("active_task")),
+            "auto_state": _normalize_auto_state(workflow.get("auto_state")),
         }
     )

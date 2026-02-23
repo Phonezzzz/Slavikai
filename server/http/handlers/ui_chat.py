@@ -34,6 +34,7 @@ from server.http_api import (
     _extract_named_files_from_output,
     _model_not_allowed_response,
     _model_not_selected_response,
+    _normalize_auto_state,
     _normalize_mode_value,
     _normalize_plan_payload,
     _normalize_task_payload,
@@ -172,6 +173,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
         active_plan = _normalize_plan_payload(workflow.get("active_plan"))
         active_task = _normalize_task_payload(workflow.get("active_task"))
+        auto_state = _normalize_auto_state(workflow.get("auto_state"))
 
         await hub.set_session_status(session_id, "busy")
         status_opened = True
@@ -243,6 +245,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                     "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
                     "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
                     "active_task": _normalize_task_payload(workflow.get("active_task")),
+                    "auto_state": _normalize_auto_state(workflow.get("auto_state")),
                 }
             )
             response.headers[UI_SESSION_HEADER] = session_id
@@ -266,6 +269,8 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         trace_id: str | None = None
         approval_request: dict[str, JSONValue] | None = None
         ui_decision: dict[str, JSONValue] | None = None
+        latest_auto_state: dict[str, JSONValue] | None = auto_state
+        auto_progress_states: list[dict[str, JSONValue]] = []
         chat_stream_id = uuid.uuid4().hex
         live_stream_sent = False
         async with agent_lock:
@@ -442,17 +447,36 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
             )
+            latest_auto_state = _normalize_auto_state(getattr(agent, "last_auto_state", None))
+            drain_auto_progress = getattr(agent, "drain_auto_progress_events", None)
+            if callable(drain_auto_progress):
+                drained = drain_auto_progress()
+                if isinstance(drained, list):
+                    for item in drained:
+                        normalized_progress = _normalize_auto_state(item)
+                        if normalized_progress is not None:
+                            auto_progress_states.append(normalized_progress)
             ui_decision = _normalize_ui_decision(
                 decision,
                 session_id=session_id,
                 trace_id=trace_id,
             )
             if approval_request is not None:
-                ui_decision = _build_ui_approval_decision(
-                    approval_request=approval_request,
-                    session_id=session_id,
-                    source_endpoint="chat.send",
-                    resume_payload={
+                approval_source_endpoint_raw = getattr(agent, "last_approval_source_endpoint", None)
+                approval_source_endpoint = (
+                    approval_source_endpoint_raw.strip()
+                    if isinstance(approval_source_endpoint_raw, str)
+                    and approval_source_endpoint_raw.strip()
+                    else "chat.send"
+                )
+                approval_resume_payload_raw = getattr(agent, "last_approval_resume_payload", None)
+                approval_resume_payload = (
+                    dict(approval_resume_payload_raw)
+                    if isinstance(approval_resume_payload_raw, dict)
+                    else {}
+                )
+                if not approval_resume_payload:
+                    approval_resume_payload = {
                         "source_request": {
                             "content": content_raw,
                             "force_canvas": force_canvas,
@@ -463,7 +487,12 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                             "provider": selected_model["provider"],
                             "model": selected_model["model"],
                         },
-                    },
+                    }
+                ui_decision = _build_ui_approval_decision(
+                    approval_request=approval_request,
+                    session_id=session_id,
+                    source_endpoint=approval_source_endpoint,
+                    resume_payload=approval_resume_payload,
                     trace_id=trace_id,
                     workflow_context=_decision_workflow_context(
                         mode=mode,
@@ -471,6 +500,20 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                         active_task=active_task,
                     ),
                 )
+
+        if latest_auto_state is not None:
+            await hub.set_session_workflow(session_id, auto_state=latest_auto_state)
+        for progress_state in auto_progress_states:
+            await hub.publish(
+                session_id,
+                {
+                    "type": "auto.progress",
+                    "payload": {
+                        "session_id": session_id,
+                        "auto_state": progress_state,
+                    },
+                },
+            )
 
         if _decision_is_pending_blocking(ui_decision):
             await _set_current_plan_step_status(
@@ -512,6 +555,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                     "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
                     "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
                     "active_task": _normalize_task_payload(current_workflow.get("active_task")),
+                    "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
                 }
             )
             response.headers[UI_SESSION_HEADER] = session_id
@@ -618,6 +662,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
                 "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
                 "active_task": _normalize_task_payload(current_workflow.get("active_task")),
+                "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
             },
         )
         response.headers[UI_SESSION_HEADER] = session_id

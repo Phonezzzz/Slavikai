@@ -7,6 +7,7 @@ from server.http_api import (
     SESSION_MODES,
     UI_SESSION_HEADER,
     _load_effective_session_security,
+    _normalize_auto_state,
     _normalize_mode_value,
     _normalize_plan_payload,
     _normalize_task_payload,
@@ -46,6 +47,7 @@ async def handle_ui_status(request: web.Request) -> web.Response:
             "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
             "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
             "active_task": _normalize_task_payload(workflow.get("active_task")),
+            "auto_state": _normalize_auto_state(workflow.get("auto_state")),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -70,6 +72,7 @@ async def handle_ui_state(request: web.Request) -> web.Response:
         "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
         "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
         "active_task": _normalize_task_payload(workflow.get("active_task")),
+        "auto_state": _normalize_auto_state(workflow.get("auto_state")),
         "pending_decision": decision,
     }
     response = json_response(payload)
@@ -104,7 +107,7 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
     if not isinstance(mode_raw, str) or mode_raw.strip().lower() not in SESSION_MODES:
         return error_response(
             status=400,
-            message="mode должен быть ask|plan|act.",
+            message="mode должен быть ask|plan|act|auto.",
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
@@ -112,6 +115,17 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
     workflow = await hub.get_session_workflow(session_id)
     current_mode = _normalize_mode_value(workflow.get("mode"), default="ask")
     active_plan = _normalize_plan_payload(workflow.get("active_plan"))
+    active_task = _normalize_task_payload(workflow.get("active_task"))
+    auto_state = _normalize_auto_state(workflow.get("auto_state"))
+    auto_status_raw = auto_state.get("status") if isinstance(auto_state, dict) else None
+    auto_status = auto_status_raw if isinstance(auto_status_raw, str) else "idle"
+    auto_run_active = auto_status in {
+        "planning",
+        "coding",
+        "merging",
+        "verifying",
+        "waiting_approval",
+    }
     if next_mode == "act" and current_mode != "plan":
         return error_response(
             status=409,
@@ -135,10 +149,39 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="plan_not_approved",
             )
+    if next_mode == "auto":
+        if current_mode in {"plan", "act"} and (active_plan is not None or active_task is not None):
+            return error_response(
+                status=409,
+                message="Нельзя перейти в auto при активном plan/act workflow.",
+                error_type="invalid_request_error",
+                code="mode_transition_not_allowed",
+            )
+    if current_mode == "auto" and next_mode == "ask" and auto_run_active:
+        return error_response(
+            status=409,
+            message="Нельзя выйти из auto: auto-run ещё активен.",
+            error_type="invalid_request_error",
+            code="auto_run_active",
+        )
+    if current_mode == "auto" and next_mode in {"plan", "act"}:
+        return error_response(
+            status=409,
+            message="Переход auto->plan|act запрещён до завершения auto-run.",
+            error_type="invalid_request_error",
+            code="mode_transition_not_allowed",
+        )
     if next_mode == "ask":
         await hub.set_session_workflow(
             session_id,
             mode="ask",
+            active_task=None,
+        )
+    elif next_mode == "auto":
+        await hub.set_session_workflow(
+            session_id,
+            mode="auto",
+            active_plan=None,
             active_task=None,
         )
     else:
@@ -151,6 +194,7 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
             "mode": _normalize_mode_value(updated.get("mode"), default="ask"),
             "active_plan": _normalize_plan_payload(updated.get("active_plan")),
             "active_task": _normalize_task_payload(updated.get("active_task")),
+            "auto_state": _normalize_auto_state(updated.get("auto_state")),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id

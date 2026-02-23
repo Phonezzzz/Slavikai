@@ -182,6 +182,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         self.planner = Planner()
         self.executor = Executor(self.tracer)
         self.auto_agent = AutoAgent(self)
+        self.auto_agent.set_progress_callback(self._record_auto_progress)
         self.tools_enabled = enable_tools or self._load_tools()
         self.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
         self.web_tool = WebSearchTool()
@@ -214,6 +215,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         self.runtime_mode = "act"
         self.runtime_active_plan: dict[str, JSONValue] | None = None
         self.runtime_active_task: dict[str, JSONValue] | None = None
+        self.runtime_auto_state: dict[str, JSONValue] | None = None
         self.runtime_plan_guard_enabled = False
         self.last_plan: TaskPlan | None = None
         self.last_plan_original: TaskPlan | None = None
@@ -233,12 +235,16 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         }
         self.decision_handler = DecisionHandler()
         self.last_approval_request: ApprovalRequest | None = None
+        self.last_approval_source_endpoint: str | None = None
+        self.last_approval_resume_payload: dict[str, JSONValue] | None = None
         self.last_decision_packet: DecisionPacket | None = None
         self.last_reasoning: str | None = None
         self.last_stream_response_raw: str | None = None
         self.last_plan_summary: str | None = None
         self.last_execution_summary: str | None = None
         self._pending_decision_packet: DecisionPacket | None = None
+        self.last_auto_state: dict[str, JSONValue] | None = None
+        self._auto_progress_events: list[dict[str, JSONValue]] = []
         self.workspace_file_path: str | None = None
         self.workspace_file_content: str | None = None
         self.workspace_selection: str | None = None
@@ -247,6 +253,14 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
 
     def _review_answer(self, answer: str) -> str:
         return answer
+
+    def _record_auto_progress(self, state: dict[str, JSONValue]) -> None:
+        self._auto_progress_events.append(dict(state))
+
+    def drain_auto_progress_events(self) -> list[dict[str, JSONValue]]:
+        events = [dict(item) for item in self._auto_progress_events]
+        self._auto_progress_events.clear()
+        return events
 
     def _build_brain(self) -> Brain:
         if self._brain_manager:

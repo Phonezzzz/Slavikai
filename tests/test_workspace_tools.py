@@ -19,6 +19,7 @@ from tools.workspace_tools import (
     RunCodeTool,
     WorkspaceTerminalRunTool,
     WriteFileTool,
+    workspace_root_context,
 )
 
 
@@ -219,7 +220,7 @@ def test_workspace_list_returns_tree_meta_and_truncates_by_max_entries(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(workspace_tools_module, "_workspace_root_current", None)
+    workspace_tools_module.set_workspace_root(None)
     monkeypatch.setattr(workspace_tools_module, "MAX_TREE_ENTRIES", 5)
     monkeypatch.setattr(workspace_tools_module, "MAX_CHILDREN_PER_DIR", 100)
     for idx in range(10):
@@ -242,7 +243,7 @@ def test_workspace_list_returns_tree_meta_and_truncates_by_max_entries(
 
 def test_workspace_list_marks_children_truncated_per_dir(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(workspace_tools_module, "_workspace_root_current", None)
+    workspace_tools_module.set_workspace_root(None)
     monkeypatch.setattr(workspace_tools_module, "MAX_TREE_ENTRIES", MAX_TREE_ENTRIES)
     monkeypatch.setattr(workspace_tools_module, "MAX_CHILDREN_PER_DIR", 2)
 
@@ -297,6 +298,19 @@ def test_workspace_list_respects_max_depth() -> None:
     assert isinstance(tree_meta, dict)
     assert tree_meta.get("max_depth_applied") == 0
     shutil.rmtree(base, ignore_errors=True)
+
+
+def test_workspace_root_context_isolation(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", tmp_path / "default")
+    default_root = workspace_tools_module.WORKSPACE_ROOT
+    default_root.mkdir(parents=True, exist_ok=True)
+    isolated = tmp_path / "isolated"
+    isolated.mkdir(parents=True, exist_ok=True)
+
+    assert workspace_tools_module.get_workspace_root() == default_root
+    with workspace_root_context(isolated):
+        assert workspace_tools_module.get_workspace_root() == isolated
+    assert workspace_tools_module.get_workspace_root() == default_root
 
 
 def _flatten_paths(tree: list[dict[str, object]]) -> set[str]:

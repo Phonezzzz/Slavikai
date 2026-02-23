@@ -7,6 +7,7 @@ from aiohttp import web
 
 from server.http_api import (
     UI_SESSION_HEADER,
+    _normalize_auto_state,
     _normalize_mode_value,
     _normalize_plan_payload,
     _normalize_task_payload,
@@ -46,6 +47,7 @@ async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
             "mode": _normalize_mode_value(initial_workflow.get("mode"), default="ask"),
             "active_plan": _normalize_plan_payload(initial_workflow.get("active_plan")),
             "active_task": _normalize_task_payload(initial_workflow.get("active_task")),
+            "auto_state": _normalize_auto_state(initial_workflow.get("auto_state")),
         },
     }
     initial_workflow_payload = json.dumps(initial_workflow_event, ensure_ascii=False)

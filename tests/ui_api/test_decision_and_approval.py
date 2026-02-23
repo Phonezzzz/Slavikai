@@ -301,6 +301,105 @@ def test_ui_decision_respond_reject_does_not_execute_workspace_tool() -> None:
     asyncio.run(run())
 
 
+def test_ui_decision_respond_auto_run_resume() -> None:
+    class AutoResumeAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_chat_interaction_id = "trace-auto-1"
+            self.last_auto_state: dict[str, JSONValue] | None = None
+
+        def resume_auto_run(self, run_id: str) -> str:
+            self.last_auto_state = {
+                "run_id": run_id,
+                "status": "completed",
+                "goal": "goal",
+                "pool_size": 3,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:01+00:00",
+                "planner": {"status": "completed"},
+                "plan": {"plan_id": "p1", "goal": "goal", "shards": []},
+                "coders": [],
+                "merge": {"status": "completed", "changed_paths": []},
+                "verifier": {"status": "passed", "command": ["check"], "exit_code": 0},
+                "approval": None,
+                "error": None,
+            }
+            return "auto resumed"
+
+        def cancel_auto_run(self, run_id: str, *, reason: str = "cancelled_by_user"):  # noqa: ANN001
+            return {
+                "run_id": run_id,
+                "status": "cancelled",
+                "goal": "goal",
+                "pool_size": 3,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:02+00:00",
+                "planner": {"status": "completed"},
+                "plan": {"plan_id": "p1", "goal": "goal", "shards": []},
+                "coders": [],
+                "merge": {"status": "cancelled"},
+                "verifier": None,
+                "approval": {"status": "rejected"},
+                "error": reason,
+            }
+
+    async def run() -> None:
+        client = await _create_client(AutoResumeAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            hub = client.server.app["ui_hub"]
+            decision_payload = {
+                "id": "decision-auto-1",
+                "kind": "approval",
+                "decision_type": "tool_approval",
+                "status": "pending",
+                "blocking": True,
+                "reason": "approval_required",
+                "summary": "Resume auto run",
+                "proposed_action": {},
+                "options": [],
+                "default_option_id": None,
+                "context": {
+                    "session_id": session_id,
+                    "source_endpoint": "auto.run",
+                    "resume_payload": {"run_id": "auto-run-1"},
+                },
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "resolved_at": None,
+            }
+            await hub.set_session_decision(session_id, decision_payload)
+            await hub.set_session_workflow(session_id, mode="auto")
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-auto-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            payload = await respond.json()
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+            assert resume.get("source_endpoint") == "auto.run"
+            auto_state = payload.get("auto_state")
+            assert isinstance(auto_state, dict)
+            assert auto_state.get("status") == "completed"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_decision_respond_ignores_client_control_fields_or_rejects() -> None:
     async def run() -> None:
         agent = WorkspaceDecisionAgent()

@@ -2,8 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { OnMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
 
-import type { UiDecision } from '../types';
-import type { PlanEnvelope, SessionMode, TaskExecutionState } from '../types';
+import type { AutoState, PlanEnvelope, SessionMode, TaskExecutionState, UiDecision } from '../types';
 import type { CanvasMessage, CanvasSendPayload } from './canvas';
 import {
   findFirstFilePath,
@@ -62,6 +61,7 @@ type WorkspaceIdeProps = {
   mode: SessionMode;
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
+  autoState: AutoState | null;
   modeBusy?: boolean;
   modeError?: string | null;
   onChangeMode: (mode: SessionMode) => Promise<void>;
@@ -107,6 +107,7 @@ export function WorkspaceIde({
   mode,
   activePlan,
   activeTask,
+  autoState,
   modeBusy = false,
   modeError = null,
   onChangeMode,
@@ -1119,15 +1120,16 @@ export function WorkspaceIde({
 
         <WorkspaceAssistantPanel
           contextChips={aiContextChips}
-          mode={mode}
-          modelOptions={modelOptions}
-          selectedModelValue={selectedModelValue}
-          modelsLoading={modelsLoading}
-          savingModel={savingModel}
-          onSelectModel={onSelectModel}
-          activePlan={activePlan}
-          activeTask={activeTask}
-          modeBusy={modeBusy}
+        mode={mode}
+        modelOptions={modelOptions}
+        selectedModelValue={selectedModelValue}
+        modelsLoading={modelsLoading}
+        savingModel={savingModel}
+        onSelectModel={onSelectModel}
+        activePlan={activePlan}
+        activeTask={activeTask}
+        autoState={autoState}
+        modeBusy={modeBusy}
           modeError={modeError}
           onChangeMode={onChangeMode}
           onPlanDraft={onPlanDraft}

@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from config.shell_config import DEFAULT_SHELL_CONFIG_PATH, load_shell_config
@@ -15,7 +17,10 @@ from tools.shell_tool import _validate_args as _validate_shell_args
 SANDBOX_ROOT = Path("sandbox").resolve()
 WORKSPACE_ROOT = (SANDBOX_ROOT / "project").resolve()
 WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
-_workspace_root_current: Path | None = None
+_workspace_root_current: ContextVar[Path | None] = ContextVar(
+    "workspace_root_current",
+    default=None,
+)
 ALLOWED_EXTENSIONS = {
     ".py",
     ".md",
@@ -54,20 +59,38 @@ MAX_CHILDREN_PER_DIR = 300
 
 
 def get_workspace_root() -> Path:
-    return _workspace_root_current or WORKSPACE_ROOT
+    return _workspace_root_current.get() or WORKSPACE_ROOT
 
 
 def set_workspace_root(root: str | Path | None) -> Path:
-    global _workspace_root_current
     if root is None:
-        _workspace_root_current = None
+        _workspace_root_current.set(None)
         return get_workspace_root()
+    candidate = _resolve_workspace_root(root)
+    _workspace_root_current.set(candidate)
+    return candidate
+
+
+@contextmanager
+def workspace_root_context(root: str | Path | None) -> Iterator[Path]:
+    candidate: Path | None
+    if root is None:
+        candidate = None
+    else:
+        candidate = _resolve_workspace_root(root)
+    token = _workspace_root_current.set(candidate)
+    try:
+        yield get_workspace_root()
+    finally:
+        _workspace_root_current.reset(token)
+
+
+def _resolve_workspace_root(root: str | Path) -> Path:
     raw = Path(root).expanduser()
     candidate = raw.resolve()
     if not candidate.exists() or not candidate.is_dir():
         raise ValueError(f"Рабочая директория не найдена: {candidate}")
-    _workspace_root_current = candidate
-    return _workspace_root_current
+    return candidate
 
 
 def _ensure_in_workspace(raw_path: str) -> Path:

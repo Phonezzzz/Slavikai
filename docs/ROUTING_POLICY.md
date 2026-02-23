@@ -5,6 +5,7 @@
 - `mwv` — задачи с изменениями/инструментами (Manager → Worker → Verifier).
 
 Политика применяется в runtime (Agent.respond) без скрытых обходов.
+Mode-level исключение: при `runtime_mode=auto` обычный текст идёт в auto-runtime, а не в `chat|mwv` классификацию.
 
 ## Правила (жёстко, без магии)
 
@@ -51,6 +52,8 @@
 ## Command lane
 
 См. `docs/COMMAND_LANE_POLICY.md` — команды `/...` считаются ручным режимом и не входят в MWV.
+Это включает `/auto <goal>`: команда остаётся command lane alias и всегда помечается
+`Командный режим (без MWV)`.
 
 ## Stop responses
 

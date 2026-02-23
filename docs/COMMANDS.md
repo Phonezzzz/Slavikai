@@ -12,10 +12,16 @@
 - `/project index [path]` — индексировать файлы из `sandbox/project/`.
 - `/project find <query>` — поиск по индексу `code/docs`.
 - `/plan <goal>` — построить и выполнить план.
-- `/auto <goal>` — запустить auto-agent.
+- `/auto <goal>` — command-lane alias для one-shot auto запуска (без MWV).
 - `/imggen <prompt>` — генерация изображения.
 - `/imganalyze <path|base64|base64:...>` — анализ изображения.
 - `/trace` — последние записи trace.
+
+## Session mode `auto`
+
+- `auto` — отдельный runtime mode (к `ask|plan|act`) с контуром `planner -> N coder -> verifier`.
+- В mode-level `auto` запуск идёт через runtime orchestrator, а не через command lane.
+- `/auto ...` остаётся именно командой `/...` и всегда помечается `Командный режим (без MWV)`.
 
 ## Важно
 

@@ -32,16 +32,15 @@ class AgentRoutingMixin:
             self.last_reasoning = None
             self._reset_workspace_diffs()
 
-            if last_content.lower().startswith("авто") or last_content.startswith("/auto"):
-                auto_goal = last_content.replace("/auto", "").strip()
-                result = self.handle_auto_command(auto_goal)
+            if last_content.startswith("/"):
+                return self.handle_tool_command(last_content)
+
+            if getattr(self, "runtime_mode", "ask") == "auto":
+                result = self.handle_auto_command(last_content)
                 self._log_chat_interaction(raw_input=last_content, response_text=result)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=result)])
                 return result
-
-            if last_content.startswith("/"):
-                return self.handle_tool_command(last_content)
 
             decision = classify_request(
                 messages,
@@ -126,14 +125,14 @@ class AgentRoutingMixin:
             self.last_reasoning = None
             self._reset_workspace_diffs()
 
-            if last_content.lower().startswith("авто") or last_content.startswith("/auto"):
-                result = self.handle_auto_command(last_content.replace("/auto", "").strip())
+            if last_content.startswith("/"):
+                result = self.handle_tool_command(last_content)
                 self.last_stream_response_raw = result
                 yield result
                 return
 
-            if last_content.startswith("/"):
-                result = self.handle_tool_command(last_content)
+            if getattr(self, "runtime_mode", "ask") == "auto":
+                result = self.handle_auto_command(last_content)
                 self.last_stream_response_raw = result
                 yield result
                 return

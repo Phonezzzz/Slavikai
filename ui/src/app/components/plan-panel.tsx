@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 
 import type {
+  AutoState,
   PlanEnvelope,
   SessionMode,
   TaskExecutionState,
@@ -10,6 +11,7 @@ type PlanPanelProps = {
   mode: SessionMode;
   plan: PlanEnvelope | null;
   task: TaskExecutionState | null;
+  autoState?: AutoState | null;
   busy: boolean;
   error: string | null;
   showModeControls?: boolean;
@@ -24,6 +26,7 @@ export function PlanPanel({
   mode,
   plan,
   task,
+  autoState = null,
   busy,
   error,
   showModeControls = true,
@@ -54,7 +57,7 @@ export function PlanPanel({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           {showModeControls
-            ? (['ask', 'plan', 'act'] as SessionMode[]).map((item) => (
+            ? (['ask', 'plan', 'act', 'auto'] as SessionMode[]).map((item) => (
                 <button
                   key={item}
                   type="button"
@@ -135,6 +138,14 @@ export function PlanPanel({
           >
             Cancel
           </button>
+        </div>
+      ) : null}
+
+      {mode === 'auto' ? (
+        <div className="mt-2 rounded-md border border-[#1f1f24] bg-[#0d0d11] p-2 text-[11px] text-[#9a9aa4]">
+          <div>run: {autoState?.run_id ?? 'none'}</div>
+          <div>status: {autoState?.status ?? 'idle'}</div>
+          <div>pool: {autoState?.pool_size ?? '-'}</div>
         </div>
       ) : null}
 

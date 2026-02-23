@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import concurrent.futures
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from core.auto_runtime import AutoOrchestrator, AutoRunOutcome
 from core.tracer import Tracer
 from llm.types import LLMResult
-from shared.models import LLMMessage
+from shared.models import JSONValue, LLMMessage
 
 if TYPE_CHECKING:
     from core.agent import Agent
@@ -14,14 +16,31 @@ MAX_SUBTASKS = 6
 
 
 class AutoAgent:
-    """Создаёт подагентов, распределяет им задачи и собирает результаты."""
+    """Compatibility wrapper: legacy helpers + role-based auto orchestrator."""
 
     def __init__(self, parent_agent: Agent) -> None:
         self.parent = parent_agent
         self.tracer = Tracer()
+        self._progress_callback: Callable[[dict[str, JSONValue]], None] | None = None
+        self.orchestrator = AutoOrchestrator(
+            parent_agent,
+            progress_callback=self._on_progress,
+        )
 
+    def set_progress_callback(
+        self,
+        callback: Callable[[dict[str, JSONValue]], None] | None,
+    ) -> None:
+        self._progress_callback = callback
+
+    def _on_progress(self, state: dict[str, JSONValue]) -> None:
+        callback = self._progress_callback
+        if callback is None:
+            return
+        callback(dict(state))
+
+    # Legacy compatibility helpers (used by existing tests).
     def generate_subtasks(self, goal: str) -> list[str]:
-        """Создаёт список подзадач из общей цели."""
         goal_clean = goal.strip()
         parts = [part.strip() for part in goal_clean.split("и") if part.strip()]
         subtasks = [p.capitalize() for p in parts if len(p) > 3][:MAX_SUBTASKS]
@@ -35,8 +54,9 @@ class AutoAgent:
         return subtasks
 
     def run_parallel(self, subtasks: list[str]) -> list[tuple[str, str]]:
-        """Выполняет подзадачи параллельно."""
         results: list[tuple[str, str]] = []
+        if not subtasks:
+            return results
         self.tracer.log("auto_start", f"Параллельное выполнение {len(subtasks)} подзадач")
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(subtasks))) as executor:
             future_to_task = {executor.submit(self.run_subagent, task): task for task in subtasks}
@@ -52,7 +72,6 @@ class AutoAgent:
         return results
 
     def run_subagent(self, task: str) -> str:
-        """Исполняет задачу отдельным “мини-агентом”."""
         brain = self.parent.brain
         try:
             prompt = LLMMessage(role="user", content=f"Подзадача: {task}")
@@ -62,10 +81,20 @@ class AutoAgent:
             return f"[Ошибка мини-агента: {exc}]"
 
     def auto_execute(self, goal: str) -> str:
-        """Основной интерфейс: планирует и запускает мини-агентов."""
-        subtasks = self.generate_subtasks(goal)
-        results = self.run_parallel(subtasks)
-        summary = "\n".join([f"🔹 {task} → {result[:120]}" for task, result in results])
-        final = f"🧩 Итог ({len(results)} подзадач):\n{summary}"
-        self.tracer.log("auto_summary", final)
-        return final
+        outcome = self.run_outcome(goal)
+        return outcome.text
+
+    def run_outcome(self, goal: str) -> AutoRunOutcome:
+        self.tracer.log("auto_invoke", f"Planner->Coder->Verifier: {goal}")
+        return self.orchestrator.run(goal)
+
+    def resume_outcome(self, run_id: str) -> AutoRunOutcome | None:
+        return self.orchestrator.resume(run_id)
+
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "cancelled_by_user",
+    ) -> dict[str, JSONValue] | None:
+        return self.orchestrator.cancel(run_id, reason=reason)

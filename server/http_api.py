@@ -291,6 +291,7 @@ _normalize_plan_step = _ui_runtime._normalize_plan_step
 _plan_hash_payload = _ui_runtime._plan_hash_payload
 _normalize_plan_payload = _ui_runtime._normalize_plan_payload
 _normalize_task_payload = _ui_runtime._normalize_task_payload
+_normalize_auto_state = _ui_runtime._normalize_auto_state
 _plan_revision_value = _ui_runtime._plan_revision_value
 _increment_plan_revision = _ui_runtime._increment_plan_revision
 _decision_workflow_context = _ui_runtime._decision_workflow_context
@@ -344,7 +345,12 @@ async def _apply_agent_runtime_state(
     agent: AgentProtocol,
     hub: UIHub,
     session_id: str,
-) -> tuple[str, dict[str, JSONValue] | None, dict[str, JSONValue] | None]:
+) -> tuple[
+    str,
+    dict[str, JSONValue] | None,
+    dict[str, JSONValue] | None,
+    dict[str, JSONValue] | None,
+]:
     async def _security_loader(
         loader_hub: _workflow_runtime.WorkflowHubProtocol,
         loader_session_id: str,
@@ -362,6 +368,7 @@ async def _apply_agent_runtime_state(
         normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),
         normalize_plan_payload_fn=_normalize_plan_payload,
         normalize_task_payload_fn=_normalize_task_payload,
+        normalize_auto_state_fn=_normalize_auto_state,
     )
 
 
@@ -416,6 +423,10 @@ def _parse_imported_session(raw: object, *, principal_id: str) -> PersistedSessi
         principal_id=principal_id,
         normalize_policy_profile_fn=_normalize_policy_profile,
         normalize_tools_state_payload_fn=_normalize_tools_state_payload,
+        normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),
+        normalize_plan_payload_fn=_normalize_plan_payload,
+        normalize_task_payload_fn=_normalize_task_payload,
+        normalize_auto_state_fn=_normalize_auto_state,
         utc_iso_fn=_utc_iso,
     )
 
@@ -427,6 +438,7 @@ def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONVal
         normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),
         normalize_plan_payload_fn=_normalize_plan_payload,
         normalize_task_payload_fn=_normalize_task_payload,
+        normalize_auto_state_fn=_normalize_auto_state,
     )
 
 

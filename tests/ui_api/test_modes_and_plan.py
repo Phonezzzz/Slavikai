@@ -22,6 +22,25 @@ def test_ui_state_and_mode_transitions() -> None:
             assert state_payload.get("mode") == "ask"
             assert state_payload.get("active_plan") is None
             assert state_payload.get("active_task") is None
+            assert state_payload.get("auto_state") is None
+
+            to_auto = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "auto"},
+            )
+            assert to_auto.status == 200
+            to_auto_payload = await to_auto.json()
+            assert to_auto_payload.get("mode") == "auto"
+
+            back_to_ask = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "ask"},
+            )
+            assert back_to_ask.status == 200
+            back_to_ask_payload = await back_to_ask.json()
+            assert back_to_ask_payload.get("mode") == "ask"
 
             to_plan = await client.post(
                 "/ui/api/mode",
@@ -206,6 +225,77 @@ def test_ui_models_endpoint(monkeypatch) -> None:
                 models = item.get("models")
                 assert isinstance(models, list)
                 assert len(models) == 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_in_auto_mode_returns_auto_state_and_progress_event() -> None:
+    class AutoStateAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_auto_state = {
+                "run_id": "auto-test-1",
+                "status": "completed",
+                "goal": "goal",
+                "pool_size": 3,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:01+00:00",
+                "planner": {"status": "completed"},
+                "plan": {"plan_id": "p1", "goal": "goal", "shards": []},
+                "coders": [],
+                "merge": {"status": "completed", "changed_paths": []},
+                "verifier": {"status": "passed", "command": ["check"], "exit_code": 0},
+                "approval": None,
+                "error": None,
+            }
+
+        def drain_auto_progress_events(self):  # noqa: ANN001
+            return [dict(self.last_auto_state)]
+
+        def respond(self, messages) -> str:  # noqa: ANN001
+            del messages
+            return "auto ok"
+
+    async def run() -> None:
+        client = await _create_client(AutoStateAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            to_auto = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "auto"},
+            )
+            assert to_auto.status == 200
+
+            events_response = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert events_response.status == 200
+            try:
+                send_resp = await client.post(
+                    "/ui/api/chat/send",
+                    headers={"X-Slavik-Session": session_id},
+                    json={"content": "run auto"},
+                )
+                assert send_resp.status == 200
+                send_payload = await send_resp.json()
+                auto_state = send_payload.get("auto_state")
+                assert isinstance(auto_state, dict)
+                assert auto_state.get("status") == "completed"
+
+                events = await _read_sse_events(events_response, max_events=20)
+                auto_events = [event for event in events if event.get("type") == "auto.progress"]
+                assert auto_events
+            finally:
+                events_response.close()
         finally:
             await client.close()
 

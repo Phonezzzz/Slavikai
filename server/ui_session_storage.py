@@ -36,6 +36,7 @@ class PersistedSession:
     mode: str = "ask"
     active_plan: dict[str, JSONValue] | None = None
     active_task: dict[str, JSONValue] | None = None
+    auto_state: dict[str, JSONValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ class InMemoryUISessionStorage:
             mode=session.mode,
             active_plan=(dict(session.active_plan) if session.active_plan is not None else None),
             active_task=(dict(session.active_task) if session.active_task is not None else None),
+            auto_state=(dict(session.auto_state) if session.auto_state is not None else None),
         )
 
     def _clone_folder(self, folder: PersistedFolder) -> PersistedFolder:
@@ -141,7 +143,7 @@ class SQLiteUISessionStorage:
                     , output_text, output_updated_at, files_json, artifacts_json
                     , workspace_root, policy_profile, yolo_armed, yolo_armed_at
                     , tools_state_json
-                    , mode, active_plan_json, active_task_json
+                    , mode, active_plan_json, active_task_json, auto_state_json
                 FROM ui_sessions
                 """,
             ).fetchall()
@@ -173,6 +175,7 @@ class SQLiteUISessionStorage:
                         mode=self._decode_mode(row["mode"]),
                         active_plan=self._decode_json_object(row["active_plan_json"]),
                         active_task=self._decode_json_object(row["active_task_json"]),
+                        auto_state=self._decode_json_object(row["auto_state_json"]),
                     ),
                 )
         return sessions
@@ -203,9 +206,10 @@ class SQLiteUISessionStorage:
                     tools_state_json,
                     mode,
                     active_plan_json,
-                    active_task_json
+                    active_task_json,
+                    auto_state_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     principal_id=excluded.principal_id,
@@ -228,7 +232,8 @@ class SQLiteUISessionStorage:
                     tools_state_json=excluded.tools_state_json,
                     mode=excluded.mode,
                     active_plan_json=excluded.active_plan_json,
-                    active_task_json=excluded.active_task_json
+                    active_task_json=excluded.active_task_json,
+                    auto_state_json=excluded.auto_state_json
                 """,
                 (
                     session.session_id,
@@ -253,6 +258,7 @@ class SQLiteUISessionStorage:
                     self._normalize_mode(session.mode),
                     self._encode_json_object(session.active_plan),
                     self._encode_json_object(session.active_task),
+                    self._encode_json_object(session.auto_state),
                 ),
             )
             conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
@@ -391,7 +397,8 @@ class SQLiteUISessionStorage:
                     tools_state_json TEXT,
                     mode TEXT NOT NULL DEFAULT 'ask',
                     active_plan_json TEXT,
-                    active_task_json TEXT
+                    active_task_json TEXT,
+                    auto_state_json TEXT
                 )
                 """,
             )
@@ -574,6 +581,8 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN active_plan_json TEXT")
         if "active_task_json" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN active_task_json TEXT")
+        if "auto_state_json" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN auto_state_json TEXT")
 
     def _ensure_ui_messages_table(self, conn: sqlite3.Connection) -> None:
         expected_columns = [
@@ -681,7 +690,7 @@ class SQLiteUISessionStorage:
 
     def _normalize_mode(self, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized in {"ask", "plan", "act"}:
+        if normalized in {"ask", "plan", "act", "auto"}:
             return normalized
         return "ask"
 

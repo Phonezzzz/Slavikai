@@ -53,3 +53,13 @@ def test_command_lane_dangerous_after_approve_passes(tmp_path: Path) -> None:
     report = extract_report_block(response)
     assert report["route"] == "command"
     assert report["stop_reason_code"] == "COMMAND_LANE_NOTICE"
+
+
+def test_command_lane_auto_alias_has_command_label(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    agent.handle_auto_command = lambda goal, command_lane=False: f"auto:{goal}"  # type: ignore[method-assign]
+    response = agent.handle_tool_command("/auto собрать отчёт")
+    assert "Командный режим (без MWV)" in response
+    report = extract_report_block(response)
+    assert report["route"] == "command"
+    assert report["stop_reason_code"] == "COMMAND_LANE_NOTICE"

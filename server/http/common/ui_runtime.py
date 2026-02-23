@@ -9,11 +9,12 @@ from aiohttp import web
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
 from server.http.common import decision_flow, plan_edit, streaming, workflow_runtime, workflow_state
 from server.ui_hub import UIHub
+from shared.auto_models import normalize_auto_state
 from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
-SESSION_MODES: Final[set[str]] = {"ask", "plan", "act"}
+SESSION_MODES: Final[set[str]] = {"ask", "plan", "act", "auto"}
 PLAN_STATUSES: Final[set[str]] = {
     "draft",
     "approved",
@@ -103,6 +104,10 @@ def _normalize_task_payload(raw: object) -> dict[str, JSONValue] | None:
         task_statuses=TASK_STATUSES,
         utc_now_iso=_utc_now_iso,
     )
+
+
+def _normalize_auto_state(raw: object) -> dict[str, JSONValue] | None:
+    return normalize_auto_state(raw)
 
 
 def _plan_revision_value(plan: dict[str, JSONValue]) -> int:

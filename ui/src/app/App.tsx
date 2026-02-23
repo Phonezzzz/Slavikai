@@ -18,6 +18,7 @@ import {
 } from './components/workspace-settings-modal';
 import { WorkspaceIde } from './components/workspace-ide';
 import type {
+  AutoState,
   ChatAttachment,
   ChatMessage,
   FolderSummary,
@@ -526,10 +527,87 @@ const parseUiDecision = (value: unknown): UiDecision | null => {
 };
 
 const parseSessionMode = (value: unknown): SessionMode => {
-  if (value === 'ask' || value === 'plan' || value === 'act') {
+  if (value === 'ask' || value === 'plan' || value === 'act' || value === 'auto') {
     return value;
   }
   return 'ask';
+};
+
+const parseAutoState = (value: unknown): AutoState | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as {
+    run_id?: unknown;
+    status?: unknown;
+    goal?: unknown;
+    pool_size?: unknown;
+    started_at?: unknown;
+    updated_at?: unknown;
+    planner?: unknown;
+    plan?: unknown;
+    coders?: unknown;
+    merge?: unknown;
+    verifier?: unknown;
+    approval?: unknown;
+    error?: unknown;
+  };
+  if (
+    typeof candidate.run_id !== 'string'
+    || typeof candidate.status !== 'string'
+    || typeof candidate.goal !== 'string'
+    || typeof candidate.started_at !== 'string'
+    || typeof candidate.updated_at !== 'string'
+  ) {
+    return null;
+  }
+  const status = candidate.status;
+  const isKnownStatus =
+    status === 'idle'
+    || status === 'planning'
+    || status === 'coding'
+    || status === 'merging'
+    || status === 'verifying'
+    || status === 'waiting_approval'
+    || status === 'completed'
+    || status === 'failed_conflict'
+    || status === 'failed_verifier'
+    || status === 'failed_worker'
+    || status === 'failed_internal'
+    || status === 'cancelled';
+  if (!isKnownStatus) {
+    return null;
+  }
+  const poolSize = typeof candidate.pool_size === 'number' && Number.isFinite(candidate.pool_size)
+    ? Math.max(1, Math.floor(candidate.pool_size))
+    : 1;
+  return {
+    run_id: candidate.run_id,
+    status,
+    goal: candidate.goal,
+    pool_size: poolSize,
+    started_at: candidate.started_at,
+    updated_at: candidate.updated_at,
+    planner: candidate.planner && typeof candidate.planner === 'object'
+      ? (candidate.planner as Record<string, unknown>)
+      : {},
+    plan: candidate.plan && typeof candidate.plan === 'object'
+      ? (candidate.plan as Record<string, unknown>)
+      : null,
+    coders: Array.isArray(candidate.coders)
+      ? candidate.coders.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+      : [],
+    merge: candidate.merge && typeof candidate.merge === 'object'
+      ? (candidate.merge as Record<string, unknown>)
+      : {},
+    verifier: candidate.verifier && typeof candidate.verifier === 'object'
+      ? (candidate.verifier as Record<string, unknown>)
+      : null,
+    approval: candidate.approval && typeof candidate.approval === 'object'
+      ? (candidate.approval as Record<string, unknown>)
+      : null,
+    error: typeof candidate.error === 'string' ? candidate.error : null,
+  };
 };
 
 const parsePlanEnvelope = (value: unknown): PlanEnvelope | null => {
@@ -949,6 +1027,7 @@ export default function App() {
   const [sessionMode, setSessionMode] = useState<SessionMode>('ask');
   const [activePlan, setActivePlan] = useState<PlanEnvelope | null>(null);
   const [activeTask, setActiveTask] = useState<TaskExecutionState | null>(null);
+  const [autoState, setAutoState] = useState<AutoState | null>(null);
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
@@ -1339,7 +1418,12 @@ export default function App() {
   const setSessionModeRemote = async (
     sessionId: string,
     mode: SessionMode,
-  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+  ): Promise<{
+    mode: SessionMode;
+    activePlan: PlanEnvelope | null;
+    activeTask: TaskExecutionState | null;
+    autoState: AutoState | null;
+  }> => {
     const response = await fetch('/ui/api/mode', {
       method: 'POST',
       headers: {
@@ -1359,13 +1443,19 @@ export default function App() {
       mode: parseSessionMode((payload as { mode?: unknown }).mode),
       activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
       activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
     };
   };
 
   const draftPlanRemote = async (
     sessionId: string,
     goal: string,
-  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+  ): Promise<{
+    mode: SessionMode;
+    activePlan: PlanEnvelope | null;
+    activeTask: TaskExecutionState | null;
+    autoState: AutoState | null;
+  }> => {
     const response = await fetch('/ui/api/plan/draft', {
       method: 'POST',
       headers: {
@@ -1382,12 +1472,18 @@ export default function App() {
       mode: parseSessionMode((payload as { mode?: unknown }).mode),
       activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
       activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
     };
   };
 
   const approvePlanRemote = async (
     sessionId: string,
-  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+  ): Promise<{
+    mode: SessionMode;
+    activePlan: PlanEnvelope | null;
+    activeTask: TaskExecutionState | null;
+    autoState: AutoState | null;
+  }> => {
     const response = await fetch('/ui/api/plan/approve', {
       method: 'POST',
       headers: {
@@ -1402,6 +1498,7 @@ export default function App() {
       mode: parseSessionMode((payload as { mode?: unknown }).mode),
       activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
       activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
     };
   };
 
@@ -1411,6 +1508,7 @@ export default function App() {
     mode: SessionMode;
     activePlan: PlanEnvelope | null;
     activeTask: TaskExecutionState | null;
+    autoState: AutoState | null;
     decision: UiDecision | null;
   }> => {
     const response = await fetch('/ui/api/plan/execute', {
@@ -1432,13 +1530,19 @@ export default function App() {
       mode: parseSessionMode((payload as { mode?: unknown }).mode),
       activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
       activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
       decision: parseUiDecision((payload as { decision?: unknown }).decision),
     };
   };
 
   const cancelPlanRemote = async (
     sessionId: string,
-  ): Promise<{ mode: SessionMode; activePlan: PlanEnvelope | null; activeTask: TaskExecutionState | null }> => {
+  ): Promise<{
+    mode: SessionMode;
+    activePlan: PlanEnvelope | null;
+    activeTask: TaskExecutionState | null;
+    autoState: AutoState | null;
+  }> => {
     const response = await fetch('/ui/api/plan/cancel', {
       method: 'POST',
       headers: {
@@ -1453,6 +1557,7 @@ export default function App() {
       mode: parseSessionMode((payload as { mode?: unknown }).mode),
       activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
       activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
+      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
     };
   };
 
@@ -1515,6 +1620,7 @@ export default function App() {
     setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
     setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
     setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
+    setAutoState(parseAutoState((session as { auto_state?: unknown } | undefined)?.auto_state));
     const parsedSelectedModel = parseSelectedModel(session?.selected_model);
     setSelectedModel(parsedSelectedModel);
     return parsedSelectedModel;
@@ -1553,6 +1659,7 @@ export default function App() {
     setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
     setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
     setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
+    setAutoState(parseAutoState((session as { auto_state?: unknown } | undefined)?.auto_state));
     setSelectedModel(sessionModel);
     return { sessionId: nextSession, selectedModel: sessionModel };
   };
@@ -1707,10 +1814,12 @@ export default function App() {
             mode?: unknown;
             active_plan?: unknown;
             active_task?: unknown;
+            auto_state?: unknown;
           };
           setSessionMode(parseSessionMode(workflow.mode));
           setActivePlan(parsePlanEnvelope(workflow.active_plan));
           setActiveTask(parseTaskExecution(workflow.active_task));
+          setAutoState(parseAutoState(workflow.auto_state));
         }
         return;
       }
@@ -1719,10 +1828,19 @@ export default function App() {
           mode?: unknown;
           active_plan?: unknown;
           active_task?: unknown;
+          auto_state?: unknown;
         };
         setSessionMode(parseSessionMode(workflow.mode));
         setActivePlan(parsePlanEnvelope(workflow.active_plan));
         setActiveTask(parseTaskExecution(workflow.active_task));
+        setAutoState(parseAutoState(workflow.auto_state));
+        return;
+      }
+      if (envelope.type === 'auto.progress') {
+        const progress = payload as {
+          auto_state?: unknown;
+        };
+        setAutoState(parseAutoState(progress.auto_state));
         return;
       }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
@@ -1979,6 +2097,7 @@ export default function App() {
       mode?: unknown;
       active_plan?: unknown;
       active_task?: unknown;
+      auto_state?: unknown;
     };
 
     if (body.messages !== undefined) {
@@ -2017,6 +2136,9 @@ export default function App() {
     }
     if (body.active_task !== undefined) {
       setActiveTask(parseTaskExecution(body.active_task));
+    }
+    if (body.auto_state !== undefined) {
+      setAutoState(parseAutoState(body.auto_state));
     }
 
     if (options.applyDisplay) {
@@ -2259,6 +2381,7 @@ export default function App() {
       setSessionMode(updated.mode);
       setActivePlan(updated.activePlan);
       setActiveTask(updated.activeTask);
+      setAutoState(updated.autoState);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to change mode.';
       setModeError(message);
@@ -2279,6 +2402,7 @@ export default function App() {
       setSessionMode(updated.mode);
       setActivePlan(updated.activePlan);
       setActiveTask(updated.activeTask);
+      setAutoState(updated.autoState);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to draft plan.';
       setModeError(message);
@@ -2299,6 +2423,7 @@ export default function App() {
       setSessionMode(updated.mode);
       setActivePlan(updated.activePlan);
       setActiveTask(updated.activeTask);
+      setAutoState(updated.autoState);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to approve plan.';
       setModeError(message);
@@ -2319,6 +2444,7 @@ export default function App() {
       setSessionMode(updated.mode);
       setActivePlan(updated.activePlan);
       setActiveTask(updated.activeTask);
+      setAutoState(updated.autoState);
       if (updated.decision) {
         setPendingDecision(updated.decision);
       }
@@ -2342,6 +2468,7 @@ export default function App() {
       setSessionMode(updated.mode);
       setActivePlan(updated.activePlan);
       setActiveTask(updated.activeTask);
+      setAutoState(updated.autoState);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to cancel plan.';
       setModeError(message);
@@ -2483,6 +2610,27 @@ export default function App() {
                 : `Project command (${toolName}) failed.`;
             setStatusMessage(errorText);
           }
+        } else if (resume.source_endpoint === 'auto.run') {
+          const data = resume.data && typeof resume.data === 'object'
+            ? (resume.data as { output?: unknown; status?: unknown })
+            : null;
+          const statusRaw = data && typeof data.status === 'string' ? data.status : null;
+          const outputRaw = data && typeof data.output === 'string' ? data.output : null;
+          if (resume.ok === true) {
+            if (outputRaw && outputRaw.trim()) {
+              setStatusMessage(outputRaw.trim());
+            } else if (statusRaw) {
+              setStatusMessage(`Auto run: ${statusRaw}`);
+            } else {
+              setStatusMessage('Auto run resumed.');
+            }
+          } else {
+            const errorText =
+              typeof resume.error === 'string' && resume.error.trim()
+                ? resume.error
+                : 'Auto run failed.';
+            setStatusMessage(errorText);
+          }
         } else {
           setStatusMessage(null);
         }
@@ -2555,6 +2703,7 @@ export default function App() {
             mode={sessionMode}
             activePlan={activePlan}
             activeTask={activeTask}
+            autoState={autoState}
             modeBusy={modeBusy}
             modeError={modeError}
             onChangeMode={handleChangeMode}

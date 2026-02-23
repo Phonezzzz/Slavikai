@@ -11,6 +11,7 @@ from tools.tool_logger import ToolCallLogger
 
 ToolHandler = Callable[[ToolRequest], ToolResult]
 ToolCapability = Literal["read", "write", "exec"]
+ExecutionMode = Literal["ask", "plan", "act", "auto"]
 
 
 @dataclass
@@ -33,7 +34,7 @@ class ToolRegistry:
         self._call_logger = call_logger or ToolCallLogger()
         self._safe_mode = False
         self._safe_block = safe_block or set()
-        self._mode: Literal["ask", "plan", "act"] = "act"
+        self._mode: ExecutionMode = "act"
         self._active_plan: dict[str, JSONValue] | None = None
         self._active_task: dict[str, JSONValue] | None = None
         self._enforce_plan_guard = False
@@ -175,12 +176,14 @@ class ToolRegistry:
         self._active_task = dict(active_task) if isinstance(active_task, dict) else None
         self._enforce_plan_guard = bool(enforce_plan_guard)
 
-    def _normalize_mode(self, mode: str) -> Literal["ask", "plan", "act"]:
+    def _normalize_mode(self, mode: str) -> ExecutionMode:
         normalized = mode.strip().lower()
         if normalized == "plan":
             return "plan"
         if normalized == "act":
             return "act"
+        if normalized == "auto":
+            return "auto"
         return "ask"
 
     def _normalize_capability(self, capability: str) -> ToolCapability:
@@ -198,7 +201,7 @@ class ToolRegistry:
     ) -> str | None:
         if self._mode == "plan" and capability != "read":
             return "PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only инструменты."
-        if self._mode != "act" or not self._enforce_plan_guard:
+        if self._mode not in {"act", "auto"} or not self._enforce_plan_guard:
             return None
         return self._plan_guard_error(tool_name)
 
