@@ -7,10 +7,10 @@ import type { PlanEnvelope, SessionMode, TaskExecutionState } from '../types';
 import type { CanvasMessage, CanvasSendPayload } from './canvas';
 import {
   findFirstFilePath,
-  nodeKey,
   policyLabel,
   terminalTimestamp,
   type WorkspaceNode,
+  type WorkspaceTreeMeta,
 } from '../../features/workspace/workspace-helpers';
 import {
   WorkspaceEditorPane,
@@ -24,13 +24,18 @@ import {
 import { WorkspaceExplorer } from '../../features/workspace/workspace-explorer';
 import { WorkspaceToolbar } from '../../features/workspace/workspace-toolbar';
 import {
+  deleteWorkspaceFile,
   fetchWorkspaceFile,
   fetchWorkspaceGitDiff,
   fetchWorkspaceRoot,
   fetchWorkspaceTree,
+  postWorkspaceFileCreate,
+  postWorkspaceFileMove,
+  postWorkspaceFileRename,
   postWorkspaceIndex,
   postWorkspaceRootSelect,
   postWorkspaceRun,
+  postWorkspaceTerminalRun,
   putWorkspaceFile,
 } from '../../features/workspace/workspace-api';
 import {
@@ -80,6 +85,8 @@ const MIN_ASSISTANT_WIDTH = 340;
 const MAX_ASSISTANT_WIDTH = 520;
 const MIN_TERMINAL_HEIGHT = 140;
 const MAX_TERMINAL_HEIGHT = 420;
+const ROOT_TREE_DEBOUNCE_MS = 150;
+const CHILD_TREE_DEBOUNCE_MS = 80;
 
 export function WorkspaceIde({
   sessionId,
@@ -116,7 +123,10 @@ export function WorkspaceIde({
   const [tree, setTree] = useState<WorkspaceNode[]>([]);
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
+  const [treeMeta, setTreeMeta] = useState<WorkspaceTreeMeta | null>(null);
+  const [loadingTreePaths, setLoadingTreePaths] = useState<Set<string>>(new Set());
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  const [activeExplorerPath, setActiveExplorerPath] = useState<string | null>(null);
 
   const [openFiles, setOpenFiles] = useState<WorkspaceOpenFileTab[]>([]);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
@@ -158,6 +168,10 @@ export function WorkspaceIde({
   const decisionSeenRef = useRef<Set<string>>(new Set());
   const statusSeenRef = useRef<string | null>(null);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const previousDecisionStatusRef = useRef<string | null>(null);
+  const treeDebounceTimersRef = useRef<Map<string, number>>(new Map());
+  const treeAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const treeInFlightPathsRef = useRef<Set<string>>(new Set());
 
   const activeTab = useMemo(
     () => openFiles.find((item) => item.id === activeFileId) ?? null,
@@ -196,8 +210,20 @@ export function WorkspaceIde({
     assistantSeenRef.current = new Set();
     decisionSeenRef.current = new Set();
     statusSeenRef.current = null;
+    treeDebounceTimersRef.current.forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    treeDebounceTimersRef.current.clear();
+    treeAbortControllersRef.current.forEach((controller) => {
+      controller.abort();
+    });
+    treeAbortControllersRef.current.clear();
+    treeInFlightPathsRef.current.clear();
     setOpenFiles([]);
     setActiveFileId(null);
+    setActiveExplorerPath(null);
+    setLoadingTreePaths(new Set());
+    setTreeMeta(null);
     setSelectionText('');
   }, [sessionId]);
 
@@ -246,12 +272,37 @@ export function WorkspaceIde({
   }, [decision]);
 
   useEffect(() => {
+    const currentStatus = decision?.status ?? null;
+    const previousStatus = previousDecisionStatusRef.current;
+    previousDecisionStatusRef.current = currentStatus;
+    if (previousStatus === 'pending' && currentStatus !== 'pending') {
+      requestTreeLoad(undefined, 'decision_resume');
+      void loadGitDiff();
+      void refreshOpenTabsFromDisk();
+    }
+  }, [decision?.status]);
+
+  useEffect(() => {
     if (!statusMessage || statusSeenRef.current === statusMessage) {
       return;
     }
     statusSeenRef.current = statusMessage;
     setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] ${statusMessage}`]);
   }, [statusMessage]);
+
+  useEffect(() => {
+    return () => {
+      treeDebounceTimersRef.current.forEach((timerId) => {
+        window.clearTimeout(timerId);
+      });
+      treeDebounceTimersRef.current.clear();
+      treeAbortControllersRef.current.forEach((controller) => {
+        controller.abort();
+      });
+      treeAbortControllersRef.current.clear();
+      treeInFlightPathsRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     if (!(draggingExplorer || draggingAssistant || draggingTerminal)) {
@@ -304,16 +355,81 @@ export function WorkspaceIde({
     }
   };
 
-  const loadTree = async (): Promise<void> => {
+  const replaceNodeChildren = (
+    nodes: WorkspaceNode[],
+    targetPath: string,
+    children: WorkspaceNode[],
+    childrenTruncated: boolean,
+  ): WorkspaceNode[] =>
+    nodes.map((node) => {
+      if (node.type === 'dir' && node.path === targetPath) {
+        return {
+          ...node,
+          children,
+          hasChildren: children.length > 0,
+          childrenTruncated,
+        };
+      }
+      if (node.type === 'dir' && node.children && node.children.length > 0) {
+        return {
+          ...node,
+          children: replaceNodeChildren(
+            node.children,
+            targetPath,
+            children,
+            childrenTruncated,
+          ),
+        };
+      }
+      return node;
+    });
+
+  const treePathKey = (path?: string): string => {
+    const normalized = path?.trim() ?? '';
+    return normalized || '__root__';
+  };
+
+  const setPathLoading = (path: string, loading: boolean) => {
+    setLoadingTreePaths((prev) => {
+      const next = new Set(prev);
+      if (loading) {
+        next.add(path);
+      } else {
+        next.delete(path);
+      }
+      return next;
+    });
+  };
+
+  const loadTreeNow = async (path?: string, reason?: string): Promise<void> => {
+    void reason;
     if (!sessionId) {
       setTree([]);
       setTreeError('No active session. Create chat first.');
       return;
     }
-    setTreeLoading(true);
-    setTreeError(null);
+    const normalizedPath = path?.trim() ?? '';
+    const requestKey = treePathKey(normalizedPath);
+    const existingController = treeAbortControllersRef.current.get(requestKey);
+    if (existingController) {
+      existingController.abort();
+    }
+    const abortController = new AbortController();
+    treeAbortControllersRef.current.set(requestKey, abortController);
+    treeInFlightPathsRef.current.add(requestKey);
+    const isRootLoad = normalizedPath.length === 0;
+    if (isRootLoad) {
+      setTreeLoading(true);
+      setTreeError(null);
+    } else {
+      setPathLoading(normalizedPath, true);
+    }
     try {
-      const { pendingApproval, tree: parsedTree } = await fetchWorkspaceTree(requestHeaders);
+      const { pendingApproval, tree: parsedTree, treeMeta: loadedTreeMeta } = await fetchWorkspaceTree(
+        normalizedPath ? { path: normalizedPath, recursive: false } : { recursive: false },
+        requestHeaders,
+        abortController.signal,
+      );
       if (pendingApproval) {
         setTreeError('Ожидает подтверждения действия для доступа к workspace.');
         setTerminalLines((prev) => [
@@ -322,32 +438,56 @@ export function WorkspaceIde({
         ]);
         return;
       }
-      setTree(parsedTree);
-      const expanded = new Set<string>();
-      const collectDirs = (nodes: WorkspaceNode[], parent: string) => {
-        for (const node of nodes) {
-          if (node.type !== 'dir') {
-            continue;
-          }
-          const key = nodeKey(node, parent);
-          expanded.add(key);
-          collectDirs(node.children ?? [], key);
-        }
-      };
-      collectDirs(parsedTree, '');
-      setExpandedNodes(expanded);
-      if (!activeFileId) {
+      setTreeMeta(loadedTreeMeta);
+      if (normalizedPath) {
+        setTree((prev) =>
+          replaceNodeChildren(prev, normalizedPath, parsedTree, loadedTreeMeta.truncated),
+        );
+      } else {
+        setTree(parsedTree);
+      }
+      if (isRootLoad && !activeFileId) {
         const first = findFirstFilePath(parsedTree);
         if (first) {
           void openFileInTab(first);
         }
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to load workspace tree.';
-      setTreeError(message);
+      if (isRootLoad) {
+        setTreeError(message);
+      } else {
+        setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+      }
     } finally {
-      setTreeLoading(false);
+      if (treeAbortControllersRef.current.get(requestKey) === abortController) {
+        treeAbortControllersRef.current.delete(requestKey);
+      }
+      treeInFlightPathsRef.current.delete(requestKey);
+      if (isRootLoad) {
+        setTreeLoading(false);
+      } else {
+        setPathLoading(normalizedPath, false);
+      }
     }
+  };
+
+  const requestTreeLoad = (path?: string, reason?: string): void => {
+    const normalizedPath = path?.trim() ?? '';
+    const requestKey = treePathKey(normalizedPath);
+    const delay = normalizedPath ? CHILD_TREE_DEBOUNCE_MS : ROOT_TREE_DEBOUNCE_MS;
+    const existingTimer = treeDebounceTimersRef.current.get(requestKey);
+    if (typeof existingTimer === 'number') {
+      window.clearTimeout(existingTimer);
+    }
+    const timerId = window.setTimeout(() => {
+      treeDebounceTimersRef.current.delete(requestKey);
+      void loadTreeNow(normalizedPath, reason);
+    }, delay);
+    treeDebounceTimersRef.current.set(requestKey, timerId);
   };
 
   const loadGitDiff = async (): Promise<void> => {
@@ -367,11 +507,57 @@ export function WorkspaceIde({
 
   useEffect(() => {
     void loadWorkspaceRoot();
-    void loadTree();
+    requestTreeLoad(undefined, 'session_init');
     void loadGitDiff();
   }, [refreshToken, sessionId]);
 
-  const readFileContent = async (path: string): Promise<string | null> => {
+  const findNodeByPath = (nodes: WorkspaceNode[], path: string): WorkspaceNode | null => {
+    for (const node of nodes) {
+      if (node.path === path) {
+        return node;
+      }
+      if (node.type === 'dir' && node.children && node.children.length > 0) {
+        const nested = findNodeByPath(node.children, path);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+    return null;
+  };
+
+  const refreshOpenTabsFromDisk = async (): Promise<void> => {
+    const tabsSnapshot = [...openFiles];
+    for (const tab of tabsSnapshot) {
+      if (tab.content !== tab.savedContent) {
+        continue;
+      }
+      try {
+        const fileData = await readFileContent(tab.path);
+        if (!fileData) {
+          continue;
+        }
+        setOpenFiles((prev) =>
+          prev.map((item) =>
+            item.id === tab.id
+              ? {
+                  ...item,
+                  content: fileData.content,
+                  savedContent: fileData.content,
+                  version: fileData.version,
+                }
+              : item,
+          ),
+        );
+      } catch {
+        // best effort refresh; keep current tab state on errors
+      }
+    }
+  };
+
+  const readFileContent = async (
+    path: string,
+  ): Promise<{ content: string; version: string | null } | null> => {
     const result = await fetchWorkspaceFile(path, requestHeaders);
     if (result.pendingApproval) {
       setTerminalLines((prev) => [
@@ -380,7 +566,7 @@ export function WorkspaceIde({
       ]);
       return null;
     }
-    return result.content;
+    return { content: result.content, version: result.version };
   };
 
   const openFileInTab = async (path: string): Promise<void> => {
@@ -388,6 +574,7 @@ export function WorkspaceIde({
     if (!normalizedPath) {
       return;
     }
+    setActiveExplorerPath(normalizedPath);
     const existing = openFiles.find((item) => item.path === normalizedPath);
     if (existing) {
       setActiveFileId(existing.id);
@@ -399,13 +586,14 @@ export function WorkspaceIde({
       name: normalizedPath.split('/').pop() || normalizedPath,
       content: '',
       savedContent: '',
+      version: null,
       loading: true,
     };
     setOpenFiles((prev) => [...prev, tab]);
     setActiveFileId(tab.id);
     try {
-      const content = await readFileContent(normalizedPath);
-      if (content === null) {
+      const fileData = await readFileContent(normalizedPath);
+      if (fileData === null) {
         setOpenFiles((prev) => prev.filter((item) => item.id !== tab.id));
         if (activeFileId === tab.id) {
           setActiveFileId(null);
@@ -417,8 +605,9 @@ export function WorkspaceIde({
           item.id === tab.id
             ? {
                 ...item,
-                content,
-                savedContent: content,
+                content: fileData.content,
+                savedContent: fileData.content,
+                version: fileData.version,
                 loading: false,
               }
             : item,
@@ -465,7 +654,12 @@ export function WorkspaceIde({
     }
     setEditorSaving(true);
     try {
-      const result = await putWorkspaceFile(activeTab.path, activeTab.content, requestHeaders);
+      const result = await putWorkspaceFile(
+        activeTab.path,
+        activeTab.content,
+        activeTab.version,
+        requestHeaders,
+      );
       if (result.pendingApproval) {
         setTerminalLines((prev) => [
           ...prev,
@@ -479,12 +673,13 @@ export function WorkspaceIde({
             ? {
                 ...item,
                 savedContent: item.content,
+                version: result.version ?? item.version,
               }
             : item,
         ),
       );
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] saved: ${activeTab.path}`]);
-      void loadTree();
+      requestTreeLoad(undefined, 'save');
       void loadGitDiff();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to save file.';
@@ -537,11 +732,34 @@ export function WorkspaceIde({
     setTerminalInput('');
     setTerminalBusy(true);
     setTerminalLines((prev) => [...prev, `$ ${command}`]);
-    const ok = await onSendAgentMessage({ content: `/sh ${command}` });
-    if (!ok) {
-      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] command failed`]);
+    try {
+      const result = await postWorkspaceTerminalRun(command, 'session_root', requestHeaders);
+      if (result.pendingApproval) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: terminal ${command}`,
+        ]);
+        return;
+      }
+      setTerminalLines((prev) => {
+        const next = [...prev];
+        if (result.stdout.trim()) {
+          next.push(result.stdout.trim());
+        }
+        if (result.stderr.trim()) {
+          next.push(`stderr: ${result.stderr.trim()}`);
+        }
+        next.push(
+          `[${terminalTimestamp()}] exit=${result.exitCode} cwd=${result.cwd || workspaceRoot || '.'}`,
+        );
+        return next;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to run terminal command.';
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+    } finally {
+      setTerminalBusy(false);
     }
-    setTerminalBusy(false);
   };
 
   const handleSelectRoot = async () => {
@@ -565,7 +783,7 @@ export function WorkspaceIde({
       setOpenFiles([]);
       setActiveFileId(null);
       void loadWorkspaceRoot();
-      void loadTree();
+      requestTreeLoad(undefined, 'root_change');
       void loadGitDiff();
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] workspace root: ${nextRoot}`]);
     } catch (error) {
@@ -595,6 +813,166 @@ export function WorkspaceIde({
     }
   };
 
+  const handleCreateFile = async () => {
+    const raw = window.prompt('Новый путь файла (относительно workspace):');
+    const nextPath = raw?.trim() ?? '';
+    if (!nextPath) {
+      return;
+    }
+    try {
+      const result = await postWorkspaceFileCreate(nextPath, '', false, requestHeaders);
+      if (result.pendingApproval) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: create ${nextPath}`,
+        ]);
+        return;
+      }
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] created: ${nextPath}`]);
+      setActiveExplorerPath(nextPath);
+      requestTreeLoad(undefined, 'create');
+      void loadGitDiff();
+      void openFileInTab(nextPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create file.';
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+    }
+  };
+
+  const handleRenamePath = async (sourcePath: string | null) => {
+    const currentPath = sourcePath?.trim() ?? '';
+    if (!currentPath) {
+      return;
+    }
+    const raw = window.prompt('Новое имя/путь:', currentPath);
+    const nextPath = raw?.trim() ?? '';
+    if (!nextPath || nextPath === currentPath) {
+      return;
+    }
+    try {
+      const result = await postWorkspaceFileRename(currentPath, nextPath, requestHeaders);
+      if (result.pendingApproval) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: rename ${currentPath}`,
+        ]);
+        return;
+      }
+      setTerminalLines((prev) => [
+        ...prev,
+        `[${terminalTimestamp()}] renamed: ${currentPath} -> ${nextPath}`,
+      ]);
+      setActiveExplorerPath(nextPath);
+      setOpenFiles((prev) =>
+        prev.map((item) =>
+          item.path === currentPath || item.path.startsWith(`${currentPath}/`)
+            ? {
+                ...item,
+                path: item.path.replace(currentPath, nextPath),
+                name: item.path
+                  .replace(currentPath, nextPath)
+                  .split('/')
+                  .pop() || item.name,
+              }
+            : item,
+        ),
+      );
+      requestTreeLoad(undefined, 'rename');
+      void loadGitDiff();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to rename path.';
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+    }
+  };
+
+  const handleMovePath = async (sourcePath: string | null) => {
+    const fromPath = sourcePath?.trim() ?? '';
+    if (!fromPath) {
+      return;
+    }
+    const raw = window.prompt('Новый путь (перемещение):', fromPath);
+    const toPath = raw?.trim() ?? '';
+    if (!toPath || toPath === fromPath) {
+      return;
+    }
+    try {
+      const result = await postWorkspaceFileMove(fromPath, toPath, requestHeaders);
+      if (result.pendingApproval) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: move ${fromPath}`,
+        ]);
+        return;
+      }
+      setTerminalLines((prev) => [
+        ...prev,
+        `[${terminalTimestamp()}] moved: ${fromPath} -> ${toPath}`,
+      ]);
+      setActiveExplorerPath(toPath);
+      setOpenFiles((prev) =>
+        prev.map((item) =>
+          item.path === fromPath || item.path.startsWith(`${fromPath}/`)
+            ? {
+                ...item,
+                path: item.path.replace(fromPath, toPath),
+                name: item.path
+                  .replace(fromPath, toPath)
+                  .split('/')
+                  .pop() || item.name,
+              }
+            : item,
+        ),
+      );
+      requestTreeLoad(undefined, 'move');
+      void loadGitDiff();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to move path.';
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+    }
+  };
+
+  const handleDeletePath = async (sourcePath: string | null) => {
+    const targetPath = sourcePath?.trim() ?? '';
+    if (!targetPath) {
+      return;
+    }
+    const node = findNodeByPath(tree, targetPath);
+    const recursive = node?.type === 'dir';
+    const confirmed = window.confirm(
+      recursive
+        ? `Удалить директорию ${targetPath} рекурсивно?`
+        : `Удалить файл ${targetPath}?`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      const result = await deleteWorkspaceFile(targetPath, recursive, requestHeaders);
+      if (result.pendingApproval) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: delete ${targetPath}`,
+        ]);
+        return;
+      }
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] deleted: ${targetPath}`]);
+      setOpenFiles((prev) =>
+        prev.filter((item) => item.path !== targetPath && !item.path.startsWith(`${targetPath}/`)),
+      );
+      if (activeTab?.path === targetPath) {
+        setActiveFileId(null);
+      }
+      if (activeExplorerPath === targetPath) {
+        setActiveExplorerPath(null);
+      }
+      requestTreeLoad(undefined, 'delete');
+      void loadGitDiff();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to delete path.';
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+    }
+  };
+
   const buildContextAttachments = () =>
     buildWorkspaceContextAttachments({
       includeOpenTabs,
@@ -602,7 +980,7 @@ export function WorkspaceIde({
       includeGitDiff,
       includeTerminal,
       openFiles,
-      activeFilePath: activeTab?.path ?? null,
+      activeFile: activeTab,
       selectionText,
       gitDiff,
       lastTerminalOutput,
@@ -695,21 +1073,40 @@ export function WorkspaceIde({
           tree={tree}
           treeLoading={treeLoading}
           treeError={treeError}
+          loadingTreePaths={loadingTreePaths}
+          treeMeta={treeMeta}
           expandedNodes={expandedNodes}
           activePath={activeTab?.path ?? null}
-          onToggleNode={(key) => {
+          activeExplorerPath={activeExplorerPath}
+          onToggleNode={(node, key, expanded) => {
             setExpandedNodes((prev) => {
               const next = new Set(prev);
-              if (next.has(key)) {
+              if (expanded) {
                 next.delete(key);
               } else {
                 next.add(key);
               }
               return next;
             });
+            if (!expanded && node.type === 'dir' && (node.children?.length ?? 0) === 0 && node.hasChildren) {
+              requestTreeLoad(node.path, 'expand_dir');
+            }
           }}
+          onSelectPath={setActiveExplorerPath}
           onOpenFile={(path) => {
             void openFileInTab(path);
+          }}
+          onCreateFile={() => {
+            void handleCreateFile();
+          }}
+          onRenamePath={(path) => {
+            void handleRenamePath(path);
+          }}
+          onMovePath={(path) => {
+            void handleMovePath(path);
+          }}
+          onDeletePath={(path) => {
+            void handleDeletePath(path);
           }}
         />
 

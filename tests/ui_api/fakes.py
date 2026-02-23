@@ -86,7 +86,16 @@ class WorkspaceDecisionAgent(DummyAgent):
             path_raw = args.get("path") if isinstance(args, dict) else ""
             path = path_raw if isinstance(path_raw, str) else "main.py"
             return ToolResult.success({"output": f"# file: {path}\n"})
-        if name in {"workspace_write", "workspace_run"}:
+        if name in {
+            "workspace_write",
+            "workspace_create",
+            "workspace_rename",
+            "workspace_move",
+            "workspace_delete",
+            "workspace_patch",
+            "workspace_run",
+            "workspace_terminal_run",
+        }:
             if "EXEC_ARBITRARY" not in self._approved_categories:
                 request = ApprovalRequest(
                     category="EXEC_ARBITRARY",
@@ -104,10 +113,20 @@ class WorkspaceDecisionAgent(DummyAgent):
                 raise ApprovalRequired(request)
             call_args = dict(args or {})
             self.tool_calls.append((name, call_args))
-            if name == "workspace_write":
+            if name in {"workspace_write", "workspace_create"}:
                 path_raw = call_args.get("path")
                 path = path_raw if isinstance(path_raw, str) else "main.py"
                 return ToolResult.success({"output": "saved", "path": path})
+            if name == "workspace_terminal_run":
+                return ToolResult.success(
+                    {
+                        "output": "ok",
+                        "stderr": "",
+                        "exit_code": 0,
+                        "cwd": "/tmp",
+                        "cwd_mode": "session_root",
+                    }
+                )
             return ToolResult.success({"output": "ran", "stderr": "", "exit_code": 0})
         return ToolResult.failure(f"unsupported tool {name}")
 

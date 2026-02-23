@@ -235,7 +235,7 @@ def test_ui_session_model_not_found_suggests_closest(monkeypatch) -> None:
             assert error.get("code") == "model_not_found"
             message = error.get("message")
             assert isinstance(message, str)
-            assert "сам придумал, сам и страдай" in message
+            assert "Выберите модель из списка доступных" in message
             details = error.get("details")
             assert isinstance(details, dict)
             assert details.get("suggestion") == "grok-4"

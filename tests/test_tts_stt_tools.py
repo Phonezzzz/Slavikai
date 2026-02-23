@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from config import stt_config as stt_config_module
 from config.stt_config import SttConfig
 from config.tts_config import TtsConfig
 from shared.models import ToolRequest
@@ -79,19 +77,13 @@ def test_stt_tool_reads_file(tmp_path, monkeypatch) -> None:
     assert headers.get("Authorization") == "Bearer key"
 
 
-def test_stt_tool_reads_api_key_from_ui_settings(tmp_path, monkeypatch) -> None:
+def test_stt_tool_reads_api_key_from_legacy_env(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("STT_API_KEY", raising=False)
-    ui_settings_path = tmp_path / "ui_settings.json"
-    ui_settings_path.write_text(
-        json.dumps({"providers": {"openai": {"api_key": "settings-openai-key"}}}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(stt_config_module, "UI_SETTINGS_PATH", ui_settings_path)
+    monkeypatch.setenv("STT_API_KEY", "legacy-stt-key")
 
     audio_dir = Path("sandbox/audio")
     audio_dir.mkdir(parents=True, exist_ok=True)
-    file_path = audio_dir / "settings-test.wav"
+    file_path = audio_dir / "stt-legacy-env.wav"
     file_path.write_bytes(b"dummy")
 
     http = DummyHttp(json_data={"text": "ok"})
@@ -101,4 +93,4 @@ def test_stt_tool_reads_api_key_from_ui_settings(tmp_path, monkeypatch) -> None:
     assert result.ok
     headers = http.last_kwargs.get("headers")
     assert isinstance(headers, dict)
-    assert headers.get("Authorization") == "Bearer settings-openai-key"
+    assert headers.get("Authorization") == "Bearer legacy-stt-key"

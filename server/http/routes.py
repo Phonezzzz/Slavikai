@@ -103,7 +103,15 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/ui/api/workspace/tree", workspace.handle_ui_workspace_tree)
     app.router.add_get("/ui/api/workspace/file", workspace.handle_ui_workspace_file_get)
     app.router.add_put("/ui/api/workspace/file", workspace.handle_ui_workspace_file_put)
+    app.router.add_post("/ui/api/workspace/file/create", workspace.handle_ui_workspace_file_create)
+    app.router.add_post("/ui/api/workspace/file/rename", workspace.handle_ui_workspace_file_rename)
+    app.router.add_post("/ui/api/workspace/file/move", workspace.handle_ui_workspace_file_move)
+    app.router.add_delete("/ui/api/workspace/file", workspace.handle_ui_workspace_file_delete)
+    app.router.add_post("/ui/api/workspace/patch", workspace.handle_ui_workspace_patch)
     app.router.add_post("/ui/api/workspace/run", workspace.handle_ui_workspace_run)
+    app.router.add_post(
+        "/ui/api/workspace/terminal/run", workspace.handle_ui_workspace_terminal_run
+    )
     app.router.add_post("/ui/api/chat/send", ui_chat.handle_ui_chat_send)
     app.router.add_post("/ui/api/tools/project", project.handle_ui_project_command)
     app.router.add_get("/ui/api/events/stream", events.handle_ui_events_stream)

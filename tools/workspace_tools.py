@@ -1,18 +1,56 @@
 from __future__ import annotations
 
+import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+from config.shell_config import DEFAULT_SHELL_CONFIG_PATH, load_shell_config
 from shared.models import JSONValue, ToolRequest, ToolResult
+from tools.shell_tool import _is_unsafe as _is_unsafe_shell_command
+from tools.shell_tool import _validate_args as _validate_shell_args
 
 SANDBOX_ROOT = Path("sandbox").resolve()
 WORKSPACE_ROOT = (SANDBOX_ROOT / "project").resolve()
 WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 _workspace_root_current: Path | None = None
-ALLOWED_EXTENSIONS = {".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml"}
+ALLOWED_EXTENSIONS = {
+    ".py",
+    ".md",
+    ".txt",
+    ".json",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".css",
+    ".html",
+    ".sql",
+    ".sh",
+}
+IGNORED_DIR_NAMES = {
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    "venv",
+    ".venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".cache",
+}
 MAX_FILE_BYTES = 2_000_000  # 2 MB
+MAX_TREE_ENTRIES = 2_500
+MAX_TREE_DIRS = 800
+MAX_TREE_FILES = 1_700
+MAX_CHILDREN_PER_DIR = 300
 
 
 def get_workspace_root() -> Path:
@@ -35,8 +73,10 @@ def set_workspace_root(root: str | Path | None) -> Path:
 def _ensure_in_workspace(raw_path: str) -> Path:
     workspace_root = get_workspace_root()
     candidate = (workspace_root / raw_path).resolve()
-    if not str(candidate).startswith(str(workspace_root)):
-        raise ValueError("Путь вне рабочей директории запрещён.")
+    try:
+        candidate.relative_to(workspace_root)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("Путь вне рабочей директории запрещён.") from exc
     return candidate
 
 
@@ -47,6 +87,10 @@ def _read_file(path: Path) -> str:
     if size > MAX_FILE_BYTES:
         raise ValueError("Файл слишком большой для чтения.")
     return path.read_text(encoding="utf-8")
+
+
+def _is_allowed_workspace_file(path: Path) -> bool:
+    return path.suffix.lower() in ALLOWED_EXTENSIONS
 
 
 def _validate_patch_contract(diff_text: str) -> str | None:
@@ -130,31 +174,186 @@ def _prepend(first: str, iterator: Iterator[str]) -> Iterator[str]:
 
 
 class ListFilesTool:
+    class _WalkState:
+        def __init__(self, *, max_depth_applied: int) -> None:
+            self.returned_entries = 0
+            self.returned_dirs = 0
+            self.returned_files = 0
+            self.max_depth_applied = max_depth_applied
+            self.truncated_reasons: set[str] = set()
+
+        def _mark(self, reason: str) -> None:
+            self.truncated_reasons.add(reason)
+
+        def can_append_dir(self) -> bool:
+            if self.returned_entries >= MAX_TREE_ENTRIES:
+                self._mark("max_entries")
+                return False
+            if self.returned_dirs >= MAX_TREE_DIRS:
+                self._mark("max_dirs")
+                return False
+            return True
+
+        def can_append_file(self) -> bool:
+            if self.returned_entries >= MAX_TREE_ENTRIES:
+                self._mark("max_entries")
+                return False
+            if self.returned_files >= MAX_TREE_FILES:
+                self._mark("max_files")
+                return False
+            return True
+
+        def consume_dir(self) -> None:
+            self.returned_entries += 1
+            self.returned_dirs += 1
+
+        def consume_file(self) -> None:
+            self.returned_entries += 1
+            self.returned_files += 1
+
+        def global_limit_reached(self) -> bool:
+            return (
+                self.returned_entries >= MAX_TREE_ENTRIES
+                or self.returned_dirs >= MAX_TREE_DIRS
+                or self.returned_files >= MAX_TREE_FILES
+            )
+
+        def meta(self) -> dict[str, JSONValue]:
+            return {
+                "returned_entries": self.returned_entries,
+                "returned_dirs": self.returned_dirs,
+                "returned_files": self.returned_files,
+                "truncated": bool(self.truncated_reasons),
+                "truncated_reasons": sorted(self.truncated_reasons),
+                "max_depth_applied": self.max_depth_applied,
+                "max_entries": MAX_TREE_ENTRIES,
+                "max_dirs": MAX_TREE_DIRS,
+                "max_files": MAX_TREE_FILES,
+                "max_children_per_dir": MAX_CHILDREN_PER_DIR,
+            }
+
     def handle(self, request: ToolRequest) -> ToolResult:
         root = get_workspace_root()
-        tree = self._walk(root)
-        return ToolResult.success({"output": "ok", "tree": tree})
+        raw_path = str(request.args.get("path") or "").strip()
+        recursive = bool(request.args.get("recursive", False))
+        max_depth_raw = request.args.get("max_depth")
+        max_depth = 12
+        if isinstance(max_depth_raw, int) and max_depth_raw >= 0:
+            max_depth = max_depth_raw
+        max_depth_applied = max_depth if recursive else 0
+        state = self._WalkState(max_depth_applied=max_depth_applied)
 
-    def _walk(self, path: Path) -> list[dict[str, JSONValue]]:
+        try:
+            target = root if not raw_path else _ensure_in_workspace(raw_path)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(str(exc))
+        if not target.exists() or not target.is_dir():
+            return ToolResult.failure(f"Директория не найдена: {target}")
+
+        tree, _ = self._walk(
+            target,
+            base_root=root,
+            recursive=recursive,
+            depth=0,
+            max_depth=max_depth,
+            state=state,
+        )
+        return ToolResult.success(
+            {
+                "output": "ok",
+                "tree": tree,
+                "path": str(target.relative_to(root)) if target != root else "",
+                "tree_meta": state.meta(),
+            }
+        )
+
+    def _dir_has_visible_children(self, path: Path) -> bool:
+        try:
+            for item in path.iterdir():
+                if item.name.startswith("."):
+                    continue
+                if item.is_dir() and item.name not in IGNORED_DIR_NAMES:
+                    return True
+                if item.is_file() and _is_allowed_workspace_file(item):
+                    return True
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    def _walk(
+        self,
+        path: Path,
+        *,
+        base_root: Path,
+        recursive: bool,
+        depth: int,
+        max_depth: int,
+        state: _WalkState,
+    ) -> tuple[list[dict[str, JSONValue]], bool]:
         entries: list[dict[str, JSONValue]] = []
-        for item in sorted(path.iterdir()):
+        children_truncated = False
+        try:
+            iter_items = sorted(
+                path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())
+            )
+        except Exception:  # noqa: BLE001
+            return entries, children_truncated
+
+        visible_children = 0
+        for item in iter_items:
             if item.name.startswith("."):
                 continue
-            if item.is_dir():
-                child = self._walk(item)
-                if child:
-                    entries.append({"name": item.name, "type": "dir", "children": child})
-            else:
-                if item.suffix.lower() not in ALLOWED_EXTENSIONS:
-                    continue
-                entries.append(
-                    {
-                        "name": item.name,
-                        "type": "file",
-                        "path": str(item.relative_to(get_workspace_root())),
-                    }
-                )
-        return entries
+            is_dir = item.is_dir() and item.name not in IGNORED_DIR_NAMES
+            is_file = item.is_file() and _is_allowed_workspace_file(item)
+            if not is_dir and not is_file:
+                continue
+            if visible_children >= MAX_CHILDREN_PER_DIR:
+                state._mark("max_children_per_dir")
+                children_truncated = True
+                break
+            visible_children += 1
+            if is_dir:
+                if not state.can_append_dir():
+                    children_truncated = True
+                    break
+                state.consume_dir()
+                rel_path = str(item.relative_to(base_root))
+                node: dict[str, JSONValue] = {
+                    "name": item.name,
+                    "type": "dir",
+                    "path": rel_path,
+                    "has_children": self._dir_has_visible_children(item),
+                }
+                if recursive and depth < max_depth:
+                    children, node_children_truncated = self._walk(
+                        item,
+                        base_root=base_root,
+                        recursive=recursive,
+                        depth=depth + 1,
+                        max_depth=max_depth,
+                        state=state,
+                    )
+                    node["children"] = children
+                    if node_children_truncated:
+                        node["children_truncated"] = True
+                entries.append(node)
+                if state.global_limit_reached() and state.truncated_reasons:
+                    children_truncated = True
+                    break
+                continue
+
+            if not state.can_append_file():
+                children_truncated = True
+                break
+            state.consume_file()
+            entries.append(
+                {
+                    "name": item.name,
+                    "type": "file",
+                    "path": str(item.relative_to(base_root)),
+                }
+            )
+        return entries, children_truncated
 
 
 class ReadFileTool:
@@ -164,7 +363,7 @@ class ReadFileTool:
             return ToolResult.failure("Не указан путь файла.")
         try:
             path = _ensure_in_workspace(raw_path)
-            if path.suffix.lower() not in ALLOWED_EXTENSIONS:
+            if not _is_allowed_workspace_file(path):
                 return ToolResult.failure("Расширение файла запрещено для чтения.")
             content = _read_file(path)
             return ToolResult.success({"output": content, "path": str(path)})
@@ -182,11 +381,116 @@ class WriteFileTool:
             return ToolResult.failure("content должен быть строкой.")
         try:
             path = _ensure_in_workspace(raw_path)
-            if path.suffix.lower() not in ALLOWED_EXTENSIONS:
+            if not _is_allowed_workspace_file(path):
                 return ToolResult.failure("Расширение файла запрещено для записи.")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
             return ToolResult.success({"output": "Файл сохранён.", "path": str(path)})
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(str(exc))
+
+
+class CreateFileTool:
+    def handle(self, request: ToolRequest) -> ToolResult:
+        raw_path = str(request.args.get("path") or "").strip()
+        content = request.args.get("content", "")
+        overwrite = bool(request.args.get("overwrite", False))
+        if not raw_path:
+            return ToolResult.failure("Не указан путь файла.")
+        if not isinstance(content, str):
+            return ToolResult.failure("content должен быть строкой.")
+        try:
+            path = _ensure_in_workspace(raw_path)
+            if not _is_allowed_workspace_file(path):
+                return ToolResult.failure("Расширение файла запрещено для создания.")
+            if path.exists() and path.is_dir():
+                return ToolResult.failure("По указанному пути уже существует директория.")
+            if path.exists() and not overwrite:
+                return ToolResult.failure("Файл уже существует. Укажите overwrite=true.")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            return ToolResult.success({"output": "Файл создан.", "path": str(path)})
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(str(exc))
+
+
+class RenameFileTool:
+    def handle(self, request: ToolRequest) -> ToolResult:
+        old_path_raw = str(request.args.get("old_path") or "").strip()
+        new_path_raw = str(request.args.get("new_path") or "").strip()
+        if not old_path_raw or not new_path_raw:
+            return ToolResult.failure("Нужны old_path и new_path.")
+        try:
+            old_path = _ensure_in_workspace(old_path_raw)
+            new_path = _ensure_in_workspace(new_path_raw)
+            if not old_path.exists():
+                return ToolResult.failure("Исходный путь не найден.")
+            if old_path.is_file() and not _is_allowed_workspace_file(old_path):
+                return ToolResult.failure("Расширение файла запрещено для переименования.")
+            if new_path.exists():
+                return ToolResult.failure("Целевой путь уже существует.")
+            if new_path.suffix and not _is_allowed_workspace_file(new_path):
+                return ToolResult.failure("Расширение файла запрещено для переименования.")
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            old_path.rename(new_path)
+            return ToolResult.success(
+                {
+                    "output": "Файл переименован.",
+                    "old_path": str(old_path),
+                    "new_path": str(new_path),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(str(exc))
+
+
+class MoveFileTool:
+    def handle(self, request: ToolRequest) -> ToolResult:
+        from_path_raw = str(request.args.get("from_path") or "").strip()
+        to_path_raw = str(request.args.get("to_path") or "").strip()
+        if not from_path_raw or not to_path_raw:
+            return ToolResult.failure("Нужны from_path и to_path.")
+        try:
+            source = _ensure_in_workspace(from_path_raw)
+            target = _ensure_in_workspace(to_path_raw)
+            if not source.exists():
+                return ToolResult.failure("Исходный путь не найден.")
+            if source.is_file() and not _is_allowed_workspace_file(source):
+                return ToolResult.failure("Расширение файла запрещено для перемещения.")
+            if target.exists():
+                return ToolResult.failure("Целевой путь уже существует.")
+            if target.suffix and not _is_allowed_workspace_file(target):
+                return ToolResult.failure("Расширение файла запрещено для перемещения.")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(target)
+            return ToolResult.success(
+                {
+                    "output": "Файл перемещён.",
+                    "from_path": str(source),
+                    "to_path": str(target),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(str(exc))
+
+
+class DeleteFileTool:
+    def handle(self, request: ToolRequest) -> ToolResult:
+        raw_path = str(request.args.get("path") or "").strip()
+        recursive = bool(request.args.get("recursive", False))
+        if not raw_path:
+            return ToolResult.failure("Не указан путь.")
+        try:
+            target = _ensure_in_workspace(raw_path)
+            if not target.exists():
+                return ToolResult.failure("Путь не найден.")
+            if target.is_dir():
+                if not recursive:
+                    return ToolResult.failure("Удаление директории требует recursive=true.")
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            return ToolResult.success({"output": "Удалено.", "path": str(target)})
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(str(exc))
 
@@ -203,6 +507,8 @@ class ApplyPatchTool:
             return ToolResult.failure(contract_error)
         try:
             path = _ensure_in_workspace(raw_path)
+            if not _is_allowed_workspace_file(path):
+                return ToolResult.failure("Расширение файла запрещено для patch.")
             original = _read_file(path)
             try:
                 patched = _apply_unified_patch(original, diff_text)
@@ -256,3 +562,67 @@ class RunCodeTool:
             return ToolResult.failure(f"Время выполнения превышено ({self.timeout}с).")
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Ошибка запуска: {exc}")
+
+
+class WorkspaceTerminalRunTool:
+    def handle(self, request: ToolRequest) -> ToolResult:
+        command = str(request.args.get("command") or "").strip()
+        cwd_mode = str(request.args.get("cwd_mode") or "session_root").strip().lower()
+        if not command:
+            return ToolResult.failure("Не указана команда.")
+        if _is_unsafe_shell_command(command):
+            return ToolResult.failure("🚫 Опасная команда заблокирована.")
+
+        try:
+            cfg = load_shell_config(DEFAULT_SHELL_CONFIG_PATH)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(f"Ошибка загрузки shell config: {exc}")
+
+        try:
+            args = shlex.split(command)
+        except ValueError as exc:
+            return ToolResult.failure(f"Ошибка парсинга команды: {exc}")
+        validation_error = _validate_shell_args(args, set(cfg.allowed_commands))
+        if validation_error:
+            return ToolResult.failure(validation_error)
+
+        if cwd_mode == "session_root":
+            cwd = get_workspace_root()
+        elif cwd_mode == "sandbox":
+            cwd = SANDBOX_ROOT
+        else:
+            return ToolResult.failure("cwd_mode должен быть session_root|sandbox.")
+        if not cwd.exists() or not cwd.is_dir():
+            return ToolResult.failure("Рабочая директория для команды не найдена.")
+
+        try:
+            proc = subprocess.run(
+                args,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=cfg.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResult.failure(
+                f"⏳ Команда превысила лимит времени ({cfg.timeout_seconds}с)."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult.failure(f"Ошибка запуска: {exc}")
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        if len(stdout) > cfg.max_output_chars:
+            stdout = stdout[: cfg.max_output_chars] + "\n…[stdout truncated]"
+        if len(stderr) > cfg.max_output_chars:
+            stderr = stderr[: cfg.max_output_chars] + "\n…[stderr truncated]"
+        return ToolResult.success(
+            {
+                "output": stdout,
+                "stderr": stderr,
+                "exit_code": proc.returncode,
+                "cwd": str(cwd),
+                "cwd_mode": cwd_mode,
+            }
+        )

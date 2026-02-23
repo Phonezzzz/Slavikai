@@ -86,9 +86,14 @@ from tools.workspace_tools import (
     MAX_FILE_BYTES,
     WORKSPACE_ROOT,
     ApplyPatchTool,
+    CreateFileTool,
+    DeleteFileTool,
     ListFilesTool,
+    MoveFileTool,
     ReadFileTool,
+    RenameFileTool,
     RunCodeTool,
+    WorkspaceTerminalRunTool,
     WriteFileTool,
 )
 
@@ -115,6 +120,7 @@ SAFE_MODE_TOOLS_OFF = {
     "image_analyze",
     "image_generate",
     "workspace_run",
+    "workspace_terminal_run",
 }
 MAX_MWV_ATTEMPTS = 3
 SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
@@ -312,11 +318,29 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             "workspace_write", WriteFileTool(), enabled=True, capability="write"
         )
         self.tool_registry.register(
+            "workspace_create", CreateFileTool(), enabled=True, capability="write"
+        )
+        self.tool_registry.register(
+            "workspace_rename", RenameFileTool(), enabled=True, capability="write"
+        )
+        self.tool_registry.register(
+            "workspace_move", MoveFileTool(), enabled=True, capability="write"
+        )
+        self.tool_registry.register(
+            "workspace_delete", DeleteFileTool(), enabled=True, capability="write"
+        )
+        self.tool_registry.register(
             "workspace_patch", ApplyPatchTool(), enabled=True, capability="write"
         )
         self.tool_registry.register(
             "workspace_run",
             RunCodeTool(),
+            enabled=self.tools_enabled.get("workspace_run", True),
+            capability="exec",
+        )
+        self.tool_registry.register(
+            "workspace_terminal_run",
+            WorkspaceTerminalRunTool(),
             enabled=self.tools_enabled.get("workspace_run", True),
             capability="exec",
         )

@@ -45,6 +45,34 @@ def test_detect_action_intents_workspace_patch_dry_run() -> None:
     assert intents == []
 
 
+def test_detect_action_intents_workspace_rename_move_delete_and_terminal() -> None:
+    rename_intents = detect_action_intents(
+        ToolRequest(name="workspace_rename", args={"old_path": "a.txt", "new_path": "b.txt"})
+    )
+    rename_categories = {intent.category for intent in rename_intents}
+    assert "FS_DELETE_OVERWRITE" in rename_categories
+
+    move_intents = detect_action_intents(
+        ToolRequest(name="workspace_move", args={"from_path": "../a.txt", "to_path": "b.txt"})
+    )
+    move_categories = {intent.category for intent in move_intents}
+    assert "FS_OUTSIDE_WORKSPACE" in move_categories
+
+    delete_intents = detect_action_intents(
+        ToolRequest(name="workspace_delete", args={"path": ".env"})
+    )
+    delete_categories = {intent.category for intent in delete_intents}
+    assert "FS_CONFIG_SECRETS" in delete_categories
+    assert "FS_DELETE_OVERWRITE" in delete_categories
+
+    terminal_intents = detect_action_intents(
+        ToolRequest(name="workspace_terminal_run", args={"command": "pip install numpy"})
+    )
+    terminal_categories = {intent.category for intent in terminal_intents}
+    assert "DEPS_INSTALL_UPDATE" in terminal_categories
+    assert "EXEC_ARBITRARY" in terminal_categories
+
+
 def test_detect_action_intents_fs_write_inside_project() -> None:
     intents = detect_action_intents(
         ToolRequest(name="fs", args={"op": "write", "path": "project/config.yaml"})

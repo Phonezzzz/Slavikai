@@ -13,10 +13,44 @@ type BuildContextAttachmentsParams = {
   includeGitDiff: boolean;
   includeTerminal: boolean;
   openFiles: WorkspaceOpenFileTab[];
-  activeFilePath: string | null;
+  activeFile: WorkspaceOpenFileTab | null;
   selectionText: string;
   gitDiff: string;
   lastTerminalOutput: string;
+};
+
+const MAX_ATTACHMENTS = 8;
+const MAX_ATTACHMENT_CHARS = 80_000;
+const MAX_TOTAL_ATTACHMENT_CHARS = 160_000;
+
+const truncateAttachmentContent = (content: string, limit: number): string => {
+  if (content.length <= limit) {
+    return content;
+  }
+  const suffix = '\n...[truncated by client attachment budget]';
+  const trimmedLimit = Math.max(0, limit - suffix.length);
+  return `${content.slice(0, trimmedLimit)}${suffix}`;
+};
+
+const pushAttachmentWithinBudget = (
+  attachments: WorkspaceContextAttachment[],
+  state: { totalChars: number },
+  attachment: WorkspaceContextAttachment,
+): void => {
+  if (attachments.length >= MAX_ATTACHMENTS) {
+    return;
+  }
+  const remaining = MAX_TOTAL_ATTACHMENT_CHARS - state.totalChars;
+  if (remaining <= 0) {
+    return;
+  }
+  const perAttachmentLimit = Math.min(MAX_ATTACHMENT_CHARS, remaining);
+  const normalized = truncateAttachmentContent(attachment.content, perAttachmentLimit);
+  if (!normalized.trim()) {
+    return;
+  }
+  attachments.push({ ...attachment, content: normalized });
+  state.totalChars += normalized.length;
 };
 
 export const buildWorkspaceContextAttachments = ({
@@ -25,19 +59,20 @@ export const buildWorkspaceContextAttachments = ({
   includeGitDiff,
   includeTerminal,
   openFiles,
-  activeFilePath,
+  activeFile,
   selectionText,
   gitDiff,
   lastTerminalOutput,
 }: BuildContextAttachmentsParams): WorkspaceContextAttachment[] => {
   const attachments: WorkspaceContextAttachment[] = [];
+  const budgetState = { totalChars: 0 };
   if (includeOpenTabs && openFiles.length > 0) {
-    attachments.push({
+    pushAttachmentWithinBudget(attachments, budgetState, {
       name: 'open-tabs.json',
       mime: 'application/json',
       content: JSON.stringify(
         {
-          active_file: activeFilePath,
+          active_file: activeFile?.path ?? null,
           open_files: openFiles.map((item) => ({
             path: item.path,
             dirty: item.content !== item.savedContent,
@@ -47,23 +82,44 @@ export const buildWorkspaceContextAttachments = ({
         2,
       ),
     });
+    if (activeFile) {
+      pushAttachmentWithinBudget(attachments, budgetState, {
+        name: 'active-file-content.txt',
+        mime: 'text/plain',
+        content: `path: ${activeFile.path}\n\n${activeFile.content}`,
+      });
+      if (activeFile.content !== activeFile.savedContent) {
+        pushAttachmentWithinBudget(attachments, budgetState, {
+          name: 'active-file-unsaved.diff',
+          mime: 'text/x-diff',
+          content: [
+            `--- saved/${activeFile.path}`,
+            `+++ unsaved/${activeFile.path}`,
+            '@@ saved @@',
+            activeFile.savedContent,
+            '@@ unsaved @@',
+            activeFile.content,
+          ].join('\n'),
+        });
+      }
+    }
   }
   if (includeSelection && selectionText.trim()) {
-    attachments.push({
+    pushAttachmentWithinBudget(attachments, budgetState, {
       name: 'selection.txt',
       mime: 'text/plain',
       content: selectionText,
     });
   }
   if (includeGitDiff && gitDiff.trim()) {
-    attachments.push({
+    pushAttachmentWithinBudget(attachments, budgetState, {
       name: 'git-diff.patch',
       mime: 'text/x-diff',
       content: gitDiff,
     });
   }
   if (includeTerminal && lastTerminalOutput.trim()) {
-    attachments.push({
+    pushAttachmentWithinBudget(attachments, budgetState, {
       name: 'terminal-last.txt',
       mime: 'text/plain',
       content: lastTerminalOutput,

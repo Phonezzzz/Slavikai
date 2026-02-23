@@ -10,6 +10,7 @@ export type WorkspaceOpenFileTab = {
   name: string;
   content: string;
   savedContent: string;
+  version: string | null;
   loading: boolean;
 };
 

@@ -3,13 +3,21 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import tools.workspace_tools as workspace_tools_module
+from config.shell_config import ShellConfig
 from shared.models import ToolRequest
 from tools.workspace_tools import (
+    MAX_TREE_ENTRIES,
     WORKSPACE_ROOT,
     ApplyPatchTool,
+    CreateFileTool,
+    DeleteFileTool,
     ListFilesTool,
+    MoveFileTool,
     ReadFileTool,
+    RenameFileTool,
     RunCodeTool,
+    WorkspaceTerminalRunTool,
     WriteFileTool,
 )
 
@@ -32,7 +40,7 @@ def test_read_write_and_list_files() -> None:
     assert read.ok
     assert read.data["output"] == content
 
-    tree_result = ListFilesTool().handle(_make_request("workspace_list", {}))
+    tree_result = ListFilesTool().handle(_make_request("workspace_list", {"recursive": True}))
     assert tree_result.ok
     paths = _flatten_paths(tree_result.data["tree"])
     assert target_path in paths
@@ -79,6 +87,19 @@ def test_apply_patch_rejects_escape() -> None:
     )
     assert not result.ok
     assert "рабочей" in (result.error or "").lower()
+
+
+def test_workspace_write_rejects_sibling_prefix_escape() -> None:
+    sibling = WORKSPACE_ROOT.parent / f"{WORKSPACE_ROOT.name}2"
+    sibling.mkdir(parents=True, exist_ok=True)
+    target = sibling / "escape.txt"
+    if target.exists():
+        target.unlink()
+    result = WriteFileTool().handle(
+        _make_request("workspace_write", {"path": f"../{sibling.name}/escape.txt", "content": "x"})
+    )
+    assert not result.ok
+    assert not target.exists()
 
 
 def test_apply_patch_rejects_multifile_contract() -> None:
@@ -131,6 +152,151 @@ def test_run_code_success_and_timeout(tmp_path: Path) -> None:
     assert "превышено" in (result_timeout.error or "").lower()
 
     shutil.rmtree(scripts_dir, ignore_errors=True)
+
+
+def test_workspace_create_rename_move_delete_file() -> None:
+    create_result = CreateFileTool().handle(
+        _make_request(
+            "workspace_create",
+            {"path": "ops/new_file.txt", "content": "hello", "overwrite": False},
+        )
+    )
+    assert create_result.ok
+
+    rename_result = RenameFileTool().handle(
+        _make_request(
+            "workspace_rename",
+            {"old_path": "ops/new_file.txt", "new_path": "ops/renamed_file.txt"},
+        )
+    )
+    assert rename_result.ok
+
+    move_result = MoveFileTool().handle(
+        _make_request(
+            "workspace_move",
+            {"from_path": "ops/renamed_file.txt", "to_path": "ops/moved/file.txt"},
+        )
+    )
+    assert move_result.ok
+
+    moved_read = ReadFileTool().handle(
+        _make_request("workspace_read", {"path": "ops/moved/file.txt"})
+    )
+    assert moved_read.ok
+    assert moved_read.data.get("output") == "hello"
+
+    delete_result = DeleteFileTool().handle(
+        _make_request("workspace_delete", {"path": "ops/moved/file.txt", "recursive": False})
+    )
+    assert delete_result.ok
+
+    read_deleted = ReadFileTool().handle(
+        _make_request("workspace_read", {"path": "ops/moved/file.txt"})
+    )
+    assert not read_deleted.ok
+
+
+def test_workspace_terminal_run_uses_workspace_root_cwd(monkeypatch) -> None:
+    monkeypatch.setattr(
+        workspace_tools_module,
+        "load_shell_config",
+        lambda path: ShellConfig(
+            allowed_commands=["echo"],
+            timeout_seconds=5,
+            max_output_chars=2000,
+            sandbox_root="sandbox",
+        ),
+    )
+    command_result = WorkspaceTerminalRunTool().handle(
+        _make_request("workspace_terminal_run", {"command": "echo ok", "cwd_mode": "session_root"})
+    )
+    assert command_result.ok
+    cwd_value = str(command_result.data.get("cwd") or "")
+    assert cwd_value == str(WORKSPACE_ROOT)
+
+
+def test_workspace_list_returns_tree_meta_and_truncates_by_max_entries(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(workspace_tools_module, "_workspace_root_current", None)
+    monkeypatch.setattr(workspace_tools_module, "MAX_TREE_ENTRIES", 5)
+    monkeypatch.setattr(workspace_tools_module, "MAX_CHILDREN_PER_DIR", 100)
+    for idx in range(10):
+        (tmp_path / f"f{idx}.txt").write_text("x", encoding="utf-8")
+
+    result = ListFilesTool().handle(_make_request("workspace_list", {"recursive": False}))
+    assert result.ok
+    tree = result.data.get("tree")
+    assert isinstance(tree, list)
+    assert len(tree) == 5
+    tree_meta = result.data.get("tree_meta")
+    assert isinstance(tree_meta, dict)
+    assert tree_meta.get("truncated") is True
+    reasons = tree_meta.get("truncated_reasons")
+    assert isinstance(reasons, list)
+    assert "max_entries" in reasons
+    assert tree_meta.get("returned_entries") == 5
+    assert tree_meta.get("max_entries") == 5
+
+
+def test_workspace_list_marks_children_truncated_per_dir(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(workspace_tools_module, "_workspace_root_current", None)
+    monkeypatch.setattr(workspace_tools_module, "MAX_TREE_ENTRIES", MAX_TREE_ENTRIES)
+    monkeypatch.setattr(workspace_tools_module, "MAX_CHILDREN_PER_DIR", 2)
+
+    nested = tmp_path / "many"
+    nested.mkdir(parents=True, exist_ok=True)
+    for idx in range(3):
+        (nested / f"child{idx}.txt").write_text("x", encoding="utf-8")
+
+    result = ListFilesTool().handle(_make_request("workspace_list", {"recursive": True}))
+    assert result.ok
+    tree = result.data.get("tree")
+    assert isinstance(tree, list)
+    many_node = next(
+        (item for item in tree if isinstance(item, dict) and item.get("name") == "many"),
+        None,
+    )
+    assert isinstance(many_node, dict)
+    assert many_node.get("children_truncated") is True
+    children = many_node.get("children")
+    assert isinstance(children, list)
+    assert len(children) == 2
+    tree_meta = result.data.get("tree_meta")
+    assert isinstance(tree_meta, dict)
+    assert tree_meta.get("truncated") is True
+    reasons = tree_meta.get("truncated_reasons")
+    assert isinstance(reasons, list)
+    assert "max_children_per_dir" in reasons
+    assert tree_meta.get("max_children_per_dir") == 2
+
+
+def test_workspace_list_respects_max_depth() -> None:
+    base = WORKSPACE_ROOT / "depth_test"
+    shutil.rmtree(base, ignore_errors=True)
+    nested = base / "a" / "b"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "leaf.txt").write_text("leaf", encoding="utf-8")
+
+    result = ListFilesTool().handle(
+        _make_request("workspace_list", {"path": "depth_test", "recursive": True, "max_depth": 0})
+    )
+    assert result.ok
+    tree = result.data.get("tree")
+    assert isinstance(tree, list)
+    a_node = next(
+        (item for item in tree if isinstance(item, dict) and item.get("name") == "a"),
+        None,
+    )
+    assert isinstance(a_node, dict)
+    children = a_node.get("children")
+    assert children is None or children == []
+    tree_meta = result.data.get("tree_meta")
+    assert isinstance(tree_meta, dict)
+    assert tree_meta.get("max_depth_applied") == 0
+    shutil.rmtree(base, ignore_errors=True)
 
 
 def _flatten_paths(tree: list[dict[str, object]]) -> set[str]:

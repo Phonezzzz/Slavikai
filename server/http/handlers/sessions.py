@@ -195,8 +195,8 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             "available_count": len(models),
         }
         message = (
-            f"сам придумал, сам и страдай. "
-            f"Модель '{model_raw}' не найдена у провайдера '{provider}'."
+            f"Модель '{model_raw}' не найдена у провайдера '{provider}'. "
+            f"Выберите модель из списка доступных."
         )
         if suggestion:
             message = f"{message} Возможно, вы имели в виду '{suggestion}'."

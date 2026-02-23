@@ -116,19 +116,6 @@ def save_ui_embeddings_settings(
 
 
 def resolve_openai_api_key(path: Path = DEFAULT_UI_SETTINGS_PATH) -> str | None:
-    payload = _load_ui_settings_blob(path)
-    providers_raw = payload.get("providers")
-    if isinstance(providers_raw, dict):
-        openai_raw = providers_raw.get("openai")
-        key_raw: object | None = None
-        if isinstance(openai_raw, dict):
-            key_raw = openai_raw.get("api_key")
-        elif isinstance(openai_raw, str):
-            key_raw = openai_raw
-        if isinstance(key_raw, str):
-            normalized = key_raw.strip()
-            if normalized:
-                return normalized
-
+    del path
     env_key = os.getenv("OPENAI_API_KEY", "").strip()
     return env_key or None

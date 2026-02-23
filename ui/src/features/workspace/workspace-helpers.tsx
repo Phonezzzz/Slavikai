@@ -3,8 +3,30 @@ import { FileCode2, FileText } from 'lucide-react';
 export type WorkspaceNode = {
   name: string;
   type: 'dir' | 'file';
-  path?: string;
+  path: string;
+  hasChildren?: boolean;
+  childrenTruncated?: boolean;
   children?: WorkspaceNode[];
+};
+
+export type WorkspaceTreeMeta = {
+  returnedEntries: number;
+  returnedDirs: number;
+  returnedFiles: number;
+  truncated: boolean;
+  truncatedReasons: string[];
+  maxDepthApplied: number;
+  maxEntries: number;
+  maxDirs: number;
+  maxFiles: number;
+  maxChildrenPerDir: number;
+};
+
+export type FlatWorkspaceRow = {
+  key: string;
+  depth: number;
+  node: WorkspaceNode;
+  parentKey: string;
 };
 
 export type ApiErrorPayload = {
@@ -63,6 +85,8 @@ export const parseWorkspaceTree = (value: unknown): WorkspaceNode[] => {
       name?: unknown;
       type?: unknown;
       path?: unknown;
+      has_children?: unknown;
+      children_truncated?: unknown;
       children?: unknown;
     };
     if (typeof candidate.name !== 'string' || !candidate.name.trim()) {
@@ -82,6 +106,12 @@ export const parseWorkspaceTree = (value: unknown): WorkspaceNode[] => {
         path,
       };
     }
+    const path =
+      typeof candidate.path === 'string' && candidate.path.trim()
+        ? candidate.path.trim()
+        : candidate.name.trim();
+    const hasChildren = candidate.has_children === true;
+    const childrenTruncated = candidate.children_truncated === true;
     const childrenRaw = Array.isArray(candidate.children) ? candidate.children : [];
     const children = childrenRaw
       .map((item) => parseNode(item))
@@ -89,6 +119,9 @@ export const parseWorkspaceTree = (value: unknown): WorkspaceNode[] => {
     return {
       name: candidate.name.trim(),
       type: 'dir',
+      path,
+      hasChildren,
+      childrenTruncated,
       children,
     };
   };
@@ -96,6 +129,56 @@ export const parseWorkspaceTree = (value: unknown): WorkspaceNode[] => {
   return value
     .map((item) => parseNode(item))
     .filter((item): item is WorkspaceNode => item !== null);
+};
+
+export const parseWorkspaceTreeMeta = (value: unknown): WorkspaceTreeMeta => {
+  if (!value || typeof value !== 'object') {
+    return {
+      returnedEntries: 0,
+      returnedDirs: 0,
+      returnedFiles: 0,
+      truncated: false,
+      truncatedReasons: [],
+      maxDepthApplied: 0,
+      maxEntries: 0,
+      maxDirs: 0,
+      maxFiles: 0,
+      maxChildrenPerDir: 0,
+    };
+  }
+  const candidate = value as {
+    returned_entries?: unknown;
+    returned_dirs?: unknown;
+    returned_files?: unknown;
+    truncated?: unknown;
+    truncated_reasons?: unknown;
+    max_depth_applied?: unknown;
+    max_entries?: unknown;
+    max_dirs?: unknown;
+    max_files?: unknown;
+    max_children_per_dir?: unknown;
+  };
+  const truncatedReasons = Array.isArray(candidate.truncated_reasons)
+    ? candidate.truncated_reasons
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0)
+    : [];
+  return {
+    returnedEntries: typeof candidate.returned_entries === 'number' ? candidate.returned_entries : 0,
+    returnedDirs: typeof candidate.returned_dirs === 'number' ? candidate.returned_dirs : 0,
+    returnedFiles: typeof candidate.returned_files === 'number' ? candidate.returned_files : 0,
+    truncated: candidate.truncated === true,
+    truncatedReasons,
+    maxDepthApplied: typeof candidate.max_depth_applied === 'number' ? candidate.max_depth_applied : 0,
+    maxEntries: typeof candidate.max_entries === 'number' ? candidate.max_entries : 0,
+    maxDirs: typeof candidate.max_dirs === 'number' ? candidate.max_dirs : 0,
+    maxFiles: typeof candidate.max_files === 'number' ? candidate.max_files : 0,
+    maxChildrenPerDir:
+      typeof candidate.max_children_per_dir === 'number'
+        ? candidate.max_children_per_dir
+        : 0,
+  };
 };
 
 export const findFirstFilePath = (nodes: WorkspaceNode[]): string | null => {
@@ -114,11 +197,37 @@ export const findFirstFilePath = (nodes: WorkspaceNode[]): string | null => {
 };
 
 export const nodeKey = (node: WorkspaceNode, parentKey: string): string => {
-  const base = parentKey ? `${parentKey}/${node.name}` : node.name;
-  if (node.type === 'file' && node.path) {
+  if (node.type === 'file') {
     return `file:${node.path}`;
   }
+  if (node.path) {
+    return `dir:${node.path}`;
+  }
+  const base = parentKey ? `${parentKey}/${node.name}` : node.name;
   return `dir:${base}`;
+};
+
+export const flattenWorkspaceTree = (
+  nodes: WorkspaceNode[],
+  expandedNodes: Set<string>,
+): FlatWorkspaceRow[] => {
+  const rows: FlatWorkspaceRow[] = [];
+  const walk = (items: WorkspaceNode[], parentKey: string, depth: number): void => {
+    for (const node of items) {
+      const key = nodeKey(node, parentKey);
+      rows.push({
+        key,
+        depth,
+        node,
+        parentKey,
+      });
+      if (node.type === 'dir' && expandedNodes.has(key) && node.children && node.children.length > 0) {
+        walk(node.children, key, depth + 1);
+      }
+    }
+  };
+  walk(nodes, '', 0);
+  return rows;
 };
 
 export const fileIcon = (path: string) => {

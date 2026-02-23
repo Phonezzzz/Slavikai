@@ -117,12 +117,12 @@ def _provider_auth_headers(
     if provider == "xai":
         api_key = _resolve_provider_api_key("xai", ui_settings_path=ui_settings_path)
         if not api_key:
-            return {}, "Не задан XAI_API_KEY (env или UI settings)."
+            return {}, "Не задан XAI_API_KEY (env)."
         return {"Authorization": f"Bearer {api_key}"}, None
     if provider == "openrouter":
         api_key = _resolve_provider_api_key("openrouter", ui_settings_path=ui_settings_path)
         if not api_key:
-            return {}, "Не задан OPENROUTER_API_KEY (env или UI settings)."
+            return {}, "Не задан OPENROUTER_API_KEY (env)."
         return {"Authorization": f"Bearer {api_key}"}, None
     if provider == "local":
         api_key = _resolve_provider_api_key("local", ui_settings_path=ui_settings_path)

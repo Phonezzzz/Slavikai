@@ -283,6 +283,207 @@ def test_ui_workspace_index_openai_provider_requires_api_key(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
+def test_ui_workspace_tree_and_file_get_without_selected_model(tmp_path) -> None:
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    target = workspace_root / "hello.txt"
+    target.write_text("hi\n", encoding="utf-8")
+
+    async def run() -> None:
+        app = create_app(
+            agent=None,
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+
+            tree_resp = await client.get(
+                "/ui/api/workspace/tree",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert tree_resp.status == 200
+            tree_payload = await tree_resp.json()
+            tree = tree_payload.get("tree")
+            assert isinstance(tree, list)
+            tree_meta = tree_payload.get("tree_meta")
+            assert isinstance(tree_meta, dict)
+            assert "truncated" in tree_meta
+            assert "max_entries" in tree_meta
+
+            file_resp = await client.get(
+                "/ui/api/workspace/file?path=hello.txt",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert file_resp.status == 200
+            file_payload = await file_resp.json()
+            assert file_payload.get("content") == "hi\n"
+            version = file_payload.get("version")
+            assert isinstance(version, str)
+            assert version.startswith("sha256:")
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_tree_returns_truncation_meta_on_large_directory(tmp_path) -> None:
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    for idx in range(320):
+        (workspace_root / f"many_{idx}.txt").write_text("x", encoding="utf-8")
+
+    async def run() -> None:
+        app = create_app(
+            agent=None,
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+
+            tree_resp = await client.get(
+                "/ui/api/workspace/tree",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert tree_resp.status == 200
+            tree_payload = await tree_resp.json()
+            tree_meta = tree_payload.get("tree_meta")
+            assert isinstance(tree_meta, dict)
+            assert tree_meta.get("truncated") is True
+            reasons = tree_meta.get("truncated_reasons")
+            assert isinstance(reasons, list)
+            assert "max_children_per_dir" in reasons
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_tree_clamps_max_depth(tmp_path) -> None:
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    nested = workspace_root / "d0" / "d1" / "d2" / "d3"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "leaf.txt").write_text("x", encoding="utf-8")
+
+    async def run() -> None:
+        app = create_app(
+            agent=None,
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+
+            tree_resp = await client.get(
+                "/ui/api/workspace/tree?recursive=1&max_depth=999",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert tree_resp.status == 200
+            tree_payload = await tree_resp.json()
+            tree_meta = tree_payload.get("tree_meta")
+            assert isinstance(tree_meta, dict)
+            assert tree_meta.get("max_depth_applied") == 12
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_file_put_version_conflict_returns_409(tmp_path) -> None:
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    target = workspace_root / "main.txt"
+    target.write_text("current\n", encoding="utf-8")
+
+    async def run() -> None:
+        client = await _create_client(WorkspaceDecisionAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+
+            response = await client.put(
+                "/ui/api/workspace/file",
+                headers={"X-Slavik-Session": session_id},
+                json={"path": "main.txt", "content": "next\n", "version": "sha256:wrong"},
+            )
+            assert response.status == 409
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "workspace_version_conflict"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_terminal_and_create_require_approval() -> None:
+    async def run() -> None:
+        client = await _create_client(WorkspaceDecisionAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            terminal_resp = await client.post(
+                "/ui/api/workspace/terminal/run",
+                headers={"X-Slavik-Session": session_id},
+                json={"command": "pwd", "cwd_mode": "session_root"},
+            )
+            assert terminal_resp.status == 202
+            terminal_payload = await terminal_resp.json()
+            terminal_decision = terminal_payload.get("decision")
+            assert isinstance(terminal_decision, dict)
+
+            create_resp = await client.post(
+                "/ui/api/workspace/file/create",
+                headers={"X-Slavik-Session": session_id},
+                json={"path": "new.txt", "content": "", "overwrite": False},
+            )
+            assert create_resp.status == 202
+            create_payload = await create_resp.json()
+            create_decision = create_payload.get("decision")
+            assert isinstance(create_decision, dict)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_create_app_keeps_workspace_root_and_policy_on_boot(tmp_path) -> None:
     db_path = tmp_path / "ui_sessions.db"
     storage = SQLiteUISessionStorage(db_path)

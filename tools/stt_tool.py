@@ -30,9 +30,7 @@ class SttTool:
 
         api_key = self.config.resolve_api_key()
         if not api_key:
-            return ToolResult.failure(
-                "STT API key не задан (OPENAI_API_KEY или settings.providers.openai.api_key)."
-            )
+            return ToolResult.failure("STT API key не задан (env: OPENAI_API_KEY или STT_API_KEY).")
 
         files = {"file": file_path.open("rb")}
         data = {"model": self.config.model, "language": language, "response_format": "json"}

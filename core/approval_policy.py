@@ -188,7 +188,7 @@ def detect_action_intents(request: ToolRequest) -> list[ActionIntent]:
     args = request.args
     intents: list[ActionIntent] = []
 
-    if tool in {"shell", "workspace_run"}:
+    if tool in {"shell", "workspace_run", "workspace_terminal_run"}:
         command = str(args.get("command") or args.get("path") or "")
         if command.strip():
             intents.extend(_shell_intents(tool, command))
@@ -198,7 +198,7 @@ def detect_action_intents(request: ToolRequest) -> list[ActionIntent]:
         intents.append(_intent(tool, "NETWORK_RISK", {"tool": tool}))
         return intents
 
-    if tool in {"workspace_write", "workspace_patch"}:
+    if tool in {"workspace_write", "workspace_create", "workspace_patch"}:
         path = str(args.get("path") or "")
         dry_run = bool(args.get("dry_run", False))
         if dry_run:
@@ -212,6 +212,44 @@ def detect_action_intents(request: ToolRequest) -> list[ActionIntent]:
                         {"path": path, "op": "write"},
                     ),
                 )
+            intents.extend(_write_intents(tool, path))
+        return intents
+
+    if tool == "workspace_rename":
+        old_path = str(args.get("old_path") or "")
+        new_path = str(args.get("new_path") or "")
+        if old_path and _is_outside_workspace(old_path, workspace_relative=True):
+            intents.append(
+                _intent(tool, "FS_OUTSIDE_WORKSPACE", {"path": old_path, "op": "rename"})
+            )
+        if new_path and _is_outside_workspace(new_path, workspace_relative=True):
+            intents.append(
+                _intent(tool, "FS_OUTSIDE_WORKSPACE", {"path": new_path, "op": "rename"})
+            )
+        if old_path:
+            intents.extend(_write_intents(tool, old_path))
+        if new_path:
+            intents.extend(_write_intents(tool, new_path))
+        return intents
+
+    if tool == "workspace_move":
+        from_path = str(args.get("from_path") or "")
+        to_path = str(args.get("to_path") or "")
+        if from_path and _is_outside_workspace(from_path, workspace_relative=True):
+            intents.append(_intent(tool, "FS_OUTSIDE_WORKSPACE", {"path": from_path, "op": "move"}))
+        if to_path and _is_outside_workspace(to_path, workspace_relative=True):
+            intents.append(_intent(tool, "FS_OUTSIDE_WORKSPACE", {"path": to_path, "op": "move"}))
+        if from_path:
+            intents.extend(_write_intents(tool, from_path))
+        if to_path:
+            intents.extend(_write_intents(tool, to_path))
+        return intents
+
+    if tool == "workspace_delete":
+        path = str(args.get("path") or "")
+        if path and _is_outside_workspace(path, workspace_relative=True):
+            intents.append(_intent(tool, "FS_OUTSIDE_WORKSPACE", {"path": path, "op": "delete"}))
+        if path:
             intents.extend(_write_intents(tool, path))
         return intents
 
@@ -302,7 +340,7 @@ def _build_prompt(
 
 
 def _build_what(tool: str, details: dict[str, JSONValue]) -> str:
-    if tool in {"shell", "workspace_run"}:
+    if tool in {"shell", "workspace_run", "workspace_terminal_run"}:
         command = str(details.get("command") or "")
         return f"Выполнить команду: {command}".strip()
     path = str(details.get("path") or "")
@@ -313,7 +351,7 @@ def _build_what(tool: str, details: dict[str, JSONValue]) -> str:
 
 def _build_changes(tool: str, details: dict[str, JSONValue]) -> list[str]:
     changes: list[str] = []
-    if tool in {"shell", "workspace_run"}:
+    if tool in {"shell", "workspace_run", "workspace_terminal_run"}:
         command = str(details.get("command") or "")
         if command:
             changes.append(f"Команда: {command}")
@@ -329,7 +367,7 @@ def _build_changes(tool: str, details: dict[str, JSONValue]) -> list[str]:
 
 
 def _build_summary(tool: str, details: dict[str, JSONValue]) -> str:
-    if tool in {"shell", "workspace_run"}:
+    if tool in {"shell", "workspace_run", "workspace_terminal_run"}:
         command = str(details.get("command") or "")
         return f"{tool}:{command}".strip()
     path = str(details.get("path") or "")
