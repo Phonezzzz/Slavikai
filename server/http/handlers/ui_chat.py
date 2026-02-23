@@ -8,6 +8,8 @@ from typing import Literal
 from aiohttp import web
 
 from config.model_whitelist import ModelNotAllowedError
+from core.mwv.routing import classify_request
+from core.skills.index import SkillIndex
 from server.http.common.chat_payload import (
     _extract_decision_payload,
     _normalize_trace_id,
@@ -57,14 +59,163 @@ from server.http_api import (
     _stream_preview_indicates_canvas,
     _stream_preview_ready_for_chat,
     _tool_calls_for_trace_id,
+    _utc_now_iso,
+    _workspace_root_for_session,
 )
 from server.ui_hub import UIHub
-from shared.models import JSONValue
+from shared.models import JSONValue, LLMMessage
+from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
 
-async def handle_ui_chat_send(request: web.Request) -> web.Response:
+def _request_requires_root_gate(
+    *,
+    mode: str,
+    content: str,
+    llm_messages: list[LLMMessage],
+    safe_mode: bool,
+    skill_index: SkillIndex | None,
+) -> bool:
+    if content.strip().startswith("/"):
+        return False
+    if mode == "ask":
+        return False
+    if mode == "auto":
+        return True
+    route = classify_request(
+        llm_messages,
+        content,
+        context={"safe_mode": safe_mode},
+        skill_index=skill_index,
+    )
+    return route.route == "mwv"
+
+
+def _auto_missing_paths(auto_state: dict[str, JSONValue] | None) -> list[str]:
+    if not isinstance(auto_state, dict):
+        return []
+    status_raw = auto_state.get("status")
+    error_code_raw = auto_state.get("error_code")
+    if status_raw != "failed_worker" or error_code_raw != "missing_file":
+        return []
+    missing_raw = auto_state.get("missing_paths")
+    if not isinstance(missing_raw, list):
+        return []
+    paths: list[str] = []
+    for item in missing_raw:
+        if isinstance(item, str):
+            cleaned = item.strip()
+            if cleaned:
+                paths.append(cleaned)
+    return paths
+
+
+def _build_missing_file_decision(
+    *,
+    session_id: str,
+    missing_paths: list[str],
+    root_path: str,
+    mode: str,
+    active_plan: dict[str, JSONValue] | None,
+    active_task: dict[str, JSONValue] | None,
+) -> dict[str, JSONValue]:
+    now = _utc_now_iso()
+    return {
+        "id": f"decision-{uuid.uuid4().hex}",
+        "kind": "decision",
+        "decision_type": "tool_approval",
+        "status": "pending",
+        "blocking": True,
+        "reason": "missing_file",
+        "summary": "Auto-run остановлен: не найдены нужные файлы в текущем root.",
+        "proposed_action": {
+            "error_code": "missing_file",
+            "missing_paths": list(missing_paths),
+            "root_path": root_path,
+        },
+        "options": [
+            {
+                "id": "approve_once",
+                "title": "Понял",
+                "action": "approve_once",
+                "payload": {},
+                "risk": "low",
+            },
+            {
+                "id": "reject",
+                "title": "Закрыть",
+                "action": "reject",
+                "payload": {},
+                "risk": "low",
+            },
+        ],
+        "default_option_id": "approve_once",
+        "context": {
+            "session_id": session_id,
+            "source_endpoint": "chat.run_missing_file",
+            "resume_payload": {
+                "missing_paths": list(missing_paths),
+                "root_path": root_path,
+            },
+            **_decision_workflow_context(
+                mode=mode,
+                active_plan=active_plan,
+                active_task=active_task,
+            ),
+        },
+        "created_at": now,
+        "updated_at": now,
+        "resolved_at": None,
+    }
+
+
+def _normalize_agent_decision(
+    decision: dict[str, JSONValue],
+    *,
+    content: str,
+    force_canvas: bool,
+    attachments: list[dict[str, str]],
+    user_message_id: str | None,
+    selected_model: dict[str, str],
+) -> dict[str, JSONValue]:
+    normalized = dict(decision)
+    decision_type_raw = normalized.get("decision_type")
+    decision_type = decision_type_raw.strip() if isinstance(decision_type_raw, str) else ""
+    if decision_type in {"tool_approval", "plan_execute"}:
+        return normalized
+    normalized["decision_type"] = "agent_decision"
+
+    context_raw = normalized.get("context")
+    context = dict(context_raw) if isinstance(context_raw, dict) else {}
+    source_endpoint_raw = context.get("source_endpoint")
+    if not isinstance(source_endpoint_raw, str) or not source_endpoint_raw.strip():
+        context["source_endpoint"] = "chat.agent_decision"
+
+    resume_payload_raw = context.get("resume_payload")
+    resume_payload = dict(resume_payload_raw) if isinstance(resume_payload_raw, dict) else {}
+    source_request_raw = resume_payload.get("source_request")
+    source_request = dict(source_request_raw) if isinstance(source_request_raw, dict) else {}
+    source_request["content"] = content
+    source_request["force_canvas"] = force_canvas
+    source_request["attachments"] = attachments
+    resume_payload["source_request"] = source_request
+    resume_payload["user_message_id"] = user_message_id
+    resume_payload["selected_model_snapshot"] = {
+        "provider": selected_model["provider"],
+        "model": selected_model["model"],
+    }
+    context["resume_payload"] = resume_payload
+    normalized["context"] = context
+    return normalized
+
+
+async def handle_ui_chat_send(
+    request: web.Request,
+    *,
+    payload_override: dict[str, JSONValue] | None = None,
+    bypass_root_gate: bool = False,
+) -> web.Response:
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
@@ -80,15 +231,18 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         if agent is None:
             return _model_not_selected_response()
 
-        try:
-            payload = await request.json()
-        except Exception as exc:  # noqa: BLE001
-            return error_response(
-                status=400,
-                message=f"Некорректный JSON: {exc}",
-                error_type="invalid_request_error",
-                code="invalid_json",
-            )
+        if payload_override is None:
+            try:
+                payload = await request.json()
+            except Exception as exc:  # noqa: BLE001
+                return error_response(
+                    status=400,
+                    message=f"Некорректный JSON: {exc}",
+                    error_type="invalid_request_error",
+                    code="invalid_json",
+                )
+        else:
+            payload = dict(payload_override)
         if not isinstance(payload, dict):
             return error_response(
                 status=400,
@@ -174,6 +328,119 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         active_plan = _normalize_plan_payload(workflow.get("active_plan"))
         active_task = _normalize_task_payload(workflow.get("active_task"))
         auto_state = _normalize_auto_state(workflow.get("auto_state"))
+        session_root = await _workspace_root_for_session(hub, session_id)
+        session_messages = await hub.get_messages(session_id)
+        preflight_messages = _ui_messages_to_llm(session_messages)
+
+        requires_root_gate = _request_requires_root_gate(
+            mode=mode,
+            content=content_raw,
+            llm_messages=preflight_messages,
+            safe_mode=bool(getattr(agent, "tools_enabled", {}).get("safe_mode", False)),
+            skill_index=getattr(agent, "skill_index", None),
+        )
+        if requires_root_gate and not bypass_root_gate:
+            existing_decision = _normalize_ui_decision(
+                await hub.get_session_decision(session_id),
+                session_id=session_id,
+            )
+            if _decision_is_pending_blocking(existing_decision):
+                return error_response(
+                    status=409,
+                    message="Pending decision already exists for this session.",
+                    error_type="invalid_request_error",
+                    code="decision_pending",
+                )
+            root_gate_approval_request: dict[str, JSONValue] = {
+                "category": "EXEC_ARBITRARY",
+                "required_categories": ["EXEC_ARBITRARY"],
+                "tool": "chat_run_root",
+                "prompt": {
+                    "what": "Подтвердить запуск из выбранного Workspace Root",
+                    "why": "Для auto/mwv запусков root подтверждается на каждый запуск.",
+                    "risk": "Запуск может изменить файлы и/или выполнить команды в проекте.",
+                    "changes": [str(session_root)],
+                },
+                "details": {
+                    "root_path": str(session_root),
+                    "mode": mode,
+                },
+            }
+            root_gate_decision = _build_ui_approval_decision(
+                approval_request=root_gate_approval_request,
+                session_id=session_id,
+                source_endpoint="chat.run_root",
+                resume_payload={
+                    "root_path": str(session_root),
+                    "mode": mode,
+                    "source_request": {
+                        "content": content_raw,
+                        "force_canvas": force_canvas,
+                        "attachments": attachments,
+                    },
+                    "user_message_id": None,
+                    "selected_model_snapshot": {
+                        "provider": selected_model["provider"],
+                        "model": selected_model["model"],
+                    },
+                },
+                workflow_context=_decision_workflow_context(
+                    mode=mode,
+                    active_plan=active_plan,
+                    active_task=active_task,
+                ),
+            )
+            options_raw = root_gate_decision.get("options")
+            if isinstance(options_raw, list):
+                root_gate_decision["options"] = [
+                    item
+                    for item in options_raw
+                    if isinstance(item, dict) and item.get("action") in {"approve_once", "reject"}
+                ]
+                root_gate_decision["default_option_id"] = "approve_once"
+            await _set_current_plan_step_status(
+                hub=hub,
+                session_id=session_id,
+                status="waiting_approval",
+            )
+            await hub.set_session_decision(session_id, root_gate_decision)
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="approval.required",
+                detail="chat.run_root",
+            )
+            output_payload = await hub.get_session_output(session_id)
+            files_payload = await hub.get_session_files(session_id)
+            artifacts_payload = await hub.get_session_artifacts(session_id)
+            current_model = await hub.get_session_model(session_id)
+            current_workflow = await hub.get_session_workflow(session_id)
+            response = json_response(
+                {
+                    "session_id": session_id,
+                    "messages": session_messages,
+                    "output": output_payload,
+                    "files": files_payload or [],
+                    "artifacts": artifacts_payload or [],
+                    "display": {
+                        "target": "chat",
+                        "artifact_id": None,
+                        "forced": force_canvas,
+                    },
+                    "decision": _normalize_ui_decision(root_gate_decision, session_id=session_id),
+                    "selected_model": current_model,
+                    "trace_id": None,
+                    "approval_request": None,
+                    "mwv_report": None,
+                    "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
+                    "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
+                    "active_task": _normalize_task_payload(current_workflow.get("active_task")),
+                    "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+                },
+                status=202,
+            )
+            response.headers[UI_SESSION_HEADER] = session_id
+            return response
 
         await hub.set_session_status(session_id, "busy")
         status_opened = True
@@ -273,6 +540,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
         auto_progress_states: list[dict[str, JSONValue]] = []
         chat_stream_id = uuid.uuid4().hex
         live_stream_sent = False
+        set_runtime_workspace_root(session_root)
         async with agent_lock:
             previous_trace_id = _normalize_trace_id(
                 getattr(agent, "last_chat_interaction_id", None)
@@ -440,6 +708,15 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                 detail="chat",
             )
             decision = _extract_decision_payload(response_text)
+            if isinstance(decision, dict):
+                decision = _normalize_agent_decision(
+                    decision,
+                    content=content_raw,
+                    force_canvas=force_canvas,
+                    attachments=attachments,
+                    user_message_id=user_message_id,
+                    selected_model=selected_model,
+                )
             trace_id = _normalize_trace_id(getattr(agent, "last_chat_interaction_id", None))
             if trace_id == previous_trace_id:
                 # Не используем trace предыдущего ответа для вывода файлов текущего ответа.
@@ -500,6 +777,7 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                         active_task=active_task,
                     ),
                 )
+        set_runtime_workspace_root(None)
 
         if latest_auto_state is not None:
             await hub.set_session_workflow(session_id, auto_state=latest_auto_state)
@@ -513,6 +791,17 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
                         "auto_state": progress_state,
                     },
                 },
+            )
+
+        missing_paths = _auto_missing_paths(latest_auto_state)
+        if ui_decision is None and missing_paths:
+            ui_decision = _build_missing_file_decision(
+                session_id=session_id,
+                missing_paths=missing_paths,
+                root_path=str(session_root),
+                mode=mode,
+                active_plan=active_plan,
+                active_task=active_task,
             )
 
         if _decision_is_pending_blocking(ui_decision):
@@ -690,5 +979,6 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
             code="agent_error",
         )
     finally:
+        set_runtime_workspace_root(None)
         if status_opened and session_id is not None and not error:
             await hub.set_session_status(session_id, "ok")

@@ -17,10 +17,12 @@ import {
   type WorkspaceGithubImportResult,
 } from './components/workspace-settings-modal';
 import { WorkspaceIde } from './components/workspace-ide';
+import { isSessionMode } from './types';
 import type {
   AutoState,
   ChatAttachment,
   ChatMessage,
+  DecisionRespondChoice,
   FolderSummary,
   PlanEnvelope,
   PlanStepStatus,
@@ -508,7 +510,9 @@ const parseUiDecision = (value: unknown): UiDecision | null => {
     id: candidate.id.trim(),
     kind: candidate.kind,
     decision_type:
-      candidate.decision_type === 'tool_approval' || candidate.decision_type === 'plan_execute'
+      candidate.decision_type === 'tool_approval'
+      || candidate.decision_type === 'plan_execute'
+      || candidate.decision_type === 'agent_decision'
         ? candidate.decision_type
         : null,
     status: candidate.status,
@@ -527,7 +531,7 @@ const parseUiDecision = (value: unknown): UiDecision | null => {
 };
 
 const parseSessionMode = (value: unknown): SessionMode => {
-  if (value === 'ask' || value === 'plan' || value === 'act' || value === 'auto') {
+  if (isSessionMode(value)) {
     return value;
   }
   return 'ask';
@@ -2536,7 +2540,7 @@ export default function App() {
   };
 
   const handleDecisionRespond = async (
-    choice: 'approve_once' | 'approve_session' | 'reject' | 'edit_and_approve' | 'edit_plan',
+    choice: DecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
   ) => {
     if (!selectedConversation || !pendingDecision) {

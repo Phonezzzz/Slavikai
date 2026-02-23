@@ -51,3 +51,16 @@ def test_agent_mwv_route_bypasses_brain(tmp_path: Path, monkeypatch) -> None:
     response = agent.respond([LLMMessage(role="user", content="исправь тесты")])
     assert response == "mwv"
     assert main.calls == 0
+
+
+def test_agent_ask_mode_uses_chat_path_for_action_text(tmp_path: Path, monkeypatch) -> None:
+    agent, main = _prepare_agent(tmp_path)
+    agent.runtime_mode = "ask"
+
+    def _mwv_unreachable(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("MWV should not run in ask mode")
+
+    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_unreachable)
+    response = agent.respond([LLMMessage(role="user", content="исправь тесты")])
+    assert response.startswith("main")
+    assert main.calls == 1

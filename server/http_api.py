@@ -189,6 +189,13 @@ UI_DECISION_RESPONSES: Final[set[str]] = {
     "edit_and_approve",
     "edit_plan",
     "reject",
+    "ask_user",
+    "proceed_safe",
+    "retry",
+    "abort",
+    "select_skill",
+    "adjust_threshold",
+    "create_candidate",
 }
 UI_DECISION_EDITABLE_FIELDS: Final[set[str]] = {"details", "args", "query", "branch", "repo_url"}
 UI_SETTINGS_USER_ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = (

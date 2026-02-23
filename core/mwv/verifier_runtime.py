@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,13 +19,15 @@ def _default_runner() -> VerifierRunnerProtocol:
     return VerifierRunner()
 
 
+_PYTHON_EXECUTABLE = sys.executable or "python"
+
 DEFAULT_FALLBACK_COMMANDS: tuple[tuple[str, ...], ...] = (
-    ("python", "-m", "ruff", "check", "."),
-    ("python", "-m", "ruff", "format", "--check", "."),
-    ("python", "skills/tools/lint_skills.py"),
-    ("python", "skills/tools/build_manifest.py", "--check"),
-    ("python", "-m", "mypy", "."),
-    ("python", "-m", "pytest", "--cov", "--cov-fail-under=80"),
+    (_PYTHON_EXECUTABLE, "-m", "ruff", "check", "."),
+    (_PYTHON_EXECUTABLE, "-m", "ruff", "format", "--check", "."),
+    (_PYTHON_EXECUTABLE, "skills/tools/lint_skills.py"),
+    (_PYTHON_EXECUTABLE, "skills/tools/build_manifest.py", "--check"),
+    (_PYTHON_EXECUTABLE, "-m", "mypy", "."),
+    (_PYTHON_EXECUTABLE, "-m", "pytest", "--cov", "--cov-fail-under=80"),
 )
 SCRIPT_NOT_FOUND_PREFIX = "Verifier script not found:"
 

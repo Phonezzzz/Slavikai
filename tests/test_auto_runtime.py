@@ -107,7 +107,28 @@ def test_auto_runtime_conflict_detection() -> None:
     assert conflict[2] == ["src/a.py"]
 
 
+def test_auto_runtime_extracts_missing_paths() -> None:
+    failed = auto_runtime.CoderResult(
+        coder_id="coder-1",
+        shard_id="s1",
+        status="failed",
+        bundle=auto_runtime.PatchBundle(
+            status="failed",
+            diagnostics=[
+                "Файл не найден: /tmp/project/AGENTS.md",
+                "File not found: /tmp/project/docs/README.md",
+                "other error",
+            ],
+        ),
+        error="failed",
+    )
+
+    missing = auto_runtime._extract_missing_paths([failed])
+    assert missing == ["/tmp/project/AGENTS.md", "/tmp/project/docs/README.md"]
+
+
 def test_auto_runtime_planner_fallback_and_complete(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    tmp_path.mkdir(exist_ok=True)
     agent = _FakeAgent(brain_text="not-json")
     orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
 
@@ -116,13 +137,18 @@ def test_auto_runtime_planner_fallback_and_complete(monkeypatch, tmp_path) -> No
         "_run_coder_pool",
         lambda **kwargs: [_completed_result("shard-1", "coder-1")],
     )
-    monkeypatch.setattr(orchestrator, "_apply_patch_bundles", lambda results: [])
+    monkeypatch.setattr(
+        orchestrator,
+        "_apply_patch_bundles",
+        lambda results, **kwargs: [],
+    )
     monkeypatch.setattr(auto_runtime, "VerifierRuntime", _PassingVerifierRuntime)
 
     outcome = orchestrator.run("Сделать задачу")
     assert outcome.status == AutoRunStatus.COMPLETED
     assert isinstance(agent.last_auto_state, dict)
     assert agent.last_auto_state.get("status") == AutoRunStatus.COMPLETED.value
+    assert agent.last_auto_state.get("root_path") == str(tmp_path.resolve())
     plan_raw = agent.last_auto_state.get("plan")
     assert isinstance(plan_raw, dict)
     shards_raw = plan_raw.get("shards")
@@ -132,8 +158,15 @@ def test_auto_runtime_planner_fallback_and_complete(monkeypatch, tmp_path) -> No
 
 def test_auto_runtime_waiting_approval_and_resume(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     planner_payload = '{"plan_id":"p","goal":"g","shards":[{"shard_id":"s1","goal":"g1"}]}'
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    fallback_root = tmp_path / "fallback"
+    fallback_root.mkdir(parents=True, exist_ok=True)
+    other_root = tmp_path / "other"
+    other_root.mkdir(parents=True, exist_ok=True)
+
     agent = _FakeAgent(brain_text=planner_payload)
-    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=fallback_root)
 
     request = ApprovalRequest(
         category="EXEC_ARBITRARY",
@@ -155,11 +188,13 @@ def test_auto_runtime_waiting_approval_and_resume(monkeypatch, tmp_path) -> None
 
     monkeypatch.setattr(orchestrator, "_run_coder_pool", _raise_approval)
 
-    with pytest.raises(ApprovalRequired):
-        orchestrator.run("goal")
+    with auto_runtime.workspace_root_context(runtime_root):
+        with pytest.raises(ApprovalRequired):
+            orchestrator.run("goal")
 
     assert isinstance(agent.last_auto_state, dict)
     assert agent.last_auto_state.get("status") == AutoRunStatus.WAITING_APPROVAL.value
+    assert agent.last_auto_state.get("root_path") == str(runtime_root.resolve())
     run_id_raw = agent.last_auto_state.get("run_id")
     assert isinstance(run_id_raw, str)
 
@@ -168,11 +203,17 @@ def test_auto_runtime_waiting_approval_and_resume(monkeypatch, tmp_path) -> None
         "_run_coder_pool",
         lambda **kwargs: [_completed_result("s1", "coder-1")],
     )
-    monkeypatch.setattr(orchestrator, "_apply_patch_bundles", lambda results: [])
+    monkeypatch.setattr(
+        orchestrator,
+        "_apply_patch_bundles",
+        lambda results, **kwargs: [],
+    )
     monkeypatch.setattr(auto_runtime, "VerifierRuntime", _PassingVerifierRuntime)
 
-    resumed = orchestrator.resume(run_id_raw)
+    with auto_runtime.workspace_root_context(other_root):
+        resumed = orchestrator.resume(run_id_raw)
     assert resumed is not None
     assert resumed.status == AutoRunStatus.COMPLETED
     assert isinstance(agent.last_auto_state, dict)
     assert agent.last_auto_state.get("status") == AutoRunStatus.COMPLETED.value
+    assert agent.last_auto_state.get("root_path") == str(runtime_root.resolve())

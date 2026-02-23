@@ -2,7 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { OnMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
 
-import type { AutoState, PlanEnvelope, SessionMode, TaskExecutionState, UiDecision } from '../types';
+import type {
+  AutoState,
+  DecisionRespondChoice,
+  PlanEnvelope,
+  SessionMode,
+  TaskExecutionState,
+  UiDecision,
+} from '../types';
 import type { CanvasMessage, CanvasSendPayload } from './canvas';
 import {
   findFirstFilePath,
@@ -73,7 +80,7 @@ type WorkspaceIdeProps = {
   decisionBusy?: boolean;
   decisionError?: string | null;
   onDecisionRespond?: (
-    choice: 'approve_once' | 'approve_session' | 'edit_and_approve' | 'edit_plan' | 'reject',
+    choice: DecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
   refreshToken?: number;

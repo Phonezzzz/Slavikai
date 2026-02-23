@@ -15,7 +15,15 @@ import {
   Volume2,
 } from 'lucide-react';
 
-import type { AutoState, PlanEnvelope, SessionMode, TaskExecutionState, UiDecision } from '../../app/types';
+import { SESSION_MODE_VALUES, isSessionMode } from '../../app/types';
+import type {
+  AutoState,
+  DecisionRespondChoice,
+  PlanEnvelope,
+  SessionMode,
+  TaskExecutionState,
+  UiDecision,
+} from '../../app/types';
 import type { CanvasMessage, CanvasSendPayload } from '../../app/components/canvas';
 import { DecisionPanel } from '../../app/components/decision-panel';
 import { PlanPanel } from '../../app/components/plan-panel';
@@ -57,7 +65,7 @@ type WorkspaceAssistantPanelProps = {
   decisionBusy: boolean;
   decisionError: string | null;
   onDecisionRespond?: (
-    choice: 'approve_once' | 'approve_session' | 'edit_and_approve' | 'edit_plan' | 'reject',
+    choice: DecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
   messages: CanvasMessage[];
@@ -598,16 +606,18 @@ export function WorkspaceAssistantPanel({
               value={mode}
               onChange={(event) => {
                 const nextMode = event.target.value;
-                if (nextMode === 'ask' || nextMode === 'plan' || nextMode === 'act') {
+                if (isSessionMode(nextMode)) {
                   void onChangeMode(nextMode);
                 }
               }}
               disabled={modeBusy || isDecisionBlocking}
               className="w-full appearance-none rounded-md border border-[#252530] bg-[#111116] px-2.5 py-1.5 pr-8 text-[11px] uppercase tracking-wide text-[#d4d4db] outline-none"
             >
-              <option value="ask">ask</option>
-              <option value="plan">plan</option>
-              <option value="act">act</option>
+              {SESSION_MODE_VALUES.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
             </select>
             <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#666]" />
           </div>

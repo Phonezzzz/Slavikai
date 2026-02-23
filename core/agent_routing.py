@@ -35,7 +35,11 @@ class AgentRoutingMixin:
             if last_content.startswith("/"):
                 return self.handle_tool_command(last_content)
 
-            if getattr(self, "runtime_mode", "ask") == "auto":
+            runtime_mode = getattr(self, "runtime_mode", "ask")
+            if runtime_mode == "ask":
+                return self._run_chat_response(messages, last_content, record_in_history)
+
+            if runtime_mode == "auto":
                 result = self.handle_auto_command(last_content)
                 self._log_chat_interaction(raw_input=last_content, response_text=result)
                 if record_in_history:
@@ -131,7 +135,16 @@ class AgentRoutingMixin:
                 yield result
                 return
 
-            if getattr(self, "runtime_mode", "ask") == "auto":
+            runtime_mode = getattr(self, "runtime_mode", "ask")
+            if runtime_mode == "ask":
+                yield from self._run_chat_response_stream(
+                    messages,
+                    last_content,
+                    record_in_history,
+                )
+                return
+
+            if runtime_mode == "auto":
                 result = self.handle_auto_command(last_content)
                 self.last_stream_response_raw = result
                 yield result

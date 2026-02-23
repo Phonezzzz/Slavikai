@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+from collections.abc import Callable
+from pathlib import Path
 from typing import cast
 
 from aiohttp import web
@@ -21,7 +23,32 @@ from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
 
+_load_dotenv: Callable[..., bool] | None
+try:
+    from dotenv import load_dotenv as _load_dotenv
+except Exception:  # noqa: BLE001
+    _load_dotenv = None
+
+_DOTENV_LOAD_ATTEMPTED = False
+
 logger = logging.getLogger("SlavikAI.HttpAPI")
+
+
+def _load_project_dotenv() -> None:
+    global _DOTENV_LOAD_ATTEMPTED
+    if _DOTENV_LOAD_ATTEMPTED:
+        return
+    _DOTENV_LOAD_ATTEMPTED = True
+    if _load_dotenv is None:
+        logger.debug("python-dotenv is unavailable; skipping .env loading")
+        return
+    project_root = Path(__file__).resolve().parents[2]
+    env_path = project_root / ".env"
+    loaded = _load_dotenv(env_path, override=False)
+    if loaded:
+        logger.info("Loaded environment from %s", env_path)
+    else:
+        logger.debug("No .env file loaded from %s", env_path)
 
 
 def create_app(
@@ -31,6 +58,7 @@ def create_app(
     ui_storage: UISessionStorage | None = None,
     auth_config: HttpAuthConfig | None = None,
 ) -> web.Application:
+    _load_project_dotenv()
     config_max_bytes = max_request_bytes or DEFAULT_MAX_REQUEST_BYTES
     resolved_auth_config = auth_config or resolve_http_auth_config()
     app = web.Application(

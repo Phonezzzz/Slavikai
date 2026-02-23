@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 
+import { SESSION_MODE_VALUES } from '../types';
 import type {
   AutoState,
   PlanEnvelope,
@@ -57,7 +58,7 @@ export function PlanPanel({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           {showModeControls
-            ? (['ask', 'plan', 'act', 'auto'] as SessionMode[]).map((item) => (
+            ? SESSION_MODE_VALUES.map((item) => (
                 <button
                   key={item}
                   type="button"

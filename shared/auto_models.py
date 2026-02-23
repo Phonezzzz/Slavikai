@@ -149,6 +149,7 @@ class AutoState:
     run_id: str
     status: AutoRunStatus
     goal: str
+    root_path: str
     pool_size: int
     started_at: str
     updated_at: str
@@ -159,12 +160,15 @@ class AutoState:
     verifier: dict[str, JSONValue] | None = None
     approval: dict[str, JSONValue] | None = None
     error: str | None = None
+    error_code: str | None = None
+    missing_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, JSONValue]:
         return {
             "run_id": self.run_id,
             "status": self.status.value,
             "goal": self.goal,
+            "root_path": self.root_path,
             "pool_size": self.pool_size,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
@@ -175,6 +179,8 @@ class AutoState:
             "verifier": dict(self.verifier) if self.verifier is not None else None,
             "approval": dict(self.approval) if self.approval is not None else None,
             "error": self.error,
+            "error_code": self.error_code,
+            "missing_paths": list(self.missing_paths),
         }
 
 
@@ -195,6 +201,7 @@ def normalize_auto_state(value: object) -> dict[str, JSONValue] | None:
         "run_id": run_id_raw.strip(),
         "status": status_raw,
         "goal": goal_raw if isinstance(goal_raw, str) else "",
+        "root_path": (value.get("root_path") if isinstance(value.get("root_path"), str) else ""),
         "pool_size": _normalize_pool_size(value.get("pool_size")),
         "started_at": (
             started_at_raw if isinstance(started_at_raw, str) and started_at_raw.strip() else now
@@ -209,6 +216,12 @@ def normalize_auto_state(value: object) -> dict[str, JSONValue] | None:
         "verifier": _normalize_object(value.get("verifier")),
         "approval": _normalize_object(value.get("approval")),
         "error": value.get("error") if isinstance(value.get("error"), str) else None,
+        "error_code": (
+            value.get("error_code")
+            if isinstance(value.get("error_code"), str) and value.get("error_code")
+            else None
+        ),
+        "missing_paths": _normalize_string_list(value.get("missing_paths")),
     }
     return normalized
 

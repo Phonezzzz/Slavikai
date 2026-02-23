@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import uuid
 from collections.abc import Callable
@@ -26,7 +27,7 @@ from shared.auto_models import (
     utc_now_iso,
 )
 from shared.models import JSONValue, LLMMessage, PlanStepStatus
-from tools.workspace_tools import WORKSPACE_ROOT, workspace_root_context
+from tools.workspace_tools import WORKSPACE_ROOT, get_workspace_root, workspace_root_context
 
 if TYPE_CHECKING:
     from core.agent import Agent
@@ -79,6 +80,7 @@ class _PausedRun:
     pool_size: int
     plan: AutoPlan
     started_at: str
+    workspace_root: Path
 
 
 class AutoOrchestrator:
@@ -101,14 +103,23 @@ class AutoOrchestrator:
         run_id: str | None = None,
         plan_override: AutoPlan | None = None,
         started_at: str | None = None,
+        run_root_override: Path | None = None,
     ) -> AutoRunOutcome:
         run_id_value = run_id or f"auto-{uuid.uuid4().hex}"
         pool_size = _resolve_pool_size()
         started = started_at or utc_now_iso()
+        runtime_root = get_workspace_root().resolve()
+        if run_root_override is not None:
+            run_root = run_root_override.resolve()
+        elif runtime_root != WORKSPACE_ROOT:
+            run_root = runtime_root
+        else:
+            run_root = self.workspace_root
         state: dict[str, JSONValue] = {
             "run_id": run_id_value,
             "status": AutoRunStatus.IDLE.value,
             "goal": goal,
+            "root_path": str(run_root),
             "pool_size": pool_size,
             "started_at": started,
             "updated_at": started,
@@ -119,6 +130,8 @@ class AutoOrchestrator:
             "verifier": None,
             "approval": None,
             "error": None,
+            "error_code": None,
+            "missing_paths": [],
         }
         self._set_state(state)
 
@@ -133,19 +146,24 @@ class AutoOrchestrator:
             self._set_state(state)
 
             self._set_status(state, AutoRunStatus.CODING)
-            baseline_snapshot = _snapshot_workspace(self.workspace_root)
+            baseline_snapshot = _snapshot_workspace(run_root)
             coder_results = self._run_coder_pool(
                 run_id=run_id_value,
                 plan=plan,
                 pool_size=pool_size,
                 baseline_snapshot=baseline_snapshot,
                 state=state,
+                workspace_root=run_root,
             )
 
             worker_fail = [item for item in coder_results if item.status != "completed"]
             if worker_fail:
                 first_error = worker_fail[0].error or "Worker failed"
                 state["error"] = first_error
+                missing_paths = _extract_missing_paths(worker_fail)
+                if missing_paths:
+                    state["error_code"] = "missing_file"
+                    state["missing_paths"] = missing_paths
                 self._set_status(state, AutoRunStatus.FAILED_WORKER)
                 return AutoRunOutcome(
                     text=self.parent._format_stop_response(
@@ -231,7 +249,7 @@ class AutoOrchestrator:
                     ],
                 )
 
-            merged_paths = self._apply_patch_bundles(ordered_results)
+            merged_paths = self._apply_patch_bundles(ordered_results, workspace_root=run_root)
             state["merge"] = {
                 "status": "completed",
                 "changed_paths": sorted(merged_paths),
@@ -239,11 +257,11 @@ class AutoOrchestrator:
             self._set_state(state)
 
             self._set_status(state, AutoRunStatus.VERIFYING)
-            verifier = VerifierRuntime(project_root=self.workspace_root)
+            verifier = VerifierRuntime(project_root=run_root)
             context = RunContext(
                 session_id=self.parent.session_id or "local",
                 trace_id=str(uuid.uuid4()),
-                workspace_root=str(self.workspace_root),
+                workspace_root=str(run_root),
                 safe_mode=bool(self.parent.tools_enabled.get("safe_mode", False)),
                 approved_categories=sorted(self.parent.approved_categories),
                 max_retries=0,
@@ -327,6 +345,7 @@ class AutoOrchestrator:
                 pool_size=pool_size,
                 plan=plan,
                 started_at=started,
+                workspace_root=run_root,
             )
             state["approval"] = {
                 "status": "required",
@@ -371,6 +390,7 @@ class AutoOrchestrator:
             run_id=paused.run_id,
             plan_override=paused.plan,
             started_at=paused.started_at,
+            run_root_override=paused.workspace_root,
         )
 
     def cancel(
@@ -386,6 +406,7 @@ class AutoOrchestrator:
             "run_id": run_id,
             "status": AutoRunStatus.CANCELLED.value,
             "goal": paused.goal,
+            "root_path": str(paused.workspace_root),
             "pool_size": paused.pool_size,
             "started_at": paused.started_at,
             "updated_at": utc_now_iso(),
@@ -396,6 +417,8 @@ class AutoOrchestrator:
             "verifier": None,
             "approval": {"status": "rejected"},
             "error": reason,
+            "error_code": None,
+            "missing_paths": [],
         }
         return self._set_state(state)
 
@@ -434,6 +457,7 @@ class AutoOrchestrator:
         pool_size: int,
         baseline_snapshot: dict[str, bytes],
         state: dict[str, JSONValue],
+        workspace_root: Path,
     ) -> list[CoderResult]:
         shards = list(plan.shards)
         coders: list[dict[str, JSONValue]] = []
@@ -450,7 +474,7 @@ class AutoOrchestrator:
         state["coders"] = coders
         self._set_state(state)
 
-        run_root = self.workspace_root / ".auto" / run_id
+        run_root = workspace_root / ".auto" / run_id
         run_root.mkdir(parents=True, exist_ok=True)
 
         results: list[CoderResult] = []
@@ -465,6 +489,7 @@ class AutoOrchestrator:
                     coder_id,
                     shard,
                     baseline_snapshot,
+                    workspace_root,
                 )
                 future_map[future] = (coder_id, shard.shard_id)
                 _update_coder_state(state, coder_id, status="running")
@@ -498,12 +523,13 @@ class AutoOrchestrator:
         coder_id: str,
         shard: AutoShard,
         baseline_snapshot: dict[str, bytes],
+        workspace_root: Path,
     ) -> CoderResult:
         workspace_copy = run_root / coder_id
         if workspace_copy.exists():
             shutil.rmtree(workspace_copy)
         shutil.copytree(
-            self.workspace_root,
+            workspace_root,
             workspace_copy,
             dirs_exist_ok=False,
             ignore=shutil.ignore_patterns(".auto"),
@@ -555,13 +581,18 @@ class AutoOrchestrator:
                 error=str(exc),
             )
 
-    def _apply_patch_bundles(self, results: list[CoderResult]) -> list[str]:
+    def _apply_patch_bundles(
+        self,
+        results: list[CoderResult],
+        *,
+        workspace_root: Path,
+    ) -> list[str]:
         changed_paths: set[str] = set()
         for item in results:
             for operation in item.bundle.operations:
-                target = (self.workspace_root / operation.path).resolve()
+                target = (workspace_root / operation.path).resolve()
                 try:
-                    target.relative_to(self.workspace_root)
+                    target.relative_to(workspace_root)
                 except ValueError as exc:
                     raise ValueError(f"path outside workspace: {operation.path}") from exc
                 if operation.op == "delete":
@@ -819,6 +850,25 @@ def _update_coder_state(
         if diagnostics is not None:
             item["diagnostics"] = list(diagnostics)
         return
+
+
+_MISSING_FILE_PATTERN = re.compile(r"(?:Файл не найден|File not found):\s*(.+)")
+
+
+def _extract_missing_paths(results: list[CoderResult]) -> list[str]:
+    paths: set[str] = set()
+    for item in results:
+        diagnostics = item.bundle.diagnostics
+        for diag in diagnostics:
+            if not isinstance(diag, str):
+                continue
+            match = _MISSING_FILE_PATTERN.search(diag)
+            if not match:
+                continue
+            raw_path = match.group(1).strip()
+            if raw_path:
+                paths.add(raw_path)
+    return sorted(paths)
 
 
 def _auto_plan_summary(plan: AutoPlan) -> str:

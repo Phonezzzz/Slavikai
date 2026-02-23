@@ -204,6 +204,36 @@ def test_ui_chat_send_requires_model_selection() -> None:
     asyncio.run(run())
 
 
+def test_ui_chat_send_in_ask_mode_does_not_require_root_gate_for_action_text() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "исправь тесты в проекте"},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            decision = payload.get("decision")
+            assert decision is None
+            output_raw = payload.get("output")
+            assert isinstance(output_raw, dict)
+            content_raw = output_raw.get("content")
+            assert isinstance(content_raw, str)
+            assert content_raw.strip()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_models_endpoint(monkeypatch) -> None:
     monkeypatch.setattr(
         "server.http_api._fetch_provider_models",
@@ -285,9 +315,34 @@ def test_ui_chat_send_in_auto_mode_returns_auto_state_and_progress_event() -> No
                     headers={"X-Slavik-Session": session_id},
                     json={"content": "run auto"},
                 )
-                assert send_resp.status == 200
+                assert send_resp.status == 202
                 send_payload = await send_resp.json()
-                auto_state = send_payload.get("auto_state")
+                decision = send_payload.get("decision")
+                assert isinstance(decision, dict)
+                assert decision.get("status") == "pending"
+                context_raw = decision.get("context")
+                assert isinstance(context_raw, dict)
+                assert context_raw.get("source_endpoint") == "chat.run_root"
+                decision_id = decision.get("id")
+                assert isinstance(decision_id, str)
+                assert decision_id
+
+                approve_resp = await client.post(
+                    "/ui/api/decision/respond",
+                    headers={"X-Slavik-Session": session_id},
+                    json={
+                        "session_id": session_id,
+                        "decision_id": decision_id,
+                        "choice": "approve_once",
+                    },
+                )
+                assert approve_resp.status == 200
+                approve_payload = await approve_resp.json()
+                resume = approve_payload.get("resume")
+                assert isinstance(resume, dict)
+                assert resume.get("source_endpoint") == "chat.run_root"
+                assert resume.get("ok") is True
+                auto_state = approve_payload.get("auto_state")
                 assert isinstance(auto_state, dict)
                 assert auto_state.get("status") == "completed"
 

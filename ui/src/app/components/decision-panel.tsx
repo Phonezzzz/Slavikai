@@ -1,14 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Check, ChevronDown, Pencil, X } from 'lucide-react';
 
-import type { UiDecision } from '../types';
-
-type DecisionRespondChoice =
-  | 'approve_once'
-  | 'approve_session'
-  | 'edit_and_approve'
-  | 'edit_plan'
-  | 'reject';
+import type { DecisionRespondChoice, UiDecision } from '../types';
 
 type DecisionPanelProps = {
   decision: UiDecision;

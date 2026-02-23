@@ -26,10 +26,24 @@ export type UiDecisionOption = {
   risk: string;
 };
 
+export type DecisionRespondChoice =
+  | 'approve_once'
+  | 'approve_session'
+  | 'edit_and_approve'
+  | 'edit_plan'
+  | 'reject'
+  | 'ask_user'
+  | 'proceed_safe'
+  | 'retry'
+  | 'abort'
+  | 'select_skill'
+  | 'adjust_threshold'
+  | 'create_candidate';
+
 export type UiDecision = {
   id: string;
   kind: 'approval' | 'decision';
-  decision_type: 'tool_approval' | 'plan_execute' | null;
+  decision_type: 'tool_approval' | 'plan_execute' | 'agent_decision' | null;
   status: UiDecisionStatus;
   blocking: boolean;
   reason: string;
@@ -43,7 +57,12 @@ export type UiDecision = {
   resolved_at: string | null;
 };
 
-export type SessionMode = 'ask' | 'plan' | 'act' | 'auto';
+export const SESSION_MODE_VALUES = ['ask', 'plan', 'act', 'auto'] as const;
+
+export type SessionMode = (typeof SESSION_MODE_VALUES)[number];
+
+export const isSessionMode = (value: unknown): value is SessionMode =>
+  typeof value === 'string' && SESSION_MODE_VALUES.some((mode) => mode === value);
 
 export type AutoRunStatus =
   | 'idle'

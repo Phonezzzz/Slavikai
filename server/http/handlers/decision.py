@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 
 from aiohttp import web
@@ -8,6 +9,7 @@ from aiohttp import web
 from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ApprovalRequired
 from server.http.common.responses import error_response, json_response
+from server.http.handlers.ui_chat import handle_ui_chat_send
 from server.http_api import (
     UI_DECISION_RESPONSES,
     _apply_agent_runtime_state,
@@ -96,9 +98,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     if not isinstance(choice_raw, str) or choice_raw not in UI_DECISION_RESPONSES:
         return error_response(
             status=400,
-            message=(
-                "choice должен быть approve_once|approve_session|edit_and_approve|edit_plan|reject."
-            ),
+            message=f"choice должен быть одним из: {', '.join(sorted(UI_DECISION_RESPONSES))}.",
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
@@ -158,12 +158,23 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             }
         )
     decision_type = _decision_type_value(current_decision)
+    generic_decision_choices = {
+        "ask_user",
+        "proceed_safe",
+        "retry",
+        "abort",
+        "select_skill",
+        "adjust_threshold",
+        "create_candidate",
+    }
+    effective_choice = choice
+    tool_source_endpoint = ""
     if decision_type == "tool_approval":
         context_raw = current_decision.get("context")
         context = context_raw if isinstance(context_raw, dict) else {}
         source_endpoint_raw = context.get("source_endpoint")
-        source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
-        if source_endpoint == "workspace.tool" and not _decision_categories(current_decision):
+        tool_source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
+        if tool_source_endpoint == "workspace.tool" and not _decision_categories(current_decision):
             return error_response(
                 status=404,
                 message="Pending decision not found.",
@@ -178,14 +189,14 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
-    elif choice in {"edit_plan"}:
-        return error_response(
-            status=400,
-            message="edit_plan доступен только для plan_execute decision.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-    else:
+    elif decision_type == "tool_approval":
+        if choice in {"edit_plan"}:
+            return error_response(
+                status=400,
+                message="edit_plan доступен только для plan_execute decision.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
         if choice not in {"approve_once", "approve_session", "edit_and_approve", "reject"}:
             return error_response(
                 status=400,
@@ -196,6 +207,41 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+    else:
+        if choice == "reject":
+            effective_choice = "abort"
+        if effective_choice not in generic_decision_choices:
+            return error_response(
+                status=400,
+                message=(
+                    "Для agent_decision доступны "
+                    "ask_user|proceed_safe|retry|abort|select_skill|adjust_threshold|create_candidate."
+                ),
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+    if tool_source_endpoint == "chat.run_root":
+        if choice == "approve_session":
+            return error_response(
+                status=400,
+                message="approve_session не поддерживается для chat.run_root.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        if choice not in {"approve_once", "reject"}:
+            return error_response(
+                status=400,
+                message="Для chat.run_root доступны approve_once|reject.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+    if tool_source_endpoint == "chat.run_missing_file" and choice not in {"approve_once", "reject"}:
+        return error_response(
+            status=400,
+            message="Для chat.run_missing_file доступны approve_once|reject.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
 
     async def _resolve_tool_decision() -> dict[str, JSONValue]:
         context_raw = current_decision.get("context")
@@ -456,6 +502,111 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "data": _normalize_json_value(result.data),
         }
 
+    async def _resolve_agent_decision() -> dict[str, JSONValue]:
+        context_raw = current_decision.get("context")
+        context = context_raw if isinstance(context_raw, dict) else {}
+        source_endpoint_raw = context.get("source_endpoint")
+        source_endpoint = (
+            source_endpoint_raw.strip()
+            if isinstance(source_endpoint_raw, str) and source_endpoint_raw.strip()
+            else "chat.agent_decision"
+        )
+        resume_payload_raw = context.get("resume_payload")
+        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+
+        if effective_choice in {
+            "ask_user",
+            "abort",
+            "select_skill",
+            "adjust_threshold",
+            "create_candidate",
+        }:
+            return {
+                "ok": True,
+                "source_endpoint": source_endpoint,
+                "data": {"action": effective_choice, "acknowledged": True},
+                "resume_started": False,
+            }
+
+        source_request_raw = resume_payload.get("source_request")
+        source_request = source_request_raw if isinstance(source_request_raw, dict) else None
+        if source_request is None:
+            return {
+                "ok": False,
+                "source_endpoint": source_endpoint,
+                "error": "resume_payload_missing",
+                "resume_started": False,
+            }
+        content_raw = source_request.get("content")
+        if not isinstance(content_raw, str) or not content_raw.strip():
+            return {
+                "ok": False,
+                "source_endpoint": source_endpoint,
+                "error": "resume_payload_missing",
+                "resume_started": False,
+            }
+        force_canvas_raw = source_request.get("force_canvas")
+        force_canvas = force_canvas_raw is True
+        attachments_raw = source_request.get("attachments")
+        attachments = attachments_raw if isinstance(attachments_raw, list) else []
+        content = content_raw
+        if effective_choice == "proceed_safe":
+            safe_hint = (
+                "SAFE MODE: only read-only/safe guidance. "
+                "Do not run risky actions, commands, writes, or network steps "
+                "unless explicitly approved."
+            )
+            content = f"{safe_hint}\n\n{content_raw}"
+        payload_override: dict[str, JSONValue] = {
+            "content": content,
+            "force_canvas": force_canvas,
+            "attachments": attachments,
+        }
+        resumed_response = await handle_ui_chat_send(
+            request,
+            payload_override=payload_override,
+            bypass_root_gate=False,
+        )
+        parsed_resume_payload: dict[str, JSONValue] = {}
+        body_raw = resumed_response.text
+        if isinstance(body_raw, str) and body_raw.strip():
+            try:
+                parsed = json.loads(body_raw)
+                if isinstance(parsed, dict):
+                    parsed_resume_payload = {
+                        str(key): _normalize_json_value(value) for key, value in parsed.items()
+                    }
+            except json.JSONDecodeError:
+                parsed_resume_payload = {}
+        resume_ok = resumed_response.status < 400
+        if resume_ok:
+            return {
+                "ok": True,
+                "source_endpoint": source_endpoint,
+                "data": {
+                    "status_code": resumed_response.status,
+                    "trace_id": parsed_resume_payload.get("trace_id"),
+                    "output": parsed_resume_payload.get("output"),
+                    "auto_state": parsed_resume_payload.get("auto_state"),
+                    "decision": parsed_resume_payload.get("decision"),
+                },
+                "resume_started": True,
+            }
+        error_raw = parsed_resume_payload.get("error")
+        resume_error: str | None = None
+        if isinstance(error_raw, dict):
+            message_raw = error_raw.get("message")
+            if isinstance(message_raw, str) and message_raw.strip():
+                resume_error = message_raw.strip()
+        if resume_error is None:
+            resume_error = f"{source_endpoint} failed: {resumed_response.status}"
+        return {
+            "ok": False,
+            "source_endpoint": source_endpoint,
+            "error": resume_error,
+            "resume_started": True,
+        }
+
     async def _resolve_plan_execute_decision() -> dict[str, JSONValue]:
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
@@ -560,7 +711,164 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "previous_task": task,
         }
 
-    if choice == "reject":
+    if (
+        decision_type == "tool_approval"
+        and tool_source_endpoint == "chat.run_missing_file"
+        and choice == "approve_once"
+    ):
+        resolved = _decision_with_status(current_decision, status="resolved", resolved=True)
+        updated, latest = await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="pending",
+            next_decision=resolved,
+        )
+        normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
+        if not updated:
+            return _decision_mismatch_response(
+                expected_id=decision_id,
+                actual_decision=normalized_latest,
+            )
+        workflow = await hub.get_session_workflow(session_id)
+        return json_response(
+            {
+                "ok": True,
+                "decision": normalized_latest,
+                "status": "resolved",
+                "resume_started": True,
+                "already_resolved": True,
+                "resume": {
+                    "ok": True,
+                    "source_endpoint": "chat.run_missing_file",
+                    "data": {"acknowledged": True},
+                },
+                "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
+                "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
+                "active_task": _normalize_task_payload(workflow.get("active_task")),
+                "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+            }
+        )
+
+    if (
+        decision_type == "tool_approval"
+        and tool_source_endpoint == "chat.run_root"
+        and choice == "approve_once"
+    ):
+        context_raw = current_decision.get("context")
+        context = context_raw if isinstance(context_raw, dict) else {}
+        resume_payload_raw = context.get("resume_payload")
+        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+        root_raw = resume_payload.get("root_path")
+        if not isinstance(root_raw, str) or not root_raw.strip():
+            return error_response(
+                status=400,
+                message="resume_payload.root_path is missing.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        source_request_raw = resume_payload.get("source_request")
+        if not isinstance(source_request_raw, dict):
+            return error_response(
+                status=400,
+                message="resume_payload.source_request is missing.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        try:
+            root_candidate = _resolve_workspace_root_candidate(
+                root_raw.strip(),
+                policy_profile="yolo",
+            )
+        except ValueError as exc:
+            return error_response(
+                status=400,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        await hub.set_workspace_root(session_id, str(root_candidate))
+
+        resolved = _decision_with_status(current_decision, status="resolved", resolved=True)
+        updated, latest = await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="pending",
+            next_decision=resolved,
+        )
+        normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
+        if not updated:
+            return _decision_mismatch_response(
+                expected_id=decision_id,
+                actual_decision=normalized_latest,
+            )
+
+        payload_override: dict[str, JSONValue] = {
+            "content": source_request_raw.get("content"),
+            "force_canvas": source_request_raw.get("force_canvas"),
+            "attachments": source_request_raw.get("attachments"),
+        }
+        resumed_response = await handle_ui_chat_send(
+            request,
+            payload_override=payload_override,
+            bypass_root_gate=True,
+        )
+        resume_data: dict[str, JSONValue] | None = None
+        resume_ok = resumed_response.status < 400
+        resume_error: str | None = None
+        parsed_resume_payload: dict[str, JSONValue] = {}
+        body_raw = resumed_response.text
+        if isinstance(body_raw, str) and body_raw.strip():
+            try:
+                parsed = json.loads(body_raw)
+                if isinstance(parsed, dict):
+                    parsed_resume_payload = {
+                        str(key): _normalize_json_value(value) for key, value in parsed.items()
+                    }
+            except json.JSONDecodeError:
+                parsed_resume_payload = {}
+        if resume_ok:
+            resume_data = {
+                "status_code": resumed_response.status,
+                "trace_id": parsed_resume_payload.get("trace_id"),
+                "output": parsed_resume_payload.get("output"),
+                "auto_state": parsed_resume_payload.get("auto_state"),
+                "decision": parsed_resume_payload.get("decision"),
+            }
+        else:
+            error_raw = parsed_resume_payload.get("error")
+            if isinstance(error_raw, dict):
+                message_raw = error_raw.get("message")
+                if isinstance(message_raw, str) and message_raw.strip():
+                    resume_error = message_raw.strip()
+            if resume_error is None:
+                resume_error = f"chat.run_root failed: {resumed_response.status}"
+
+        workflow = await hub.get_session_workflow(session_id)
+        latest_decision = _normalize_ui_decision(
+            await hub.get_session_decision(session_id),
+            session_id=session_id,
+        )
+        return json_response(
+            {
+                "ok": True,
+                "decision": latest_decision,
+                "status": "resolved",
+                "resume_started": True,
+                "already_resolved": True,
+                "resume": {
+                    "ok": resume_ok,
+                    "source_endpoint": "chat.run_root",
+                    "data": resume_data,
+                    "error": resume_error,
+                },
+                "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
+                "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
+                "active_task": _normalize_task_payload(workflow.get("active_task")),
+                "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+            }
+        )
+
+    if choice == "reject" and decision_type in {"tool_approval", "plan_execute"}:
         context_raw = current_decision.get("context")
         context = context_raw if isinstance(context_raw, dict) else {}
         source_endpoint_raw = context.get("source_endpoint")
@@ -666,8 +974,10 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
 
     if decision_type == "plan_execute":
         resume = await _resolve_plan_execute_decision()
-    else:
+    elif decision_type == "tool_approval":
         resume = await _resolve_tool_decision()
+    else:
+        resume = await _resolve_agent_decision()
 
     if decision_type == "tool_approval":
         await _set_current_plan_step_status(
@@ -675,6 +985,10 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             session_id=session_id,
             status="done" if resume.get("ok") is True else "blocked",
         )
+    resume_started = True
+    if isinstance(resume, dict) and "resume_started" in resume:
+        resume_started = resume.get("resume_started") is True
+        resume = {key: value for key, value in resume.items() if key != "resume_started"}
 
     resolved = _decision_with_status(executing, status="resolved", resolved=True)
     updated_resolved, latest_resolved = await hub.transition_session_decision(
@@ -685,6 +999,26 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     )
     normalized_resolved = _normalize_ui_decision(latest_resolved, session_id=session_id)
     if not updated_resolved:
+        if decision_type == "agent_decision":
+            workflow = await hub.get_session_workflow(session_id)
+            latest_decision = _normalize_ui_decision(
+                await hub.get_session_decision(session_id),
+                session_id=session_id,
+            )
+            return json_response(
+                {
+                    "ok": True,
+                    "decision": latest_decision,
+                    "status": "resolved",
+                    "resume_started": resume_started,
+                    "already_resolved": True,
+                    "resume": resume,
+                    "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
+                    "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
+                    "active_task": _normalize_task_payload(workflow.get("active_task")),
+                    "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+                }
+            )
         return _decision_mismatch_response(
             expected_id=decision_id,
             actual_decision=normalized_resolved,
@@ -695,7 +1029,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "ok": True,
             "decision": normalized_resolved,
             "status": "resolved",
-            "resume_started": True,
+            "resume_started": resume_started,
             "already_resolved": True,
             "resume": resume,
             "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),

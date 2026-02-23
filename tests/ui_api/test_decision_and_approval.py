@@ -400,6 +400,122 @@ def test_ui_decision_respond_auto_run_resume() -> None:
     asyncio.run(run())
 
 
+def test_ui_decision_respond_chat_run_root_approve_session_unsupported(tmp_path) -> None:  # noqa: ANN001
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub = client.server.app["ui_hub"]
+            decision_payload = {
+                "id": "decision-root-1",
+                "kind": "approval",
+                "decision_type": "tool_approval",
+                "status": "pending",
+                "blocking": True,
+                "reason": "approval_required",
+                "summary": "Root gate",
+                "proposed_action": {},
+                "options": [],
+                "default_option_id": None,
+                "context": {
+                    "session_id": session_id,
+                    "source_endpoint": "chat.run_root",
+                    "resume_payload": {
+                        "root_path": str(tmp_path),
+                        "source_request": {
+                            "content": "run",
+                            "attachments": [],
+                            "force_canvas": False,
+                        },
+                    },
+                },
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "resolved_at": None,
+            }
+            await hub.set_session_decision(session_id, decision_payload)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-root-1",
+                    "choice": "approve_session",
+                },
+            )
+            assert respond.status == 400
+            payload = await respond.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            message = error.get("message")
+            assert isinstance(message, str)
+            assert "chat.run_root" in message
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_chat_run_missing_file_ack() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub = client.server.app["ui_hub"]
+            decision_payload = {
+                "id": "decision-missing-file-1",
+                "kind": "decision",
+                "decision_type": "tool_approval",
+                "status": "pending",
+                "blocking": True,
+                "reason": "missing_file",
+                "summary": "missing file",
+                "proposed_action": {},
+                "options": [],
+                "default_option_id": None,
+                "context": {
+                    "session_id": session_id,
+                    "source_endpoint": "chat.run_missing_file",
+                    "resume_payload": {
+                        "missing_paths": ["/tmp/missing.md"],
+                        "root_path": "/tmp",
+                    },
+                },
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "resolved_at": None,
+            }
+            await hub.set_session_decision(session_id, decision_payload)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-missing-file-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            payload = await respond.json()
+            assert payload.get("status") == "resolved"
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("source_endpoint") == "chat.run_missing_file"
+            assert resume.get("ok") is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_decision_respond_ignores_client_control_fields_or_rejects() -> None:
     async def run() -> None:
         agent = WorkspaceDecisionAgent()
@@ -498,6 +614,267 @@ def test_ui_chat_send_decision_isolated_between_sessions() -> None:
             assert isinstance(decision_a, dict)
             assert isinstance(decision_b, dict)
             assert decision_a.get("id") != decision_b.get("id")
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_agent_decision_supports_generic_choices() -> None:
+    async def run() -> None:
+        client = await _create_client(DecisionEchoAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "need decision"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            decision = send_payload.get("decision")
+            assert isinstance(decision, dict)
+            assert decision.get("decision_type") == "agent_decision"
+            context = decision.get("context")
+            assert isinstance(context, dict)
+            assert context.get("source_endpoint") == "chat.agent_decision"
+            resume_payload = context.get("resume_payload")
+            assert isinstance(resume_payload, dict)
+            assert isinstance(resume_payload.get("source_request"), dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            ask_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "ask_user",
+                },
+            )
+            assert ask_resp.status == 200
+            ask_payload = await ask_resp.json()
+            assert ask_payload.get("status") == "resolved"
+            assert ask_payload.get("resume_started") is False
+            ask_resume = ask_payload.get("resume")
+            assert isinstance(ask_resume, dict)
+            ask_data = ask_resume.get("data")
+            assert isinstance(ask_data, dict)
+            assert ask_data.get("action") == "ask_user"
+
+            send_resp_2 = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "need decision again"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp_2.status == 200
+            send_payload_2 = await send_resp_2.json()
+            decision_2 = send_payload_2.get("decision")
+            assert isinstance(decision_2, dict)
+            decision_id_2 = decision_2.get("id")
+            assert isinstance(decision_id_2, str)
+
+            reject_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id_2,
+                    "choice": "reject",
+                },
+            )
+            assert reject_resp.status == 200
+            reject_payload = await reject_resp.json()
+            assert reject_payload.get("status") == "resolved"
+            assert reject_payload.get("resume_started") is False
+            reject_resume = reject_payload.get("resume")
+            assert isinstance(reject_resume, dict)
+            reject_data = reject_resume.get("data")
+            assert isinstance(reject_data, dict)
+            assert reject_data.get("action") == "abort"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_agent_decision_retry_replays_source_request() -> None:
+    class RetryDecisionAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def respond(self, messages) -> str:
+            del messages
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "id": "decision-retry-1",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "reason": "need_user_input",
+                        "summary": "Need retry choice",
+                        "context": {},
+                        "options": [
+                            {
+                                "id": "ask_user",
+                                "title": "Ask user",
+                                "action": "ask_user",
+                                "payload": {},
+                                "risk": "low",
+                            },
+                            {
+                                "id": "proceed_safe",
+                                "title": "Proceed safe",
+                                "action": "proceed_safe",
+                                "payload": {},
+                                "risk": "low",
+                            },
+                            {
+                                "id": "retry",
+                                "title": "Retry",
+                                "action": "retry",
+                                "payload": {},
+                                "risk": "medium",
+                            },
+                            {
+                                "id": "abort",
+                                "title": "Abort",
+                                "action": "abort",
+                                "payload": {},
+                                "risk": "low",
+                            },
+                        ],
+                        "default_option_id": "ask_user",
+                        "ttl_seconds": 600,
+                        "policy": {"require_user_choice": True},
+                    }
+                )
+            return "retry-ok"
+
+    async def run() -> None:
+        agent = RetryDecisionAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "trigger retry"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            decision = send_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            retry_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "retry",
+                },
+            )
+            assert retry_resp.status == 200
+            retry_payload = await retry_resp.json()
+            assert retry_payload.get("status") == "resolved"
+            assert retry_payload.get("resume_started") is True
+            resume = retry_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("source_endpoint") == "chat.agent_decision"
+            assert resume.get("ok") is True
+            data = resume.get("data")
+            assert isinstance(data, dict)
+            assert data.get("status_code") == 200
+            assert agent.calls == 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_agent_decision_retry_without_resume_payload() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id,
+                {
+                    "id": "decision-missing-resume",
+                    "kind": "decision",
+                    "decision_type": "agent_decision",
+                    "status": "pending",
+                    "blocking": True,
+                    "reason": "need_user_input",
+                    "summary": "Retry requested",
+                    "proposed_action": {},
+                    "options": [
+                        {
+                            "id": "ask_user",
+                            "title": "Ask user",
+                            "action": "ask_user",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                        {
+                            "id": "retry",
+                            "title": "Retry",
+                            "action": "retry",
+                            "payload": {},
+                            "risk": "medium",
+                        },
+                        {
+                            "id": "abort",
+                            "title": "Abort",
+                            "action": "abort",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                    ],
+                    "default_option_id": "ask_user",
+                    "context": {"session_id": session_id, "source_endpoint": "chat.agent_decision"},
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "resolved_at": None,
+                },
+            )
+
+            retry_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-missing-resume",
+                    "choice": "retry",
+                },
+            )
+            assert retry_resp.status == 200
+            retry_payload = await retry_resp.json()
+            assert retry_payload.get("status") == "resolved"
+            assert retry_payload.get("resume_started") is False
+            resume = retry_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is False
+            assert resume.get("error") == "resume_payload_missing"
         finally:
             await client.close()
 
