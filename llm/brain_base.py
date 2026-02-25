@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 
-from llm.types import LLMResult, ModelConfig
+from llm.types import LLMResult, LLMStreamChunk, ModelConfig
 from shared.models import LLMMessage
 
 
@@ -31,3 +31,13 @@ class Brain(ABC):
         chunk_size = 80
         for idx in range(0, len(result.text), chunk_size):
             yield result.text[idx : idx + chunk_size]
+
+    def generate_stream_chunks(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None = None,
+    ) -> Iterator[LLMStreamChunk]:
+        for delta in self.generate_stream(messages, config=config):
+            if not delta:
+                continue
+            yield LLMStreamChunk(text=delta, mode="append")

@@ -8,7 +8,7 @@
 - `git`, `make`, `venv`.
 - Для UI-сборки: Node.js + npm.
 
-## 2) Быстрый запуск (xAI / OpenRouter / Local)
+## 2) Быстрый запуск (xAI / OpenRouter / Local / Inception)
 
 ```bash
 git clone <repo-url>
@@ -29,7 +29,7 @@ make ui-build
 }
 ```
 
-`provider` поддерживает: `xai`, `openrouter`, `local`.
+`provider` поддерживает: `xai`, `openrouter`, `local`, `inception`.
 
 Экспортируй ключи/настройки:
 
@@ -43,6 +43,10 @@ export OPENROUTER_API_KEY="..."
 # optional: Local endpoint
 export LOCAL_LLM_URL="http://localhost:11434/v1/chat/completions"
 export LOCAL_LLM_API_KEY=""
+
+# optional: Inception endpoint
+export INCEPTION_API_KEY="..."
+export INCEPTION_API_URL="https://api.inceptionlabs.ai/v1"
 
 # важно: whitelist должен содержать выбранный model id
 export SLAVIK_MODEL_WHITELIST="your-model-id"
@@ -116,4 +120,3 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now slavikai
 sudo systemctl status slavikai
 ```
-

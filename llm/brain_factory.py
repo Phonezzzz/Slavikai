@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from llm.brain_base import Brain
+from llm.inception_brain import InceptionBrain
 from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
 from llm.types import ModelConfig
@@ -18,4 +19,6 @@ def create_brain(config: ModelConfig, api_key: str | None = None) -> Brain:
             base_url=config.base_url,
             api_key=api_key or config.api_key,
         )
+    if config.provider == "inception":
+        return InceptionBrain(api_key=api_key or config.api_key, default_config=config)
     raise ValueError(f"Неизвестный провайдер модели: {config.provider}")

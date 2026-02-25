@@ -503,3 +503,59 @@ def test_session_ownership_enforced_for_stream_workspace_decision_delete_files_o
             await client.close()
 
     asyncio.run(run())
+
+
+def test_workspace_stream_supports_replace_mode_chunks() -> None:
+    class ReplaceStreamAgent(DummyAgent):
+        def respond_stream(self, messages):  # noqa: ANN001
+            del messages
+            yield {"text": "hel", "mode": "replace"}
+            yield {"text": "hello", "mode": "replace"}
+            self.last_stream_response_raw = "hello"
+
+        def respond(self, messages) -> str:  # noqa: ANN001
+            del messages
+            return "hello"
+
+    async def run() -> None:
+        client = await _create_client(ReplaceStreamAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "workspace stream", "lane": "workspace"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+
+            events = await _read_sse_events(stream_resp, max_events=32)
+            replace_payloads = []
+            for event in events:
+                if event.get("type") != "chat.stream.delta":
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("mode") == "replace":
+                    replace_payloads.append(payload)
+            assert replace_payloads
+            assert all(item.get("lane") == "workspace" for item in replace_payloads)
+            assert replace_payloads[-1].get("delta") == "hello"
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

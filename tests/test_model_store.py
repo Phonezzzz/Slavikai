@@ -29,3 +29,14 @@ def test_model_config_roundtrip(tmp_path: Path) -> None:
     roundtrip = model_config_from_dict(data)
     assert roundtrip.model == cfg.model
     assert json.loads(path.read_text())["main"]["model"] == "gpt-test"
+
+
+def test_load_model_configs_returns_none_for_missing_path(tmp_path: Path) -> None:
+    missing_path = tmp_path / "missing-model.json"
+    assert load_model_configs(missing_path) is None
+
+
+def test_load_model_configs_returns_none_when_main_missing(tmp_path: Path) -> None:
+    path = tmp_path / "model-without-main.json"
+    path.write_text(json.dumps({"legacy": {"provider": "local", "model": "x"}}), encoding="utf-8")
+    assert load_model_configs(path) is None

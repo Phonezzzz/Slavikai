@@ -156,6 +156,7 @@ API_KEY_SETTINGS_PROVIDERS: Final[set[str]] = _ui_settings.API_KEY_SETTINGS_PROV
 PROVIDER_API_KEY_ENV: Final[dict[str, str]] = _ui_settings.PROVIDER_API_KEY_ENV
 XAI_MODELS_ENDPOINT: Final[str] = _ui_settings.XAI_MODELS_ENDPOINT
 OPENROUTER_MODELS_ENDPOINT: Final[str] = _ui_settings.OPENROUTER_MODELS_ENDPOINT
+INCEPTION_DEFAULT_API_BASE: Final[str] = _ui_settings.INCEPTION_DEFAULT_API_BASE
 OPENAI_STT_ENDPOINT: Final[str] = _ui_settings.OPENAI_STT_ENDPOINT
 MODEL_FETCH_TIMEOUT: Final[int] = _ui_settings.MODEL_FETCH_TIMEOUT
 UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index", "github_import"}

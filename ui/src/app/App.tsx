@@ -2042,6 +2042,7 @@ export default function App() {
         artifact_id?: unknown;
         stream_id?: unknown;
         delta?: unknown;
+        mode?: unknown;
         lane?: unknown;
         decision?: unknown;
         workflow?: unknown;
@@ -2065,6 +2066,7 @@ export default function App() {
         const streamId =
           typeof payload.stream_id === 'string' ? payload.stream_id.trim() : '';
         const delta = typeof payload.delta === 'string' ? payload.delta : '';
+        const mode = payload.mode === 'replace' ? 'replace' : 'append';
         if (!streamId || !delta) {
           return;
         }
@@ -2074,11 +2076,17 @@ export default function App() {
             if (!prev || prev.streamId !== streamId) {
               return { streamId, content: delta };
             }
+            if (mode === 'replace') {
+              return { streamId, content: delta };
+            }
             return { streamId, content: `${prev.content}${delta}` };
           });
         } else {
           setChatStreamingState((prev) => {
             if (!prev || prev.streamId !== streamId) {
+              return { streamId, content: delta };
+            }
+            if (mode === 'replace') {
               return { streamId, content: delta };
             }
             return { streamId, content: `${prev.content}${delta}` };

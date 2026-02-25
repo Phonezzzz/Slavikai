@@ -27,6 +27,11 @@ def model_config_from_dict(data: dict[str, Any]) -> ModelConfig:
         extra_headers=data.get("extra_headers", {}),
         system_prompt=data.get("system_prompt"),
         mode=data.get("mode", "default"),
+        thinking_enabled=bool(data.get("thinking_enabled", False)),
+        reasoning_effort=data.get("reasoning_effort"),
+        reasoning_summary=data.get("reasoning_summary"),
+        reasoning_summary_wait=data.get("reasoning_summary_wait"),
+        diffusing=data.get("diffusing"),
     )
 
 

@@ -8,7 +8,7 @@ from shared.models import JSONValue, LLMMessage
 
 @dataclass(frozen=True)
 class ModelConfig:
-    provider: Literal["openrouter", "local", "xai"]
+    provider: Literal["openrouter", "local", "xai", "inception"]
     model: str
     temperature: float = 0.7
     top_p: float | None = None
@@ -19,6 +19,10 @@ class ModelConfig:
     system_prompt: str | None = None
     mode: Literal["default", "planner"] = "default"
     thinking_enabled: bool = False
+    reasoning_effort: Literal["instant", "low", "medium", "high"] | None = None
+    reasoning_summary: bool | None = None
+    reasoning_summary_wait: bool | None = None
+    diffusing: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -40,3 +44,13 @@ class LLMResult:
 class BrainRequest:
     messages: list[LLMMessage]
     config: ModelConfig
+
+
+LLMStreamChunkMode = Literal["append", "replace"]
+
+
+@dataclass(frozen=True)
+class LLMStreamChunk:
+    text: str
+    mode: LLMStreamChunkMode = "append"
+    meta: dict[str, JSONValue] | None = None

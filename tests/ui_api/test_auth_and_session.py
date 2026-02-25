@@ -30,6 +30,70 @@ def test_ui_api_requires_bearer_by_default() -> None:
     asyncio.run(run())
 
 
+def test_ui_models_inception_docs_fallback_when_api_unavailable(monkeypatch) -> None:
+    monkeypatch.setenv("INCEPTION_API_KEY", "inc-test-key")
+
+    def _fail_get(*args, **kwargs):  # noqa: ANN001
+        del args, kwargs
+        raise RuntimeError("api down")
+
+    monkeypatch.setattr("server.http.common.ui_settings.requests.get", _fail_get)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.get("/ui/api/models?provider=inception")
+            assert response.status == 200
+            payload = await response.json()
+            providers = payload.get("providers")
+            assert isinstance(providers, list)
+            assert len(providers) == 1
+            item = providers[0]
+            assert isinstance(item, dict)
+            assert item.get("provider") == "inception"
+            assert item.get("models") == ["mercury", "mercury-coder"]
+            assert item.get("error") is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_model_accepts_inception_mercury(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (
+            ["mercury", "mercury-coder"],
+            None,
+        )
+        if provider == "inception"
+        else (["local-default"], None),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            response = await client.post(
+                "/ui/api/session-model",
+                headers={"X-Slavik-Session": session_id},
+                json={"provider": "inception", "model": "mercury"},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            selected = payload.get("selected_model")
+            assert isinstance(selected, dict)
+            assert selected.get("provider") == "inception"
+            assert selected.get("model") == "mercury"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_session_policy_rejects_unknown_profile() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())

@@ -9,6 +9,7 @@ from core.decision.handler import DecisionContext, DecisionRequired
 from core.mwv.models import StopReasonCode
 from core.mwv.routing import classify_request
 from core.skills.index import SkillMatchDecision
+from llm.types import LLMStreamChunk
 from shared.models import LLMMessage
 
 
@@ -114,7 +115,7 @@ class AgentRoutingMixin:
                 self._append_short_term([LLMMessage(role="assistant", content=error_text)])
             return error_text
 
-    def respond_stream(self, messages: list[LLMMessage]) -> Iterator[str]:
+    def respond_stream(self, messages: list[LLMMessage]) -> Iterator[str | LLMStreamChunk]:
         if not messages:
             self.last_stream_response_raw = "[Пустое сообщение]"
             yield "[Пустое сообщение]"
@@ -282,7 +283,7 @@ class AgentRoutingMixin:
         messages: list[LLMMessage],
         last_content: str,
         record_in_history: bool,
-    ) -> Iterator[str]:
+    ) -> Iterator[LLMStreamChunk]:
         try:
             self.tracer.log("reasoning_start", "Потоковая генерация ответа моделью")
             policy_application = self._apply_policies(last_content)
@@ -292,13 +293,21 @@ class AgentRoutingMixin:
                 policy_application,
             )
             del messages
-            collected_chunks: list[str] = []
-            for delta in self._get_main_brain().generate_stream(messages_with_context):
-                if not isinstance(delta, str) or not delta:
+            collected_text = ""
+            brain = self._get_main_brain()
+            for chunk in brain.generate_stream_chunks(messages_with_context):
+                if not isinstance(chunk, LLMStreamChunk):
                     continue
-                collected_chunks.append(delta)
-                yield delta
-            reviewed = self._review_answer("".join(collected_chunks))
+                delta = chunk.text
+                if not delta:
+                    continue
+                mode = "replace" if chunk.mode == "replace" else "append"
+                if mode == "replace":
+                    collected_text = delta
+                else:
+                    collected_text = f"{collected_text}{delta}"
+                yield LLMStreamChunk(text=delta, mode=mode, meta=chunk.meta)
+            reviewed = self._review_answer(collected_text)
             self.tracer.log("reasoning_end", "Ответ получен", {"reply_preview": reviewed[:120]})
             response_text = self._append_report_block(
                 reviewed,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from typing import Protocol
+from typing import Literal, Protocol
 
 from shared.models import JSONValue
 
@@ -83,10 +83,12 @@ async def _publish_chat_stream_delta(
     session_id: str,
     stream_id: str,
     delta: str,
+    mode: Literal["append", "replace"] = "append",
     lane: str = "chat",
 ) -> None:
     if not delta:
         return
+    normalized_mode: Literal["append", "replace"] = "replace" if mode == "replace" else "append"
     await hub.publish(
         session_id,
         {
@@ -95,6 +97,7 @@ async def _publish_chat_stream_delta(
                 "session_id": session_id,
                 "stream_id": stream_id,
                 "delta": delta,
+                "mode": normalized_mode,
                 "lane": lane,
             },
         },

@@ -11,8 +11,8 @@ interface SettingsProps {
 }
 
 type SettingsTab = 'api' | 'personalization' | 'memory' | 'tools' | 'import';
-type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'openai';
-type ModelProvider = 'xai' | 'openrouter' | 'local';
+type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai';
+type ModelProvider = 'xai' | 'openrouter' | 'local' | 'inception';
 type ApiKeySource = 'env' | 'missing';
 type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt' | 'safe_mode';
 type PolicyProfile = 'sandbox' | 'index' | 'yolo';
@@ -66,8 +66,8 @@ type MemoryConflict = {
 const DEFAULT_SYSTEM_PROMPT =
   'You are SlavikAI, a helpful AI assistant with MWV architecture.';
 
-const API_KEY_PROVIDERS: ApiKeyProvider[] = ['xai', 'openrouter', 'local', 'openai'];
-const MODEL_PROVIDERS: ModelProvider[] = ['xai', 'openrouter', 'local'];
+const API_KEY_PROVIDERS: ApiKeyProvider[] = ['xai', 'openrouter', 'local', 'inception', 'openai'];
+const MODEL_PROVIDERS: ModelProvider[] = ['xai', 'openrouter', 'local', 'inception'];
 const TOOL_TOGGLE_KEYS: ToolKey[] = ['web', 'fs', 'project', 'shell', 'tts', 'stt', 'img', 'safe_mode'];
 const SAFE_MODE_BLOCKED_TOOLS = new Set<ToolKey>(['web', 'shell', 'project', 'tts', 'stt']);
 const TOOL_LABELS: Record<ToolKey, string> = {
@@ -85,6 +85,7 @@ const PROVIDER_LABELS: Record<ApiKeyProvider, string> = {
   xai: 'xAI',
   openrouter: 'OpenRouter',
   local: 'Local',
+  inception: 'Inception',
   openai: 'OpenAI',
 };
 
@@ -136,6 +137,16 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     last_check_error: null,
     last_checked_at: null,
   },
+  {
+    provider: 'inception',
+    api_key_env: 'INCEPTION_API_KEY',
+    api_key_set: false,
+    api_key_source: 'missing',
+    endpoint: 'https://api.inceptionlabs.ai/v1/models',
+    api_key_valid: null,
+    last_check_error: null,
+    last_checked_at: null,
+  },
 ];
 const DEFAULT_TOOLS_STATE: Record<ToolKey, boolean> = {
   fs: true,
@@ -149,13 +160,13 @@ const DEFAULT_TOOLS_STATE: Record<ToolKey, boolean> = {
 };
 
 const isApiKeyProvider = (value: unknown): value is ApiKeyProvider =>
-  value === 'xai' || value === 'openrouter' || value === 'local' || value === 'openai';
+  value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception' || value === 'openai';
 
 const isApiKeySource = (value: unknown): value is ApiKeySource =>
   value === 'env' || value === 'missing';
 
 const isModelProvider = (value: unknown): value is ModelProvider =>
-  value === 'xai' || value === 'openrouter' || value === 'local';
+  value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception';
 
 const isToolKey = (value: unknown): value is ToolKey =>
   value === 'fs'
@@ -375,6 +386,7 @@ const DEFAULT_PROVIDER_RUNTIME: ProviderRuntimeByModel = {
   xai: null,
   openrouter: null,
   local: null,
+  inception: null,
 };
 
 const parseProviderRuntimePayload = (payload: unknown): ProviderRuntimeByModel => {

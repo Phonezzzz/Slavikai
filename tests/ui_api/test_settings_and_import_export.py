@@ -76,7 +76,7 @@ def test_ui_settings_endpoint() -> None:
             providers = settings.get("providers")
             assert isinstance(providers, list)
             provider_names = {item.get("provider") for item in providers if isinstance(item, dict)}
-            assert provider_names == {"local", "openrouter", "xai", "openai"}
+            assert provider_names == {"local", "openrouter", "xai", "inception", "openai"}
             for provider in providers:
                 assert isinstance(provider, dict)
                 assert "api_key_value" not in provider
@@ -111,6 +111,7 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("INCEPTION_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     async def run() -> None:
@@ -186,6 +187,11 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert openrouter_provider.get("api_key_set") is False
             assert openrouter_provider.get("api_key_source") == "missing"
             assert "api_key_value" not in openrouter_provider
+            inception_provider = provider_by_name.get("inception")
+            assert isinstance(inception_provider, dict)
+            assert inception_provider.get("api_key_set") is False
+            assert inception_provider.get("api_key_source") == "missing"
+            assert "api_key_value" not in inception_provider
 
             saved_payload = json.loads(ui_settings_path.read_text(encoding="utf-8"))
             assert isinstance(saved_payload, dict)

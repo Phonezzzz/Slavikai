@@ -24,16 +24,24 @@ from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
 from shared.models import JSONValue
 
-SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local"}
-API_KEY_SETTINGS_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local", "openai"}
+SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local", "inception"}
+API_KEY_SETTINGS_PROVIDERS: Final[set[str]] = {
+    "xai",
+    "openrouter",
+    "local",
+    "inception",
+    "openai",
+}
 PROVIDER_API_KEY_ENV: Final[dict[str, str]] = {
     "xai": "XAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "local": "LOCAL_LLM_API_KEY",
+    "inception": "INCEPTION_API_KEY",
     "openai": "OPENAI_API_KEY",
 }
 XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
 OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
+INCEPTION_DEFAULT_API_BASE: Final[str] = "https://api.inceptionlabs.ai/v1"
 OPENAI_STT_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/transcriptions"
 MODEL_FETCH_TIMEOUT: Final[int] = 20
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parents[3] / ".run" / "ui_settings.json"
@@ -62,6 +70,7 @@ UI_SETTINGS_CONTROL_TOP_LEVEL_KEYS: Final[set[str]] = {
     "approved_categories",
     "safe_mode",
 }
+INCEPTION_DOCS_MODELS: Final[list[str]] = ["mercury", "mercury-coder"]
 
 
 def _normalize_provider(raw_provider: str) -> str | None:
@@ -78,6 +87,8 @@ def _build_model_config(provider: str, model_id: str) -> ModelConfig:
         return ModelConfig(provider="openrouter", model=model_id)
     if provider == "local":
         return ModelConfig(provider="local", model=model_id)
+    if provider == "inception":
+        return ModelConfig(provider="inception", model=model_id)
     raise ValueError(f"Неизвестный провайдер: {provider}")
 
 
@@ -99,6 +110,15 @@ def _local_models_endpoint() -> str:
     return f"{base_url.rstrip('/')}/models"
 
 
+def _inception_models_endpoint() -> str:
+    base_url = os.getenv("INCEPTION_API_URL", INCEPTION_DEFAULT_API_BASE).strip()
+    if not base_url:
+        base_url = INCEPTION_DEFAULT_API_BASE
+    if base_url.endswith("/chat/completions"):
+        return f"{base_url.removesuffix('/chat/completions')}/models"
+    return f"{base_url.rstrip('/')}/models"
+
+
 def _provider_models_endpoint(provider: str) -> str:
     if provider == "xai":
         return XAI_MODELS_ENDPOINT
@@ -106,6 +126,8 @@ def _provider_models_endpoint(provider: str) -> str:
         return OPENROUTER_MODELS_ENDPOINT
     if provider == "local":
         return _local_models_endpoint()
+    if provider == "inception":
+        return _inception_models_endpoint()
     raise ValueError(f"Неизвестный провайдер: {provider}")
 
 
@@ -128,6 +150,11 @@ def _provider_auth_headers(
         api_key = _resolve_provider_api_key("local", ui_settings_path=ui_settings_path)
         if not api_key:
             return {}, None
+        return {"Authorization": f"Bearer {api_key}"}, None
+    if provider == "inception":
+        api_key = _resolve_provider_api_key("inception", ui_settings_path=ui_settings_path)
+        if not api_key:
+            return {}, "Не задан INCEPTION_API_KEY (env)."
         return {"Authorization": f"Bearer {api_key}"}, None
     return {}, f"Неизвестный провайдер: {provider}"
 
@@ -157,6 +184,27 @@ def _fetch_provider_models(
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
 ) -> tuple[list[str], str | None]:
+    if provider == "inception":
+        docs_models = list(INCEPTION_DOCS_MODELS)
+        headers, _ = _provider_auth_headers(provider, ui_settings_path=ui_settings_path)
+        if headers:
+            try:
+                url = _provider_models_endpoint(provider)
+                response = requests.get(url, headers=headers, timeout=MODEL_FETCH_TIMEOUT)
+                response.raise_for_status()
+                api_models = _parse_models_payload(response.json())
+                if api_models:
+                    allowed = set(docs_models)
+                    merged: list[str] = [item for item in docs_models if item in allowed]
+                    for model_id in api_models:
+                        if model_id in allowed and model_id not in merged:
+                            merged.append(model_id)
+                    if merged:
+                        return merged, None
+            except Exception:  # noqa: BLE001
+                pass
+        return docs_models, None
+
     try:
         url = _provider_models_endpoint(provider)
     except ValueError as exc:
@@ -561,6 +609,21 @@ def _provider_settings_payload(
             ),
             "endpoint": local_endpoint,
             **_runtime_status("local"),
+        },
+        {
+            "provider": "inception",
+            "api_key_env": "INCEPTION_API_KEY",
+            "api_key_set": _resolve_provider_api_key(
+                "inception",
+                ui_settings_path=ui_settings_path,
+            )
+            is not None,
+            "api_key_source": _provider_api_key_source(
+                "inception",
+                ui_settings_path=ui_settings_path,
+            ),
+            "endpoint": _inception_models_endpoint(),
+            **_runtime_status("inception"),
         },
         {
             "provider": "openai",

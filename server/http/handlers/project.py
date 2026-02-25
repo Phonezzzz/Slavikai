@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Literal
 
 from aiohttp import web
 
 from config.model_whitelist import ModelNotAllowedError
+from llm.types import ModelConfig
 from server import http_api as api
 from server.http.common.chat_payload import (
     _extract_decision_payload,
@@ -44,6 +46,18 @@ from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 WORKSPACE_LANE: Literal["workspace"] = "workspace"
+
+
+def _workspace_inception_runtime_config(config: ModelConfig) -> ModelConfig:
+    if config.provider != "inception":
+        return config
+    return replace(
+        config,
+        reasoning_effort="instant",
+        reasoning_summary=True,
+        reasoning_summary_wait=False,
+        diffusing=True,
+    )
 
 
 async def handle_ui_project_command(request: web.Request) -> web.Response:
@@ -312,6 +326,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     selected_model["provider"],
                     selected_model["model"],
                 )
+                model_config = _workspace_inception_runtime_config(model_config)
                 api_key = _resolve_provider_api_key(selected_model["provider"])
                 agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
             except Exception as exc:  # noqa: BLE001
