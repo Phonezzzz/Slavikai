@@ -7,9 +7,6 @@ from aiohttp import web
 
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
-    PLAN_AUDIT_MAX_READ_FILES,
-    PLAN_AUDIT_MAX_SEARCH_CALLS,
-    PLAN_AUDIT_MAX_TOTAL_BYTES,
     UI_SESSION_HEADER,
     _build_plan_draft,
     _build_plan_execute_decision,
@@ -76,17 +73,6 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
 
     root = await _workspace_root_for_session(hub, session_id)
     audit_log, usage = _run_plan_readonly_audit(root=root)
-    if (
-        usage["read_files"] >= PLAN_AUDIT_MAX_READ_FILES
-        or usage["total_bytes"] >= PLAN_AUDIT_MAX_TOTAL_BYTES
-        or usage["search_calls"] >= PLAN_AUDIT_MAX_SEARCH_CALLS
-    ):
-        return error_response(
-            status=409,
-            message="Достигнут лимит read-only аудита.",
-            error_type="invalid_request_error",
-            code="PLAN_AUDIT_LIMIT_REACHED",
-        )
 
     draft = _build_plan_draft(goal=goal_raw.strip(), audit_log=audit_log)
     await hub.set_session_workflow(session_id, active_plan=draft, active_task=None)

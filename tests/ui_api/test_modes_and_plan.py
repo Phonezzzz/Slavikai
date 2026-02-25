@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: F403,F405
+from server.http_api import PLAN_AUDIT_MAX_READ_FILES
+
 from .fakes import *
 
 
@@ -151,6 +153,43 @@ def test_ui_plan_lifecycle_endpoints() -> None:
                     completed = True
                     break
             assert completed is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_plan_draft_allows_audit_soft_cap() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            mode_resp = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "plan"},
+            )
+            assert mode_resp.status == 200
+
+            draft_resp = await client.post(
+                "/ui/api/plan/draft",
+                headers={"X-Slavik-Session": session_id},
+                json={"goal": "Проверка soft-cap audit"},
+            )
+            assert draft_resp.status == 200
+            draft_payload = await draft_resp.json()
+            plan_raw = draft_payload.get("active_plan")
+            assert isinstance(plan_raw, dict)
+            assert plan_raw.get("status") == "draft"
+            audit_usage = draft_payload.get("audit_usage")
+            assert isinstance(audit_usage, dict)
+            read_files = audit_usage.get("read_files")
+            assert isinstance(read_files, int)
+            assert read_files == PLAN_AUDIT_MAX_READ_FILES
         finally:
             await client.close()
 
