@@ -90,9 +90,12 @@ type WorkspaceIdeProps = {
 const MIN_EXPLORER_WIDTH = 240;
 const MAX_EXPLORER_WIDTH = 420;
 const MIN_ASSISTANT_WIDTH = 340;
-const MAX_ASSISTANT_WIDTH = 520;
+const ASSISTANT_MAX_SCREEN_SHARE = 0.5;
 const MIN_TERMINAL_HEIGHT = 140;
 const MAX_TERMINAL_HEIGHT = 420;
+const MIN_EDITOR_WIDTH = 420;
+const ASSISTANT_RESIZER_WIDTH = 6;
+const EXPLORER_RESIZER_WIDTH = 6;
 const ROOT_TREE_DEBOUNCE_MS = 150;
 const CHILD_TREE_DEBOUNCE_MS = 80;
 
@@ -183,6 +186,25 @@ export function WorkspaceIde({
   const treeDebounceTimersRef = useRef<Map<string, number>>(new Map());
   const treeAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const treeInFlightPathsRef = useRef<Set<string>>(new Set());
+  const workspaceGridRef = useRef<HTMLDivElement>(null);
+
+  const clampAssistantWidth = (nextWidth: number): number => {
+    const fallbackWidth = typeof window === 'undefined' ? 1280 : window.innerWidth;
+    const gridWidth = workspaceGridRef.current?.clientWidth ?? fallbackWidth;
+    const fixedColumns = explorerVisible
+      ? explorerWidth + EXPLORER_RESIZER_WIDTH + ASSISTANT_RESIZER_WIDTH
+      : ASSISTANT_RESIZER_WIDTH;
+    const maxByEditor = Math.max(
+      MIN_ASSISTANT_WIDTH,
+      Math.floor(gridWidth - fixedColumns - MIN_EDITOR_WIDTH),
+    );
+    const maxByHalfScreen = Math.max(
+      MIN_ASSISTANT_WIDTH,
+      Math.floor(gridWidth * ASSISTANT_MAX_SCREEN_SHARE),
+    );
+    const maxAllowed = Math.min(maxByEditor, maxByHalfScreen);
+    return Math.min(maxAllowed, Math.max(MIN_ASSISTANT_WIDTH, nextWidth));
+  };
 
   const activeTab = useMemo(
     () => openFiles.find((item) => item.id === activeFileId) ?? null,
@@ -324,7 +346,7 @@ export function WorkspaceIde({
         setExplorerWidth((prev) => Math.min(MAX_EXPLORER_WIDTH, Math.max(MIN_EXPLORER_WIDTH, prev + event.movementX)));
       }
       if (draggingAssistant) {
-        setAssistantWidth((prev) => Math.min(MAX_ASSISTANT_WIDTH, Math.max(MIN_ASSISTANT_WIDTH, prev + event.movementX)));
+        setAssistantWidth((prev) => clampAssistantWidth(prev + event.movementX));
       }
       if (draggingTerminal) {
         setTerminalHeight((prev) => Math.min(MAX_TERMINAL_HEIGHT, Math.max(MIN_TERMINAL_HEIGHT, prev - event.movementY)));
@@ -348,6 +370,17 @@ export function WorkspaceIde({
       setDraggingExplorer(false);
     }
   }, [draggingExplorer, explorerVisible]);
+
+  useEffect(() => {
+    const syncAssistantWidth = () => {
+      setAssistantWidth((prev) => clampAssistantWidth(prev));
+    };
+    syncAssistantWidth();
+    window.addEventListener('resize', syncAssistantWidth);
+    return () => {
+      window.removeEventListener('resize', syncAssistantWidth);
+    };
+  }, [explorerVisible, explorerWidth]);
 
   const loadWorkspaceRoot = async (): Promise<void> => {
     if (!sessionId) {
@@ -1056,8 +1089,8 @@ export function WorkspaceIde({
     : null;
   const canSendWithContext = Boolean(agentInput.trim() || buildContextAttachments().length > 0);
   const workspaceGridColumns = explorerVisible
-    ? `${explorerWidth}px 6px ${assistantWidth}px 6px minmax(420px,1fr)`
-    : `${assistantWidth}px 6px minmax(420px,1fr)`;
+    ? `${explorerWidth}px ${EXPLORER_RESIZER_WIDTH}px ${assistantWidth}px ${ASSISTANT_RESIZER_WIDTH}px minmax(${MIN_EDITOR_WIDTH}px,1fr)`
+    : `${assistantWidth}px ${ASSISTANT_RESIZER_WIDTH}px minmax(${MIN_EDITOR_WIDTH}px,1fr)`;
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-[#0a0a0d] text-[#d2d2d9]">
@@ -1089,6 +1122,7 @@ export function WorkspaceIde({
       />
 
       <div
+        ref={workspaceGridRef}
         className="flex-1 min-h-0 grid"
         style={{
           gridTemplateColumns: workspaceGridColumns,
