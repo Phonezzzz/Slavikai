@@ -29,6 +29,7 @@ from server.http_api import (
     _plan_apply_edit_operation,
     _plan_revision_value,
     _plan_with_status,
+    _publish_session_security_event,
     _resolve_agent,
     _resolve_workspace_root_candidate,
     _run_plan_runner,
@@ -323,9 +324,18 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "error": "model_not_selected",
                     "source_endpoint": source_endpoint,
                 }
+            _, effective_policy = await _load_effective_session_security(
+                hub=hub,
+                session_id=session_id,
+            )
+            yolo_override_active = effective_policy.get("yolo_override_active") is True
             response_text: str | None = None
             async with agent_lock:
                 await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                if yolo_override_active:
+                    consumed = await hub.consume_yolo_once(session_id)
+                    if consumed:
+                        await _publish_session_security_event(hub=hub, session_id=session_id)
                 agent.set_session_context(session_id, one_call_categories)
                 resume_method = getattr(agent, "resume_auto_run", None)
                 if not callable(resume_method):
@@ -463,11 +473,20 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "error": "model_not_selected",
                 "source_endpoint": source_endpoint,
             }
+        _, effective_policy = await _load_effective_session_security(
+            hub=hub,
+            session_id=session_id,
+        )
+        yolo_override_active = effective_policy.get("yolo_override_active") is True
         session_root = await _workspace_root_for_session(hub, session_id)
         async with agent_lock:
             set_runtime_workspace_root(session_root)
             try:
                 await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                if yolo_override_active:
+                    consumed = await hub.consume_yolo_once(session_id)
+                    if consumed:
+                        await _publish_session_security_event(hub=hub, session_id=session_id)
                 agent.set_session_context(session_id, one_call_categories)
                 try:
                     result = agent.call_tool(

@@ -345,14 +345,27 @@ def test_ui_decision_respond_auto_run_resume() -> None:
 
     async def run() -> None:
         client = await _create_client(AutoResumeAgent())
+        stream_response = None
         try:
             status_resp = await client.get("/ui/api/status")
             status_payload = await status_resp.json()
             session_id = status_payload.get("session_id")
             assert isinstance(session_id, str)
             await _select_local_model(client, session_id)
+            stream_response = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert stream_response.status == 200
+            _ = await _read_first_sse_event(stream_response)
 
             hub = client.server.app["ui_hub"]
+            await hub.set_session_policy(
+                session_id,
+                profile="yolo",
+                yolo_armed=True,
+                yolo_armed_at="2026-01-01T00:00:00+00:00",
+            )
             decision_payload = {
                 "id": "decision-auto-1",
                 "kind": "approval",
@@ -394,7 +407,45 @@ def test_ui_decision_respond_auto_run_resume() -> None:
             auto_state = payload.get("auto_state")
             assert isinstance(auto_state, dict)
             assert auto_state.get("status") == "completed"
+
+            events = await _read_sse_events(stream_response, max_events=40)
+            message_events = [
+                event
+                for event in events
+                if isinstance(event.get("type"), str) and event.get("type") == "message.append"
+            ]
+            assert message_events
+            assistant_messages = [
+                event.get("payload")
+                for event in message_events
+                if isinstance(event.get("payload"), dict)
+            ]
+            assert any(
+                isinstance(item, dict)
+                and isinstance(item.get("message"), dict)
+                and (item.get("message") or {}).get("content") == "auto resumed"
+                for item in assistant_messages
+            )
+
+            security_events = [
+                event
+                for event in events
+                if isinstance(event.get("type"), str) and event.get("type") == "session.security"
+            ]
+            assert security_events
+            security_payload = security_events[-1].get("payload")
+            assert isinstance(security_payload, dict)
+            policy = security_payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("yolo_armed") is False
+            assert policy.get("yolo_override_active") is False
+            assert policy.get("safe_mode_effective") is True
+            tools_state = security_payload.get("tools_state")
+            assert isinstance(tools_state, dict)
+            assert tools_state.get("safe_mode") is True
         finally:
+            if stream_response is not None:
+                stream_response.close()
             await client.close()
 
     asyncio.run(run())

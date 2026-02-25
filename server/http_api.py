@@ -347,6 +347,29 @@ async def _load_effective_session_security(
     )
 
 
+async def _publish_session_security_event(
+    *,
+    hub: UIHub,
+    session_id: str,
+) -> tuple[dict[str, bool], dict[str, JSONValue]]:
+    effective_tools, effective_policy = await _load_effective_session_security(
+        hub=hub,
+        session_id=session_id,
+    )
+    await hub.publish(
+        session_id,
+        {
+            "type": "session.security",
+            "payload": {
+                "session_id": session_id,
+                "tools_state": effective_tools,
+                "policy": effective_policy,
+            },
+        },
+    )
+    return effective_tools, effective_policy
+
+
 async def _apply_agent_runtime_state(
     *,
     agent: AgentProtocol,

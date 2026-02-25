@@ -8,6 +8,7 @@ type WorkspaceToolbarProps = {
   workspaceRoot: string;
   workspacePolicy: string;
   workspaceYoloActive: boolean;
+  workspaceSafeModeEnabled: boolean;
   rootPickerOpen: boolean;
   rootInput: string;
   rootBusy: boolean;
@@ -28,6 +29,7 @@ export function WorkspaceToolbar({
   workspaceRoot,
   workspacePolicy,
   workspaceYoloActive,
+  workspaceSafeModeEnabled,
   rootPickerOpen,
   rootInput,
   rootBusy,
@@ -82,6 +84,9 @@ export function WorkspaceToolbar({
         <div className="flex items-center justify-end gap-2">
           <span className={`text-[11px] ${workspaceYoloActive ? 'text-red-300' : 'text-[#8f8f98]'}`}>
             Policy: {workspacePolicy}
+          </span>
+          <span className={`text-[11px] ${workspaceSafeModeEnabled ? 'text-amber-300' : 'text-emerald-300'}`}>
+            Safe mode: {workspaceSafeModeEnabled ? 'ON' : 'OFF'}
           </span>
           <button
             onClick={onRefreshGitDiff}

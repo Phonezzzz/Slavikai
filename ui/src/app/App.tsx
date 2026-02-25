@@ -1780,6 +1780,7 @@ export default function App() {
         delta?: unknown;
         decision?: unknown;
         workflow?: unknown;
+        session_id?: unknown;
       };
       if (envelope.type === 'chat.stream.start') {
         const streamId =
@@ -1845,6 +1846,14 @@ export default function App() {
           auto_state?: unknown;
         };
         setAutoState(parseAutoState(progress.auto_state));
+        return;
+      }
+      if (envelope.type === 'session.security') {
+        const payloadSessionId =
+          typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
+        if (payloadSessionId && payloadSessionId === selectedConversation) {
+          setWorkspaceRefreshToken((value) => value + 1);
+        }
         return;
       }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
@@ -2366,6 +2375,7 @@ export default function App() {
   const handleSettingsSaved = async () => {
     try {
       await Promise.all([loadModels(), loadComposerSettings()]);
+      setWorkspaceRefreshToken((value) => value + 1);
       setStatusMessage('Settings saved.');
     } catch (error) {
       const message =

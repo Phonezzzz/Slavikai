@@ -24,6 +24,7 @@ from server.http_api import (
     _normalize_task_payload,
     _normalize_tools_state_payload,
     _normalize_ui_decision,
+    _publish_session_security_event,
     _resolve_ui_session_id_for_principal,
     _resolve_workspace_root_candidate,
     _session_forbidden_response,
@@ -327,11 +328,17 @@ async def _call_workspace_tool(
     hub: UIHub = request.app["ui_hub"]
     agent_lock = request.app["agent_lock"]
     session_root = await _workspace_root_for_session(hub, session_id)
+    _, effective_policy = await _load_effective_session_security(hub=hub, session_id=session_id)
+    yolo_override_active = effective_policy.get("yolo_override_active") is True
     async with agent_lock:
         set_runtime_workspace_root(session_root)
         try:
             try:
                 await api._apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                if yolo_override_active:
+                    consumed = await hub.consume_yolo_once(session_id)
+                    if consumed:
+                        await _publish_session_security_event(hub=hub, session_id=session_id)
                 agent.set_session_context(session_id, approved_categories)
             except Exception:  # noqa: BLE001
                 api.logger.debug(
@@ -1327,6 +1334,8 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
         profile: str | None = None
         yolo_armed: bool | None = None
         yolo_armed_at: str | None = None
+        requested_profile_yolo = False
+        requested_yolo_arm = False
 
         if "profile" in policy_raw:
             profile_raw = policy_raw.get("profile")
@@ -1341,6 +1350,7 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                     code="invalid_request_error",
                 )
             profile = profile_raw.strip().lower()
+            requested_profile_yolo = profile == "yolo"
 
         if "yolo_armed" in policy_raw:
             yolo_armed_raw = policy_raw.get("yolo_armed")
@@ -1352,8 +1362,16 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                     code="invalid_request_error",
                 )
             yolo_armed = yolo_armed_raw
+            requested_yolo_arm = yolo_armed is True
 
-        if profile == "yolo" or yolo_armed is True:
+        workspace_root = await _workspace_root_for_session(hub, session_id)
+        current_policy = await hub.get_session_policy(session_id)
+        current_profile = _normalize_policy_profile(current_policy.get("profile"))
+        target_profile = profile or current_profile
+        requires_yolo_confirm = target_profile == "yolo" and (
+            requested_profile_yolo or requested_yolo_arm
+        )
+        if requires_yolo_confirm:
             confirm_raw = policy_raw.get("yolo_confirm")
             confirm_text_raw = policy_raw.get("yolo_confirm_text")
             confirm_ok = (
@@ -1371,13 +1389,11 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                     error_type="invalid_request_error",
                     code="yolo_confirmation_required",
                 )
+        if target_profile == "yolo":
             if yolo_armed is None:
                 yolo_armed = True
-
-        workspace_root = await _workspace_root_for_session(hub, session_id)
-        current_policy = await hub.get_session_policy(session_id)
-        current_profile = _normalize_policy_profile(current_policy.get("profile"))
-        target_profile = profile or current_profile
+        else:
+            yolo_armed = False
         try:
             _resolve_workspace_root_candidate(
                 str(workspace_root),
@@ -1396,9 +1412,9 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                 },
             )
 
-        if yolo_armed is True:
+        if yolo_armed:
             yolo_armed_at = _utc_now_iso()
-        if yolo_armed is False:
+        else:
             yolo_armed_at = None
         await hub.set_session_policy(
             session_id,
@@ -1448,7 +1464,7 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
             merge=True,
         )
 
-    effective_tools, effective_policy = await _load_effective_session_security(
+    effective_tools, effective_policy = await _publish_session_security_event(
         hub=hub,
         session_id=session_id,
     )

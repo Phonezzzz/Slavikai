@@ -398,6 +398,61 @@ def test_control_plane_security_settings_applies_tools_live(monkeypatch, tmp_pat
     asyncio.run(run())
 
 
+def test_control_plane_policy_switch_clears_yolo_armed(monkeypatch, tmp_path) -> None:
+    tools_path = tmp_path / "tools.json"
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(
+        "server.http_api.load_tools_config",
+        lambda: load_tools_config_from_path(path=tools_path),
+    )
+    monkeypatch.setattr(
+        "server.http_api.save_tools_config",
+        lambda config: save_tools_config_to_path(config, path=tools_path),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            yolo_resp = await client.post(
+                "/slavik/admin/settings/security",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={
+                    "policy": {
+                        "profile": "yolo",
+                        "yolo_confirm": True,
+                        "yolo_confirm_text": "YOLO",
+                    },
+                },
+            )
+            assert yolo_resp.status == 200
+            yolo_payload = await yolo_resp.json()
+            yolo_settings = yolo_payload.get("settings")
+            assert isinstance(yolo_settings, dict)
+            yolo_policy = yolo_settings.get("policy")
+            assert isinstance(yolo_policy, dict)
+            assert yolo_policy.get("profile") == "yolo"
+            assert yolo_policy.get("yolo_armed") is True
+
+            sandbox_resp = await client.post(
+                "/slavik/admin/settings/security",
+                headers={"Authorization": "Bearer admin-secret"},
+                json={"policy": {"profile": "sandbox"}},
+            )
+            assert sandbox_resp.status == 200
+            sandbox_payload = await sandbox_resp.json()
+            sandbox_settings = sandbox_payload.get("settings")
+            assert isinstance(sandbox_settings, dict)
+            sandbox_policy = sandbox_settings.get("policy")
+            assert isinstance(sandbox_policy, dict)
+            assert sandbox_policy.get("profile") == "sandbox"
+            assert sandbox_policy.get("yolo_armed") is False
+            assert sandbox_policy.get("yolo_armed_at") is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_settings_update_rejects_invalid_composer_threshold() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())

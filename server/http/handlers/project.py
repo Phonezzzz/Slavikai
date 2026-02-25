@@ -23,6 +23,7 @@ from server.http_api import (
     _build_ui_approval_decision,
     _decision_is_pending_blocking,
     _decision_workflow_context,
+    _load_effective_session_security,
     _model_not_allowed_response,
     _model_not_selected_response,
     _normalize_mode_value,
@@ -31,6 +32,7 @@ from server.http_api import (
     _normalize_ui_decision,
     _parse_github_import_args,
     _publish_agent_activity,
+    _publish_session_security_event,
     _resolve_agent,
     _resolve_provider_api_key,
     _resolve_ui_session_id_for_principal,
@@ -116,6 +118,10 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         )
 
         approved_categories = await session_store.get_categories(session_id)
+        _, effective_policy = await _load_effective_session_security(
+            hub=hub,
+            session_id=session_id,
+        )
         user_message = hub.create_message(role="user", content=user_command)
         await hub.append_message(session_id, user_message)
         user_message_id_raw = user_message.get("message_id")
@@ -297,6 +303,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         mwv_report: dict[str, JSONValue] | None = None
         ui_decision: dict[str, JSONValue] | None = None
         async with agent_lock:
+            yolo_override_active = effective_policy.get("yolo_override_active") is True
             try:
                 model_config = _build_model_config(
                     selected_model["provider"],
@@ -313,6 +320,10 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 )
             try:
                 await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                if yolo_override_active:
+                    consumed = await hub.consume_yolo_once(session_id)
+                    if consumed:
+                        await _publish_session_security_event(hub=hub, session_id=session_id)
                 agent.set_session_context(session_id, approved_categories)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

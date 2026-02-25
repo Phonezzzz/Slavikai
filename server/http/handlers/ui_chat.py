@@ -34,6 +34,7 @@ from server.http_api import (
     _decision_workflow_context,
     _extract_files_from_tool_calls,
     _extract_named_files_from_output,
+    _load_effective_session_security,
     _model_not_allowed_response,
     _model_not_selected_response,
     _normalize_auto_state,
@@ -47,6 +48,7 @@ from server.http_api import (
     _publish_chat_stream_done,
     _publish_chat_stream_from_text,
     _publish_chat_stream_start,
+    _publish_session_security_event,
     _request_likely_canvas,
     _resolve_agent,
     _resolve_provider_api_key,
@@ -331,12 +333,16 @@ async def handle_ui_chat_send(
         session_root = await _workspace_root_for_session(hub, session_id)
         session_messages = await hub.get_messages(session_id)
         preflight_messages = _ui_messages_to_llm(session_messages)
+        effective_tools, effective_policy = await _load_effective_session_security(
+            hub=hub,
+            session_id=session_id,
+        )
 
         requires_root_gate = _request_requires_root_gate(
             mode=mode,
             content=content_raw,
             llm_messages=preflight_messages,
-            safe_mode=bool(getattr(agent, "tools_enabled", {}).get("safe_mode", False)),
+            safe_mode=bool(effective_tools.get("safe_mode", False)),
             skill_index=getattr(agent, "skill_index", None),
         )
         if requires_root_gate and not bypass_root_gate:
@@ -545,6 +551,7 @@ async def handle_ui_chat_send(
             previous_trace_id = _normalize_trace_id(
                 getattr(agent, "last_chat_interaction_id", None)
             )
+            yolo_override_active = effective_policy.get("yolo_override_active") is True
             try:
                 model_config = _build_model_config(
                     selected_model["provider"],
@@ -561,6 +568,10 @@ async def handle_ui_chat_send(
                 )
             try:
                 await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                if yolo_override_active:
+                    consumed = await hub.consume_yolo_once(session_id)
+                    if consumed:
+                        await _publish_session_security_event(hub=hub, session_id=session_id)
                 agent.set_session_context(session_id, approved_categories)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

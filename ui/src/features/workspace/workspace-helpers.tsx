@@ -285,3 +285,13 @@ export const policyLabel = (value: unknown): string => {
   if (value === 'yolo') return 'YOLO';
   return 'Sandbox';
 };
+
+export const policySafeModeEffective = (policy: unknown): boolean | null => {
+  if (!policy || typeof policy !== 'object') {
+    return null;
+  }
+  const candidate = policy as { safe_mode_effective?: unknown };
+  return typeof candidate.safe_mode_effective === 'boolean'
+    ? candidate.safe_mode_effective
+    : null;
+};

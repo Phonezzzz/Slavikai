@@ -76,10 +76,15 @@ def test_ui_session_policy_set_updates_session_state() -> None:
             policy = payload.get("policy")
             assert isinstance(policy, dict)
             assert policy.get("profile") == "yolo"
+            assert policy.get("yolo_armed") is True
+            assert policy.get("safe_mode_base") is True
+            assert policy.get("safe_mode_effective") is False
+            assert policy.get("yolo_override_active") is True
 
             hub: UIHub = client.server.app["ui_hub"]
             stored_policy = await hub.get_session_policy(session_id)
             assert stored_policy.get("profile") == "yolo"
+            assert stored_policy.get("yolo_armed") is True
         finally:
             await client.close()
 
@@ -115,6 +120,10 @@ def test_ui_session_security_get_and_post_updates_state() -> None:
             policy = update_payload.get("policy")
             assert isinstance(policy, dict)
             assert policy.get("profile") == "sandbox"
+            assert policy.get("yolo_armed") is False
+            assert policy.get("safe_mode_base") is True
+            assert policy.get("safe_mode_effective") is True
+            assert policy.get("yolo_override_active") is False
 
             get_resp = await client.get(
                 "/ui/api/session/security",
@@ -129,7 +138,118 @@ def test_ui_session_security_get_and_post_updates_state() -> None:
             get_policy = get_payload.get("policy")
             assert isinstance(get_policy, dict)
             assert get_policy.get("profile") == "sandbox"
+            assert get_policy.get("yolo_armed") is False
+            assert get_policy.get("safe_mode_base") is True
+            assert get_policy.get("safe_mode_effective") is True
+            assert get_policy.get("yolo_override_active") is False
         finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_policy_switch_to_non_yolo_clears_armed_state() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            yolo_status, yolo_payload = await _set_session_policy_via_api(
+                client,
+                session_id=session_id,
+                policy_profile="yolo",
+                confirm_yolo=True,
+            )
+            assert yolo_status == 200
+            yolo_policy = yolo_payload.get("policy")
+            assert isinstance(yolo_policy, dict)
+            assert yolo_policy.get("profile") == "yolo"
+            assert yolo_policy.get("yolo_armed") is True
+            assert yolo_policy.get("safe_mode_effective") is False
+
+            sandbox_resp = await client.post(
+                "/ui/api/session/security",
+                headers={"X-Slavik-Session": session_id},
+                json={"policy": {"profile": "sandbox"}},
+            )
+            assert sandbox_resp.status == 200
+            sandbox_payload = await sandbox_resp.json()
+            sandbox_policy = sandbox_payload.get("policy")
+            assert isinstance(sandbox_policy, dict)
+            assert sandbox_policy.get("profile") == "sandbox"
+            assert sandbox_policy.get("yolo_armed") is False
+            assert sandbox_policy.get("yolo_override_active") is False
+            assert sandbox_policy.get("safe_mode_effective") is True
+
+            hub: UIHub = client.server.app["ui_hub"]
+            stored_policy = await hub.get_session_policy(session_id)
+            assert stored_policy.get("profile") == "sandbox"
+            assert stored_policy.get("yolo_armed") is False
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_security_post_publishes_security_event() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        stream_response = None
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            stream_response = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert stream_response.status == 200
+            _ = await _read_first_sse_event(stream_response)
+
+            update_resp = await client.post(
+                "/ui/api/session/security",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "policy": {
+                        "profile": "yolo",
+                        "yolo_confirm": True,
+                        "yolo_confirm_text": "YOLO",
+                    },
+                },
+            )
+            assert update_resp.status == 200
+
+            events = await _read_sse_events(stream_response, max_events=20)
+            security_events = [
+                event
+                for event in events
+                if isinstance(event.get("type"), str) and event.get("type") == "session.security"
+            ]
+            assert security_events
+            payload = security_events[-1].get("payload")
+            assert isinstance(payload, dict)
+            assert payload.get("session_id") == session_id
+            policy = payload.get("policy")
+            assert isinstance(policy, dict)
+            assert policy.get("profile") == "yolo"
+            assert policy.get("safe_mode_effective") is False
+            tools_state = payload.get("tools_state")
+            assert isinstance(tools_state, dict)
+            assert tools_state.get("safe_mode") is False
+        finally:
+            if stream_response is not None:
+                stream_response.close()
             await client.close()
 
     asyncio.run(run())

@@ -441,9 +441,13 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
-        profile, yolo_armed, yolo_armed_at = api._load_policy_settings()
+        profile, _, yolo_armed_at = api._load_policy_settings()
+        yolo_armed: bool | None = None
+        requested_profile_yolo = False
+        requested_yolo_arm = False
         if "profile" in policy_raw:
             profile = api._normalize_policy_profile(policy_raw.get("profile"))
+            requested_profile_yolo = profile == "yolo"
         if "yolo_armed" in policy_raw:
             yolo_armed_raw = policy_raw.get("yolo_armed")
             if not isinstance(yolo_armed_raw, bool):
@@ -454,7 +458,8 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
                     code="invalid_request_error",
                 )
             yolo_armed = yolo_armed_raw
-        if profile == "yolo" or yolo_armed:
+            requested_yolo_arm = yolo_armed is True
+        if profile == "yolo" and (requested_profile_yolo or requested_yolo_arm):
             confirm_raw = policy_raw.get("yolo_confirm")
             confirm_text_raw = policy_raw.get("yolo_confirm_text")
             confirm_ok = (
@@ -472,6 +477,11 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
                     error_type="invalid_request_error",
                     code="yolo_confirmation_required",
                 )
+        if profile == "yolo":
+            if yolo_armed is None:
+                yolo_armed = True
+        else:
+            yolo_armed = False
         if yolo_armed:
             yolo_armed_at = api._utc_now_iso()
         else:

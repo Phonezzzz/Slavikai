@@ -14,6 +14,7 @@ import type { CanvasMessage, CanvasSendPayload } from './canvas';
 import {
   findFirstFilePath,
   policyLabel,
+  policySafeModeEffective,
   terminalTimestamp,
   type WorkspaceNode,
   type WorkspaceTreeMeta,
@@ -156,6 +157,7 @@ export function WorkspaceIde({
   const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [workspacePolicy, setWorkspacePolicy] = useState('Sandbox');
   const [workspaceYoloActive, setWorkspaceYoloActive] = useState(false);
+  const [workspaceSafeModeEnabled, setWorkspaceSafeModeEnabled] = useState(true);
   const [rootPickerOpen, setRootPickerOpen] = useState(false);
   const [rootInput, setRootInput] = useState('');
   const [rootBusy, setRootBusy] = useState(false);
@@ -344,6 +346,7 @@ export function WorkspaceIde({
     if (!sessionId) {
       setWorkspaceRoot('');
       setWorkspacePolicy('Sandbox');
+      setWorkspaceSafeModeEnabled(true);
       return;
     }
     try {
@@ -353,9 +356,12 @@ export function WorkspaceIde({
       if (policy) {
         setWorkspacePolicy(policyLabel(policy.profile));
         setWorkspaceYoloActive(policy.yolo_armed === true);
+        const safeModeEffective = policySafeModeEffective(policy);
+        setWorkspaceSafeModeEnabled(safeModeEffective ?? true);
       } else {
         setWorkspacePolicy('Sandbox');
         setWorkspaceYoloActive(false);
+        setWorkspaceSafeModeEnabled(true);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load workspace root.';
@@ -1051,6 +1057,7 @@ export function WorkspaceIde({
         workspaceRoot={workspaceRoot}
         workspacePolicy={workspacePolicy}
         workspaceYoloActive={workspaceYoloActive}
+        workspaceSafeModeEnabled={workspaceSafeModeEnabled}
         rootPickerOpen={rootPickerOpen}
         rootInput={rootInput}
         rootBusy={rootBusy}
