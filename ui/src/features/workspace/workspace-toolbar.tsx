@@ -18,6 +18,7 @@ type WorkspaceToolbarProps = {
   onReindex: () => void;
   onRefreshGitDiff: () => void;
   onOpenWorkspaceSettings: () => void;
+  onOpenQuickOpen: () => void;
   onRootInputChange: (value: string) => void;
   onApplyRoot: () => void;
   onCancelRootPicker: () => void;
@@ -39,6 +40,7 @@ export function WorkspaceToolbar({
   onReindex,
   onRefreshGitDiff,
   onOpenWorkspaceSettings,
+  onOpenQuickOpen,
   onRootInputChange,
   onApplyRoot,
   onCancelRootPicker,
@@ -82,12 +84,20 @@ export function WorkspaceToolbar({
             {indexing ? 'Indexing...' : 'Re-index'}
           </button>
           {workspaceRoot ? (
-            <span
-              className="max-w-[380px] truncate rounded-md border border-[#2a2a31] bg-[#111117] px-2 py-1 text-[11px] text-[#8f8f99]"
-              title={workspaceRoot}
+            <button
+              onClick={onOpenQuickOpen}
+              className="inline-flex max-w-[420px] items-center gap-1 rounded-md border border-[#2a2a31] bg-[#111117] px-2 py-1 text-left text-[11px] text-[#8f8f99] hover:bg-[#171720]"
+              title="Quick Open (Ctrl+Space, Ctrl+D)"
+              aria-label="Quick Open (Ctrl+Space, Ctrl+D)"
             >
-              {compactPath(workspaceRoot, 68)}
-            </span>
+              <span className="truncate">{compactPath(workspaceRoot, 60)}</span>
+              <span className="rounded border border-[#32405d] bg-[#182137] px-1 py-0.5 text-[10px] text-[#9ec0ff]">
+                Ctrl+Space
+              </span>
+              <span className="rounded border border-[#2d2d39] bg-[#171721] px-1 py-0.5 text-[10px] text-[#9a9aa8]">
+                Ctrl+D
+              </span>
+            </button>
           ) : null}
         </div>
 

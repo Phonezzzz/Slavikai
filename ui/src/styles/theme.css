@@ -39,6 +39,12 @@
   --sidebar-accent-foreground: oklch(0.92 0 0);
   --sidebar-border: #2b313d;
   --sidebar-ring: oklch(0.708 0 0);
+  --messages-font-family: "Segoe UI", "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont,
+    "Helvetica Neue", sans-serif;
+  --messages-code-font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco,
+    Consolas, "Liberation Mono", monospace;
+  --messages-chat-line-height: 1.6;
+  --messages-workspace-line-height: 1.45;
 }
 
 .dark {

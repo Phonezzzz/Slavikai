@@ -28,6 +28,10 @@ import {
   type WorkspaceContextChip,
 } from '../../features/workspace/workspace-assistant-panel';
 import { WorkspaceExplorer } from '../../features/workspace/workspace-explorer';
+import {
+  WorkspaceQuickOpen,
+  type WorkspaceQuickOpenItem,
+} from '../../features/workspace/workspace-quick-open';
 import { WorkspaceToolbar } from '../../features/workspace/workspace-toolbar';
 import {
   deleteWorkspaceFile,
@@ -98,6 +102,15 @@ const ASSISTANT_RESIZER_WIDTH = 6;
 const EXPLORER_RESIZER_WIDTH = 6;
 const ROOT_TREE_DEBOUNCE_MS = 150;
 const CHILD_TREE_DEBOUNCE_MS = 80;
+const QUICK_OPEN_MAX_RESULTS = 120;
+const QUICK_OPEN_MAX_RECENT = 24;
+
+type QuickOpenIndexCache = {
+  rootKey: string;
+  items: WorkspaceQuickOpenItem[];
+  partial: boolean;
+  loadedAt: number;
+};
 
 export function WorkspaceIde({
   sessionId,
@@ -168,6 +181,12 @@ export function WorkspaceIde({
   const [indexing, setIndexing] = useState(false);
   const [gitDiffLoading, setGitDiffLoading] = useState(false);
   const [gitDiff, setGitDiff] = useState('');
+  const [quickOpenOpen, setQuickOpenOpen] = useState(false);
+  const [quickOpenQuery, setQuickOpenQuery] = useState('');
+  const [quickOpenLoading, setQuickOpenLoading] = useState(false);
+  const [quickOpenPartial, setQuickOpenPartial] = useState(false);
+  const [quickOpenItems, setQuickOpenItems] = useState<WorkspaceQuickOpenItem[]>([]);
+  const [recentPaths, setRecentPaths] = useState<string[]>([]);
 
   const [explorerWidth, setExplorerWidth] = useState(280);
   const [assistantWidth, setAssistantWidth] = useState(390);
@@ -186,6 +205,8 @@ export function WorkspaceIde({
   const treeDebounceTimersRef = useRef<Map<string, number>>(new Map());
   const treeAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const treeInFlightPathsRef = useRef<Set<string>>(new Set());
+  const quickOpenFileIndexRef = useRef<QuickOpenIndexCache | null>(null);
+  const quickOpenLoadedForRoot = useRef<string | null>(null);
   const workspaceGridRef = useRef<HTMLDivElement>(null);
 
   const clampAssistantWidth = (nextWidth: number): number => {
@@ -219,6 +240,86 @@ export function WorkspaceIde({
     }
     return { [sessionHeader]: sessionId };
   }, [sessionHeader, sessionId]);
+
+  const pushRecentPath = (path: string) => {
+    const normalized = path.trim();
+    if (!normalized) {
+      return;
+    }
+    setRecentPaths((prev) => {
+      const next = [normalized, ...prev.filter((item) => item !== normalized)];
+      return next.slice(0, QUICK_OPEN_MAX_RECENT);
+    });
+  };
+
+  const collectQuickOpenItems = (nodes: WorkspaceNode[]): WorkspaceQuickOpenItem[] => {
+    const output: WorkspaceQuickOpenItem[] = [];
+    const walk = (items: WorkspaceNode[]) => {
+      for (const node of items) {
+        if (node.type === 'file') {
+          const path = node.path?.trim() ?? '';
+          if (!path) {
+            continue;
+          }
+          const slash = path.lastIndexOf('/');
+          const name = slash >= 0 ? path.slice(slash + 1) : path;
+          const dir = slash >= 0 ? path.slice(0, slash) : '';
+          output.push({ path, name, dir });
+          continue;
+        }
+        if (node.children && node.children.length > 0) {
+          walk(node.children);
+        }
+      }
+    };
+    walk(nodes);
+    output.sort((a, b) => {
+      const byName = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      if (byName !== 0) {
+        return byName;
+      }
+      return a.path.localeCompare(b.path, undefined, { sensitivity: 'base' });
+    });
+    return output;
+  };
+
+  const quickOpenResults = useMemo(() => {
+    const rawQuery = quickOpenQuery.trim().toLowerCase();
+    if (!rawQuery) {
+      return quickOpenItems.slice(0, QUICK_OPEN_MAX_RESULTS);
+    }
+    const recentBoost = new Set(recentPaths);
+    const scored = quickOpenItems
+      .map((item) => {
+        const name = item.name.toLowerCase();
+        const path = item.path.toLowerCase();
+        let score = -1;
+        if (name === rawQuery) {
+          score = 400;
+        } else if (name.startsWith(rawQuery)) {
+          score = 300;
+        } else if (name.includes(rawQuery)) {
+          score = 200;
+        } else if (path.includes(rawQuery)) {
+          score = 120;
+        }
+        if (score < 0) {
+          return null;
+        }
+        if (recentBoost.has(item.path)) {
+          score += 35;
+        }
+        return { item, score };
+      })
+      .filter((entry): entry is { item: WorkspaceQuickOpenItem; score: number } => entry !== null)
+      .sort((a, b) => {
+        if (b.score !== a.score) {
+          return b.score - a.score;
+        }
+        return a.item.path.localeCompare(b.item.path, undefined, { sensitivity: 'base' });
+      });
+    return scored.slice(0, QUICK_OPEN_MAX_RESULTS).map((entry) => entry.item);
+  }, [quickOpenItems, quickOpenQuery, recentPaths]);
 
   const lastTerminalOutput = useMemo(() => {
     for (let index = terminalLines.length - 1; index >= 0; index -= 1) {
@@ -258,6 +359,13 @@ export function WorkspaceIde({
     setLoadingTreePaths(new Set());
     setTreeMeta(null);
     setSelectionText('');
+    setQuickOpenOpen(false);
+    setQuickOpenQuery('');
+    setQuickOpenPartial(false);
+    setQuickOpenItems([]);
+    setRecentPaths([]);
+    quickOpenFileIndexRef.current = null;
+    quickOpenLoadedForRoot.current = null;
   }, [sessionId]);
 
   useEffect(() => {
@@ -544,6 +652,63 @@ export function WorkspaceIde({
     treeDebounceTimersRef.current.set(requestKey, timerId);
   };
 
+  const ensureQuickOpenIndex = async (): Promise<void> => {
+    if (!sessionId) {
+      setQuickOpenItems([]);
+      setQuickOpenPartial(false);
+      return;
+    }
+    const rootKey = workspaceRoot.trim();
+    if (rootKey && quickOpenLoadedForRoot.current === rootKey && quickOpenFileIndexRef.current) {
+      setQuickOpenItems(quickOpenFileIndexRef.current.items);
+      setQuickOpenPartial(quickOpenFileIndexRef.current.partial);
+      return;
+    }
+    setQuickOpenLoading(true);
+    try {
+      const { pendingApproval, tree: parsedTree, treeMeta: loadedTreeMeta } = await fetchWorkspaceTree(
+        { recursive: true, maxDepth: 12 },
+        requestHeaders,
+      );
+      if (pendingApproval) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: quick open index`,
+        ]);
+        return;
+      }
+      const indexedItems = collectQuickOpenItems(parsedTree);
+      setQuickOpenItems(indexedItems);
+      setQuickOpenPartial(loadedTreeMeta.truncated);
+      const cache: QuickOpenIndexCache = {
+        rootKey,
+        items: indexedItems,
+        partial: loadedTreeMeta.truncated,
+        loadedAt: Date.now(),
+      };
+      quickOpenFileIndexRef.current = cache;
+      quickOpenLoadedForRoot.current = rootKey;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load quick open file list.';
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+      setQuickOpenItems([]);
+      setQuickOpenPartial(false);
+    } finally {
+      setQuickOpenLoading(false);
+    }
+  };
+
+  const openQuickOpen = () => {
+    setQuickOpenOpen(true);
+    setQuickOpenQuery('');
+    void ensureQuickOpenIndex();
+  };
+
+  const handleQuickOpenSelect = (path: string) => {
+    void openFileInTab(path);
+    setQuickOpenOpen(false);
+  };
+
   const loadGitDiff = async (): Promise<void> => {
     if (!sessionId) {
       setGitDiff('');
@@ -564,6 +729,62 @@ export function WorkspaceIde({
     requestTreeLoad(undefined, 'session_init');
     void loadGitDiff();
   }, [refreshToken, sessionId]);
+
+  useEffect(() => {
+    const rootKey = workspaceRoot.trim();
+    if (quickOpenLoadedForRoot.current === rootKey) {
+      return;
+    }
+    quickOpenLoadedForRoot.current = null;
+    quickOpenFileIndexRef.current = null;
+    setQuickOpenItems([]);
+    setQuickOpenPartial(false);
+  }, [workspaceRoot]);
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+      if (target.isContentEditable) {
+        return true;
+      }
+      if (
+        target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+      ) {
+        return true;
+      }
+      if (target.closest('.monaco-editor')) {
+        return true;
+      }
+      return false;
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) {
+        return;
+      }
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      const isPrimaryShortcut = event.code === 'Space' || key === ' ';
+      const isSecondaryShortcut = key === 'd';
+      if (!isPrimaryShortcut && !isSecondaryShortcut) {
+        return;
+      }
+      event.preventDefault();
+      openQuickOpen();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [sessionId, workspaceRoot, requestHeaders]);
 
   const findNodeByPath = (nodes: WorkspaceNode[], path: string): WorkspaceNode | null => {
     for (const node of nodes) {
@@ -628,6 +849,7 @@ export function WorkspaceIde({
     if (!normalizedPath) {
       return;
     }
+    pushRecentPath(normalizedPath);
     setActiveExplorerPath(normalizedPath);
     const existing = openFiles.find((item) => item.path === normalizedPath);
     if (existing) {
@@ -1114,6 +1336,7 @@ export function WorkspaceIde({
           void loadGitDiff();
         }}
         onOpenWorkspaceSettings={onOpenWorkspaceSettings}
+        onOpenQuickOpen={openQuickOpen}
         onRootInputChange={setRootInput}
         onApplyRoot={() => {
           void handleSelectRoot();
@@ -1253,6 +1476,17 @@ export function WorkspaceIde({
           }}
         />
       </div>
+
+      <WorkspaceQuickOpen
+        open={quickOpenOpen}
+        query={quickOpenQuery}
+        items={quickOpenResults}
+        loading={quickOpenLoading}
+        partial={quickOpenPartial}
+        onQueryChange={setQuickOpenQuery}
+        onSelect={handleQuickOpenSelect}
+        onClose={() => setQuickOpenOpen(false)}
+      />
     </div>
   );
 }

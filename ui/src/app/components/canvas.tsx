@@ -11,7 +11,6 @@ import {
   ChevronDown,
   Paperclip,
   Mic,
-  User,
   Check,
   PanelRight,
   LoaderCircle,
@@ -20,19 +19,12 @@ import {
 } from "lucide-react";
 
 import BrainLogo from "../../assets/brain.png";
-import type { DecisionRespondChoice, UiDecision } from "../types";
+import { MessageRenderer } from "../../features/messages";
+import type { RenderableMessage } from "../../features/messages";
+import type { DecisionRespondChoice, MessageRuntimeMeta, UiDecision } from "../types";
 import { DecisionPanel } from "./decision-panel";
 
 // ====== Types ======
-
-interface CodeBlock {
-  language: string;
-  code: string;
-}
-
-type MessageSection =
-  | { type: "text"; content: string }
-  | { type: "code"; codeBlock: CodeBlock };
 
 export interface CanvasMessage {
   id: string;
@@ -44,6 +36,7 @@ export interface CanvasMessage {
   parentUserMessageId?: string | null;
   attachments?: Array<{ name: string; mime: string; content: string }>;
   transient?: boolean;
+  runtimeMeta?: MessageRuntimeMeta | null;
 }
 
 export type CanvasComposerAttachment = {
@@ -55,73 +48,6 @@ export type CanvasComposerAttachment = {
 export type CanvasSendPayload = {
   content: string;
   attachments?: CanvasComposerAttachment[];
-};
-
-const CODE_FENCE_PATTERN = /(?:^|\n|\\n)```([a-zA-Z0-9_-]{0,32})(?:\n|\\n)([\s\S]*?)```(?=\n|\\n|$)/g;
-
-const normalizeEscapedMarkdown = (value: string): string => {
-  if (!value.includes("\\n") || !value.includes("```")) {
-    return value;
-  }
-  if (!/```[a-zA-Z0-9_-]*\\n/.test(value)) {
-    return value;
-  }
-  return value.replace(/\\n/g, "\n");
-};
-
-const parseFencedSections = (source: string): MessageSection[] => {
-  const sections: MessageSection[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null = CODE_FENCE_PATTERN.exec(source);
-
-  while (match) {
-    const fullMatch = match[0];
-    let prefixLen = 0;
-    if (fullMatch.startsWith("\n")) {
-      prefixLen = 1;
-    } else if (fullMatch.startsWith("\\n")) {
-      prefixLen = 2;
-    }
-    const matchStart = match.index + prefixLen;
-    const before = source.slice(lastIndex, matchStart);
-    if (before.trim()) {
-      sections.push({ type: "text", content: before.trim() });
-    }
-
-    const rawLanguage = (match[1] || "").trim().toLowerCase();
-    const language = /^[a-z0-9_-]{1,32}$/.test(rawLanguage) ? rawLanguage : "text";
-    const codeRaw = match[2] || "";
-    const code = codeRaw.replace(/\\n/g, "\n").replace(/\r\n/g, "\n").trimEnd();
-    sections.push({ type: "code", codeBlock: { language, code } });
-
-    lastIndex = match.index + fullMatch.length;
-    match = CODE_FENCE_PATTERN.exec(source);
-  }
-
-  const tail = source.slice(lastIndex);
-  if (tail.trim()) {
-    sections.push({ type: "text", content: tail.trim() });
-  }
-  return sections;
-};
-
-const parseContentSections = (content: string): MessageSection[] => {
-  if (!content.includes("```")) {
-    return [{ type: "text", content }];
-  }
-  const direct = parseFencedSections(content);
-  if (direct.some((section) => section.type === "code")) {
-    return direct;
-  }
-  const normalized = normalizeEscapedMarkdown(content);
-  if (normalized !== content) {
-    const normalizedSections = parseFencedSections(normalized);
-    if (normalizedSections.some((section) => section.type === "code")) {
-      return normalizedSections;
-    }
-    return [{ type: "text", content: normalized }];
-  }
-  return direct.length > 0 ? direct : [{ type: "text", content }];
 };
 
 interface CanvasProps {
@@ -162,241 +88,28 @@ interface CanvasProps {
 
 // ====== Sub Components ======
 
-function CodeBlockRenderer({ codeBlock }: { codeBlock: CodeBlock }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(codeBlock.code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  // Simple syntax highlighting
-  const highlightCode = (code: string, lang: string) => {
-    const keywords =
-      lang === "python"
-        ? [
-            "class",
-            "def",
-            "import",
-            "from",
-            "return",
-            "if",
-            "else",
-            "elif",
-            "for",
-            "while",
-            "in",
-            "not",
-            "and",
-            "or",
-            "True",
-            "False",
-            "None",
-            "print",
-            "str",
-            "int",
-            "list",
-            "dict",
-          ]
-        : [
-            "const",
-            "let",
-            "var",
-            "function",
-            "return",
-            "if",
-            "else",
-            "for",
-            "while",
-            "import",
-            "from",
-            "export",
-            "default",
-            "class",
-            "new",
-            "true",
-            "false",
-            "null",
-            "undefined",
-          ];
-
-    return code.split("\n").map((line, i) => {
-      let highlighted = line;
-
-      // Comments
-      const commentIdx = line.indexOf("#");
-      const jsCommentIdx = line.indexOf("//");
-      const cIdx = commentIdx >= 0 ? commentIdx : jsCommentIdx;
-
-      if (cIdx >= 0) {
-        const before = line.substring(0, cIdx);
-        const comment = line.substring(cIdx);
-        highlighted = before;
-        return (
-          <div key={i} className="flex">
-            <span className="text-[#666] select-none mr-4 text-right w-6 inline-block">
-              {i + 1}
-            </span>
-            <span>
-              <HighlightLine text={highlighted} keywords={keywords} />
-              <span className="text-[#6a7a5a]">{comment}</span>
-            </span>
-          </div>
-        );
-      }
-
-      return (
-        <div key={i} className="flex">
-          <span className="text-[#666] select-none mr-4 text-right w-6 inline-block">
-            {i + 1}
-          </span>
-          <HighlightLine text={line} keywords={keywords} />
-        </div>
-      );
-    });
-  };
-
-  return (
-    <div className="rounded-lg overflow-hidden bg-[#0d0d10] border border-[#1f1f24] my-2">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 bg-[#111115] border-b border-[#1f1f24]">
-        <span className="text-[12px] text-[#888]">{codeBlock.language}</span>
-        <button
-          onClick={handleCopy}
-          className="flex items-center gap-1 text-[12px] text-[#666] hover:text-[#ccc] transition-colors cursor-pointer"
-        >
-          {copied ? (
-            <>
-              <Check className="w-3 h-3 text-green-400" />
-              <span className="text-green-400">Copied</span>
-            </>
-          ) : (
-            <>
-              <Copy className="w-3 h-3" />
-              Copy
-            </>
-          )}
-        </button>
-      </div>
-      {/* Code */}
-      <div className="p-4 overflow-x-auto">
-        <pre className="text-[13px] leading-relaxed font-mono">
-          {highlightCode(codeBlock.code, codeBlock.language)}
-        </pre>
-      </div>
-    </div>
-  );
-}
-
-function HighlightLine({
-  text,
-  keywords,
-}: {
-  text: string;
-  keywords: string[];
-}) {
-  // Very simple keyword highlighting
-  const parts = text.split(/(\s+|[.,:;()[\]{}=|"'])/);
-  return (
-    <span>
-      {parts.map((part, i) => {
-        if (keywords.includes(part)) {
-          return (
-            <span key={i} className="text-[#c792ea]">
-              {part}
-            </span>
-          );
-        }
-        // Strings
-        if (part.startsWith('"') || part.startsWith("'")) {
-          return (
-            <span key={i} className="text-[#c3e88d]">
-              {part}
-            </span>
-          );
-        }
-        // Numbers
-        if (/^\d+$/.test(part)) {
-          return (
-            <span key={i} className="text-[#f78c6c]">
-              {part}
-            </span>
-          );
-        }
-        return (
-          <span key={i} className="text-[#d4d4d8]">
-            {part}
-          </span>
-        );
-      })}
-    </span>
-  );
-}
-
 function MessageBubble({ message }: { message: CanvasMessage }) {
-  const isUser = message.role === "user";
-  const sections = useMemo(() => parseContentSections(message.content), [message.content]);
-  const attachments = useMemo(() => message.attachments ?? [], [message.attachments]);
+  const renderable: RenderableMessage = {
+    kind: "message",
+    message,
+    meta: message.runtimeMeta ?? null,
+  };
 
   return (
-    <div className={`flex gap-3 ${isUser ? "flex-row-reverse" : ""}`}>
-      {/* Avatar */}
-      <div
-        className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center ${
-          isUser
-            ? "bg-[#6366f1]/20 border border-[#6366f1]/30"
-            : "bg-[#2a2a30] border border-[#3a3a42]"
-        }`}
-      >
-        {isUser ? (
-          <User className="w-4 h-4 text-[#818cf8]" />
-        ) : (
+    <div className={`flex gap-3 ${message.role === "user" ? "flex-row-reverse" : ""}`}>
+      <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center bg-[#2a2a30] border border-[#3a3a42]">
+        {message.role === "assistant" ? (
           <img
             src={BrainLogo}
             alt="SlavikAI"
             className="w-4 h-4 object-contain"
           />
+        ) : (
+          <span className="text-[11px] font-semibold text-[#aeb1ff]">YOU</span>
         )}
       </div>
-
-      {/* Content */}
-      <div className={`flex-1 max-w-[calc(100%-50px)] ${isUser ? "text-right" : ""}`}>
-        {sections.map((section, idx) => {
-          switch (section.type) {
-            case "text":
-              return (
-                <p
-                  key={idx}
-                  className={`whitespace-pre-wrap text-[14px] leading-relaxed text-[#c8c8cc] my-1 ${
-                    isUser ? "text-right" : ""
-                  }`}
-                >
-                  {section.content}
-                </p>
-              );
-            case "code":
-              return section.codeBlock ? (
-                <CodeBlockRenderer key={idx} codeBlock={section.codeBlock} />
-              ) : null;
-            default:
-              return null;
-          }
-        })}
-        {attachments.length > 0 ? (
-          <div className={`mt-2 flex flex-wrap gap-2 ${isUser ? "justify-end" : "justify-start"}`}>
-            {attachments.map((attachment, index) => (
-              <div
-                key={`${attachment.name}-${index}`}
-                className="inline-flex items-center gap-2 rounded-md border border-[#2a2a30] bg-[#141418] px-2.5 py-1.5 text-[12px] text-[#b9b9bf]"
-                title={`${attachment.name} (${attachment.mime})`}
-              >
-                <FileText className="h-3.5 w-3.5 text-[#8e8e95]" />
-                <span className="max-w-[220px] truncate">{attachment.name}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
+      <div className={`flex-1 min-w-0 ${message.role === "user" ? "text-right" : ""}`}>
+        <MessageRenderer context="chat" message={renderable} />
       </div>
     </div>
   );

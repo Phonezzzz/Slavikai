@@ -25,6 +25,8 @@ import type {
   DecisionRespondChoice,
   FolderSummary,
   MessageLane,
+  MessageRuntimeMeta,
+  MwvReportUi,
   PlanEnvelope,
   PlanStepStatus,
   ProviderModels,
@@ -790,6 +792,69 @@ const parseTaskExecution = (value: unknown): TaskExecutionState | null => {
   };
 };
 
+const parseTraceId = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized || null;
+};
+
+const parseMwvReport = (value: unknown): MwvReportUi | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const report = value as Record<string, unknown>;
+  const normalized: MwvReportUi = {};
+
+  if (typeof report.route === 'string') {
+    normalized.route = report.route;
+  }
+  if (report.trace_id === null || typeof report.trace_id === 'string') {
+    normalized.trace_id = report.trace_id;
+  }
+  if (typeof report.stop_reason_code === 'string') {
+    normalized.stop_reason_code = report.stop_reason_code;
+  }
+  if (typeof report.plan_summary === 'string') {
+    normalized.plan_summary = report.plan_summary;
+  }
+  if (typeof report.execution_summary === 'string') {
+    normalized.execution_summary = report.execution_summary;
+  }
+  if (report.attempts && typeof report.attempts === 'object' && !Array.isArray(report.attempts)) {
+    const attempts = report.attempts as { current?: unknown; max?: unknown };
+    normalized.attempts = {
+      current: typeof attempts.current === 'number' ? attempts.current : undefined,
+      max: typeof attempts.max === 'number' ? attempts.max : undefined,
+    };
+  }
+  if (report.verifier && typeof report.verifier === 'object' && !Array.isArray(report.verifier)) {
+    normalized.verifier = report.verifier as { status?: string; duration_ms?: number | null; [k: string]: unknown };
+  }
+
+  for (const [key, entry] of Object.entries(report)) {
+    if (!(key in normalized)) {
+      normalized[key] = entry;
+    }
+  }
+  return normalized;
+};
+
+const toMessageRuntimeMeta = (
+  message: ChatMessage,
+  lane: MessageLane,
+  previous: MessageRuntimeMeta | null,
+): MessageRuntimeMeta => {
+  return {
+    messageId: message.message_id,
+    lane,
+    traceId: previous?.traceId ?? message.trace_id ?? null,
+    isFinal: true,
+    mwvReport: previous?.mwvReport ?? null,
+  };
+};
+
 const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) {
@@ -809,7 +874,11 @@ const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
   return 'older';
 };
 
-const buildCanvasMessages = (messages: ChatMessage[]): CanvasMessage[] => {
+const buildCanvasMessages = (
+  messages: ChatMessage[],
+  lane: MessageLane,
+  runtimeMetaByMessageId: Record<string, MessageRuntimeMeta>,
+): CanvasMessage[] => {
   return messages
     .filter(
       (message): message is ChatMessage & { role: 'user' | 'assistant' } =>
@@ -825,6 +894,8 @@ const buildCanvasMessages = (messages: ChatMessage[]): CanvasMessage[] => {
       parentUserMessageId: message.parent_user_message_id,
       attachments: message.attachments,
       transient: false,
+      runtimeMeta: runtimeMetaByMessageId[message.message_id]
+        ?? toMessageRuntimeMeta(message, lane, null),
     }));
 };
 
@@ -1042,6 +1113,9 @@ export default function App() {
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [workspaceMessagesState, setWorkspaceMessagesState] = useState<ChatMessage[]>([]);
+  const [messageRuntimeMetaById, setMessageRuntimeMetaById] = useState<
+    Record<string, MessageRuntimeMeta>
+  >({});
   const [, setSessionOutput] = useState<string | null>(null);
   const [sessionFiles, setSessionFiles] = useState<string[]>([]);
   const [sessionArtifacts, setSessionArtifacts] = useState<SessionArtifactRecord[]>([]);
@@ -1093,8 +1167,8 @@ export default function App() {
       ? pendingUserMessage
       : null;
   const canvasMessages = useMemo(
-    () => buildCanvasMessages(chatMessages),
-    [chatMessages],
+    () => buildCanvasMessages(chatMessages, 'chat', messageRuntimeMetaById),
+    [chatMessages, messageRuntimeMetaById],
   );
   const pendingCanvasMessage = useMemo(() => {
     if (!pendingForChat) {
@@ -1111,6 +1185,13 @@ export default function App() {
       parentUserMessageId: null,
       attachments: pendingForChat.attachments,
       transient: true,
+      runtimeMeta: {
+        messageId: pendingId,
+        lane: 'chat' as MessageLane,
+        traceId: null,
+        isFinal: false,
+        mwvReport: null,
+      },
     };
   }, [pendingForChat]);
   const streamingAssistantCanvasMessage = useMemo(() => {
@@ -1127,11 +1208,18 @@ export default function App() {
       parentUserMessageId: null,
       attachments: [],
       transient: true,
+      runtimeMeta: {
+        messageId: `stream-${chatStreamingState.streamId}`,
+        lane: 'chat' as MessageLane,
+        traceId: null,
+        isFinal: false,
+        mwvReport: null,
+      },
     };
   }, [chatStreamingState]);
   const workspaceCanvasMessages = useMemo(
-    () => buildCanvasMessages(workspaceMessagesState),
-    [workspaceMessagesState],
+    () => buildCanvasMessages(workspaceMessagesState, 'workspace', messageRuntimeMetaById),
+    [messageRuntimeMetaById, workspaceMessagesState],
   );
   const pendingWorkspaceCanvasMessage = useMemo(() => {
     if (!pendingForWorkspace) {
@@ -1148,6 +1236,13 @@ export default function App() {
       parentUserMessageId: null,
       attachments: pendingForWorkspace.attachments,
       transient: true,
+      runtimeMeta: {
+        messageId: pendingId,
+        lane: 'workspace' as MessageLane,
+        traceId: null,
+        isFinal: false,
+        mwvReport: null,
+      },
     };
   }, [pendingForWorkspace]);
   const streamingWorkspaceAssistantMessage = useMemo(() => {
@@ -1164,6 +1259,13 @@ export default function App() {
       parentUserMessageId: null,
       attachments: [],
       transient: true,
+      runtimeMeta: {
+        messageId: `stream-ws-${workspaceStreamingState.streamId}`,
+        lane: 'workspace' as MessageLane,
+        traceId: null,
+        isFinal: false,
+        mwvReport: null,
+      },
     };
   }, [workspaceStreamingState]);
   const workspaceMessages = useMemo(() => {
@@ -1728,10 +1830,26 @@ export default function App() {
     }
 
     const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
-    setChatMessages(parseMessages((historyPayload as { messages?: unknown }).messages));
-    setWorkspaceMessagesState(
-      parseMessages((workspaceHistoryPayload as { messages?: unknown }).messages),
+    const parsedChatMessages = parseMessages((historyPayload as { messages?: unknown }).messages);
+    const parsedWorkspaceMessages = parseMessages(
+      (workspaceHistoryPayload as { messages?: unknown }).messages,
     );
+    setChatMessages(parsedChatMessages);
+    setWorkspaceMessagesState(parsedWorkspaceMessages);
+    setMessageRuntimeMetaById(() => {
+      const next: Record<string, MessageRuntimeMeta> = {};
+      parsedChatMessages.forEach((message) => {
+        if (message.role === 'assistant' || message.role === 'user') {
+          next[message.message_id] = toMessageRuntimeMeta(message, 'chat', null);
+        }
+      });
+      parsedWorkspaceMessages.forEach((message) => {
+        if (message.role === 'assistant' || message.role === 'user') {
+          next[message.message_id] = toMessageRuntimeMeta(message, 'workspace', null);
+        }
+      });
+      return next;
+    });
     setChatStreamingState(null);
     setWorkspaceStreamingState(null);
     setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
@@ -1771,10 +1889,26 @@ export default function App() {
       }
     ).session;
     const sessionModel = parseSelectedModel(session?.selected_model);
-    setChatMessages(parseMessages(session?.messages));
-    setWorkspaceMessagesState(
-      parseMessages((session as { workspace_messages?: unknown } | undefined)?.workspace_messages),
+    const parsedChatMessages = parseMessages(session?.messages);
+    const parsedWorkspaceMessages = parseMessages(
+      (session as { workspace_messages?: unknown } | undefined)?.workspace_messages,
     );
+    setChatMessages(parsedChatMessages);
+    setWorkspaceMessagesState(parsedWorkspaceMessages);
+    setMessageRuntimeMetaById(() => {
+      const next: Record<string, MessageRuntimeMeta> = {};
+      parsedChatMessages.forEach((message) => {
+        if (message.role === 'assistant' || message.role === 'user') {
+          next[message.message_id] = toMessageRuntimeMeta(message, 'chat', null);
+        }
+      });
+      parsedWorkspaceMessages.forEach((message) => {
+        if (message.role === 'assistant' || message.role === 'user') {
+          next[message.message_id] = toMessageRuntimeMeta(message, 'workspace', null);
+        }
+      });
+      return next;
+    });
     setChatStreamingState(null);
     setWorkspaceStreamingState(null);
     setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
@@ -2183,6 +2317,7 @@ export default function App() {
             setSelectedConversation(null);
             setChatMessages([]);
             setWorkspaceMessagesState([]);
+            setMessageRuntimeMetaById({});
             setSessionOutput(null);
             setSessionFiles([]);
             setSessionArtifacts([]);
@@ -2259,16 +2394,23 @@ export default function App() {
       active_plan?: unknown;
       active_task?: unknown;
       auto_state?: unknown;
+      trace_id?: unknown;
+      mwv_report?: unknown;
     };
 
-    if (body.messages !== undefined) {
-      setChatMessages(parseMessages(body.messages));
+    const parsedChatMessages = body.messages !== undefined ? parseMessages(body.messages) : null;
+    const parsedWorkspaceMessages =
+      body.workspace_messages !== undefined ? parseMessages(body.workspace_messages) : null;
+    if (parsedChatMessages !== null) {
+      setChatMessages(parsedChatMessages);
     }
-    if (body.workspace_messages !== undefined) {
-      setWorkspaceMessagesState(parseMessages(body.workspace_messages));
+    if (parsedWorkspaceMessages !== null) {
+      setWorkspaceMessagesState(parsedWorkspaceMessages);
     }
 
     const lane: MessageLane = body.lane === 'workspace' ? 'workspace' : 'chat';
+    const traceIdFromPayload = parseTraceId(body.trace_id);
+    const mwvReportFromPayload = parseMwvReport(body.mwv_report);
 
     const parsedDecision = parseUiDecision(body.decision);
     if (body.decision !== undefined) {
@@ -2306,6 +2448,49 @@ export default function App() {
     if (body.auto_state !== undefined) {
       setAutoState(parseAutoState(body.auto_state));
     }
+    setMessageRuntimeMetaById((previous) => {
+      const next = { ...previous };
+      const upsertForLane = (
+        list: ChatMessage[] | null,
+        listLane: MessageLane,
+      ) => {
+        if (!list) {
+          return;
+        }
+        list.forEach((message) => {
+          if (message.role !== 'assistant' && message.role !== 'user') {
+            return;
+          }
+          next[message.message_id] = toMessageRuntimeMeta(
+            message,
+            listLane,
+            previous[message.message_id] ?? null,
+          );
+        });
+      };
+
+      upsertForLane(parsedChatMessages, 'chat');
+      upsertForLane(parsedWorkspaceMessages, 'workspace');
+
+      const laneMessages = lane === 'workspace'
+        ? parsedWorkspaceMessages ?? workspaceMessagesState
+        : parsedChatMessages ?? chatMessages;
+      const lastAssistant = [...laneMessages]
+        .reverse()
+        .find((message) => message.role === 'assistant');
+      if (lastAssistant) {
+        const previousMeta = next[lastAssistant.message_id] ?? null;
+        next[lastAssistant.message_id] = {
+          messageId: lastAssistant.message_id,
+          lane,
+          traceId: traceIdFromPayload ?? previousMeta?.traceId ?? lastAssistant.trace_id ?? null,
+          isFinal: true,
+          mwvReport: mwvReportFromPayload ?? previousMeta?.mwvReport ?? null,
+        };
+      }
+
+      return next;
+    });
 
     if (options.applyDisplay) {
       const displayDecision = parseDisplayDecision(body.display);

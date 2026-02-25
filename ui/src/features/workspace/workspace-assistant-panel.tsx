@@ -25,7 +25,8 @@ import type {
   UiDecision,
 } from '../../app/types';
 import type { CanvasMessage, CanvasSendPayload } from '../../app/components/canvas';
-import { DecisionPanel } from '../../app/components/decision-panel';
+import { MessageRenderer } from '../messages';
+import type { RenderableMessage } from '../messages';
 import { PlanPanel } from '../../app/components/plan-panel';
 
 export type WorkspaceContextChip = {
@@ -126,6 +127,21 @@ export function WorkspaceAssistantPanel({
   const audioChunksRef = useRef<Blob[]>([]);
 
   const visibleMessages = useMemo(() => messages.slice(-24), [messages]);
+  const renderItems = useMemo<RenderableMessage[]>(() => {
+    const items: RenderableMessage[] = visibleMessages.map((message) => ({
+      kind: 'message',
+      message,
+      meta: message.runtimeMeta ?? null,
+    }));
+    if (decision && decision.status === 'pending') {
+      items.push({
+        kind: 'decision',
+        id: `decision-${decision.id}`,
+        decision,
+      });
+    }
+    return items;
+  }, [decision, visibleMessages]);
 
   const canUseMediaRecorder = useMemo(() => {
     if (typeof window === 'undefined') {
@@ -462,27 +478,26 @@ export function WorkspaceAssistantPanel({
         showModeControls={false}
       />
 
-      {decision && decision.status === 'pending' ? (
-        <div className="border-b border-[#1f1f24]">
-          <DecisionPanel
-            decision={decision}
-            busy={decisionBusy}
-            error={decisionError}
-            onRespond={(choice, editedAction) => {
-              if (!onDecisionRespond) {
-                return;
-              }
-              void onDecisionRespond(choice, editedAction);
-            }}
-          />
-        </div>
-      ) : null}
-
       <div className="flex-1 min-h-0 overflow-auto px-3 py-3 space-y-2" data-scrollbar="always">
-        {visibleMessages.length === 0 ? (
+        {renderItems.length === 0 ? (
           <div className="text-[12px] text-[#777]">No messages yet.</div>
         ) : (
-          visibleMessages.map((message) => {
+          renderItems.map((item) => {
+            if (item.kind === 'decision') {
+              return (
+                <div key={item.id}>
+                  <MessageRenderer
+                    context="workspace"
+                    message={item}
+                    decisionBusy={decisionBusy}
+                    decisionError={decisionError}
+                    onDecisionRespond={onDecisionRespond}
+                  />
+                </div>
+              );
+            }
+
+            const message = item.message;
             const isUser = message.role === 'user';
             const canFeedback =
               !!onSendFeedback
@@ -495,15 +510,13 @@ export function WorkspaceAssistantPanel({
 
             return (
               <div key={message.id}>
-                <div
-                  className={`rounded-lg border px-3 py-2 text-[12px] whitespace-pre-wrap break-words ${
-                    isUser
-                      ? 'bg-[#141418] border-[#252530] text-[#d0d0d8] ml-6'
-                      : 'bg-[#101015] border-[#1f1f28] text-[#bfc2cb] mr-6'
-                  }`}
-                >
-                  {message.content}
-                </div>
+                <MessageRenderer
+                  context="workspace"
+                  message={item}
+                  decisionBusy={decisionBusy}
+                  decisionError={decisionError}
+                  onDecisionRespond={onDecisionRespond}
+                />
                 {isSavedMessage ? (
                   <div className={`mt-1 flex items-center gap-1 ${isUser ? 'justify-end mr-6' : 'ml-0'}`}>
                     <button

@@ -1,6 +1,25 @@
 export type ChatRole = 'user' | 'assistant' | 'system';
 export type MessageLane = 'chat' | 'workspace';
 
+export type MwvReportUi = {
+  route?: string;
+  trace_id?: string | null;
+  stop_reason_code?: string;
+  plan_summary?: string;
+  execution_summary?: string;
+  attempts?: { current?: number; max?: number };
+  verifier?: { status?: string; duration_ms?: number | null; [k: string]: unknown };
+  [k: string]: unknown;
+};
+
+export type MessageRuntimeMeta = {
+  messageId: string;
+  lane: MessageLane;
+  traceId: string | null;
+  isFinal: boolean;
+  mwvReport: MwvReportUi | null;
+};
+
 export type ChatAttachment = {
   name: string;
   mime: string;
