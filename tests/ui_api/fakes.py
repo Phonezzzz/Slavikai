@@ -25,6 +25,7 @@ from config.tools_config import (
 )
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
 from core.tracer import Tracer
+from memory.categorized_memory_store import CategorizedMemoryStore
 from server.http_api import _resolve_workspace_root_candidate, create_app
 from server.ui_hub import UIHub
 from server.ui_session_storage import (
@@ -32,6 +33,7 @@ from server.ui_session_storage import (
     PersistedSession,
     SQLiteUISessionStorage,
 )
+from shared.memory_category_models import MemoryCategory
 from shared.models import JSONValue, ToolResult
 from tools.tool_logger import ToolCallLogger
 
@@ -369,6 +371,24 @@ class MemoryConflictAgent(DummyAgent):
         return dict(next_item)
 
 
+class MemoryTriageAgent(DummyAgent):
+    def __init__(self, db_path: Path) -> None:
+        super().__init__()
+        self._memory_inbox_store = CategorizedMemoryStore(str(db_path))
+        self._memory_inbox_store.add_item(
+            MemoryCategory.INBOX,
+            "rule: always answer shortly",
+            "user",
+            tags=["policy"],
+        )
+        self._memory_inbox_store.add_item(
+            MemoryCategory.INBOX,
+            "note: keep project stable",
+            "user",
+            tags=["note"],
+        )
+
+
 class UIReportAgent(DummyAgent):
     def respond(self, messages) -> str:
         del messages
@@ -528,13 +548,15 @@ class DelayedFirstUserMessageHub(UIHub):
         self,
         session_id: str,
         message: dict[str, JSONValue],
+        *,
+        lane: str = "chat",
     ) -> dict[str, JSONValue]:
         role_raw = message.get("role")
         role = role_raw if isinstance(role_raw, str) else ""
         if not self._delay_done and session_id == self._delayed_session_id and role == "user":
             self._delay_done = True
             await asyncio.sleep(0.05)
-        return await super().append_message(session_id, dict(message))
+        return await super().append_message(session_id, dict(message), lane=lane)
 
 
 class FakeSttResponse:

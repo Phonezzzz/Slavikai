@@ -13,6 +13,7 @@ from core.mwv.models import (
     VerificationStatus,
     WorkResult,
     WorkStatus,
+    with_task_packet_hash,
 )
 from core.mwv.routing import MessageLike, RouteDecision, classify_request
 from shared.models import JSONValue
@@ -20,7 +21,7 @@ from shared.models import JSONValue
 RouteClassifier = Callable[[Sequence[MessageLike], str, dict[str, JSONValue] | None], RouteDecision]
 TaskBuilder = Callable[[Sequence[MWVMessage], RunContext], TaskPacket]
 WorkRunner = Callable[[TaskPacket, RunContext], WorkResult]
-VerifierRunner = Callable[[RunContext], VerificationResult]
+VerifierRunner = Callable[[TaskPacket, RunContext], VerificationResult]
 RetryHintGenerator = Callable[[TaskPacket, VerificationResult, RetryDecision], str | None]
 
 
@@ -65,7 +66,7 @@ class ManagerRuntime:
         while True:
             attempt_context = replace(context, attempt=attempt)
             work_result = worker(task, attempt_context)
-            verification_result = verifier(attempt_context)
+            verification_result = verifier(task, attempt_context)
             if _is_success(work_result, verification_result):
                 return MWVRunResult(
                     task=task,
@@ -171,15 +172,23 @@ def build_retry_task(
         constraints.append(constraint)
     if decision.llm_hint:
         constraints.append(f"LLM-уточнение: {decision.llm_hint}")
-    return TaskPacket(
+    next_task = TaskPacket(
         task_id=task.task_id,
         session_id=task.session_id,
         trace_id=task.trace_id,
         goal=task.goal,
+        packet_revision=max(1, int(task.packet_revision) + 1),
         messages=task.messages,
+        steps=task.steps,
         constraints=constraints,
+        policy=task.policy,
+        scope=task.scope,
+        budgets=task.budgets,
+        approvals=task.approvals,
+        verifier=task.verifier,
         context=task.context,
     )
+    return with_task_packet_hash(next_task)
 
 
 def summarize_verifier_failure(result: VerificationResult) -> str:

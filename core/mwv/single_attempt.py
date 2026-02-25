@@ -15,7 +15,7 @@ from core.mwv.models import (
 
 TaskBuilder = Callable[[Sequence[MWVMessage], RunContext], TaskPacket]
 WorkRunner = Callable[[TaskPacket, RunContext], WorkResult]
-VerifierRunner = Callable[[RunContext], VerificationResult]
+VerifierRunner = Callable[[TaskPacket, RunContext], VerificationResult]
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ class MWVSingleAttemptRuntime:
         task = self.task_builder(messages, context)
         attempt_context = replace(context, attempt=1, max_retries=0)
         work_result = self.worker(task, attempt_context)
-        verification_result = self.verifier(attempt_context)
+        verification_result = self.verifier(task, attempt_context)
         report = build_mwv_report(work_result, verification_result)
         return MWVSingleAttemptResult(
             task=task,

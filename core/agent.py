@@ -703,13 +703,20 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             )
         return applied
 
-    def build_memory_capsule(self, query: str, *, for_mwv: bool = False) -> dict[str, JSONValue]:
+    def build_memory_capsule(
+        self,
+        query: str,
+        *,
+        for_mwv: bool = False,
+        allow_vector_runtime_init: bool = True,
+    ) -> dict[str, JSONValue]:
         return build_memory_capsule_payload(
             query=query,
             store=self._canonical_store,
             vector_index=self.vectors,
             for_mwv=for_mwv,
             config=self._retrieval_config,
+            allow_vector_runtime_init=allow_vector_runtime_init,
         )
 
     def list_memory_conflicts(self, limit: int = 50) -> list[dict[str, JSONValue]]:
@@ -790,7 +797,11 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
                 context_parts.append(f"- {meta.get('key')}: {meta.get('value')}")
 
         try:
-            memory_capsule = self.build_memory_capsule(query, for_mwv=False)
+            memory_capsule = self.build_memory_capsule(
+                query,
+                for_mwv=False,
+                allow_vector_runtime_init=False,
+            )
             capsule_text = memory_capsule.get("text")
             if isinstance(capsule_text, str) and capsule_text.strip():
                 context_parts.append("Каноническая память:")
@@ -800,8 +811,18 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
 
         # Векторный поиск по проектному индексу (code + docs)
         try:
-            vec_results_code = self.vectors.search(query, namespace="code", top_k=3)
-            vec_results_docs = self.vectors.search(query, namespace="docs", top_k=3)
+            vec_results_code = self.vectors.search(
+                query,
+                namespace="code",
+                top_k=3,
+                allow_runtime_init=False,
+            )
+            vec_results_docs = self.vectors.search(
+                query,
+                namespace="docs",
+                top_k=3,
+                allow_runtime_init=False,
+            )
             vec_results = [*vec_results_code, *vec_results_docs]
             if vec_results:
                 context_parts.append("Контекст проекта (code/docs):")

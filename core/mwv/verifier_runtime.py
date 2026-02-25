@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 import time
@@ -7,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from core.mwv.models import RunContext, VerificationResult, VerificationStatus
+from core.mwv.models import RunContext, TaskPacket, VerificationResult, VerificationStatus
 from core.mwv.verifier import VerifierRunner
 
 
@@ -20,6 +21,7 @@ def _default_runner() -> VerifierRunnerProtocol:
 
 
 _PYTHON_EXECUTABLE = sys.executable or "python"
+_DEFAULT_TIMEOUT_SECONDS = 60 * 30
 
 DEFAULT_FALLBACK_COMMANDS: tuple[tuple[str, ...], ...] = (
     (_PYTHON_EXECUTABLE, "-m", "ruff", "check", "."),
@@ -42,14 +44,87 @@ class VerifierRuntime:
     fallback_commands: tuple[tuple[str, ...], ...] = DEFAULT_FALLBACK_COMMANDS
     project_root: Path = field(default_factory=_default_project_root)
 
-    def run(self, context: RunContext) -> VerificationResult:
-        _ = context
+    def run(self, task: TaskPacket, context: RunContext) -> VerificationResult:
+        try:
+            command = _resolve_packet_command(task.verifier)
+            timeout_seconds = _resolve_timeout(task.verifier)
+            cwd = _resolve_cwd(task.verifier, workspace_root=context.workspace_root)
+        except ValueError as exc:
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=[],
+                exit_code=None,
+                stdout="",
+                stderr="",
+                duration_seconds=0.0,
+                error=f"invalid_verifier_config: {exc}",
+            )
+
+        if command is not None:
+            return self._run_command(command, cwd=cwd, timeout_seconds=timeout_seconds)
+
         result = self.runner.run()
         if not _should_run_fallback(result):
             return result
-        return self._run_fallback()
+        return self._run_fallback(cwd=cwd, timeout_seconds=timeout_seconds)
 
-    def _run_fallback(self) -> VerificationResult:
+    def _run_command(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> VerificationResult:
+        start = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=command,
+                exit_code=None,
+                stdout=_coerce_output(exc.stdout),
+                stderr=_coerce_output(exc.stderr),
+                duration_seconds=time.monotonic() - start,
+                error="verifier_timeout",
+            )
+        except OSError as exc:
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=command,
+                exit_code=None,
+                stdout="",
+                stderr="",
+                duration_seconds=time.monotonic() - start,
+                error=f"verifier_os_error: {exc}",
+            )
+
+        status = (
+            VerificationStatus.PASSED if completed.returncode == 0 else VerificationStatus.FAILED
+        )
+        return VerificationResult(
+            status=status,
+            command=command,
+            exit_code=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+            duration_seconds=time.monotonic() - start,
+            error=None,
+        )
+
+    def _run_fallback(
+        self,
+        *,
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> VerificationResult:
         start = time.monotonic()
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
@@ -60,10 +135,21 @@ class VerifierRuntime:
             try:
                 completed = subprocess.run(
                     command,
-                    cwd=self.project_root,
+                    cwd=cwd,
                     capture_output=True,
                     text=True,
+                    timeout=timeout_seconds,
                     check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                return VerificationResult(
+                    status=VerificationStatus.ERROR,
+                    command=command,
+                    exit_code=None,
+                    stdout=_join_output(stdout_parts),
+                    stderr=_join_output([*stderr_parts, _coerce_output(exc.stderr)]),
+                    duration_seconds=time.monotonic() - start,
+                    error="verifier_timeout",
                 )
             except OSError as exc:
                 return VerificationResult(
@@ -88,6 +174,7 @@ class VerifierRuntime:
                     duration_seconds=time.monotonic() - start,
                     error=None,
                 )
+
         return VerificationResult(
             status=VerificationStatus.PASSED,
             command=last_command,
@@ -97,6 +184,76 @@ class VerifierRuntime:
             duration_seconds=time.monotonic() - start,
             error=None,
         )
+
+
+def _resolve_packet_command(verifier: object) -> list[str] | None:
+    if not isinstance(verifier, dict):
+        return None
+    command_raw = verifier.get("command")
+    if command_raw is None:
+        return None
+    if isinstance(command_raw, str):
+        stripped = command_raw.strip()
+        if not stripped:
+            return None
+        parsed = shlex.split(stripped)
+        if not parsed:
+            raise ValueError("verifier.command пустой.")
+        return parsed
+    if isinstance(command_raw, list):
+        command: list[str] = []
+        for item in command_raw:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("verifier.command list должен содержать непустые строки.")
+            command.append(item.strip())
+        if not command:
+            raise ValueError("verifier.command list пустой.")
+        return command
+    raise ValueError("verifier.command должен быть string или list[string].")
+
+
+def _resolve_timeout(verifier: object) -> int:
+    if not isinstance(verifier, dict):
+        return _DEFAULT_TIMEOUT_SECONDS
+    timeout_raw = verifier.get("timeout_seconds")
+    if timeout_raw is None:
+        return _DEFAULT_TIMEOUT_SECONDS
+    if not isinstance(timeout_raw, int):
+        raise ValueError("verifier.timeout_seconds должен быть int.")
+    if timeout_raw <= 0:
+        raise ValueError("verifier.timeout_seconds должен быть > 0.")
+    return timeout_raw
+
+
+def _resolve_cwd(verifier: object, *, workspace_root: str) -> Path:
+    root = Path(workspace_root).resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"workspace_root недоступен: {root}")
+    if not isinstance(verifier, dict):
+        return root
+    cwd_raw = verifier.get("cwd")
+    if cwd_raw is None:
+        return root
+    if not isinstance(cwd_raw, str) or not cwd_raw.strip():
+        raise ValueError("verifier.cwd должен быть непустой строкой.")
+    candidate_raw = Path(cwd_raw.strip()).expanduser()
+    candidate = candidate_raw if candidate_raw.is_absolute() else (root / candidate_raw)
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"verifier.cwd вне workspace_root: {resolved}") from exc
+    if not resolved.exists() or not resolved.is_dir():
+        raise ValueError(f"verifier.cwd недоступен: {resolved}")
+    return resolved
+
+
+def _coerce_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def _join_output(parts: list[str]) -> str:

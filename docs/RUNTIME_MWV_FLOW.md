@@ -1,6 +1,7 @@
 # RUNTIME_MWV_FLOW — текущий рабочий контур
 
 Документ описывает как MWV реально включён в runtime.
+Нормативный источник инвариантов: `docs/ARCH_CANON.md`.
 
 ## Точка входа
 
@@ -10,7 +11,7 @@
 ## Данные контура
 
 - `RunContext`: `session_id`, `trace_id`, `safe_mode`, `approved_categories`, `max_retries`, `attempt`.
-- `TaskPacket`: цель + сообщения + ограничения + контекст.
+- `TaskPacket`: execution contract (см. `TaskPacket v2` в `docs/ARCH_CANON.md`).
 - `WorkResult`: summary, changes, diagnostics.
 - `VerificationResult`: статус, команда, exit code, stdout/stderr, длительность.
 

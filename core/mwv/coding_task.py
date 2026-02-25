@@ -111,11 +111,15 @@ class CodingTaskRuntime:
             changes=changes,
         )
 
-    def _verifier_runner(self) -> Callable[[RunContext], VerificationResult]:
+    def _verifier_runner(self) -> Callable[[TaskPacket, RunContext], VerificationResult]:
         script_path = self.workspace_root / "scripts" / "check.sh"
         runner = self.verifier or VerifierRunner(script_path=script_path)
         runtime = VerifierRuntime(runner=runner)
-        return runtime.run
+
+        def _run(task: TaskPacket, context: RunContext) -> VerificationResult:
+            return runtime.run(task, context)
+
+        return _run
 
 
 def _extract_target_path(text: str) -> str | None:

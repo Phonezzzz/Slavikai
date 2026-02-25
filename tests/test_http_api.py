@@ -43,10 +43,45 @@ class DummyAgent:
         self._feedback_events: list[dict[str, object]] = []
         self.session_id: str | None = None
         self.approved_categories: set[str] = set()
+        self.runtime_mode = "act"
+        self.runtime_active_plan: dict[str, object] | None = None
+        self.runtime_active_task: dict[str, object] | None = None
+        self.runtime_auto_state: dict[str, object] | None = None
+        self.runtime_plan_guard_enabled = False
+        self.runtime_state_calls: list[dict[str, object]] = []
+        self.runtime_tools_calls: list[dict[str, bool]] = []
 
     def set_session_context(self, session_id: str | None, approved_categories: set[str]) -> None:
         self.session_id = session_id
         self.approved_categories = set(approved_categories)
+
+    def apply_runtime_tools_enabled(self, state: dict[str, bool]) -> None:
+        self.runtime_tools_calls.append(dict(state))
+        self.tools_enabled.update(state)
+
+    def set_runtime_state(
+        self,
+        *,
+        mode: str,
+        active_plan: dict[str, object] | None,
+        active_task: dict[str, object] | None,
+        auto_state: dict[str, object] | None = None,
+        enforce_plan_guard: bool,
+    ) -> None:
+        self.runtime_mode = mode
+        self.runtime_active_plan = dict(active_plan) if isinstance(active_plan, dict) else None
+        self.runtime_active_task = dict(active_task) if isinstance(active_task, dict) else None
+        self.runtime_auto_state = dict(auto_state) if isinstance(auto_state, dict) else None
+        self.runtime_plan_guard_enabled = bool(enforce_plan_guard)
+        self.runtime_state_calls.append(
+            {
+                "mode": mode,
+                "active_plan": self.runtime_active_plan,
+                "active_task": self.runtime_active_task,
+                "auto_state": self.runtime_auto_state,
+                "enforce_plan_guard": self.runtime_plan_guard_enabled,
+            }
+        )
 
     def respond(self, messages) -> str:
         content = messages[-1].content if messages else ""
@@ -226,6 +261,117 @@ def test_chat_completions_returns_meta(monkeypatch, tmp_path) -> None:
             assert isinstance(meta.get("trace_id"), str)
             assert isinstance(meta.get("session_id"), str)
             assert meta.get("safe_mode") is True
+            assert meta.get("runtime_mode") is None
+            assert meta.get("runtime_session_id") is None
+            assert not agent.runtime_state_calls
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_chat_completions_runtime_mode_ask_opt_in(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            runtime_session_id = "runtime-session-ask"
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                    "slavik_meta": {
+                        "runtime_mode": "ask",
+                        "runtime_session_id": runtime_session_id,
+                    },
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            meta = payload.get("slavik_meta")
+            assert isinstance(meta, dict)
+            assert meta.get("runtime_mode") == "ask"
+            assert meta.get("runtime_session_id") == runtime_session_id
+            assert agent.runtime_mode == "ask"
+            assert agent.runtime_state_calls
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_chat_completions_runtime_mode_auto_opt_in(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            runtime_session_id = "runtime-session-auto"
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "исправь тесты"}],
+                    "stream": False,
+                    "slavik_meta": {
+                        "runtime_mode": "auto",
+                        "runtime_session_id": runtime_session_id,
+                    },
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            meta = payload.get("slavik_meta")
+            assert isinstance(meta, dict)
+            assert meta.get("runtime_mode") == "auto"
+            assert meta.get("runtime_session_id") == runtime_session_id
+            assert agent.runtime_mode == "auto"
+            assert agent.runtime_state_calls
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("runtime_mode", ["plan", "act"])
+def test_chat_completions_runtime_mode_plan_act_rejected(
+    monkeypatch,
+    tmp_path,
+    runtime_mode: str,
+) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                    "slavik_meta": {
+                        "runtime_mode": runtime_mode,
+                        "runtime_session_id": "runtime-session",
+                    },
+                },
+            )
+            assert resp.status == 400
+            payload = await resp.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("type") == "invalid_request_error"
+            details = error.get("details")
+            assert isinstance(details, dict)
+            next_steps = details.get("next_steps")
+            assert isinstance(next_steps, list)
+            assert next_steps
         finally:
             await client.close()
 

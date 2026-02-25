@@ -1,9 +1,13 @@
 # LIFECYCLE — жизненный цикл запроса
 
+Нормативный источник инвариантов: `docs/ARCH_CANON.md`.
+
 ## 1) Вход
 
 - HTTP: `/v1/chat/completions` или UI-endpoints `/ui/api/*`.
 - Точка обработки: `Agent.respond(...)`.
+- Для `/v1` rollout: `slavik_meta.runtime_mode` работает как opt-in (`ask|auto`),
+  legacy-путь по умолчанию сохраняется.
 
 ## 2) Разветвление
 

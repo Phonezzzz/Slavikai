@@ -62,6 +62,7 @@ async def _publish_chat_stream_start(
     *,
     session_id: str,
     stream_id: str,
+    lane: str = "chat",
 ) -> None:
     await hub.publish(
         session_id,
@@ -70,6 +71,7 @@ async def _publish_chat_stream_start(
             "payload": {
                 "session_id": session_id,
                 "stream_id": stream_id,
+                "lane": lane,
             },
         },
     )
@@ -81,6 +83,7 @@ async def _publish_chat_stream_delta(
     session_id: str,
     stream_id: str,
     delta: str,
+    lane: str = "chat",
 ) -> None:
     if not delta:
         return
@@ -92,6 +95,7 @@ async def _publish_chat_stream_delta(
                 "session_id": session_id,
                 "stream_id": stream_id,
                 "delta": delta,
+                "lane": lane,
             },
         },
     )
@@ -102,6 +106,7 @@ async def _publish_chat_stream_done(
     *,
     session_id: str,
     stream_id: str,
+    lane: str = "chat",
 ) -> None:
     await hub.publish(
         session_id,
@@ -110,6 +115,7 @@ async def _publish_chat_stream_done(
             "payload": {
                 "session_id": session_id,
                 "stream_id": stream_id,
+                "lane": lane,
             },
         },
     )
@@ -121,17 +127,19 @@ async def _publish_chat_stream_from_text(
     session_id: str,
     stream_id: str,
     content: str,
+    lane: str = "chat",
 ) -> None:
-    await _publish_chat_stream_start(hub, session_id=session_id, stream_id=stream_id)
+    await _publish_chat_stream_start(hub, session_id=session_id, stream_id=stream_id, lane=lane)
     for chunk in _split_chat_stream_chunks(content):
         await _publish_chat_stream_delta(
             hub,
             session_id=session_id,
             stream_id=stream_id,
             delta=chunk,
+            lane=lane,
         )
         await asyncio.sleep(0.01)
-    await _publish_chat_stream_done(hub, session_id=session_id, stream_id=stream_id)
+    await _publish_chat_stream_done(hub, session_id=session_id, stream_id=stream_id, lane=lane)
 
 
 def _split_canvas_stream_chunks(content: str) -> list[str]:

@@ -44,16 +44,24 @@ def test_ui_chat_send_canvas_stream_emits_chat_status_and_canvas_stream() -> Non
             assert "chat.stream.delta" in event_types
             assert "chat.stream.done" in event_types
             chat_deltas: list[str] = []
+            chat_lanes: set[str] = set()
             for event in events:
-                if event.get("type") != "chat.stream.delta":
+                event_type = event.get("type")
+                if not isinstance(event_type, str) or not event_type.startswith("chat.stream."):
                     continue
                 payload = event.get("payload")
                 if not isinstance(payload, dict):
+                    continue
+                lane_raw = payload.get("lane")
+                if isinstance(lane_raw, str):
+                    chat_lanes.add(lane_raw)
+                if event_type != "chat.stream.delta":
                     continue
                 delta = payload.get("delta")
                 if isinstance(delta, str):
                     chat_deltas.append(delta)
             assert chat_deltas
+            assert chat_lanes == {"chat"}
             assert all("import time" not in delta for delta in chat_deltas)
             stream_resp.close()
         finally:
@@ -255,10 +263,87 @@ def test_ui_events_stream_includes_chat_stream_events() -> None:
             ]
             assert len(assistant_messages) == 1
 
-            event_types = await _read_sse_event_types(stream_resp, max_events=64)
+            events = await _read_sse_events(stream_resp, max_events=64)
+            event_types = [
+                event.get("type") for event in events if isinstance(event.get("type"), str)
+            ]
             assert "chat.stream.start" in event_types
             assert "chat.stream.delta" in event_types
             assert "chat.stream.done" in event_types
+            stream_lanes: set[str] = set()
+            for event in events:
+                event_type = event.get("type")
+                if not isinstance(event_type, str) or not event_type.startswith("chat.stream."):
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                lane = payload.get("lane")
+                if isinstance(lane, str):
+                    stream_lanes.add(lane)
+            assert stream_lanes == {"chat"}
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_events_stream_workspace_lane_has_chat_stream_without_canvas() -> None:
+    async def run() -> None:
+        client = await _create_client(LongCodeAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Generate long module", "lane": "workspace"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            assert send_payload.get("lane") == "workspace"
+            display = send_payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "chat"
+            artifacts = send_payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts == []
+
+            events = await _read_sse_events(stream_resp, max_events=64)
+            event_types = [
+                event.get("type") for event in events if isinstance(event.get("type"), str)
+            ]
+            assert "chat.stream.start" in event_types
+            assert "chat.stream.delta" in event_types
+            assert "chat.stream.done" in event_types
+            assert "canvas.stream.start" not in event_types
+            assert "canvas.stream.delta" not in event_types
+            assert "canvas.stream.done" not in event_types
+            lanes: set[str] = set()
+            for event in events:
+                event_type = event.get("type")
+                if not isinstance(event_type, str) or not event_type.startswith("chat.stream."):
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                lane = payload.get("lane")
+                if isinstance(lane, str):
+                    lanes.add(lane)
+            assert lanes == {"workspace"}
             stream_resp.close()
         finally:
             await client.close()

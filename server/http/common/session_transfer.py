@@ -7,6 +7,8 @@ from core.tracer import TraceRecord
 from server.ui_session_storage import PersistedSession
 from shared.models import JSONValue
 
+_MESSAGE_LANES = {"chat", "workspace"}
+
 
 def _serialize_trace_events(
     events: list[TraceRecord],
@@ -29,11 +31,24 @@ def _utc_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _parse_imported_message(raw: object) -> dict[str, JSONValue] | None:
+def _normalize_message_lane(value: object, *, default: str) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _MESSAGE_LANES:
+            return normalized
+    return default
+
+
+def _parse_imported_message(
+    raw: object,
+    *,
+    default_lane: str = "chat",
+) -> dict[str, JSONValue] | None:
     if not isinstance(raw, dict):
         return None
     message_id_raw = raw.get("message_id")
     role_raw = raw.get("role")
+    lane_raw = raw.get("lane")
     content_raw = raw.get("content")
     created_at_raw = raw.get("created_at")
     trace_id_raw = raw.get("trace_id")
@@ -88,6 +103,7 @@ def _parse_imported_message(raw: object) -> dict[str, JSONValue] | None:
     return {
         "message_id": message_id_raw.strip(),
         "role": role_raw,
+        "lane": _normalize_message_lane(lane_raw, default=default_lane),
         "content": content_raw,
         "created_at": created_at_raw.strip(),
         "trace_id": trace_id,
@@ -124,15 +140,26 @@ def _parse_imported_session(
     updated_at = (
         updated_at_raw if isinstance(updated_at_raw, str) and updated_at_raw.strip() else created_at
     )
+    messages: list[dict[str, JSONValue]] = []
     messages_raw = raw.get("messages")
+    if messages_raw is None:
+        messages_raw = []
     if not isinstance(messages_raw, list):
         return None
-    messages: list[dict[str, JSONValue]] = []
     for item in messages_raw:
-        parsed_message = _parse_imported_message(item)
+        parsed_message = _parse_imported_message(item, default_lane="chat")
         if parsed_message is None:
             return None
         messages.append(parsed_message)
+    workspace_messages_raw = raw.get("workspace_messages")
+    if workspace_messages_raw is not None:
+        if not isinstance(workspace_messages_raw, list):
+            return None
+        for item in workspace_messages_raw:
+            parsed_message = _parse_imported_message(item, default_lane="workspace")
+            if parsed_message is None:
+                return None
+            messages.append(parsed_message)
     policy_raw = raw.get("policy")
     policy = policy_raw if isinstance(policy_raw, dict) else {}
     policy_profile = normalize_policy_profile_fn(policy.get("profile"))
@@ -184,12 +211,21 @@ def _serialize_persisted_session(
             "provider": session.model_provider,
             "model": session.model_id,
         }
+    chat_messages: list[dict[str, JSONValue]] = []
+    workspace_messages: list[dict[str, JSONValue]] = []
+    for item in session.messages:
+        lane = _normalize_message_lane(item.get("lane"), default="chat")
+        if lane == "workspace":
+            workspace_messages.append(dict(item))
+        else:
+            chat_messages.append(dict(item))
     payload: dict[str, JSONValue] = {
         "session_id": session.session_id,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
         "status": session.status,
-        "messages": [dict(item) for item in session.messages],
+        "messages": chat_messages,
+        "workspace_messages": workspace_messages,
         "output": {
             "content": session.output_text,
             "updated_at": session.output_updated_at,

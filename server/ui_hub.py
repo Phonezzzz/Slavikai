@@ -22,6 +22,7 @@ def _utc_iso_now() -> str:
 
 
 SessionStatus = Literal["ok", "busy", "error"]
+MessageLane = Literal["chat", "workspace"]
 PolicyProfile = Literal["sandbox", "index", "yolo"]
 SessionMode = Literal["ask", "plan", "act", "auto"]
 SessionAccess = Literal["owned", "forbidden", "missing"]
@@ -35,6 +36,9 @@ class SessionListItem(TypedDict):
     created_at: str
     updated_at: str
     message_count: int
+    chat_message_count: int
+    workspace_message_count: int
+    last_message_lane: MessageLane | None
     title_override: str | None
     folder_id: str | None
 
@@ -45,6 +49,9 @@ class _SessionListSortableItem(TypedDict):
     created_at: str
     updated_at: datetime
     message_count: int
+    chat_message_count: int
+    workspace_message_count: int
+    last_message_lane: MessageLane | None
     title_override: str | None
     folder_id: str | None
 
@@ -54,6 +61,17 @@ DEFAULT_MAX_SESSIONS = 200
 DEFAULT_MAX_MESSAGES_PER_SESSION = 500
 
 _MESSAGE_ROLES = {"user", "assistant", "system"}
+_MESSAGE_LANES = {"chat", "workspace"}
+
+
+def _normalize_message_lane(value: object, *, default: MessageLane = "chat") -> MessageLane:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "workspace":
+            return "workspace"
+        if normalized == "chat":
+            return "chat"
+    return default
 
 
 def _normalize_message_attachments(value: JSONValue) -> list[dict[str, str]]:
@@ -88,6 +106,7 @@ def _build_message(
     *,
     role: str,
     content: str,
+    lane: MessageLane = "chat",
     trace_id: str | None = None,
     parent_user_message_id: str | None = None,
     attachments: list[dict[str, str]] | None = None,
@@ -97,9 +116,11 @@ def _build_message(
     normalized_role = role.strip()
     if normalized_role not in _MESSAGE_ROLES:
         raise ValueError(f"unsupported message role: {role}")
+    normalized_lane = _normalize_message_lane(lane)
     return {
         "message_id": (message_id or uuid.uuid4().hex).strip(),
         "role": normalized_role,
+        "lane": normalized_lane,
         "content": content,
         "created_at": (created_at or _utc_iso_now()).strip(),
         "trace_id": trace_id.strip() if isinstance(trace_id, str) and trace_id.strip() else None,
@@ -115,6 +136,7 @@ def _build_message(
 def _normalize_message_payload(message: dict[str, JSONValue]) -> dict[str, JSONValue]:
     message_id = message.get("message_id")
     role = message.get("role")
+    lane = message.get("lane")
     content = message.get("content")
     created_at = message.get("created_at")
     trace_id = message.get("trace_id")
@@ -125,6 +147,8 @@ def _normalize_message_payload(message: dict[str, JSONValue]) -> dict[str, JSONV
         raise ValueError("message_id required")
     if not isinstance(role, str) or role.strip() not in _MESSAGE_ROLES:
         raise ValueError("role required")
+    if lane is not None and (not isinstance(lane, str) or lane.strip() not in _MESSAGE_LANES):
+        raise ValueError("lane must be chat|workspace")
     if not isinstance(content, str):
         raise ValueError("content required")
     if not isinstance(created_at, str) or not created_at.strip():
@@ -137,6 +161,7 @@ def _normalize_message_payload(message: dict[str, JSONValue]) -> dict[str, JSONV
         raise ValueError("parent_user_message_id must be string or null")
 
     normalized_role = role.strip()
+    normalized_lane = _normalize_message_lane(lane, default="chat")
     normalized_trace = trace_id.strip() if isinstance(trace_id, str) and trace_id.strip() else None
     normalized_parent = (
         parent_user_message_id.strip()
@@ -153,6 +178,7 @@ def _normalize_message_payload(message: dict[str, JSONValue]) -> dict[str, JSONV
     return {
         "message_id": message_id.strip(),
         "role": normalized_role,
+        "lane": normalized_lane,
         "content": content,
         "created_at": created_at.strip(),
         "trace_id": normalized_trace,
@@ -266,19 +292,61 @@ class UIHub:
             self._drop_sessions_locked([normalized])
             return True
 
-    async def get_messages(self, session_id: str) -> list[dict[str, JSONValue]]:
+    def _messages_for_lane(
+        self,
+        messages: list[dict[str, JSONValue]],
+        *,
+        lane: MessageLane,
+    ) -> list[dict[str, JSONValue]]:
+        normalized_lane = _normalize_message_lane(lane)
+        filtered: list[dict[str, JSONValue]] = []
+        for message in messages:
+            message_lane = _normalize_message_lane(message.get("lane"), default="chat")
+            if message_lane != normalized_lane:
+                continue
+            filtered.append(dict(message))
+        return filtered
+
+    def _session_lane_stats(
+        self,
+        messages: list[dict[str, JSONValue]],
+    ) -> tuple[int, int, MessageLane | None]:
+        chat_count = 0
+        workspace_count = 0
+        last_lane: MessageLane | None = None
+        for message in messages:
+            message_lane = _normalize_message_lane(message.get("lane"), default="chat")
+            if message_lane == "workspace":
+                workspace_count += 1
+                last_lane = "workspace"
+            else:
+                chat_count += 1
+                last_lane = "chat"
+        return chat_count, workspace_count, last_lane
+
+    async def get_messages(
+        self,
+        session_id: str,
+        *,
+        lane: MessageLane = "chat",
+    ) -> list[dict[str, JSONValue]]:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 return []
-            return [dict(item) for item in state.messages]
+            return self._messages_for_lane(state.messages, lane=lane)
 
-    async def get_session_history(self, session_id: str) -> list[dict[str, JSONValue]] | None:
+    async def get_session_history(
+        self,
+        session_id: str,
+        *,
+        lane: MessageLane = "chat",
+    ) -> list[dict[str, JSONValue]] | None:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 return None
-            return [dict(item) for item in state.messages]
+            return self._messages_for_lane(state.messages, lane=lane)
 
     async def get_session_output(self, session_id: str) -> dict[str, str | None] | None:
         async with self._lock:
@@ -376,14 +444,19 @@ class UIHub:
             for session_id, state in self._sessions.items():
                 if state.principal_id != normalized_principal:
                     continue
-                title = state.title_override or self._build_session_title(state.messages)
+                chat_count, workspace_count, last_lane = self._session_lane_stats(state.messages)
+                chat_messages = self._messages_for_lane(state.messages, lane="chat")
+                title = state.title_override or self._build_session_title(chat_messages)
                 items.append(
                     {
                         "session_id": session_id,
                         "title": title,
                         "created_at": state.created_at,
                         "updated_at": datetime.fromisoformat(state.updated_at),
-                        "message_count": len(state.messages),
+                        "message_count": chat_count,
+                        "chat_message_count": chat_count,
+                        "workspace_message_count": workspace_count,
+                        "last_message_lane": last_lane,
                         "title_override": state.title_override,
                         "folder_id": state.folder_id,
                     },
@@ -396,6 +469,9 @@ class UIHub:
                     "created_at": item["created_at"],
                     "updated_at": item["updated_at"].isoformat(),
                     "message_count": item["message_count"],
+                    "chat_message_count": item["chat_message_count"],
+                    "workspace_message_count": item["workspace_message_count"],
+                    "last_message_lane": item["last_message_lane"],
                     "title_override": item["title_override"],
                     "folder_id": item["folder_id"],
                 }
@@ -616,12 +692,21 @@ class UIHub:
             decision = dict(state.decision_packet) if state.decision_packet is not None else None
             status_value = self._normalize_status(state.status_state)
             selected_model = self._selected_model_payload(state)
+            chat_messages = self._messages_for_lane(state.messages, lane="chat")
+            workspace_messages = self._messages_for_lane(state.messages, lane="workspace")
+            chat_count, workspace_count, last_lane = self._session_lane_stats(state.messages)
             return {
                 "session_id": session_id,
                 "created_at": state.created_at,
                 "updated_at": state.updated_at,
                 "status": status_value,
-                "messages": [dict(item) for item in state.messages],
+                "messages": chat_messages,
+                "workspace_messages": workspace_messages,
+                "lane_stats": {
+                    "chat_message_count": chat_count,
+                    "workspace_message_count": workspace_count,
+                    "last_message_lane": last_lane,
+                },
                 "output": {
                     "content": state.output_text,
                     "updated_at": state.output_updated_at,
@@ -915,8 +1000,11 @@ class UIHub:
         self,
         session_id: str,
         message: dict[str, JSONValue],
+        *,
+        lane: MessageLane = "chat",
     ) -> dict[str, JSONValue]:
         normalized_message = _normalize_message_payload(message)
+        normalized_message["lane"] = _normalize_message_lane(lane)
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -1271,6 +1359,10 @@ class UIHub:
 
     def _build_session_title(self, messages: list[dict[str, JSONValue]]) -> str:
         for message in messages:
+            lane_raw = message.get("lane")
+            lane = _normalize_message_lane(lane_raw, default="chat")
+            if lane != "chat":
+                continue
             role_raw = message.get("role")
             role = role_raw if isinstance(role_raw, str) else ""
             if role != "user":
@@ -1293,6 +1385,7 @@ class UIHub:
         *,
         role: str,
         content: str,
+        lane: MessageLane = "chat",
         trace_id: str | None = None,
         parent_user_message_id: str | None = None,
         attachments: list[dict[str, str]] | None = None,
@@ -1302,6 +1395,7 @@ class UIHub:
         return _build_message(
             role=role,
             content=content,
+            lane=lane,
             trace_id=trace_id,
             parent_user_message_id=parent_user_message_id,
             attachments=attachments,

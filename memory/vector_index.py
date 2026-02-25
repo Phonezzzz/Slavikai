@@ -219,11 +219,23 @@ class VectorIndex:
         return int(cur.rowcount)
 
     def search(
-        self, query: str, namespace: str = "default", top_k: int = 5
+        self,
+        query: str,
+        namespace: str = "default",
+        top_k: int = 5,
+        *,
+        allow_runtime_init: bool = True,
     ) -> list[VectorSearchResult]:
         if not query.strip():
             return []
-        query_embedding = self._encode_texts([query])[0]
+        if not allow_runtime_init and not self.is_runtime_ready():
+            return []
+        try:
+            query_embedding = self._encode_texts([query], allow_runtime_init=allow_runtime_init)[0]
+        except RuntimeError:
+            if not allow_runtime_init:
+                return []
+            raise
         cur = self.conn.cursor()
         cur.execute(
             "SELECT path, content, embedding, meta FROM vectors WHERE namespace = ?",
@@ -258,6 +270,13 @@ class VectorIndex:
             return
         raise RuntimeError(f"Неизвестный embeddings provider: {self.provider}")
 
+    def is_runtime_ready(self) -> bool:
+        if self.provider == "local":
+            return self.model is not None
+        if self.provider == "openai":
+            return bool(self.openai_api_key)
+        return False
+
     def _ensure_local_model(self) -> SentenceTransformer:
         if self.model is not None:
             return self.model
@@ -274,10 +293,20 @@ class VectorIndex:
                 f"VectorIndex не смог загрузить локальную модель {self.local_model}: {exc}"
             ) from exc
 
-    def _encode_texts(self, texts: list[str]) -> np.ndarray:
-        self.ensure_runtime_ready()
+    def _encode_texts(self, texts: list[str], *, allow_runtime_init: bool = True) -> np.ndarray:
+        if allow_runtime_init:
+            self.ensure_runtime_ready()
+        elif not self.is_runtime_ready():
+            raise RuntimeError("VectorIndex runtime is not ready")
         if self.provider == "local":
-            model = self._ensure_local_model()
+            model: SentenceTransformer
+            if allow_runtime_init:
+                model = self._ensure_local_model()
+            else:
+                local_model = self.model
+                if local_model is None:
+                    raise RuntimeError("VectorIndex local model is not loaded")
+                model = local_model
             raw = model.encode(texts)
             return np.asarray(raw, dtype=np.float32)
         return self._encode_openai(texts)

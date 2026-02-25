@@ -82,6 +82,7 @@ def rank_atoms(
     vector_index: VectorIndex,
     namespace: str,
     top_k: int,
+    allow_vector_runtime_init: bool,
 ) -> list[CanonicalAtom]:
     if not atoms:
         return []
@@ -89,7 +90,12 @@ def rank_atoms(
     ranked: list[CanonicalAtom] = []
     seen: set[str] = set()
     try:
-        semantic = vector_index.search(query, namespace=namespace, top_k=max(top_k * 3, top_k))
+        semantic = vector_index.search(
+            query,
+            namespace=namespace,
+            top_k=max(top_k * 3, top_k),
+            allow_runtime_init=allow_vector_runtime_init,
+        )
     except Exception:  # noqa: BLE001
         semantic = []
 
@@ -156,6 +162,7 @@ def build_memory_capsule(
     for_mwv: bool,
     config: RetrievalConfig,
     include_conflicts: bool = False,
+    allow_vector_runtime_init: bool = True,
 ) -> dict[str, JSONValue]:
     allowed_types = _DEFAULT_MWV_TYPES if for_mwv else _DEFAULT_CHAT_TYPES
     all_atoms = store.list_atoms(statuses={AtomStatus.ACTIVE, AtomStatus.CONFLICT}, limit=400)
@@ -172,6 +179,7 @@ def build_memory_capsule(
         vector_index=vector_index,
         namespace="atoms",
         top_k=config.top_k,
+        allow_vector_runtime_init=allow_vector_runtime_init,
     )
     packed_text, packed_items = pack_context(ranked, max_chars=config.max_context_chars)
     return {

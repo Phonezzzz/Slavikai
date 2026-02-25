@@ -5,10 +5,12 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from shared.models import JSONValue
 from shared.sanitize import safe_json_loads
+
+MessageLane = Literal["chat", "workspace"]
 
 
 @dataclass(frozen=True)
@@ -269,6 +271,7 @@ class SQLiteUISessionStorage:
                     INSERT INTO ui_messages (
                         message_id,
                         session_id,
+                        lane,
                         role,
                         content,
                         created_at,
@@ -276,11 +279,12 @@ class SQLiteUISessionStorage:
                         parent_user_message_id,
                         attachments_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         prepared["message_id"],
                         session.session_id,
+                        prepared["lane"],
                         prepared["role"],
                         prepared["content"],
                         prepared["created_at"],
@@ -373,6 +377,10 @@ class SQLiteUISessionStorage:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
+            if self._requires_legacy_reset(conn):
+                conn.execute("DROP TABLE IF EXISTS ui_messages")
+                conn.execute("DROP TABLE IF EXISTS ui_sessions")
+                conn.execute("DROP TABLE IF EXISTS ui_folders")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ui_sessions (
@@ -418,6 +426,7 @@ class SQLiteUISessionStorage:
                 CREATE TABLE IF NOT EXISTS ui_messages (
                     message_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
+                    lane TEXT NOT NULL DEFAULT 'chat',
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -431,6 +440,23 @@ class SQLiteUISessionStorage:
             self._ensure_ui_messages_table(conn)
             conn.commit()
 
+    def _requires_legacy_reset(self, conn: sqlite3.Connection) -> bool:
+        existing_tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+            if isinstance(row, sqlite3.Row) and row["name"] is not None
+        }
+        if "ui_messages" not in existing_tables:
+            return False
+        message_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(ui_messages)").fetchall()
+            if isinstance(row, sqlite3.Row) and row["name"] is not None
+        }
+        return "lane" not in message_columns
+
     def _load_messages(
         self,
         conn: sqlite3.Connection,
@@ -440,6 +466,7 @@ class SQLiteUISessionStorage:
             """
             SELECT
                 message_id,
+                lane,
                 role,
                 content,
                 created_at,
@@ -457,6 +484,7 @@ class SQLiteUISessionStorage:
             messages.append(
                 {
                     "message_id": str(row["message_id"]),
+                    "lane": self._decode_lane(row["lane"]),
                     "role": str(row["role"]),
                     "content": str(row["content"]),
                     "created_at": str(row["created_at"]),
@@ -588,6 +616,7 @@ class SQLiteUISessionStorage:
         expected_columns = [
             "message_id",
             "session_id",
+            "lane",
             "role",
             "content",
             "created_at",
@@ -604,6 +633,7 @@ class SQLiteUISessionStorage:
                 CREATE TABLE ui_messages (
                     message_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
+                    lane TEXT NOT NULL DEFAULT 'chat',
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -623,6 +653,7 @@ class SQLiteUISessionStorage:
 
     def _message_for_write(self, message: dict[str, JSONValue]) -> dict[str, str | None]:
         message_id = message.get("message_id")
+        lane_raw = message.get("lane")
         role = message.get("role")
         content = message.get("content")
         created_at = message.get("created_at")
@@ -631,6 +662,7 @@ class SQLiteUISessionStorage:
         attachments_raw = message.get("attachments")
         if not isinstance(message_id, str) or not message_id.strip():
             raise ValueError("message_id required")
+        lane = self._normalize_lane(lane_raw)
         if not isinstance(role, str) or not role.strip():
             raise ValueError("role required")
         if not isinstance(content, str):
@@ -644,6 +676,7 @@ class SQLiteUISessionStorage:
         attachments = self._normalize_attachments_for_write(attachments_raw, role.strip())
         return {
             "message_id": message_id.strip(),
+            "lane": lane,
             "role": role.strip(),
             "content": content,
             "created_at": created_at.strip(),
@@ -687,6 +720,18 @@ class SQLiteUISessionStorage:
         if isinstance(value, str):
             return self._normalize_mode(value)
         return "ask"
+
+    def _decode_lane(self, value: object) -> MessageLane:
+        return self._normalize_lane(value)
+
+    def _normalize_lane(self, value: object) -> MessageLane:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized == "workspace":
+                return "workspace"
+            if normalized == "chat":
+                return "chat"
+        return "chat"
 
     def _normalize_mode(self, value: str) -> str:
         normalized = value.strip().lower()

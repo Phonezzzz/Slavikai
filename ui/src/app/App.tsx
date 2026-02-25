@@ -24,6 +24,7 @@ import type {
   ChatMessage,
   DecisionRespondChoice,
   FolderSummary,
+  MessageLane,
   PlanEnvelope,
   PlanStepStatus,
   ProviderModels,
@@ -67,6 +68,7 @@ type ChatStreamState = {
 type PendingUserMessage = {
   content: string;
   attachments: ChatAttachment[];
+  lane: MessageLane;
 };
 
 type AppView = 'chat' | 'workspace';
@@ -122,6 +124,7 @@ const isChatMessage = (value: unknown): value is ChatMessage => {
   const candidate = value as {
     message_id?: unknown;
     role?: unknown;
+    lane?: unknown;
     content?: unknown;
     created_at?: unknown;
     trace_id?: unknown;
@@ -132,6 +135,9 @@ const isChatMessage = (value: unknown): value is ChatMessage => {
     return false;
   }
   if (candidate.role !== 'user' && candidate.role !== 'assistant' && candidate.role !== 'system') {
+    return false;
+  }
+  if (candidate.lane !== undefined && candidate.lane !== 'chat' && candidate.lane !== 'workspace') {
     return false;
   }
   if (typeof candidate.content !== 'string') {
@@ -161,6 +167,7 @@ const parseMessages = (value: unknown): ChatMessage[] => {
   }
   return value.filter(isChatMessage).map((message) => ({
     ...message,
+    lane: (message as { lane?: unknown }).lane === 'workspace' ? 'workspace' : 'chat',
     attachments: parseChatAttachments((message as { attachments?: unknown }).attachments),
   }));
 };
@@ -292,6 +299,9 @@ const parseSessions = (value: unknown): SessionSummary[] => {
       created_at?: unknown;
       updated_at?: unknown;
       message_count?: unknown;
+      chat_message_count?: unknown;
+      workspace_message_count?: unknown;
+      last_message_lane?: unknown;
       title_override?: unknown;
       folder_id?: unknown;
     };
@@ -313,6 +323,18 @@ const parseSessions = (value: unknown): SessionSummary[] => {
       created_at: candidate.created_at,
       updated_at: candidate.updated_at,
       message_count: candidate.message_count,
+      chat_message_count:
+        typeof candidate.chat_message_count === 'number'
+          ? candidate.chat_message_count
+          : candidate.message_count,
+      workspace_message_count:
+        typeof candidate.workspace_message_count === 'number'
+          ? candidate.workspace_message_count
+          : 0,
+      last_message_lane:
+        candidate.last_message_lane === 'workspace' || candidate.last_message_lane === 'chat'
+          ? candidate.last_message_lane
+          : null,
       title_override: typeof candidate.title_override === 'string' ? candidate.title_override : null,
       folder_id: typeof candidate.folder_id === 'string' ? candidate.folder_id : null,
     });
@@ -996,7 +1018,8 @@ export default function App() {
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [workspaceMessagesState, setWorkspaceMessagesState] = useState<ChatMessage[]>([]);
   const [, setSessionOutput] = useState<string | null>(null);
   const [sessionFiles, setSessionFiles] = useState<string[]>([]);
   const [sessionArtifacts, setSessionArtifacts] = useState<SessionArtifactRecord[]>([]);
@@ -1021,6 +1044,9 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
+  const [workspaceStreamingState, setWorkspaceStreamingState] = useState<ChatStreamState | null>(
+    null,
+  );
   const [awaitingFirstAssistantChunk, setAwaitingFirstAssistantChunk] = useState(false);
   const [composerSettings, setComposerSettings] = useState<ComposerUiSettings>(
     DEFAULT_COMPOSER_SETTINGS,
@@ -1036,29 +1062,35 @@ export default function App() {
   const [modeError, setModeError] = useState<string | null>(null);
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
 
-  const pendingForCanvas =
-    pendingSessionId === selectedConversation ? pendingUserMessage : null;
+  const pendingForChat =
+    pendingSessionId === selectedConversation && pendingUserMessage?.lane === 'chat'
+      ? pendingUserMessage
+      : null;
+  const pendingForWorkspace =
+    pendingSessionId === selectedConversation && pendingUserMessage?.lane === 'workspace'
+      ? pendingUserMessage
+      : null;
   const canvasMessages = useMemo(
-    () => buildCanvasMessages(messages),
-    [messages],
+    () => buildCanvasMessages(chatMessages),
+    [chatMessages],
   );
   const pendingCanvasMessage = useMemo(() => {
-    if (!pendingForCanvas) {
+    if (!pendingForChat) {
       return null;
     }
-    const pendingId = `pending-${Date.now()}-${pendingForCanvas.content.length}-${pendingForCanvas.attachments.length}`;
+    const pendingId = `pending-${Date.now()}-${pendingForChat.content.length}-${pendingForChat.attachments.length}`;
     return {
       id: pendingId,
       messageId: pendingId,
       role: 'user' as const,
-      content: pendingForCanvas.content,
+      content: pendingForChat.content,
       createdAt: new Date().toISOString(),
       traceId: null,
       parentUserMessageId: null,
-      attachments: pendingForCanvas.attachments,
+      attachments: pendingForChat.attachments,
       transient: true,
     };
-  }, [pendingForCanvas]);
+  }, [pendingForChat]);
   const streamingAssistantCanvasMessage = useMemo(() => {
     if (!chatStreamingState || !chatStreamingState.content.trim()) {
       return null;
@@ -1075,16 +1107,53 @@ export default function App() {
       transient: true,
     };
   }, [chatStreamingState]);
-  const workspaceMessages = useMemo(() => {
-    const next = [...canvasMessages];
-    if (pendingCanvasMessage) {
-      next.push(pendingCanvasMessage);
+  const workspaceCanvasMessages = useMemo(
+    () => buildCanvasMessages(workspaceMessagesState),
+    [workspaceMessagesState],
+  );
+  const pendingWorkspaceCanvasMessage = useMemo(() => {
+    if (!pendingForWorkspace) {
+      return null;
     }
-    if (streamingAssistantCanvasMessage) {
-      next.push(streamingAssistantCanvasMessage);
+    const pendingId = `pending-ws-${Date.now()}-${pendingForWorkspace.content.length}-${pendingForWorkspace.attachments.length}`;
+    return {
+      id: pendingId,
+      messageId: pendingId,
+      role: 'user' as const,
+      content: pendingForWorkspace.content,
+      createdAt: new Date().toISOString(),
+      traceId: null,
+      parentUserMessageId: null,
+      attachments: pendingForWorkspace.attachments,
+      transient: true,
+    };
+  }, [pendingForWorkspace]);
+  const streamingWorkspaceAssistantMessage = useMemo(() => {
+    if (!workspaceStreamingState || !workspaceStreamingState.content.trim()) {
+      return null;
+    }
+    return {
+      id: `stream-ws-${workspaceStreamingState.streamId}`,
+      messageId: `stream-ws-${workspaceStreamingState.streamId}`,
+      role: 'assistant' as const,
+      content: workspaceStreamingState.content,
+      createdAt: new Date().toISOString(),
+      traceId: null,
+      parentUserMessageId: null,
+      attachments: [],
+      transient: true,
+    };
+  }, [workspaceStreamingState]);
+  const workspaceMessages = useMemo(() => {
+    const next = [...workspaceCanvasMessages];
+    if (pendingWorkspaceCanvasMessage) {
+      next.push(pendingWorkspaceCanvasMessage);
+    }
+    if (streamingWorkspaceAssistantMessage) {
+      next.push(streamingWorkspaceAssistantMessage);
     }
     return next;
-  }, [canvasMessages, pendingCanvasMessage, streamingAssistantCanvasMessage]);
+  }, [workspaceCanvasMessages, pendingWorkspaceCanvasMessage, streamingWorkspaceAssistantMessage]);
   const showAssistantLoading = useMemo(
     () =>
       sending &&
@@ -1098,6 +1167,8 @@ export default function App() {
         id: session.session_id,
         title: session.title,
         messageCount: session.message_count,
+        chatMessageCount: session.chat_message_count,
+        workspaceMessageCount: session.workspace_message_count,
         date: session.updated_at,
         group: groupSessionByDate(session.updated_at),
       })),
@@ -1566,13 +1637,19 @@ export default function App() {
   };
 
   const loadConversation = async (sessionId: string): Promise<SelectedModel | null> => {
-    const [sessionResponse, historyResponse, outputResponse, filesResponse] = await Promise.all([
+    const [sessionResponse, historyResponse, workspaceHistoryResponse, outputResponse, filesResponse] =
+      await Promise.all([
       fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
         headers: {
           [SESSION_HEADER]: sessionId,
         },
       }),
       fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/history`, {
+        headers: {
+          [SESSION_HEADER]: sessionId,
+        },
+      }),
+      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/history?lane=workspace`, {
         headers: {
           [SESSION_HEADER]: sessionId,
         },
@@ -1589,10 +1666,11 @@ export default function App() {
       }),
     ]);
 
-    const [sessionPayload, historyPayload, outputPayload, filesPayload]: unknown[] =
+    const [sessionPayload, historyPayload, workspaceHistoryPayload, outputPayload, filesPayload]: unknown[] =
       await Promise.all([
         sessionResponse.json(),
         historyResponse.json(),
+        workspaceHistoryResponse.json(),
         outputResponse.json(),
         filesResponse.json(),
       ]);
@@ -1603,6 +1681,11 @@ export default function App() {
     if (!historyResponse.ok) {
       throw new Error(extractErrorMessage(historyPayload, 'Failed to load chat history.'));
     }
+    if (!workspaceHistoryResponse.ok) {
+      throw new Error(
+        extractErrorMessage(workspaceHistoryPayload, 'Failed to load workspace history.'),
+      );
+    }
     if (!outputResponse.ok) {
       throw new Error(extractErrorMessage(outputPayload, 'Failed to load canvas output.'));
     }
@@ -1611,8 +1694,12 @@ export default function App() {
     }
 
     const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
-    setMessages(parseMessages((historyPayload as { messages?: unknown }).messages));
+    setChatMessages(parseMessages((historyPayload as { messages?: unknown }).messages));
+    setWorkspaceMessagesState(
+      parseMessages((workspaceHistoryPayload as { messages?: unknown }).messages),
+    );
     setChatStreamingState(null);
+    setWorkspaceStreamingState(null);
     setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
     setDecisionError(null);
     const parsedOutput = parseSessionOutput((outputPayload as { output?: unknown }).output);
@@ -1644,10 +1731,18 @@ export default function App() {
     const headerSession = response.headers.get(SESSION_HEADER);
     const payloadSession = extractSessionIdFromPayload(payload);
     const nextSession = (headerSession && headerSession.trim()) || payloadSession || null;
-    const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
+    const session = (
+      payload as {
+        session?: { messages?: unknown; workspace_messages?: unknown; selected_model?: unknown };
+      }
+    ).session;
     const sessionModel = parseSelectedModel(session?.selected_model);
-    setMessages(parseMessages(session?.messages));
+    setChatMessages(parseMessages(session?.messages));
+    setWorkspaceMessagesState(
+      parseMessages((session as { workspace_messages?: unknown } | undefined)?.workspace_messages),
+    );
     setChatStreamingState(null);
+    setWorkspaceStreamingState(null);
     setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
     setDecisionError(null);
     const parsedOutput = parseSessionOutput(
@@ -1758,6 +1853,7 @@ export default function App() {
       return;
     }
     setChatStreamingState(null);
+    setWorkspaceStreamingState(null);
     const streamUrl = `/ui/api/events/stream?session_id=${encodeURIComponent(selectedConversation)}`;
     const eventSource = new EventSource(streamUrl);
     eventSource.onmessage = (event) => {
@@ -1778,9 +1874,11 @@ export default function App() {
         artifact_id?: unknown;
         stream_id?: unknown;
         delta?: unknown;
+        lane?: unknown;
         decision?: unknown;
         workflow?: unknown;
       };
+      const lane: MessageLane = payload.lane === 'workspace' ? 'workspace' : 'chat';
       if (envelope.type === 'chat.stream.start') {
         const streamId =
           typeof payload.stream_id === 'string' ? payload.stream_id.trim() : '';
@@ -1788,7 +1886,11 @@ export default function App() {
           return;
         }
         setAwaitingFirstAssistantChunk(false);
-        setChatStreamingState({ streamId, content: '' });
+        if (lane === 'workspace') {
+          setWorkspaceStreamingState({ streamId, content: '' });
+        } else {
+          setChatStreamingState({ streamId, content: '' });
+        }
         return;
       }
       if (envelope.type === 'chat.stream.delta') {
@@ -1799,15 +1901,29 @@ export default function App() {
           return;
         }
         setAwaitingFirstAssistantChunk(false);
-        setChatStreamingState((prev) => {
-          if (!prev || prev.streamId !== streamId) {
-            return { streamId, content: delta };
-          }
-          return { streamId, content: `${prev.content}${delta}` };
-        });
+        if (lane === 'workspace') {
+          setWorkspaceStreamingState((prev) => {
+            if (!prev || prev.streamId !== streamId) {
+              return { streamId, content: delta };
+            }
+            return { streamId, content: `${prev.content}${delta}` };
+          });
+        } else {
+          setChatStreamingState((prev) => {
+            if (!prev || prev.streamId !== streamId) {
+              return { streamId, content: delta };
+            }
+            return { streamId, content: `${prev.content}${delta}` };
+          });
+        }
         return;
       }
       if (envelope.type === 'chat.stream.done') {
+        if (lane === 'workspace') {
+          setWorkspaceStreamingState(null);
+        } else {
+          setChatStreamingState(null);
+        }
         return;
       }
       if (envelope.type === 'decision.packet') {
@@ -1883,6 +1999,7 @@ export default function App() {
     return () => {
       eventSource.close();
       setChatStreamingState(null);
+      setWorkspaceStreamingState(null);
     };
   }, [selectedConversation]);
 
@@ -1890,10 +2007,12 @@ export default function App() {
     if (!sessionId || sessionId === selectedConversation) {
       return;
     }
+    setView('chat');
     setSelectedConversation(sessionId);
     setArtifactViewerArtifactId(null);
     setStreamingContentByArtifactId({});
     setChatStreamingState(null);
+    setWorkspaceStreamingState(null);
     setPendingDecision(null);
     setDecisionError(null);
     try {
@@ -2028,12 +2147,14 @@ export default function App() {
             saveLastSessionId(created.sessionId);
           } else {
             setSelectedConversation(null);
-            setMessages([]);
+            setChatMessages([]);
+            setWorkspaceMessagesState([]);
             setSessionOutput(null);
             setSessionFiles([]);
             setSessionArtifacts([]);
             setStreamingContentByArtifactId({});
             setChatStreamingState(null);
+            setWorkspaceStreamingState(null);
             setSelectedModel(null);
             saveLastSessionId(null);
           }
@@ -2089,9 +2210,11 @@ export default function App() {
   const applySessionPayload = (
     payload: unknown,
     options: SessionPayloadApplyOptions,
-  ): { decision: UiDecision | null } => {
+  ): { decision: UiDecision | null; lane: MessageLane } => {
     const body = payload as {
       messages?: unknown;
+      workspace_messages?: unknown;
+      lane?: unknown;
       decision?: unknown;
       output?: unknown;
       files?: unknown;
@@ -2105,8 +2228,13 @@ export default function App() {
     };
 
     if (body.messages !== undefined) {
-      setMessages(parseMessages(body.messages));
+      setChatMessages(parseMessages(body.messages));
     }
+    if (body.workspace_messages !== undefined) {
+      setWorkspaceMessagesState(parseMessages(body.workspace_messages));
+    }
+
+    const lane: MessageLane = body.lane === 'workspace' ? 'workspace' : 'chat';
 
     const parsedDecision = parseUiDecision(body.decision);
     if (body.decision !== undefined) {
@@ -2157,10 +2285,13 @@ export default function App() {
       }
     }
 
-    return { decision: parsedDecision };
+    return { decision: parsedDecision, lane };
   };
 
-  const handleSend = async (payload: CanvasSendPayload): Promise<boolean> => {
+  const handleSend = async (
+    payload: CanvasSendPayload,
+    lane: MessageLane = 'chat',
+  ): Promise<boolean> => {
     if (!selectedConversation || sending) {
       return false;
     }
@@ -2169,12 +2300,16 @@ export default function App() {
     if (!trimmed && normalizedAttachments.length === 0) {
       return false;
     }
-    setPendingUserMessage({ content: trimmed, attachments: normalizedAttachments });
+    setPendingUserMessage({ content: trimmed, attachments: normalizedAttachments, lane });
     setPendingSessionId(selectedConversation);
-    setChatStreamingState(null);
+    if (lane === 'workspace') {
+      setWorkspaceStreamingState(null);
+    } else {
+      setChatStreamingState(null);
+    }
     setAwaitingFirstAssistantChunk(true);
-    const forceCanvasForRequest = forceCanvasNext;
-    if (forceCanvasForRequest) {
+    const forceCanvasForRequest = lane === 'chat' ? forceCanvasNext : false;
+    if (lane === 'chat' && forceCanvasForRequest) {
       setForceCanvasNext(false);
     }
     setSending(true);
@@ -2187,6 +2322,7 @@ export default function App() {
         },
         body: JSON.stringify({
           content: trimmed,
+          lane,
           force_canvas: forceCanvasForRequest,
           attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
         }),
@@ -2207,7 +2343,11 @@ export default function App() {
 
       setPendingUserMessage(null);
       setPendingSessionId(null);
-      setChatStreamingState(null);
+      if (lane === 'workspace') {
+        setWorkspaceStreamingState(null);
+      } else {
+        setChatStreamingState(null);
+      }
       applySessionPayload(payload, { applyDisplay: true });
       await loadSessions();
       setStatusMessage(null);
@@ -2217,8 +2357,12 @@ export default function App() {
       setStatusMessage(message);
       setPendingUserMessage(null);
       setPendingSessionId(null);
-      setChatStreamingState(null);
-      if (forceCanvasForRequest) {
+      if (lane === 'workspace') {
+        setWorkspaceStreamingState(null);
+      } else {
+        setChatStreamingState(null);
+      }
+      if (lane === 'chat' && forceCanvasForRequest) {
         setForceCanvasNext(true);
       }
       return false;
@@ -2703,7 +2847,7 @@ export default function App() {
               setView('chat');
             }}
             onOpenWorkspaceSettings={() => setWorkspaceSettingsOpen(true)}
-            onSendAgentMessage={(payload) => handleSend(payload)}
+            onSendAgentMessage={(payload) => handleSend(payload, 'workspace')}
             mode={sessionMode}
             activePlan={activePlan}
             activeTask={activeTask}
@@ -2732,7 +2876,7 @@ export default function App() {
               streamingAssistantMessage={streamingAssistantCanvasMessage}
               showAssistantLoading={showAssistantLoading}
               sending={sending}
-              onSendMessage={(payload) => handleSend(payload)}
+              onSendMessage={(payload) => handleSend(payload, 'chat')}
               onSendFeedback={(interactionId, rating) => handleSendFeedback(interactionId, rating)}
               modelName={modelLabel}
               onOpenSettings={() => setSettingsOpen(true)}

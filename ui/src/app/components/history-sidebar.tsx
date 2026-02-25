@@ -19,6 +19,8 @@ export interface ChatItem {
   id: string;
   title: string;
   messageCount: number;
+  chatMessageCount?: number;
+  workspaceMessageCount?: number;
   date: string;
   group: "today" | "yesterday" | "older";
 }
@@ -197,7 +199,10 @@ export function HistorySidebar({
               </div>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className="text-[11px] text-[#666]">
-                  {chat.messageCount} messages
+                  C:{chat.chatMessageCount ?? chat.messageCount}
+                </span>
+                <span className="text-[11px] text-[#666]">
+                  W:{chat.workspaceMessageCount ?? 0}
                 </span>
                 <span className="text-[11px] text-[#444]">-</span>
                 <span className="text-[11px] text-[#555]">

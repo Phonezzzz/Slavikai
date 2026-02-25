@@ -88,7 +88,7 @@ def test_mwv_fail_retry_then_success() -> None:
         ),
     ]
 
-    def _verifier(run_context: RunContext) -> VerificationResult:
+    def _verifier(_task: TaskPacket, run_context: RunContext) -> VerificationResult:
         _ = run_context
         return verifier_results.pop(0)
 
@@ -115,7 +115,7 @@ def test_mwv_fail_after_max_retries_returns_stop_response(tmp_path: Path) -> Non
         _ = run_context
         return WorkResult(task_id=task.task_id, status=WorkStatus.SUCCESS, summary="ok")
 
-    def _verifier(run_context: RunContext) -> VerificationResult:
+    def _verifier(_task: TaskPacket, run_context: RunContext) -> VerificationResult:
         _ = run_context
         return VerificationResult(
             status=VerificationStatus.FAILED,

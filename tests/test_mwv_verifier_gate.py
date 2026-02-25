@@ -46,7 +46,12 @@ def test_mwv_stops_on_verifier_failure(tmp_path: Path) -> None:
     )
     messages = [MWVMessage(role="user", content="исправь тесты")]
 
-    result = manager.run_flow(messages, context, worker=_worker, verifier=lambda ctx: runner.run())
+    result = manager.run_flow(
+        messages,
+        context,
+        worker=_worker,
+        verifier=lambda _task, _ctx: runner.run(),
+    )
 
     assert result.verification_result.status == VerificationStatus.FAILED
     assert result.retry_decision is not None

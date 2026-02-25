@@ -100,6 +100,10 @@ class AgentToolsMixin:
     last_decision_packet: DecisionPacket | None
     last_plan_summary: str | None
     last_execution_summary: str | None
+    last_reasoning: str | None
+    last_stream_response_raw: str | None
+    last_plan: TaskPlan | None
+    last_plan_original: TaskPlan | None
     _pending_decision_packet: DecisionPacket | None
     runtime_mode: str
     runtime_active_plan: dict[str, JSONValue] | None
@@ -140,15 +144,15 @@ class AgentToolsMixin:
                 plan = self.planner.build_plan(goal)
                 self.last_plan_original = plan
                 self.last_plan = plan
-                executed: TaskPlan = self.executor.run(
-                    plan,
-                    tool_gateway=self._build_tool_gateway(
-                        pre_call=self._workspace_diff_pre_call,
-                        post_call=self._workspace_diff_post_call,
-                        safe_mode_override=True,
-                    ),
+                plan_preview = self._format_plan(plan)
+                result = (
+                    "Plan сформирован (transactional-only).\n"
+                    "Выполнение инструментов из /plan отключено.\n"
+                    "Что делать дальше:\n"
+                    "- Подтверди план в UI workflow.\n"
+                    "- Перейди в act-режим и запусти execute.\n"
+                    f"{plan_preview}"
                 )
-                result = self._format_plan(executed)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
                 return response
@@ -302,6 +306,40 @@ class AgentToolsMixin:
         self.last_approval_request = None
         self.last_approval_source_endpoint = None
         self.last_approval_resume_payload = None
+
+    def reset_runtime_transient_state(self) -> None:
+        self._reset_workspace_diffs()
+        self._reset_approval_state()
+        self.last_decision_packet = None
+        self.last_reasoning = None
+        self.last_stream_response_raw = None
+        self.last_plan = None
+        self.last_plan_original = None
+        self.last_plan_summary = None
+        self.last_execution_summary = None
+        self._pending_decision_packet = None
+        self.last_auto_state = None
+        self.runtime_mode = "ask"
+        self.runtime_active_plan = None
+        self.runtime_active_task = None
+        self.runtime_auto_state = None
+        self.runtime_plan_guard_enabled = False
+        short_term = getattr(self, "short_term", None)
+        if isinstance(short_term, list):
+            short_term.clear()
+        auto_events = getattr(self, "_auto_progress_events", None)
+        if isinstance(auto_events, list):
+            auto_events.clear()
+        tool_registry = getattr(self, "tool_registry", None)
+        set_execution_policy = getattr(tool_registry, "set_execution_policy", None)
+        if callable(set_execution_policy):
+            set_execution_policy(
+                mode="ask",
+                active_plan=None,
+                active_task=None,
+                enforce_plan_guard=False,
+            )
+        self.tracer.log("runtime_reset", "Transient runtime state reset")
 
     def _record_decision_packet(self, packet: DecisionPacket) -> None:
         self.last_decision_packet = packet
@@ -951,15 +989,22 @@ class AgentToolsMixin:
         payload: dict[str, JSONValue] = {"route": route, "trace_id": trace_id}
         payload["plan_summary"] = ux_contract.plan_summary
         payload["execution_summary"] = ux_contract.execution_summary
+        is_stop = stop_reason_code is not None
         if attempts is not None:
             payload["attempts"] = {"current": attempts[0], "max": attempts[1]}
+        elif is_stop:
+            payload["attempts"] = {"current": 1, "max": 1}
         if verifier is not None:
             payload["verifier"] = {
                 "status": "ok" if verifier.status == VerificationStatus.PASSED else "fail",
                 "duration_ms": verifier.duration_ms,
             }
+        elif is_stop:
+            payload["verifier"] = {"status": "unknown", "duration_ms": None}
         if next_steps is not None:
             payload["next_steps"] = self._normalize_report_steps(next_steps)
+        elif is_stop:
+            payload["next_steps"] = []
         if stop_reason_code is not None:
             payload["stop_reason_code"] = stop_reason_code.value
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

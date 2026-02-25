@@ -30,6 +30,7 @@ EXTRA_SAMPLING_KEYS: Final[set[str]] = {
     "num_ctx",
 }
 SAMPLING_PREFIXES: Final[tuple[str, ...]] = ("ollama_", "mirostat")
+RUNTIME_MODES: Final[set[str]] = {"ask", "auto", "plan", "act"}
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,8 @@ class ChatRequest:
     messages: list[LLMMessage]
     stream: bool
     session_id: str | None
+    runtime_mode: str | None
+    runtime_session_id: str | None
     sampling_warnings: list[str]
     tool_calling_present: bool
 
@@ -128,6 +131,8 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
 
     meta_raw = payload.get("slavik_meta")
     session_id: str | None = None
+    runtime_mode: str | None = None
+    runtime_session_id: str | None = None
     if meta_raw is not None:
         if not isinstance(meta_raw, dict):
             return None, "slavik_meta должен быть объектом."
@@ -136,6 +141,19 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
             return None, "slavik_meta.session_id должен быть строкой."
         if isinstance(session_raw, str) and session_raw.strip():
             session_id = session_raw.strip()
+        runtime_mode_raw = meta_raw.get("runtime_mode")
+        if runtime_mode_raw is not None and not isinstance(runtime_mode_raw, str):
+            return None, "slavik_meta.runtime_mode должен быть строкой."
+        if isinstance(runtime_mode_raw, str) and runtime_mode_raw.strip():
+            normalized_mode = runtime_mode_raw.strip().lower()
+            if normalized_mode not in RUNTIME_MODES:
+                return None, "slavik_meta.runtime_mode должен быть ask|auto|plan|act."
+            runtime_mode = normalized_mode
+        runtime_session_raw = meta_raw.get("runtime_session_id")
+        if runtime_session_raw is not None and not isinstance(runtime_session_raw, str):
+            return None, "slavik_meta.runtime_session_id должен быть строкой."
+        if isinstance(runtime_session_raw, str) and runtime_session_raw.strip():
+            runtime_session_id = runtime_session_raw.strip()
 
     return (
         ChatRequest(
@@ -143,6 +161,8 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
             messages=messages,
             stream=stream,
             session_id=session_id,
+            runtime_mode=runtime_mode,
+            runtime_session_id=runtime_session_id,
             sampling_warnings=sampling_unknown,
             tool_calling_present=tool_calling_present,
         ),

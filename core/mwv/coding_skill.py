@@ -66,7 +66,7 @@ class CodingSkill:
         manager = ManagerRuntime(task_builder=self._task_builder(normalized))
         verifier = self.verifier or VerifierRunner()
 
-        def _run_verifier(_: RunContext) -> VerificationResult:
+        def _run_verifier(_: TaskPacket, __: RunContext) -> VerificationResult:
             return verifier.run()
 
         result = manager.run_flow(messages, context, worker=self._worker, verifier=_run_verifier)

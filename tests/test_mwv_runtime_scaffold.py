@@ -19,6 +19,8 @@ from core.mwv.models import (
     VerificationStatus,
     WorkResult,
     WorkStatus,
+    is_task_packet_hash_valid,
+    with_task_packet_hash,
 )
 from core.mwv.routing import RouteDecision
 from core.mwv.verifier import VerifierRunner
@@ -98,7 +100,8 @@ def test_verifier_runtime_returns_runner_result() -> None:
     )
     runtime = VerifierRuntime(runner=DummyVerifierRunner(expected))
     result = runtime.run(
-        RunContext(session_id="s", trace_id="t", workspace_root="/tmp", safe_mode=True)
+        TaskPacket(task_id="task-1", session_id="s", trace_id="t", goal="g"),
+        RunContext(session_id="s", trace_id="t", workspace_root="/tmp", safe_mode=True),
     )
     assert result == expected
 
@@ -198,6 +201,8 @@ def test_build_retry_task_uses_stricter_constraint_on_second_retry() -> None:
     )
     updated = build_retry_task(task, failure, decision)
     assert any("максимально минимальный diff" in item for item in updated.constraints)
+    assert updated.packet_revision == 2
+    assert is_task_packet_hash_valid(updated) is True
 
 
 def test_build_retry_task_appends_llm_hint() -> None:
@@ -221,6 +226,14 @@ def test_build_retry_task_appends_llm_hint() -> None:
     )
     updated = build_retry_task(task, failure, decision)
     assert any("LLM-уточнение: Проверь импорт pathlib." == item for item in updated.constraints)
+
+
+def test_task_packet_hash_helpers() -> None:
+    packet = TaskPacket(task_id="t", session_id="s", trace_id="trace", goal="g")
+    assert is_task_packet_hash_valid(packet) is False
+    hashed = with_task_packet_hash(packet)
+    assert hashed.packet_hash
+    assert is_task_packet_hash_valid(hashed) is True
 
 
 def test_summarize_verifier_failure_handles_empty_output() -> None:
@@ -286,7 +299,7 @@ def test_run_flow_stops_on_worker_failure() -> None:
     def _worker(_task: TaskPacket, _context: RunContext) -> WorkResult:
         return WorkResult(task_id="t", status=WorkStatus.FAILURE, summary="fail")
 
-    def _verifier(_context: RunContext) -> VerificationResult:
+    def _verifier(_task: TaskPacket, _context: RunContext) -> VerificationResult:
         return VerificationResult(
             status=VerificationStatus.PASSED,
             command=["check"],
@@ -347,7 +360,7 @@ def test_run_flow_retry_uses_retry_hint_generator() -> None:
         ),
     ]
 
-    def _verifier(_context: RunContext) -> VerificationResult:
+    def _verifier(_task: TaskPacket, _context: RunContext) -> VerificationResult:
         return verifier_results.pop(0)
 
     result = manager.run_flow(messages, context, worker=_worker, verifier=_verifier)

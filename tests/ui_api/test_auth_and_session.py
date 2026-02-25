@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 # ruff: noqa: F403,F405
 from .fakes import *
 
@@ -241,11 +243,15 @@ def test_ui_chat_send_endpoint() -> None:
             assert resp.status == 200
             payload = await resp.json()
             response_session_id = payload.get("session_id")
+            assert payload.get("lane") == "chat"
             messages = payload.get("messages", [])
+            workspace_messages = payload.get("workspace_messages")
             assert isinstance(response_session_id, str)
             assert response_session_id
             assert isinstance(messages, list)
             assert messages
+            assert isinstance(workspace_messages, list)
+            assert workspace_messages == []
             assert resp.headers.get("X-Slavik-Session") == response_session_id
             selected = payload.get("selected_model")
             assert isinstance(selected, dict)
@@ -585,6 +591,71 @@ def test_ui_chat_send_force_canvas_override() -> None:
     asyncio.run(run())
 
 
+def test_ui_chat_send_workspace_lane_disables_canvas_and_artifacts() -> None:
+    async def run() -> None:
+        client = await _create_client(LongCodeAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={
+                    "content": "Generate long module",
+                    "lane": "workspace",
+                    "force_canvas": True,
+                },
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            assert payload.get("lane") == "workspace"
+            display = payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "chat"
+            assert display.get("forced") is False
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages == []
+            workspace_messages = payload.get("workspace_messages")
+            assert isinstance(workspace_messages, list)
+            assert len(workspace_messages) == 2
+            assistant = workspace_messages[-1]
+            assert isinstance(assistant, dict)
+            assistant_content = assistant.get("content")
+            assert isinstance(assistant_content, str)
+            assert assistant_content.startswith("```python")
+            artifacts = payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts == []
+            output_payload = payload.get("output")
+            assert isinstance(output_payload, dict)
+            assert output_payload.get("content") is None
+
+            chat_history_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
+            assert chat_history_resp.status == 200
+            chat_history_payload = await chat_history_resp.json()
+            chat_history = chat_history_payload.get("messages")
+            assert isinstance(chat_history, list)
+            assert chat_history == []
+
+            workspace_history_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/history?lane=workspace"
+            )
+            assert workspace_history_resp.status == 200
+            workspace_history_payload = await workspace_history_resp.json()
+            workspace_history = workspace_history_payload.get("messages")
+            assert isinstance(workspace_history, list)
+            assert len(workspace_history) == 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_sessions_api_create_send_get_history() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -612,8 +683,16 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             session = get_payload.get("session")
             assert isinstance(session, dict)
             messages = session.get("messages")
+            workspace_messages = session.get("workspace_messages")
+            lane_stats = session.get("lane_stats")
             assert isinstance(messages, list)
             assert len(messages) >= 2
+            assert isinstance(workspace_messages, list)
+            assert workspace_messages == []
+            assert isinstance(lane_stats, dict)
+            assert lane_stats.get("chat_message_count") == len(messages)
+            assert lane_stats.get("workspace_message_count") == 0
+            assert lane_stats.get("last_message_lane") == "chat"
             first = messages[0]
             second = messages[1]
             assert isinstance(first, dict)
@@ -625,9 +704,19 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             history_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
             assert history_resp.status == 200
             history_payload = await history_resp.json()
+            assert history_payload.get("lane") == "chat"
             history_messages = history_payload.get("messages")
             assert isinstance(history_messages, list)
             assert len(history_messages) == len(messages)
+            workspace_history_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/history?lane=workspace"
+            )
+            assert workspace_history_resp.status == 200
+            workspace_history_payload = await workspace_history_resp.json()
+            assert workspace_history_payload.get("lane") == "workspace"
+            workspace_history_messages = workspace_history_payload.get("messages")
+            assert isinstance(workspace_history_messages, list)
+            assert workspace_history_messages == []
 
             output_resp = await client.get(f"/ui/api/sessions/{session_id}/output")
             assert output_resp.status == 200
@@ -657,7 +746,35 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             )
             assert isinstance(selected, dict)
             assert selected.get("message_count") == len(messages)
+            assert selected.get("chat_message_count") == len(messages)
+            assert selected.get("workspace_message_count") == 0
+            assert selected.get("last_message_lane") == "chat"
             assert selected.get("title") == "Ping"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_history_rejects_invalid_lane_query() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            created = create_payload.get("session")
+            assert isinstance(created, dict)
+            session_id = created.get("session_id")
+            assert isinstance(session_id, str)
+            response = await client.get(
+                f"/ui/api/sessions/{session_id}/history?lane=bad_lane",
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
         finally:
             await client.close()
 
@@ -921,6 +1038,91 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             await client_after.close()
 
     asyncio.run(run())
+
+
+def test_ui_storage_resets_legacy_messages_schema_without_lane(tmp_path) -> None:
+    db_path = tmp_path / "ui_sessions.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE ui_sessions (
+                session_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                decision_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE ui_messages (
+                message_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                trace_id TEXT,
+                parent_user_message_id TEXT,
+                attachments_json TEXT NOT NULL DEFAULT '[]'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ui_sessions (session_id, created_at, updated_at, status, decision_json)
+            VALUES (
+                'legacy-session',
+                '2026-01-01T00:00:00+00:00',
+                '2026-01-01T00:00:00+00:00',
+                'ok',
+                NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ui_messages (
+                message_id,
+                session_id,
+                role,
+                content,
+                created_at,
+                trace_id,
+                parent_user_message_id,
+                attachments_json
+            )
+            VALUES (
+                'legacy-msg',
+                'legacy-session',
+                'user',
+                'legacy',
+                '2026-01-01T00:00:00+00:00',
+                NULL,
+                NULL,
+                '[]'
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    storage = SQLiteUISessionStorage(db_path)
+    assert storage.load_sessions() == []
+
+    verify_conn = sqlite3.connect(db_path)
+    try:
+        verify_conn.row_factory = sqlite3.Row
+        columns = {
+            str(row["name"])
+            for row in verify_conn.execute("PRAGMA table_info(ui_messages)").fetchall()
+            if isinstance(row, sqlite3.Row)
+        }
+    finally:
+        verify_conn.close()
+    assert "lane" in columns
 
 
 def test_ui_session_policy_persist_after_restart(tmp_path) -> None:

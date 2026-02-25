@@ -157,6 +157,7 @@ class AutoState:
     plan: dict[str, JSONValue] | None = None
     coders: list[dict[str, JSONValue]] = field(default_factory=list)
     merge: dict[str, JSONValue] = field(default_factory=dict)
+    budgets: dict[str, JSONValue] = field(default_factory=dict)
     verifier: dict[str, JSONValue] | None = None
     approval: dict[str, JSONValue] | None = None
     error: str | None = None
@@ -176,6 +177,7 @@ class AutoState:
             "plan": dict(self.plan) if self.plan is not None else None,
             "coders": [dict(item) for item in self.coders],
             "merge": dict(self.merge),
+            "budgets": dict(self.budgets),
             "verifier": dict(self.verifier) if self.verifier is not None else None,
             "approval": dict(self.approval) if self.approval is not None else None,
             "error": self.error,
@@ -213,6 +215,7 @@ def normalize_auto_state(value: object) -> dict[str, JSONValue] | None:
         "plan": _normalize_object(value.get("plan")),
         "coders": _normalize_object_list(value.get("coders")),
         "merge": _normalize_object(value.get("merge")) or {},
+        "budgets": _normalize_object(value.get("budgets")) or {},
         "verifier": _normalize_object(value.get("verifier")),
         "approval": _normalize_object(value.get("approval")),
         "error": value.get("error") if isinstance(value.get("error"), str) else None,

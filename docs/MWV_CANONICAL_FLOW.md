@@ -1,6 +1,7 @@
 # MWV_CANONICAL_FLOW — канонический поток Manager -> Worker -> Verifier
 
 Этот документ фиксирует фактический runtime-контур MWV.
+Нормативный источник инвариантов: `docs/ARCH_CANON.md`.
 
 ## Маршрутизация
 
@@ -10,7 +11,7 @@
 
 ## Канонический цикл
 
-1. `ManagerRuntime` строит `TaskPacket`.
+1. `ManagerRuntime` строит `TaskPacket` (v2 execution contract).
 2. `WorkerRuntime` выполняет задачу через `Planner` + `Executor` + tools.
 3. `VerifierRuntime` запускает проверку (`scripts/check.sh`, с fallback-командами при отсутствии скрипта).
 4. Успех только если одновременно:
@@ -29,3 +30,4 @@
 ## Stop-ответы
 
 Формат stop-ответов соответствует `docs/STOP_RESPONSES.md`.
+Для канонического формата `STOP_TO_CHAT` см. также `docs/ARCH_CANON.md`.

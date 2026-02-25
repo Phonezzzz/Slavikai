@@ -32,6 +32,15 @@ from server.ui_session_storage import PersistedSession
 from shared.models import JSONValue
 
 
+def _normalize_history_lane(value: str | None) -> Literal["chat", "workspace"]:
+    if not isinstance(value, str):
+        return "chat"
+    normalized = value.strip().lower()
+    if normalized == "workspace":
+        return "workspace"
+    return "chat"
+
+
 async def handle_ui_chats_export(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     principal_id = _request_principal_id(request)
@@ -236,6 +245,9 @@ async def handle_ui_sessions_list(request: web.Request) -> web.Response:
             "created_at": item["created_at"],
             "updated_at": item["updated_at"],
             "message_count": item["message_count"],
+            "chat_message_count": item["chat_message_count"],
+            "workspace_message_count": item["workspace_message_count"],
+            "last_message_lane": item["last_message_lane"],
             "title_override": item["title_override"],
             "folder_id": item["folder_id"],
         }
@@ -353,7 +365,16 @@ async def handle_ui_session_history_get(request: web.Request) -> web.Response:
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
-    messages = await hub.get_session_history(session_id)
+    lane_query = request.query.get("lane")
+    lane = _normalize_history_lane(lane_query)
+    if lane_query is not None and lane_query.strip().lower() not in {"chat", "workspace"}:
+        return error_response(
+            status=400,
+            message="lane должен быть chat|workspace.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    messages = await hub.get_session_history(session_id, lane=lane)
     if messages is None:
         return error_response(
             status=404,
@@ -361,7 +382,7 @@ async def handle_ui_session_history_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="session_not_found",
         )
-    return json_response({"session_id": session_id, "messages": messages})
+    return json_response({"session_id": session_id, "lane": lane, "messages": messages})
 
 
 async def handle_ui_session_output_get(request: web.Request) -> web.Response:

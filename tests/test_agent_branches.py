@@ -96,7 +96,8 @@ def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
     agent.executor = executor  # type: ignore[assignment]
     result = agent.handle_tool_command("/plan goal")
     assert "step-one" in result
-    assert executor.run_called
+    assert "transactional-only" in result
+    assert executor.run_called is False
 
 
 def test_save_feedback_major_hint(tmp_path: Path) -> None:

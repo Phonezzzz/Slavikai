@@ -41,6 +41,14 @@ from shared.models import JSONValue
 from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
 
 
+def _normalize_message_lane(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "workspace":
+            return "workspace"
+    return "chat"
+
+
 async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     hub = request.app["ui_hub"]
     session_store = request.app["session_store"]
@@ -547,6 +555,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             }
         force_canvas_raw = source_request.get("force_canvas")
         force_canvas = force_canvas_raw is True
+        lane = _normalize_message_lane(source_request.get("lane"))
         attachments_raw = source_request.get("attachments")
         attachments = attachments_raw if isinstance(attachments_raw, list) else []
         content = content_raw
@@ -560,6 +569,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         payload_override: dict[str, JSONValue] = {
             "content": content,
             "force_canvas": force_canvas,
+            "lane": lane,
             "attachments": attachments,
         }
         resumed_response = await handle_ui_chat_send(
@@ -805,6 +815,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         payload_override: dict[str, JSONValue] = {
             "content": source_request_raw.get("content"),
             "force_canvas": source_request_raw.get("force_canvas"),
+            "lane": _normalize_message_lane(source_request_raw.get("lane")),
             "attachments": source_request_raw.get("attachments"),
         }
         resumed_response = await handle_ui_chat_send(

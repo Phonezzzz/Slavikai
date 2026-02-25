@@ -63,3 +63,18 @@ def test_command_lane_auto_alias_has_command_label(tmp_path: Path) -> None:
     report = extract_report_block(response)
     assert report["route"] == "command"
     assert report["stop_reason_code"] == "COMMAND_LANE_NOTICE"
+
+
+def test_command_lane_plan_does_not_execute_tools(tmp_path: Path, monkeypatch) -> None:
+    agent = _make_agent(tmp_path)
+
+    def _executor_unreachable(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("/plan must not execute tools")
+
+    monkeypatch.setattr(agent.executor, "run", _executor_unreachable)
+    response = agent.handle_tool_command("/plan подготовить план миграции")
+    assert "Командный режим (без MWV)" in response
+    assert "transactional-only" in response
+    report = extract_report_block(response)
+    assert report["route"] == "command"
+    assert report["stop_reason_code"] == "COMMAND_LANE_NOTICE"

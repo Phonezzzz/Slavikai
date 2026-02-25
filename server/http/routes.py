@@ -38,6 +38,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/ui/api/status", workflow.handle_ui_status)
     app.router.add_get("/ui/api/state", workflow.handle_ui_state)
     app.router.add_post("/ui/api/mode", workflow.handle_ui_mode)
+    app.router.add_post("/ui/api/runtime/init", workflow.handle_ui_runtime_init)
+    app.router.add_post("/ui/api/init", workflow.handle_ui_runtime_init)
     app.router.add_post("/ui/api/plan/draft", plan.handle_ui_plan_draft)
     app.router.add_post("/ui/api/plan/approve", plan.handle_ui_plan_approve)
     app.router.add_post("/ui/api/plan/edit", plan.handle_ui_plan_edit)
@@ -50,6 +52,9 @@ def register_routes(app: web.Application) -> None:
         "/ui/api/memory/conflicts/resolve",
         memory.handle_ui_memory_conflicts_resolve,
     )
+    app.router.add_post("/ui/api/memory/triage/preview", memory.handle_ui_memory_triage_preview)
+    app.router.add_post("/ui/api/memory/triage/apply", memory.handle_ui_memory_triage_apply)
+    app.router.add_post("/ui/api/memory/triage/undo", memory.handle_ui_memory_triage_undo)
     app.router.add_post("/ui/api/stt/transcribe", settings.handle_ui_stt_transcribe)
     app.router.add_get("/ui/api/settings/chats/export", sessions.handle_ui_chats_export)
     app.router.add_post("/ui/api/settings/chats/import", sessions.handle_ui_chats_import)

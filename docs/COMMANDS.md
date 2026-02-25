@@ -11,7 +11,7 @@
 - `/sh <command>` — запуск shell-команды с ограничениями.
 - `/project index [path]` — индексировать файлы из `sandbox/project/`.
 - `/project find <query>` — поиск по индексу `code/docs`.
-- `/plan <goal>` — построить и выполнить план.
+- `/plan <goal>` — построить план (transactional-only, без выполнения инструментов).
 - `/auto <goal>` — command-lane alias для one-shot auto запуска (без MWV).
 - `/imggen <prompt>` — генерация изображения.
 - `/imganalyze <path|base64|base64:...>` — анализ изображения.

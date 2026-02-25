@@ -75,16 +75,19 @@ class AgentRoutingMixin:
                     raw_input=last_content,
                     record_in_history=record_in_history,
                 )
+            if is_auto_mode:
+                if decision.skill_decision and decision.skill_decision.status == "no_match":
+                    self._record_unknown_inbox(last_content, decision)
+                    self._record_unknown_skill_candidate(last_content, decision)
+                result = self.handle_auto_command(last_content)
+                self._log_chat_interaction(raw_input=last_content, response_text=result)
+                if record_in_history:
+                    self._append_short_term([LLMMessage(role="assistant", content=result)])
+                return result
             if decision.route == "mwv":
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_inbox(last_content, decision)
                     self._record_unknown_skill_candidate(last_content, decision)
-                if is_auto_mode:
-                    result = self.handle_auto_command(last_content)
-                    self._log_chat_interaction(raw_input=last_content, response_text=result)
-                    if record_in_history:
-                        self._append_short_term([LLMMessage(role="assistant", content=result)])
-                    return result
                 return self._run_mwv_flow(messages, last_content, decision, record_in_history)
             return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
@@ -181,16 +184,19 @@ class AgentRoutingMixin:
                 self.last_stream_response_raw = response
                 yield response
                 return
+            if is_auto_mode:
+                if decision.skill_decision and decision.skill_decision.status == "no_match":
+                    self._record_unknown_inbox(last_content, decision)
+                    self._record_unknown_skill_candidate(last_content, decision)
+                response = self.handle_auto_command(last_content)
+                self.last_stream_response_raw = response
+                yield response
+                return
 
             if decision.route == "mwv":
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_inbox(last_content, decision)
                     self._record_unknown_skill_candidate(last_content, decision)
-                if is_auto_mode:
-                    response = self.handle_auto_command(last_content)
-                    self.last_stream_response_raw = response
-                    yield response
-                    return
                 response = self._run_mwv_flow(messages, last_content, decision, record_in_history)
                 self.last_stream_response_raw = response
                 yield response
@@ -254,21 +260,6 @@ class AgentRoutingMixin:
                 plan_summary="План не требуется для chat-маршрута.",
                 execution_summary="Ответ сформирован моделью.",
             )
-            capture_claims = getattr(self, "capture_memory_claims_from_text", None)
-            if callable(capture_claims):
-                try:
-                    source_id = getattr(self, "session_id", None) or "local"
-                    capture_claims(
-                        last_content,
-                        source_kind="chat.user_input",
-                        source_id=source_id,
-                        lang_hint="ru",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self.logger.warning("Memory claim capture failed: %s", exc)
-                    self.tracer.log("memory_claims_error", str(exc))
-            if self.memory_config.auto_save_dialogue:
-                self.save_to_memory(last_content, response_text)
             self._log_chat_interaction(
                 raw_input=last_content,
                 response_text=response_text,
@@ -321,21 +312,6 @@ class AgentRoutingMixin:
                 execution_summary="Ответ сформирован моделью.",
             )
             self.last_stream_response_raw = response_text
-            capture_claims = getattr(self, "capture_memory_claims_from_text", None)
-            if callable(capture_claims):
-                try:
-                    source_id = getattr(self, "session_id", None) or "local"
-                    capture_claims(
-                        last_content,
-                        source_kind="chat.user_input",
-                        source_id=source_id,
-                        lang_hint="ru",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self.logger.warning("Memory claim capture failed: %s", exc)
-                    self.tracer.log("memory_claims_error", str(exc))
-            if self.memory_config.auto_save_dialogue:
-                self.save_to_memory(last_content, response_text)
             self._log_chat_interaction(
                 raw_input=last_content,
                 response_text=response_text,

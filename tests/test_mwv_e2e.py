@@ -61,7 +61,7 @@ def test_mwv_e2e_happy_path_with_workspace_change(tmp_path: Path) -> None:
             ],
         )
 
-    def _verifier(run_context: RunContext) -> VerificationResult:
+    def _verifier(_task: TaskPacket, run_context: RunContext) -> VerificationResult:
         _ = run_context
         return VerificationResult(
             status=VerificationStatus.PASSED,

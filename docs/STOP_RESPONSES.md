@@ -37,6 +37,8 @@ MWV_REPORT_JSON=<json>
 | MWV_INTERNAL_ERROR | ошибка MWV‑контуров |
 | COMMAND_LANE_NOTICE | командный режим (без MWV) |
 | WORKER_FAILED | выполнение шагов завершилось ошибкой |
+| REPLAN_REQUIRED | требуется новый TaskPacket (перепланирование в Plan) |
+| BUDGET_EXHAUSTED | исчерпаны budgets auto/mwv исполнения |
 
 ## MWV_REPORT_JSON (стабильный блок)
 

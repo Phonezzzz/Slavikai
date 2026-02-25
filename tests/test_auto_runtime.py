@@ -241,3 +241,26 @@ def test_auto_runtime_sets_error_code_for_missing_target_path(monkeypatch, tmp_p
     assert agent.last_auto_state.get("error_code") == "missing_target_path"
     missing_paths = agent.last_auto_state.get("missing_paths")
     assert missing_paths == []
+
+
+def test_auto_runtime_stops_on_files_budget(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    agent = _FakeAgent(brain_text="not-json")
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+
+    monkeypatch.setenv("AUTO_MAX_FILES_TOUCHED", "1")
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_coder_pool",
+        lambda **kwargs: [_completed_result("shard-1", "coder-1")],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_apply_patch_bundles",
+        lambda results, **kwargs: ["a.py", "b.py"],
+    )
+
+    outcome = orchestrator.run("Сделай изменения")
+    assert outcome.status == AutoRunStatus.FAILED_INTERNAL
+    assert outcome.stop_reason_code == auto_runtime.StopReasonCode.BUDGET_EXHAUSTED
+    assert isinstance(agent.last_auto_state, dict)
+    assert agent.last_auto_state.get("error_code") == "budget_files_touched"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from aiohttp import web
 
@@ -42,6 +43,7 @@ from server.ui_hub import UIHub
 from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
+WORKSPACE_LANE: Literal["workspace"] = "workspace"
 
 
 async def handle_ui_project_command(request: web.Request) -> web.Response:
@@ -116,8 +118,8 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         )
 
         approved_categories = await session_store.get_categories(session_id)
-        user_message = hub.create_message(role="user", content=user_command)
-        await hub.append_message(session_id, user_message)
+        user_message = hub.create_message(role="user", content=user_command, lane=WORKSPACE_LANE)
+        await hub.append_message(session_id, user_message, lane=WORKSPACE_LANE)
         user_message_id_raw = user_message.get("message_id")
         user_message_id = (
             user_message_id_raw
@@ -181,14 +183,17 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     status="waiting_approval",
                 )
                 await hub.set_session_decision(session_id, approval_decision)
-                messages = await hub.get_messages(session_id)
+                messages = await hub.get_messages(session_id, lane="chat")
+                workspace_messages = await hub.get_messages(session_id, lane="workspace")
                 current_decision = await hub.get_session_decision(session_id)
                 current_model = await hub.get_session_model(session_id)
                 current_workflow = await hub.get_session_workflow(session_id)
                 response = json_response(
                     {
                         "session_id": session_id,
+                        "lane": WORKSPACE_LANE,
                         "messages": messages,
+                        "workspace_messages": workspace_messages,
                         "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                         "selected_model": current_model,
                         "trace_id": None,
@@ -262,18 +267,23 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 hub.create_message(
                     role="assistant",
                     content=response_text,
+                    lane=WORKSPACE_LANE,
                     parent_user_message_id=user_message_id,
                 ),
+                lane=WORKSPACE_LANE,
             )
             await hub.set_session_decision(session_id, None)
-            messages = await hub.get_messages(session_id)
+            messages = await hub.get_messages(session_id, lane="chat")
+            workspace_messages = await hub.get_messages(session_id, lane="workspace")
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
             current_workflow = await hub.get_session_workflow(session_id)
             response = json_response(
                 {
                     "session_id": session_id,
+                    "lane": WORKSPACE_LANE,
                     "messages": messages,
+                    "workspace_messages": workspace_messages,
                     "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                     "selected_model": current_model,
                     "trace_id": None,
@@ -292,7 +302,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             )
             return response
 
-        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id, lane=WORKSPACE_LANE))
 
         mwv_report: dict[str, JSONValue] | None = None
         ui_decision: dict[str, JSONValue] | None = None
@@ -385,14 +395,17 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 phase="approval.required",
                 detail="project",
             )
-            messages = await hub.get_messages(session_id)
+            messages = await hub.get_messages(session_id, lane="chat")
+            workspace_messages = await hub.get_messages(session_id, lane="workspace")
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
             current_workflow = await hub.get_session_workflow(session_id)
             response = json_response(
                 {
                     "session_id": session_id,
+                    "lane": WORKSPACE_LANE,
                     "messages": messages,
+                    "workspace_messages": workspace_messages,
                     "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                     "selected_model": current_model,
                     "trace_id": trace_id,
@@ -417,19 +430,24 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             hub.create_message(
                 role="assistant",
                 content=response_text,
+                lane=WORKSPACE_LANE,
                 trace_id=trace_id if isinstance(trace_id, str) else None,
                 parent_user_message_id=user_message_id,
             ),
+            lane=WORKSPACE_LANE,
         )
         await hub.set_session_decision(session_id, ui_decision)
-        messages = await hub.get_messages(session_id)
+        messages = await hub.get_messages(session_id, lane="chat")
+        workspace_messages = await hub.get_messages(session_id, lane="workspace")
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
         current_workflow = await hub.get_session_workflow(session_id)
         response = json_response(
             {
                 "session_id": session_id,
+                "lane": WORKSPACE_LANE,
                 "messages": messages,
+                "workspace_messages": workspace_messages,
                 "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                 "selected_model": current_model,
                 "trace_id": trace_id,

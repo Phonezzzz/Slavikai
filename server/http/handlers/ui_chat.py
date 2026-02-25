@@ -68,6 +68,18 @@ from tools.workspace_tools import set_workspace_root as set_runtime_workspace_ro
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
+MessageLane = Literal["chat", "workspace"]
+
+
+def _normalize_message_lane(value: object, *, default: MessageLane = "chat") -> MessageLane:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "workspace":
+            return "workspace"
+        if normalized == "chat":
+            return "chat"
+    return default
+
 
 def _request_requires_root_gate(
     *,
@@ -189,6 +201,7 @@ def _normalize_agent_decision(
     *,
     content: str,
     force_canvas: bool,
+    lane: MessageLane,
     attachments: list[dict[str, str]],
     user_message_id: str | None,
     selected_model: dict[str, str],
@@ -212,6 +225,7 @@ def _normalize_agent_decision(
     source_request = dict(source_request_raw) if isinstance(source_request_raw, dict) else {}
     source_request["content"] = content
     source_request["force_canvas"] = force_canvas
+    source_request["lane"] = lane
     source_request["attachments"] = attachments
     resume_payload["source_request"] = source_request
     resume_payload["user_message_id"] = user_message_id
@@ -292,6 +306,27 @@ async def handle_ui_chat_send(
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+        lane_raw = payload.get("lane")
+        if lane_raw is None:
+            lane: MessageLane = "chat"
+        elif isinstance(lane_raw, str):
+            lane = _normalize_message_lane(lane_raw, default="chat")
+            if lane_raw.strip().lower() not in {"chat", "workspace"}:
+                return error_response(
+                    status=400,
+                    message="lane должен быть chat|workspace.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+        else:
+            return error_response(
+                status=400,
+                message="lane должен быть chat|workspace.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        if lane == "workspace":
+            force_canvas = False
         attachments_raw = payload.get("attachments")
         try:
             attachments, attachments_chars = _parse_ui_chat_attachments(attachments_raw)
@@ -343,7 +378,9 @@ async def handle_ui_chat_send(
         active_task = _normalize_task_payload(workflow.get("active_task"))
         auto_state = _normalize_auto_state(workflow.get("auto_state"))
         session_root = await _workspace_root_for_session(hub, session_id)
-        session_messages = await hub.get_messages(session_id)
+        session_messages = await hub.get_messages(session_id, lane=lane)
+        chat_messages_payload = await hub.get_messages(session_id, lane="chat")
+        workspace_messages_payload = await hub.get_messages(session_id, lane="workspace")
         preflight_messages = _ui_messages_to_llm(session_messages)
 
         requires_root_gate = _request_requires_root_gate(
@@ -390,6 +427,7 @@ async def handle_ui_chat_send(
                     "source_request": {
                         "content": content_raw,
                         "force_canvas": force_canvas,
+                        "lane": lane,
                         "attachments": attachments,
                     },
                     "user_message_id": None,
@@ -426,13 +464,17 @@ async def handle_ui_chat_send(
             )
             output_payload = await hub.get_session_output(session_id)
             files_payload = await hub.get_session_files(session_id)
-            artifacts_payload = await hub.get_session_artifacts(session_id)
+            artifacts_payload = (
+                await hub.get_session_artifacts(session_id) if lane == "chat" else []
+            )
             current_model = await hub.get_session_model(session_id)
             current_workflow = await hub.get_session_workflow(session_id)
             response = json_response(
                 {
                     "session_id": session_id,
-                    "messages": session_messages,
+                    "lane": lane,
+                    "messages": chat_messages_payload,
+                    "workspace_messages": workspace_messages_payload,
                     "output": output_payload,
                     "files": files_payload or [],
                     "artifacts": artifacts_payload or [],
@@ -469,9 +511,10 @@ async def handle_ui_chat_send(
         user_message = hub.create_message(
             role="user",
             content=content_raw.strip(),
+            lane=lane,
             attachments=attachments,
         )
-        await hub.append_message(session_id, user_message)
+        await hub.append_message(session_id, user_message, lane=lane)
         user_message_id_raw = user_message.get("message_id")
         user_message_id = (
             user_message_id_raw
@@ -490,26 +533,34 @@ async def handle_ui_chat_send(
                 session_id=session_id,
                 stream_id=chat_stream_id,
                 content=guidance_text,
+                lane=lane,
             )
-            await hub.set_session_output(session_id, guidance_text)
+            if lane == "chat":
+                await hub.set_session_output(session_id, guidance_text)
             assistant_message = hub.create_message(
                 role="assistant",
                 content=guidance_text,
+                lane=lane,
                 trace_id=None,
                 parent_user_message_id=user_message_id,
             )
-            await hub.append_message(session_id, assistant_message)
-            messages = await hub.get_messages(session_id)
+            await hub.append_message(session_id, assistant_message, lane=lane)
+            messages = await hub.get_messages(session_id, lane="chat")
+            workspace_messages = await hub.get_messages(session_id, lane="workspace")
             output_payload = await hub.get_session_output(session_id)
             files_payload = await hub.get_session_files(session_id)
-            artifacts_payload = await hub.get_session_artifacts(session_id)
+            artifacts_payload = (
+                await hub.get_session_artifacts(session_id) if lane == "chat" else []
+            )
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
             current_workflow = await hub.get_session_workflow(session_id)
             response = json_response(
                 {
                     "session_id": session_id,
+                    "lane": lane,
                     "messages": messages,
+                    "workspace_messages": workspace_messages,
                     "output": output_payload,
                     "files": files_payload or [],
                     "artifacts": artifacts_payload or [],
@@ -538,7 +589,7 @@ async def handle_ui_chat_send(
             )
             return response
 
-        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id))
+        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id, lane=lane))
         await _publish_agent_activity(
             hub,
             session_id=session_id,
@@ -592,7 +643,9 @@ async def handle_ui_chat_send(
                 phase="agent.respond.start",
                 detail="chat",
             )
-            request_prefers_canvas = force_canvas or _request_likely_canvas(content_raw)
+            request_prefers_canvas = lane == "chat" and (
+                force_canvas or _request_likely_canvas(content_raw)
+            )
             response_raw: str
             respond_stream_method = getattr(agent, "respond_stream", None)
             if callable(respond_stream_method):
@@ -617,12 +670,14 @@ async def handle_ui_chat_send(
                                     hub,
                                     session_id=session_id,
                                     stream_id=chat_stream_id,
+                                    lane=lane,
                                 )
                                 await _publish_chat_stream_delta(
                                     hub,
                                     session_id=session_id,
                                     stream_id=chat_stream_id,
                                     delta="Статус: формирую результат в Canvas...",
+                                    lane=lane,
                                 )
                                 live_stream_sent = True
                                 canvas_status_stream_open = True
@@ -633,6 +688,7 @@ async def handle_ui_chat_send(
                                     session_id=session_id,
                                     stream_id=chat_stream_id,
                                     delta="\nСтатус: обновляю содержимое Canvas...",
+                                    lane=lane,
                                 )
                                 live_stream_sent = True
                                 next_canvas_status_at += CANVAS_STATUS_CHARS_STEP
@@ -644,13 +700,14 @@ async def handle_ui_chat_send(
                                     session_id=session_id,
                                     stream_id=chat_stream_id,
                                     delta=chunk,
+                                    lane=lane,
                                 )
                                 live_stream_sent = True
                                 await asyncio.sleep(0.005)
                             continue
                         pending_chat_chunks.append(delta)
                         pending_preview = "".join(pending_chat_chunks)
-                        if _stream_preview_indicates_canvas(pending_preview):
+                        if lane == "chat" and _stream_preview_indicates_canvas(pending_preview):
                             chat_stream_mode = "canvas"
                             continue
                         if not _stream_preview_ready_for_chat(pending_preview):
@@ -660,6 +717,7 @@ async def handle_ui_chat_send(
                             hub,
                             session_id=session_id,
                             stream_id=chat_stream_id,
+                            lane=lane,
                         )
                         chat_content_stream_open = True
                         for chunk in _split_chat_stream_chunks(pending_preview):
@@ -668,6 +726,7 @@ async def handle_ui_chat_send(
                                 session_id=session_id,
                                 stream_id=chat_stream_id,
                                 delta=chunk,
+                                lane=lane,
                             )
                             live_stream_sent = True
                             await asyncio.sleep(0.005)
@@ -677,6 +736,7 @@ async def handle_ui_chat_send(
                             hub,
                             session_id=session_id,
                             stream_id=chat_stream_id,
+                            lane=lane,
                         )
                         chat_content_stream_open = False
                     if canvas_status_stream_open:
@@ -684,6 +744,7 @@ async def handle_ui_chat_send(
                             hub,
                             session_id=session_id,
                             stream_id=chat_stream_id,
+                            lane=lane,
                         )
                         canvas_status_stream_open = False
                     response_raw_candidate = getattr(agent, "last_stream_response_raw", None)
@@ -702,6 +763,7 @@ async def handle_ui_chat_send(
                             hub,
                             session_id=session_id,
                             stream_id=chat_stream_id,
+                            lane=lane,
                         )
                         chat_content_stream_open = False
                     if canvas_status_stream_open:
@@ -709,6 +771,7 @@ async def handle_ui_chat_send(
                             hub,
                             session_id=session_id,
                             stream_id=chat_stream_id,
+                            lane=lane,
                         )
                         canvas_status_stream_open = False
                     response_raw = agent.respond(llm_messages)
@@ -727,6 +790,7 @@ async def handle_ui_chat_send(
                     decision,
                     content=content_raw,
                     force_canvas=force_canvas,
+                    lane=lane,
                     attachments=attachments,
                     user_message_id=user_message_id,
                     selected_model=selected_model,
@@ -771,6 +835,7 @@ async def handle_ui_chat_send(
                         "source_request": {
                             "content": content_raw,
                             "force_canvas": force_canvas,
+                            "lane": lane,
                             "attachments": attachments,
                         },
                         "user_message_id": user_message_id,
@@ -779,6 +844,15 @@ async def handle_ui_chat_send(
                             "model": selected_model["model"],
                         },
                     }
+                source_request_raw = approval_resume_payload.get("source_request")
+                source_request = (
+                    dict(source_request_raw) if isinstance(source_request_raw, dict) else {}
+                )
+                source_request["content"] = content_raw
+                source_request["force_canvas"] = force_canvas
+                source_request["lane"] = lane
+                source_request["attachments"] = attachments
+                approval_resume_payload["source_request"] = source_request
                 ui_decision = _build_ui_approval_decision(
                     approval_request=approval_request,
                     session_id=session_id,
@@ -835,17 +909,22 @@ async def handle_ui_chat_send(
                 phase="approval.required",
                 detail="chat",
             )
-            messages = await hub.get_messages(session_id)
+            messages = await hub.get_messages(session_id, lane="chat")
+            workspace_messages = await hub.get_messages(session_id, lane="workspace")
             output_payload = await hub.get_session_output(session_id)
             files_payload = await hub.get_session_files(session_id)
-            artifacts_payload = await hub.get_session_artifacts(session_id)
+            artifacts_payload = (
+                await hub.get_session_artifacts(session_id) if lane == "chat" else []
+            )
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
             current_workflow = await hub.get_session_workflow(session_id)
             response = json_response(
                 {
                     "session_id": session_id,
+                    "lane": lane,
                     "messages": messages,
+                    "workspace_messages": workspace_messages,
                     "output": output_payload,
                     "files": files_payload or [],
                     "artifacts": artifacts_payload or [],
@@ -874,16 +953,19 @@ async def handle_ui_chat_send(
             )
             return response
 
-        await hub.set_session_output(session_id, response_text)
+        if lane == "chat":
+            await hub.set_session_output(session_id, response_text)
         files_from_tools: list[str] = []
-        if trace_id:
+        if lane == "chat" and trace_id:
             tool_calls = _tool_calls_for_trace_id(trace_id) or []
             files_from_tools = _extract_files_from_tool_calls(tool_calls)
             if files_from_tools:
                 await hub.merge_session_files(session_id, files_from_tools)
-        named_files_count = len(_extract_named_files_from_output(response_text))
+        named_files_count = (
+            len(_extract_named_files_from_output(response_text)) if lane == "chat" else 0
+        )
         display_target: Literal["chat", "canvas"]
-        if approval_request is not None:
+        if lane != "chat" or approval_request is not None:
             display_target = "chat"
         else:
             display_target = (
@@ -896,18 +978,20 @@ async def handle_ui_chat_send(
                 )
                 else "chat"
             )
-        artifact_payloads = _build_output_artifacts(
-            response_text=response_text,
-            display_target=display_target,
-            files_from_tools=files_from_tools,
-        )
-        for artifact in artifact_payloads:
-            await hub.append_session_artifact(session_id, artifact)
+        artifact_payloads: list[dict[str, JSONValue]] = []
+        if lane == "chat":
+            artifact_payloads = _build_output_artifacts(
+                response_text=response_text,
+                display_target=display_target,
+                files_from_tools=files_from_tools,
+            )
+            for artifact in artifact_payloads:
+                await hub.append_session_artifact(session_id, artifact)
         first_artifact = artifact_payloads[0] if artifact_payloads else None
         artifact_id_raw = first_artifact.get("id") if first_artifact is not None else None
         artifact_id = artifact_id_raw if isinstance(artifact_id_raw, str) else None
         artifact_title = _canvas_summary_title_from_artifact(first_artifact)
-        if display_target == "canvas" and artifact_id is not None:
+        if lane == "chat" and display_target == "canvas" and artifact_id is not None:
             stream_source_raw = (
                 first_artifact.get("content") if first_artifact is not None else response_text
             )
@@ -928,31 +1012,39 @@ async def handle_ui_chat_send(
                 session_id=session_id,
                 stream_id=chat_stream_id,
                 content=response_text,
+                lane=lane,
             )
-        chat_summary = (
-            response_text
-            if approval_request is not None or display_target == "chat"
-            else _build_canvas_chat_summary(artifact_title=artifact_title)
-        )
+        if lane == "chat":
+            chat_summary = (
+                response_text
+                if approval_request is not None or display_target == "chat"
+                else _build_canvas_chat_summary(artifact_title=artifact_title)
+            )
+        else:
+            chat_summary = response_text
         assistant_message = hub.create_message(
             role="assistant",
             content=chat_summary,
+            lane=lane,
             trace_id=trace_id,
             parent_user_message_id=user_message_id,
         )
-        await hub.append_message(session_id, assistant_message)
+        await hub.append_message(session_id, assistant_message, lane=lane)
         await hub.set_session_decision(session_id, ui_decision)
-        messages = await hub.get_messages(session_id)
+        messages = await hub.get_messages(session_id, lane="chat")
+        workspace_messages = await hub.get_messages(session_id, lane="workspace")
         output_payload = await hub.get_session_output(session_id)
         files_payload = await hub.get_session_files(session_id)
-        artifacts_payload = await hub.get_session_artifacts(session_id)
+        artifacts_payload = await hub.get_session_artifacts(session_id) if lane == "chat" else []
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
         current_workflow = await hub.get_session_workflow(session_id)
         response = json_response(
             {
                 "session_id": session_id,
+                "lane": lane,
                 "messages": messages,
+                "workspace_messages": workspace_messages,
                 "output": output_payload,
                 "files": files_payload or [],
                 "artifacts": artifacts_payload or [],

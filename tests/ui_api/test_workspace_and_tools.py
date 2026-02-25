@@ -535,10 +535,14 @@ def test_ui_project_tool_endpoint() -> None:
             assert response.status == 200
             payload = await response.json()
             assert payload.get("session_id") == session_id
+            assert payload.get("lane") == "workspace"
             messages = payload.get("messages")
             assert isinstance(messages, list)
-            assert len(messages) >= 2
-            last_message = messages[-1]
+            assert messages == []
+            workspace_messages = payload.get("workspace_messages")
+            assert isinstance(workspace_messages, list)
+            assert len(workspace_messages) >= 2
+            last_message = workspace_messages[-1]
             assert isinstance(last_message, dict)
             content = last_message.get("content")
             assert isinstance(content, str)
@@ -659,10 +663,14 @@ def test_ui_project_github_import_runs_after_approval(monkeypatch, tmp_path) -> 
             )
             assert response.status == 200
             payload = await response.json()
+            assert payload.get("lane") == "workspace"
             messages = payload.get("messages")
             assert isinstance(messages, list)
-            assert messages
-            last_message = messages[-1]
+            assert messages == []
+            workspace_messages = payload.get("workspace_messages")
+            assert isinstance(workspace_messages, list)
+            assert workspace_messages
+            last_message = workspace_messages[-1]
             assert isinstance(last_message, dict)
             content = last_message.get("content")
             assert isinstance(content, str)

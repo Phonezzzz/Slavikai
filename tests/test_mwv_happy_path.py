@@ -38,7 +38,7 @@ def test_mwv_happy_path() -> None:
     def _worker(task: TaskPacket, run_context: RunContext) -> WorkResult:
         return WorkResult(task_id="t1", status=WorkStatus.SUCCESS, summary="ok")
 
-    def _verifier(run_context: RunContext) -> VerificationResult:
+    def _verifier(_task: TaskPacket, run_context: RunContext) -> VerificationResult:
         return VerificationResult(
             status=VerificationStatus.PASSED,
             command=["check"],

@@ -61,7 +61,7 @@ def test_mwv_fail_then_fix() -> None:
         ),
     ]
 
-    def _verifier(run_context: RunContext) -> VerificationResult:
+    def _verifier(_task: TaskPacket, run_context: RunContext) -> VerificationResult:
         return verifier_results.pop(0)
 
     result = manager.run_flow(messages, context, worker=_worker, verifier=_verifier)

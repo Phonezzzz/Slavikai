@@ -1,4 +1,5 @@
 export type ChatRole = 'user' | 'assistant' | 'system';
+export type MessageLane = 'chat' | 'workspace';
 
 export type ChatAttachment = {
   name: string;
@@ -9,6 +10,7 @@ export type ChatAttachment = {
 export type ChatMessage = {
   message_id: string;
   role: ChatRole;
+  lane: MessageLane;
   content: string;
   created_at: string;
   trace_id: string | null;
@@ -145,6 +147,9 @@ export type SessionSummary = {
   created_at: string;
   updated_at: string;
   message_count: number;
+  chat_message_count: number;
+  workspace_message_count: number;
+  last_message_lane: MessageLane | null;
   title_override?: string | null;
   folder_id?: string | null;
 };

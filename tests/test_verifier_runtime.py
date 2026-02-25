@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from core.mwv.models import RunContext, VerificationResult, VerificationStatus
+from core.mwv.models import RunContext, TaskPacket, VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import SCRIPT_NOT_FOUND_PREFIX, VerifierRuntime
 
 
@@ -24,6 +24,16 @@ def _context(workspace_root: Path) -> RunContext:
         trace_id="trace",
         workspace_root=str(workspace_root),
         safe_mode=True,
+    )
+
+
+def _task(workspace_root: Path) -> TaskPacket:
+    return TaskPacket(
+        task_id="task-1",
+        session_id="session",
+        trace_id="trace",
+        goal="verify",
+        scope={"workspace_root": str(workspace_root)},
     )
 
 
@@ -48,9 +58,10 @@ def test_verifier_runtime_fallback_pass(monkeypatch: pytest.MonkeyPatch, tmp_pat
         cwd: Path,
         capture_output: bool,
         text: bool,
+        timeout: int,
         check: bool,
     ) -> subprocess.CompletedProcess[str]:
-        _ = (cwd, capture_output, text, check)
+        _ = (cwd, capture_output, text, timeout, check)
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -63,7 +74,7 @@ def test_verifier_runtime_fallback_pass(monkeypatch: pytest.MonkeyPatch, tmp_pat
         ),
         project_root=tmp_path,
     )
-    result = runtime.run(_context(tmp_path))
+    result = runtime.run(_task(tmp_path), _context(tmp_path))
 
     assert result.status == VerificationStatus.PASSED
     assert result.exit_code == 0
@@ -77,9 +88,10 @@ def test_verifier_runtime_fallback_fail(monkeypatch: pytest.MonkeyPatch, tmp_pat
         cwd: Path,
         capture_output: bool,
         text: bool,
+        timeout: int,
         check: bool,
     ) -> subprocess.CompletedProcess[str]:
-        _ = (cwd, capture_output, text, check)
+        _ = (cwd, capture_output, text, timeout, check)
         return subprocess.CompletedProcess(command, 3, stdout="", stderr="boom")
 
     monkeypatch.setattr(subprocess, "run", _run)
@@ -88,7 +100,7 @@ def test_verifier_runtime_fallback_fail(monkeypatch: pytest.MonkeyPatch, tmp_pat
         fallback_commands=(("python", "-m", "ruff", "check", "."),),
         project_root=tmp_path,
     )
-    result = runtime.run(_context(tmp_path))
+    result = runtime.run(_task(tmp_path), _context(tmp_path))
 
     assert result.status == VerificationStatus.FAILED
     assert result.command == ["python", "-m", "ruff", "check", "."]
@@ -113,7 +125,7 @@ def test_verifier_runtime_no_fallback_for_other_error(
         error="verifier_timeout",
     )
     runtime = VerifierRuntime(runner=StubRunner(initial))
-    result = runtime.run(_context(tmp_path))
+    result = runtime.run(_task(tmp_path), _context(tmp_path))
 
     assert result == initial
 
@@ -130,7 +142,7 @@ def test_verifier_runtime_fallback_os_error(
         fallback_commands=(("python", "-m", "ruff", "check", "."),),
         project_root=tmp_path,
     )
-    result = runtime.run(_context(tmp_path))
+    result = runtime.run(_task(tmp_path), _context(tmp_path))
 
     assert result.status == VerificationStatus.ERROR
     assert result.error and "fallback_failed" in result.error

@@ -14,6 +14,7 @@ from server.http.common.chat_payload import (
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     TOOL_PIPELINE_ENABLED,
+    _apply_agent_runtime_state,
     _model_not_allowed_response,
     _model_not_selected_response,
     _parse_chat_request,
@@ -33,6 +34,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         return _model_not_selected_response()
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
+    hub = request.app["ui_hub"]
 
     try:
         payload = await request.json()
@@ -63,6 +65,22 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     session_id = _extract_session_id(request, payload) or parsed.session_id
     if session_id is None:
         session_id = str(uuid.uuid4())
+    runtime_session_id = parsed.runtime_session_id or session_id
+    runtime_mode = parsed.runtime_mode
+
+    if runtime_mode in {"plan", "act"}:
+        return error_response(
+            status=400,
+            message="runtime_mode=plan|act для /v1 пока не поддерживается.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+            details={
+                "next_steps": [
+                    "Используйте UI workflow endpoints: /ui/api/plan/* и /ui/api/mode.",
+                    "Для /v1 доступен opt-in runtime_mode=ask|auto.",
+                ],
+            },
+        )
 
     approved_categories = await session_store.get_categories(session_id)
     try:
@@ -98,6 +116,31 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     mwv_report: dict[str, JSONValue] | None = None
     try:
         async with agent_lock:
+            if runtime_mode in {"ask", "auto"}:
+                await _apply_agent_runtime_state(
+                    agent=agent,
+                    hub=hub,
+                    session_id=runtime_session_id,
+                )
+                runtime_setter = getattr(agent, "set_runtime_state", None)
+                if callable(runtime_setter):
+                    active_plan_raw = getattr(agent, "runtime_active_plan", None)
+                    active_task_raw = getattr(agent, "runtime_active_task", None)
+                    auto_state_raw = getattr(agent, "runtime_auto_state", None)
+                    active_plan = (
+                        dict(active_plan_raw) if isinstance(active_plan_raw, dict) else None
+                    )
+                    active_task = (
+                        dict(active_task_raw) if isinstance(active_task_raw, dict) else None
+                    )
+                    auto_state = dict(auto_state_raw) if isinstance(auto_state_raw, dict) else None
+                    runtime_setter(
+                        mode=runtime_mode,
+                        active_plan=active_plan,
+                        active_task=active_task,
+                        auto_state=auto_state,
+                        enforce_plan_guard=False,
+                    )
             response_raw = agent.respond(parsed.messages)
             response_text, mwv_report = _split_response_and_report(response_raw)
             trace_id = agent.last_chat_interaction_id
@@ -160,6 +203,9 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     }
     if mwv_report is not None:
         slavik_meta["mwv_report"] = mwv_report
+    if runtime_mode in {"ask", "auto"}:
+        slavik_meta["runtime_mode"] = runtime_mode
+        slavik_meta["runtime_session_id"] = runtime_session_id
 
     response_payload: dict[str, JSONValue] = {
         "id": f"chatcmpl-{uuid.uuid4().hex}",

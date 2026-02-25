@@ -645,7 +645,9 @@ def test_ui_decision_respond_agent_decision_supports_generic_choices() -> None:
             assert context.get("source_endpoint") == "chat.agent_decision"
             resume_payload = context.get("resume_payload")
             assert isinstance(resume_payload, dict)
-            assert isinstance(resume_payload.get("source_request"), dict)
+            source_request = resume_payload.get("source_request")
+            assert isinstance(source_request, dict)
+            assert source_request.get("lane") == "chat"
             decision_id = decision.get("id")
             assert isinstance(decision_id, str)
 
@@ -801,6 +803,122 @@ def test_ui_decision_respond_agent_decision_retry_replays_source_request() -> No
             assert isinstance(data, dict)
             assert data.get("status_code") == 200
             assert agent.calls == 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_agent_decision_retry_preserves_workspace_lane() -> None:
+    class RetryDecisionAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def respond(self, messages) -> str:
+            del messages
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps(
+                    {
+                        "id": "decision-retry-workspace",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "reason": "need_user_input",
+                        "summary": "Need retry choice",
+                        "context": {},
+                        "options": [
+                            {
+                                "id": "retry",
+                                "title": "Retry",
+                                "action": "retry",
+                                "payload": {},
+                                "risk": "medium",
+                            },
+                            {
+                                "id": "abort",
+                                "title": "Abort",
+                                "action": "abort",
+                                "payload": {},
+                                "risk": "low",
+                            },
+                        ],
+                        "default_option_id": "retry",
+                        "ttl_seconds": 600,
+                        "policy": {"require_user_choice": True},
+                    }
+                )
+            return "retry-ok"
+
+    async def run() -> None:
+        agent = RetryDecisionAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "trigger retry", "lane": "workspace"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            assert send_payload.get("lane") == "workspace"
+            chat_messages = send_payload.get("messages")
+            assert isinstance(chat_messages, list)
+            assert chat_messages == []
+            workspace_messages = send_payload.get("workspace_messages")
+            assert isinstance(workspace_messages, list)
+            assert len(workspace_messages) == 1
+            decision = send_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            retry_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "retry",
+                },
+            )
+            assert retry_resp.status == 200
+            retry_payload = await retry_resp.json()
+            assert retry_payload.get("status") == "resolved"
+            assert retry_payload.get("resume_started") is True
+            resume = retry_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+            assert agent.calls == 2
+
+            chat_history_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
+            assert chat_history_resp.status == 200
+            chat_history_payload = await chat_history_resp.json()
+            chat_history = chat_history_payload.get("messages")
+            assert isinstance(chat_history, list)
+            assert chat_history == []
+
+            workspace_history_resp = await client.get(
+                f"/ui/api/sessions/{session_id}/history?lane=workspace"
+            )
+            assert workspace_history_resp.status == 200
+            workspace_history_payload = await workspace_history_resp.json()
+            workspace_history = workspace_history_payload.get("messages")
+            assert isinstance(workspace_history, list)
+            assert len(workspace_history) == 3
+            last_item = workspace_history[-1]
+            assert isinstance(last_item, dict)
+            assert last_item.get("role") == "assistant"
+            assert last_item.get("content") == "retry-ok"
+            assert all(
+                isinstance(item, dict) and item.get("lane") == "workspace"
+                for item in workspace_history
+            )
         finally:
             await client.close()
 

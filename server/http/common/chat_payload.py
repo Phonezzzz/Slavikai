@@ -32,6 +32,9 @@ def _extract_session_id(request: web.Request, payload: dict[str, object]) -> str
     session_raw = meta_raw.get("session_id")
     if isinstance(session_raw, str) and session_raw.strip():
         return session_raw.strip()
+    runtime_session_raw = meta_raw.get("runtime_session_id")
+    if isinstance(runtime_session_raw, str) and runtime_session_raw.strip():
+        return runtime_session_raw.strip()
     return None
 
 

@@ -5,15 +5,22 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.approval_policy import ApprovalRequired
 from core.executor import Executor
-from core.mwv.models import RunContext, StopReasonCode, VerificationResult, VerificationStatus
+from core.mwv.models import (
+    RunContext,
+    StopReasonCode,
+    TaskPacket,
+    VerificationResult,
+    VerificationStatus,
+)
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.planner import Planner
 from shared.auto_models import (
@@ -34,6 +41,16 @@ if TYPE_CHECKING:
 
 
 AUTO_CODER_POOL_ENV = "AUTO_CODER_POOL_SIZE"
+AUTO_MAX_RUNTIME_SECONDS_ENV = "AUTO_MAX_RUNTIME_SECONDS"
+AUTO_MAX_TOOL_CALLS_ENV = "AUTO_MAX_TOOL_CALLS"
+AUTO_MAX_FILES_TOUCHED_ENV = "AUTO_MAX_FILES_TOUCHED"
+AUTO_MAX_LLM_TOKENS_ENV = "AUTO_MAX_LLM_TOKENS"
+AUTO_MAX_RETRIES_ENV = "AUTO_MAX_RETRIES"
+AUTO_DEFAULT_MAX_RUNTIME_SECONDS = 900
+AUTO_DEFAULT_MAX_TOOL_CALLS = 80
+AUTO_DEFAULT_MAX_FILES_TOUCHED = 120
+AUTO_DEFAULT_MAX_LLM_TOKENS = 120_000
+AUTO_DEFAULT_MAX_RETRIES = 0
 AUTO_DEFAULT_ACCEPTANCE_CHECKS = [
     "Изменения применены без конфликтов",
     "Проверки завершены успешно",
@@ -73,6 +90,24 @@ class AutoRunOutcome:
     next_steps: list[str]
 
 
+@dataclass(frozen=True)
+class AutoBudgets:
+    max_runtime_seconds: int
+    max_tool_calls: int
+    max_files_touched: int
+    max_llm_tokens: int
+    max_retries: int
+
+    def to_dict(self) -> dict[str, JSONValue]:
+        return {
+            "max_runtime_seconds": self.max_runtime_seconds,
+            "max_tool_calls": self.max_tool_calls,
+            "max_files_touched": self.max_files_touched,
+            "max_llm_tokens": self.max_llm_tokens,
+            "max_retries": self.max_retries,
+        }
+
+
 @dataclass
 class _PausedRun:
     run_id: str
@@ -108,6 +143,8 @@ class AutoOrchestrator:
         run_id_value = run_id or f"auto-{uuid.uuid4().hex}"
         pool_size = _resolve_pool_size()
         started = started_at or utc_now_iso()
+        started_monotonic = time.monotonic()
+        budgets = _resolve_auto_budgets()
         runtime_root = get_workspace_root().resolve()
         if run_root_override is not None:
             run_root = run_root_override.resolve()
@@ -127,6 +164,7 @@ class AutoOrchestrator:
             "plan": None,
             "coders": [],
             "merge": {"status": "idle", "changed_paths": []},
+            "budgets": budgets.to_dict(),
             "verifier": None,
             "approval": None,
             "error": None,
@@ -137,6 +175,16 @@ class AutoOrchestrator:
 
         try:
             self._set_status(state, AutoRunStatus.PLANNING)
+            budget_stop = _budget_runtime_stop(
+                budgets=budgets,
+                started_monotonic=started_monotonic,
+            )
+            if budget_stop is not None:
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                state["error"] = budget_stop
+                state["error_code"] = "budget_runtime"
+                self._set_state(state)
+                return _budget_stop_outcome(self.parent, budget_stop)
             plan = plan_override or self._build_plan(goal)
             state["planner"] = {
                 "status": "completed",
@@ -146,6 +194,16 @@ class AutoOrchestrator:
             self._set_state(state)
 
             self._set_status(state, AutoRunStatus.CODING)
+            budget_stop = _budget_runtime_stop(
+                budgets=budgets,
+                started_monotonic=started_monotonic,
+            )
+            if budget_stop is not None:
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                state["error"] = budget_stop
+                state["error_code"] = "budget_runtime"
+                self._set_state(state)
+                return _budget_stop_outcome(self.parent, budget_stop)
             baseline_snapshot = _snapshot_workspace(run_root)
             coder_results = self._run_coder_pool(
                 run_id=run_id_value,
@@ -191,7 +249,29 @@ class AutoOrchestrator:
                     ],
                 )
 
+            tool_calls_used = len(coder_results)
+            if tool_calls_used > budgets.max_tool_calls:
+                reason = (
+                    f"Budget exhausted: tool_calls={tool_calls_used} "
+                    f"> max_tool_calls={budgets.max_tool_calls}"
+                )
+                state["error"] = reason
+                state["error_code"] = "budget_tool_calls"
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                self._set_state(state)
+                return _budget_stop_outcome(self.parent, reason)
+
             self._set_status(state, AutoRunStatus.MERGING)
+            budget_stop = _budget_runtime_stop(
+                budgets=budgets,
+                started_monotonic=started_monotonic,
+            )
+            if budget_stop is not None:
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                state["error"] = budget_stop
+                state["error_code"] = "budget_runtime"
+                self._set_state(state)
+                return _budget_stop_outcome(self.parent, budget_stop)
             topo = _topological_order(plan)
             topo_ids = [item.shard_id for item in topo]
             ordered_results = sorted(
@@ -252,6 +332,16 @@ class AutoOrchestrator:
                 )
 
             merged_paths = self._apply_patch_bundles(ordered_results, workspace_root=run_root)
+            if len(merged_paths) > budgets.max_files_touched:
+                reason = (
+                    f"Budget exhausted: files_touched={len(merged_paths)} "
+                    f"> max_files_touched={budgets.max_files_touched}"
+                )
+                state["error"] = reason
+                state["error_code"] = "budget_files_touched"
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                self._set_state(state)
+                return _budget_stop_outcome(self.parent, reason)
             state["merge"] = {
                 "status": "completed",
                 "changed_paths": sorted(merged_paths),
@@ -259,6 +349,16 @@ class AutoOrchestrator:
             self._set_state(state)
 
             self._set_status(state, AutoRunStatus.VERIFYING)
+            budget_stop = _budget_runtime_stop(
+                budgets=budgets,
+                started_monotonic=started_monotonic,
+            )
+            if budget_stop is not None:
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                state["error"] = budget_stop
+                state["error_code"] = "budget_runtime"
+                self._set_state(state)
+                return _budget_stop_outcome(self.parent, budget_stop)
             verifier = VerifierRuntime(project_root=run_root)
             context = RunContext(
                 session_id=self.parent.session_id or "local",
@@ -266,10 +366,23 @@ class AutoOrchestrator:
                 workspace_root=str(run_root),
                 safe_mode=bool(self.parent.tools_enabled.get("safe_mode", False)),
                 approved_categories=sorted(self.parent.approved_categories),
-                max_retries=0,
+                max_retries=budgets.max_retries,
                 attempt=1,
             )
-            verification = verifier.run(context)
+            verifier_task = TaskPacket(
+                task_id=run_id_value,
+                session_id=context.session_id,
+                trace_id=context.trace_id,
+                goal=goal,
+                scope={"workspace_root": str(run_root)},
+                verifier={"command": "scripts/check.sh", "cwd": str(run_root)},
+            )
+            verifier_run: Any = verifier.run
+            try:
+                verification = verifier_run(verifier_task, context)
+            except TypeError:
+                # Backward compatibility for legacy verifier stubs.
+                verification = verifier_run(context)
             state["verifier"] = {
                 "status": verification.status.value,
                 "command": list(verification.command),
@@ -636,6 +749,85 @@ def _resolve_pool_size() -> int:
     except ValueError:
         return AUTO_CODER_POOL_DEFAULT
     return max(AUTO_CODER_POOL_MIN, min(AUTO_CODER_POOL_MAX, value))
+
+
+def _env_int(name: str, default: int, *, min_value: int = 0) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < min_value:
+        return default
+    return value
+
+
+def _resolve_auto_budgets() -> AutoBudgets:
+    return AutoBudgets(
+        max_runtime_seconds=_env_int(
+            AUTO_MAX_RUNTIME_SECONDS_ENV,
+            AUTO_DEFAULT_MAX_RUNTIME_SECONDS,
+            min_value=1,
+        ),
+        max_tool_calls=_env_int(
+            AUTO_MAX_TOOL_CALLS_ENV,
+            AUTO_DEFAULT_MAX_TOOL_CALLS,
+            min_value=1,
+        ),
+        max_files_touched=_env_int(
+            AUTO_MAX_FILES_TOUCHED_ENV,
+            AUTO_DEFAULT_MAX_FILES_TOUCHED,
+            min_value=1,
+        ),
+        max_llm_tokens=_env_int(
+            AUTO_MAX_LLM_TOKENS_ENV,
+            AUTO_DEFAULT_MAX_LLM_TOKENS,
+            min_value=1,
+        ),
+        max_retries=_env_int(
+            AUTO_MAX_RETRIES_ENV,
+            AUTO_DEFAULT_MAX_RETRIES,
+            min_value=0,
+        ),
+    )
+
+
+def _budget_runtime_stop(
+    *,
+    budgets: AutoBudgets,
+    started_monotonic: float,
+) -> str | None:
+    elapsed = int(max(0.0, time.monotonic() - started_monotonic))
+    if elapsed <= budgets.max_runtime_seconds:
+        return None
+    return (
+        f"Budget exhausted: runtime_seconds={elapsed} "
+        f"> max_runtime_seconds={budgets.max_runtime_seconds}"
+    )
+
+
+def _budget_stop_outcome(parent_agent: Agent, reason: str) -> AutoRunOutcome:
+    next_steps = [
+        "Сузь задачу и перезапусти auto.",
+        "Увеличь budgets для auto-run при необходимости.",
+    ]
+    return AutoRunOutcome(
+        text=parent_agent._format_stop_response(
+            what="Auto-run остановлен: budget exhausted",
+            why=reason,
+            next_steps=next_steps,
+            stop_reason_code=StopReasonCode.BUDGET_EXHAUSTED,
+            route="auto",
+            plan_summary="Auto FSM остановлен бюджетным лимитом.",
+            execution_summary=reason,
+        ),
+        status=AutoRunStatus.FAILED_INTERNAL,
+        stop_reason_code=StopReasonCode.BUDGET_EXHAUSTED,
+        verifier=None,
+        next_steps=next_steps,
+    )
 
 
 def _fallback_shard(goal: str) -> AutoShard:

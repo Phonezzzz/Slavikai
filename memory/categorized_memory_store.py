@@ -13,6 +13,7 @@ from shared.models import JSONValue
 
 DEFAULT_DB_PATH: Final[Path] = Path("memory/memory_categories.db")
 _CURSOR_SEP: Final[str] = "|"
+_UNSET: Final[object] = object()
 
 
 @dataclass(frozen=True)
@@ -118,8 +119,8 @@ class CategorizedMemoryStore:
         tags: list[str] | None = None,
         meta: dict[str, JSONValue] | None = None,
         source: MemorySource | None = None,
-        triaged_from: str | None = None,
-        triaged_at: datetime | None = None,
+        triaged_from: str | None | object = _UNSET,
+        triaged_at: datetime | None | object = _UNSET,
     ) -> MemoryItem | None:
         current = self.get_item(item_id)
         if current is None:
@@ -128,6 +129,20 @@ class CategorizedMemoryStore:
         new_source = source or current.source
         new_content = content if content is not None else current.content
         fingerprint = _fingerprint(_normalize_content(new_content), new_source)
+        next_triaged_from: str | None
+        if triaged_from is _UNSET:
+            next_triaged_from = current.triaged_from
+        elif isinstance(triaged_from, str):
+            next_triaged_from = triaged_from
+        else:
+            next_triaged_from = None
+        next_triaged_at: datetime | None
+        if triaged_at is _UNSET:
+            next_triaged_at = current.triaged_at
+        elif isinstance(triaged_at, datetime):
+            next_triaged_at = _ensure_utc(triaged_at)
+        else:
+            next_triaged_at = None
         updated = MemoryItem(
             id=current.id,
             category=new_category,
@@ -139,8 +154,8 @@ class CategorizedMemoryStore:
             source=new_source,
             fingerprint=fingerprint,
             meta=meta if meta is not None else current.meta,
-            triaged_from=triaged_from if triaged_from is not None else current.triaged_from,
-            triaged_at=_ensure_utc(triaged_at) if triaged_at else current.triaged_at,
+            triaged_from=next_triaged_from,
+            triaged_at=next_triaged_at,
         )
         self._replace(updated)
         return updated

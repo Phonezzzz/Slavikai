@@ -51,7 +51,7 @@ def test_mwv_approval_required_is_propagated() -> None:
     def _worker(_task: TaskPacket, _context: RunContext) -> WorkResult:
         raise ApprovalRequired(approval_request)
 
-    def _verifier(_context: RunContext) -> VerificationResult:
+    def _verifier(_task: TaskPacket, _context: RunContext) -> VerificationResult:
         raise AssertionError("Verifier should not run when approval is required.")
 
     with pytest.raises(ApprovalRequired):
