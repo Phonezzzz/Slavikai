@@ -38,6 +38,7 @@ import type {
 const SESSION_HEADER = 'X-Slavik-Session';
 const SCROLLBAR_REVEAL_DISTANCE_PX = 38;
 const LAST_SESSION_KEY = 'slavik.last.session';
+const WORKSPACE_EXPLORER_VISIBLE_KEY = 'slavik.workspace.explorer.visible';
 const WORKSPACE_PATHS = new Set(['/workspace', '/ui/workspace']);
 
 type SessionArtifactRecord = {
@@ -258,6 +259,24 @@ const saveLastSessionId = (sessionId: string | null) => {
     return;
   }
   window.localStorage.setItem(LAST_SESSION_KEY, sessionId);
+};
+
+const loadWorkspaceExplorerVisible = (): boolean => {
+  if (typeof window === 'undefined') {
+    return true;
+  }
+  const raw = window.localStorage.getItem(WORKSPACE_EXPLORER_VISIBLE_KEY);
+  if (raw === 'false') {
+    return false;
+  }
+  return true;
+};
+
+const saveWorkspaceExplorerVisible = (visible: boolean): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.setItem(WORKSPACE_EXPLORER_VISIBLE_KEY, visible ? 'true' : 'false');
 };
 
 const viewFromPathname = (pathname: string): AppView => {
@@ -1015,6 +1034,9 @@ export default function App() {
     }
     return viewFromPathname(window.location.pathname);
   });
+  const [workspaceExplorerVisible, setWorkspaceExplorerVisible] = useState<boolean>(() =>
+    loadWorkspaceExplorerVisible(),
+  );
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
@@ -1332,6 +1354,14 @@ export default function App() {
     window.history.pushState({ view }, '', nextPath);
   };
 
+  const handleWorkspaceSidebarAction = () => {
+    if (activeView !== 'workspace') {
+      setView('workspace');
+      return;
+    }
+    setWorkspaceExplorerVisible((prev) => !prev);
+  };
+
   const isModelAvailable = (model: SelectedModel, providers: ProviderModels[]) =>
     providers.some((provider) => provider.provider === model.provider && provider.models.includes(model.model));
 
@@ -1354,6 +1384,10 @@ export default function App() {
       setWorkspaceSettingsOpen(false);
     }
   }, [activeView, workspaceSettingsOpen]);
+
+  useEffect(() => {
+    saveWorkspaceExplorerVisible(workspaceExplorerVisible);
+  }, [workspaceExplorerVisible]);
 
   const extractErrorFromResponse = async (
     response: Response,
@@ -2818,12 +2852,14 @@ export default function App() {
           void handleMoveChatToFolder(sessionId, folderId);
         }}
         onOpenSearch={() => setSearchOpen(true)}
-        onOpenWorkspace={() => setView('workspace')}
+        onOpenWorkspace={handleWorkspaceSidebarAction}
         onOpenSettings={() => setSettingsOpen(true)}
         onCreateFolder={() => {
           void handleCreateFolder();
         }}
         compact={activeView === 'workspace'}
+        workspaceActive={activeView === 'workspace'}
+        workspaceExplorerVisible={workspaceExplorerVisible}
       />
 
       <div className="flex-1 min-w-0 relative">
@@ -2866,6 +2902,7 @@ export default function App() {
               void handleDecisionRespond(choice, editedAction);
             }}
             refreshToken={workspaceRefreshToken}
+            explorerVisible={workspaceExplorerVisible}
           />
         ) : (
           <>

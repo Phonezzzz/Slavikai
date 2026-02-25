@@ -84,6 +84,7 @@ type WorkspaceIdeProps = {
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
   refreshToken?: number;
+  explorerVisible: boolean;
 };
 
 const MIN_EXPLORER_WIDTH = 240;
@@ -127,6 +128,7 @@ export function WorkspaceIde({
   decisionError = null,
   onDecisionRespond,
   refreshToken = 0,
+  explorerVisible,
 }: WorkspaceIdeProps) {
   const [tree, setTree] = useState<WorkspaceNode[]>([]);
   const [treeLoading, setTreeLoading] = useState(false);
@@ -318,7 +320,7 @@ export function WorkspaceIde({
       return;
     }
     const handleMove = (event: MouseEvent) => {
-      if (draggingExplorer) {
+      if (explorerVisible && draggingExplorer) {
         setExplorerWidth((prev) => Math.min(MAX_EXPLORER_WIDTH, Math.max(MIN_EXPLORER_WIDTH, prev + event.movementX)));
       }
       if (draggingAssistant) {
@@ -339,7 +341,13 @@ export function WorkspaceIde({
       window.removeEventListener('mousemove', handleMove);
       window.removeEventListener('mouseup', handleUp);
     };
-  }, [draggingAssistant, draggingExplorer, draggingTerminal]);
+  }, [draggingAssistant, draggingExplorer, draggingTerminal, explorerVisible]);
+
+  useEffect(() => {
+    if (!explorerVisible && draggingExplorer) {
+      setDraggingExplorer(false);
+    }
+  }, [draggingExplorer, explorerVisible]);
 
   const loadWorkspaceRoot = async (): Promise<void> => {
     if (!sessionId) {
@@ -1047,6 +1055,9 @@ export function WorkspaceIde({
     ? 'Ожидает подтверждения решения. Отправка временно заблокирована.'
     : null;
   const canSendWithContext = Boolean(agentInput.trim() || buildContextAttachments().length > 0);
+  const workspaceGridColumns = explorerVisible
+    ? `${explorerWidth}px 6px ${assistantWidth}px 6px minmax(420px,1fr)`
+    : `${assistantWidth}px 6px minmax(420px,1fr)`;
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-[#0a0a0d] text-[#d2d2d9]">
@@ -1080,56 +1091,60 @@ export function WorkspaceIde({
       <div
         className="flex-1 min-h-0 grid"
         style={{
-          gridTemplateColumns: `${explorerWidth}px 6px ${assistantWidth}px 6px minmax(420px,1fr)`,
+          gridTemplateColumns: workspaceGridColumns,
         }}
       >
-        <WorkspaceExplorer
-          tree={tree}
-          treeLoading={treeLoading}
-          treeError={treeError}
-          loadingTreePaths={loadingTreePaths}
-          treeMeta={treeMeta}
-          expandedNodes={expandedNodes}
-          activePath={activeTab?.path ?? null}
-          activeExplorerPath={activeExplorerPath}
-          onToggleNode={(node, key, expanded) => {
-            setExpandedNodes((prev) => {
-              const next = new Set(prev);
-              if (expanded) {
-                next.delete(key);
-              } else {
-                next.add(key);
-              }
-              return next;
-            });
-            if (!expanded && node.type === 'dir' && (node.children?.length ?? 0) === 0 && node.hasChildren) {
-              requestTreeLoad(node.path, 'expand_dir');
-            }
-          }}
-          onSelectPath={setActiveExplorerPath}
-          onOpenFile={(path) => {
-            void openFileInTab(path);
-          }}
-          onCreateFile={() => {
-            void handleCreateFile();
-          }}
-          onRenamePath={(path) => {
-            void handleRenamePath(path);
-          }}
-          onMovePath={(path) => {
-            void handleMovePath(path);
-          }}
-          onDeletePath={(path) => {
-            void handleDeletePath(path);
-          }}
-        />
+        {explorerVisible ? (
+          <>
+            <WorkspaceExplorer
+              tree={tree}
+              treeLoading={treeLoading}
+              treeError={treeError}
+              loadingTreePaths={loadingTreePaths}
+              treeMeta={treeMeta}
+              expandedNodes={expandedNodes}
+              activePath={activeTab?.path ?? null}
+              activeExplorerPath={activeExplorerPath}
+              onToggleNode={(node, key, expanded) => {
+                setExpandedNodes((prev) => {
+                  const next = new Set(prev);
+                  if (expanded) {
+                    next.delete(key);
+                  } else {
+                    next.add(key);
+                  }
+                  return next;
+                });
+                if (!expanded && node.type === 'dir' && (node.children?.length ?? 0) === 0 && node.hasChildren) {
+                  requestTreeLoad(node.path, 'expand_dir');
+                }
+              }}
+              onSelectPath={setActiveExplorerPath}
+              onOpenFile={(path) => {
+                void openFileInTab(path);
+              }}
+              onCreateFile={() => {
+                void handleCreateFile();
+              }}
+              onRenamePath={(path) => {
+                void handleRenamePath(path);
+              }}
+              onMovePath={(path) => {
+                void handleMovePath(path);
+              }}
+              onDeletePath={(path) => {
+                void handleDeletePath(path);
+              }}
+            />
 
-        <button
-          onMouseDown={() => setDraggingExplorer(true)}
-          className="cursor-col-resize bg-[#121218] hover:bg-[#1b1b23]"
-          aria-label="Resize explorer"
-          title="Resize explorer"
-        />
+            <button
+              onMouseDown={() => setDraggingExplorer(true)}
+              className="cursor-col-resize bg-[#121218] hover:bg-[#1b1b23]"
+              aria-label="Resize explorer"
+              title="Resize explorer"
+            />
+          </>
+        ) : null}
 
         <WorkspaceAssistantPanel
           contextChips={aiContextChips}

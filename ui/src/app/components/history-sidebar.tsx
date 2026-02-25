@@ -46,6 +46,8 @@ interface HistorySidebarProps {
   onCreateFolder?: () => void;
   className?: string;
   compact?: boolean;
+  workspaceActive?: boolean;
+  workspaceExplorerVisible?: boolean;
 }
 
 const defaultChats: ChatItem[] = [];
@@ -66,6 +68,8 @@ export function HistorySidebar({
   onCreateFolder,
   className = "",
   compact = false,
+  workspaceActive = false,
+  workspaceExplorerVisible = true,
 }: HistorySidebarProps) {
   const [hoveredChat, setHoveredChat] = useState<string | null>(null);
   const [menuChatId, setMenuChatId] = useState<string | null>(null);
@@ -90,6 +94,9 @@ export function HistorySidebar({
   const todayChats = chats.filter((c) => c.group === "today");
   const yesterdayChats = chats.filter((c) => c.group === "yesterday");
   const olderChats = chats.filter((c) => c.group === "older");
+  const workspaceButtonLabel = workspaceActive
+    ? (workspaceExplorerVisible ? "Hide File Manager" : "Show File Manager")
+    : "Workspace";
 
   if (compact) {
     return (
@@ -124,8 +131,9 @@ export function HistorySidebar({
         <button
           onClick={onOpenWorkspace}
           className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg bg-[#141418] text-[#d0d0d0] hover:bg-[#1b1b20]"
-          title="Workspace"
-          aria-label="Workspace"
+          title={workspaceButtonLabel}
+          aria-label={workspaceButtonLabel}
+          aria-pressed={workspaceActive ? workspaceExplorerVisible : undefined}
         >
           <LayoutGrid className="h-4 w-4" />
         </button>
