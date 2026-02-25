@@ -3,6 +3,7 @@ import type { OnMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
 
 import type {
+  AgentLoopState,
   AutoState,
   DecisionRespondChoice,
   PlanEnvelope,
@@ -61,6 +62,7 @@ type WorkspaceIdeProps = {
   messages: CanvasMessage[];
   sending: boolean;
   statusMessage?: string | null;
+  agentLoopState?: AgentLoopState | null;
   onBackToChat: () => void;
   onOpenWorkspaceSettings: () => void;
   onSendAgentMessage: (payload: CanvasSendPayload) => Promise<boolean>;
@@ -107,6 +109,7 @@ export function WorkspaceIde({
   messages,
   sending,
   statusMessage,
+  agentLoopState = null,
   onBackToChat,
   onOpenWorkspaceSettings,
   onSendAgentMessage,
@@ -236,7 +239,9 @@ export function WorkspaceIde({
   }, [sessionId]);
 
   useEffect(() => {
-    const assistantMessages = messages.filter((item) => item.role === 'assistant');
+    const assistantMessages = messages.filter(
+      (item) => item.role === 'assistant' && item.transient !== true,
+    );
     if (!assistantInitRef.current) {
       assistantMessages.forEach((message) => {
         assistantSeenRef.current.add(message.messageId);
@@ -1127,16 +1132,16 @@ export function WorkspaceIde({
 
         <WorkspaceAssistantPanel
           contextChips={aiContextChips}
-        mode={mode}
-        modelOptions={modelOptions}
-        selectedModelValue={selectedModelValue}
-        modelsLoading={modelsLoading}
-        savingModel={savingModel}
-        onSelectModel={onSelectModel}
-        activePlan={activePlan}
-        activeTask={activeTask}
-        autoState={autoState}
-        modeBusy={modeBusy}
+          mode={mode}
+          modelOptions={modelOptions}
+          selectedModelValue={selectedModelValue}
+          modelsLoading={modelsLoading}
+          savingModel={savingModel}
+          onSelectModel={onSelectModel}
+          activePlan={activePlan}
+          activeTask={activeTask}
+          autoState={autoState}
+          modeBusy={modeBusy}
           modeError={modeError}
           onChangeMode={onChangeMode}
           onPlanDraft={onPlanDraft}
@@ -1148,6 +1153,7 @@ export function WorkspaceIde({
           decisionError={decisionError}
           onDecisionRespond={onDecisionRespond}
           messages={messages}
+          agentLoopState={agentLoopState}
           terminalPendingText={terminalPendingText}
           agentInput={agentInput}
           sending={sending}

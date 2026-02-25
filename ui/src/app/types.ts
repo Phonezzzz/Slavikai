@@ -57,6 +57,26 @@ export type UiDecision = {
   resolved_at: string | null;
 };
 
+export type AgentLoopStage =
+  | 'idle'
+  | 'submitted'
+  | 'reading'
+  | 'prepared'
+  | 'thinking'
+  | 'responding'
+  | 'waiting_approval'
+  | 'finalizing'
+  | 'completed'
+  | 'error';
+
+export type AgentLoopState = {
+  stage: AgentLoopStage;
+  text: string;
+  detail?: string | null;
+  updatedAt: string;
+  transient: boolean;
+};
+
 export const SESSION_MODE_VALUES = ['ask', 'plan', 'act', 'auto'] as const;
 
 export type SessionMode = (typeof SESSION_MODE_VALUES)[number];

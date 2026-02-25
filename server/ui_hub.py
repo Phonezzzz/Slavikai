@@ -305,6 +305,18 @@ class UIHub:
             state.updated_at = _utc_iso_now()
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
+            subscribers = list(state.subscribers)
+            payload: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "output": {
+                    "content": state.output_text,
+                    "updated_at": state.output_updated_at,
+                },
+            }
+        if not subscribers:
+            return
+        event = self._build_event("session.output", payload)
+        self._publish_to_subscribers(subscribers, event)
 
     async def get_session_files(self, session_id: str) -> list[str] | None:
         async with self._lock:

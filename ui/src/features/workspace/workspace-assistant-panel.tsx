@@ -17,6 +17,7 @@ import {
 
 import { SESSION_MODE_VALUES, isSessionMode } from '../../app/types';
 import type {
+  AgentLoopState,
   AutoState,
   DecisionRespondChoice,
   PlanEnvelope,
@@ -69,6 +70,7 @@ type WorkspaceAssistantPanelProps = {
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
   messages: CanvasMessage[];
+  agentLoopState: AgentLoopState | null;
   terminalPendingText: string | null;
   agentInput: string;
   sending: boolean;
@@ -103,6 +105,7 @@ export function WorkspaceAssistantPanel({
   decisionError,
   onDecisionRespond,
   messages,
+  agentLoopState,
   terminalPendingText,
   agentInput,
   sending,
@@ -137,6 +140,22 @@ export function WorkspaceAssistantPanel({
       && typeof window.navigator.mediaDevices.getUserMedia === 'function'
     );
   }, []);
+
+  const loopToneClass = useMemo(() => {
+    if (!agentLoopState) {
+      return 'text-[#8e8e98]';
+    }
+    if (agentLoopState.stage === 'waiting_approval') {
+      return 'text-amber-300';
+    }
+    if (agentLoopState.stage === 'error') {
+      return 'text-rose-300';
+    }
+    if (agentLoopState.stage === 'completed') {
+      return 'text-emerald-300';
+    }
+    return 'text-[#8e8e98]';
+  }, [agentLoopState]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -592,6 +611,24 @@ export function WorkspaceAssistantPanel({
       </div>
 
       <div className="border-t border-[#1f1f24] p-3 space-y-2">
+        {agentLoopState && agentLoopState.stage !== 'idle' ? (
+          <div className={`flex items-center gap-2 text-[11px] ${loopToneClass}`}>
+            {agentLoopState.stage === 'thinking'
+            || agentLoopState.stage === 'responding'
+            || agentLoopState.stage === 'submitted'
+            || agentLoopState.stage === 'reading'
+            || agentLoopState.stage === 'prepared'
+            || agentLoopState.stage === 'finalizing' ? (
+                <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+              ) : null}
+            <span>{agentLoopState.text}</span>
+            {agentLoopState.detail ? (
+              <span className="truncate text-[#6f6f7a]" title={agentLoopState.detail}>
+                {agentLoopState.detail}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {terminalPendingText ? (
           <div className="text-[11px] text-amber-300">{terminalPendingText}</div>
         ) : null}

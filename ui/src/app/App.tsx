@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelRight } from 'lucide-react';
 
 import { ArtifactPanel } from './components/artifact-panel';
@@ -19,6 +19,8 @@ import {
 import { WorkspaceIde } from './components/workspace-ide';
 import { isSessionMode } from './types';
 import type {
+  AgentLoopStage,
+  AgentLoopState,
   AutoState,
   ChatAttachment,
   ChatMessage,
@@ -67,6 +69,83 @@ type ChatStreamState = {
 type PendingUserMessage = {
   content: string;
   attachments: ChatAttachment[];
+};
+
+const AGENT_LOOP_ACTIVE_STAGES: ReadonlySet<AgentLoopStage> = new Set([
+  'submitted',
+  'reading',
+  'prepared',
+  'thinking',
+  'responding',
+  'waiting_approval',
+  'finalizing',
+]);
+
+const agentLoopText = (stage: AgentLoopStage): string => {
+  if (stage === 'submitted') {
+    return 'Сообщение отправлено. Читаю контекст...';
+  }
+  if (stage === 'reading') {
+    return 'Читает контекст';
+  }
+  if (stage === 'prepared') {
+    return 'Подготавливает контекст';
+  }
+  if (stage === 'thinking') {
+    return 'Думает';
+  }
+  if (stage === 'responding') {
+    return 'Печатает ответ';
+  }
+  if (stage === 'waiting_approval') {
+    return 'Ожидает подтверждение';
+  }
+  if (stage === 'finalizing') {
+    return 'Финализирует ответ';
+  }
+  if (stage === 'completed') {
+    return 'Готово';
+  }
+  if (stage === 'error') {
+    return 'Ошибка';
+  }
+  return '';
+};
+
+const isTransientLoopStage = (stage: AgentLoopStage): boolean =>
+  stage !== 'idle' && stage !== 'completed' && stage !== 'error';
+
+const buildAgentLoopState = (
+  stage: AgentLoopStage,
+  detail?: string | null,
+): AgentLoopState => ({
+  stage,
+  text: agentLoopText(stage),
+  detail: detail ?? null,
+  updatedAt: new Date().toISOString(),
+  transient: isTransientLoopStage(stage),
+});
+
+const agentActivityStage = (phase: string): AgentLoopStage | null => {
+  if (phase === 'request.received') {
+    return 'reading';
+  }
+  if (phase === 'context.prepared') {
+    return 'prepared';
+  }
+  if (phase === 'agent.respond.start') {
+    return 'thinking';
+  }
+  if (phase === 'approval.required') {
+    return 'waiting_approval';
+  }
+  if (phase === 'response.ready') {
+    return 'finalizing';
+  }
+  if (phase === 'error') {
+    return 'error';
+  }
+  return null;
 };
 
 type AppView = 'chat' | 'workspace';
@@ -155,14 +234,28 @@ const isChatMessage = (value: unknown): value is ChatMessage => {
   return true;
 };
 
+const parseChatMessage = (value: unknown): ChatMessage | null => {
+  if (!isChatMessage(value)) {
+    return null;
+  }
+  return {
+    ...value,
+    attachments: parseChatAttachments((value as { attachments?: unknown }).attachments),
+  };
+};
+
 const parseMessages = (value: unknown): ChatMessage[] => {
   if (!Array.isArray(value)) {
     return [];
   }
-  return value.filter(isChatMessage).map((message) => ({
-    ...message,
-    attachments: parseChatAttachments((message as { attachments?: unknown }).attachments),
-  }));
+  const messages: ChatMessage[] = [];
+  for (const item of value) {
+    const parsed = parseChatMessage(item);
+    if (parsed) {
+      messages.push(parsed);
+    }
+  }
+  return messages;
 };
 
 const parseComposerSettings = (value: unknown): ComposerUiSettings => {
@@ -749,6 +842,36 @@ const parseTaskExecution = (value: unknown): TaskExecutionState | null => {
   };
 };
 
+const buildTaskLoopDetail = (
+  plan: PlanEnvelope | null,
+  task: TaskExecutionState | null,
+): string | null => {
+  if (!plan || !task || !task.current_step_id) {
+    return null;
+  }
+  const index = plan.steps.findIndex((step) => step.step_id === task.current_step_id);
+  if (index < 0) {
+    return null;
+  }
+  const step = plan.steps[index];
+  const title = step.title.trim();
+  if (title) {
+    return `Шаг ${index + 1}/${plan.steps.length}: ${title}`;
+  }
+  return `Шаг ${index + 1}/${plan.steps.length}`;
+};
+
+const buildAutoLoopDetail = (state: AutoState | null): string | null => {
+  if (!state) {
+    return null;
+  }
+  const status = state.status.replace(/_/g, ' ');
+  if (state.error && state.error.trim()) {
+    return `auto: ${status} · ${state.error.trim()}`;
+  }
+  return `auto: ${status}`;
+};
+
 const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) {
@@ -1032,9 +1155,73 @@ export default function App() {
   const [activePlan, setActivePlan] = useState<PlanEnvelope | null>(null);
   const [activeTask, setActiveTask] = useState<TaskExecutionState | null>(null);
   const [autoState, setAutoState] = useState<AutoState | null>(null);
+  const [agentLoopState, setAgentLoopState] = useState<AgentLoopState | null>(null);
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
+  const agentLoopResetTimerRef = useRef<number | null>(null);
+  const sendingRef = useRef(false);
+  const pendingDecisionRef = useRef<UiDecision | null>(null);
+  const agentLoopStateRef = useRef<AgentLoopState | null>(null);
+
+  const clearAgentLoopResetTimer = () => {
+    if (agentLoopResetTimerRef.current !== null) {
+      window.clearTimeout(agentLoopResetTimerRef.current);
+      agentLoopResetTimerRef.current = null;
+    }
+  };
+
+  const scheduleAgentLoopIdle = (delayMs = 1000) => {
+    clearAgentLoopResetTimer();
+    agentLoopResetTimerRef.current = window.setTimeout(() => {
+      setAgentLoopState(buildAgentLoopState('idle'));
+      agentLoopResetTimerRef.current = null;
+    }, delayMs);
+  };
+
+  const setAgentLoopStage = (
+    stage: AgentLoopStage,
+    detail?: string | null,
+    options?: { force?: boolean },
+  ) => {
+    const force = options?.force === true;
+    if (stage === 'idle') {
+      clearAgentLoopResetTimer();
+      setAgentLoopState(buildAgentLoopState('idle'));
+      return;
+    }
+    if (stage === 'completed') {
+      clearAgentLoopResetTimer();
+      setAgentLoopState(buildAgentLoopState(stage, detail));
+      scheduleAgentLoopIdle(1000);
+      return;
+    }
+    if (stage === 'error') {
+      clearAgentLoopResetTimer();
+      setAgentLoopState(buildAgentLoopState(stage, detail));
+      scheduleAgentLoopIdle(1700);
+      return;
+    }
+    clearAgentLoopResetTimer();
+    setAgentLoopState((current) => {
+      if (!force && current?.stage === stage && (current.detail ?? null) === (detail ?? null)) {
+        return current;
+      }
+      return buildAgentLoopState(stage, detail);
+    });
+  };
+
+  useEffect(() => {
+    sendingRef.current = sending;
+  }, [sending]);
+
+  useEffect(() => {
+    pendingDecisionRef.current = pendingDecision;
+  }, [pendingDecision]);
+
+  useEffect(() => {
+    agentLoopStateRef.current = agentLoopState;
+  }, [agentLoopState]);
 
   const pendingForCanvas =
     pendingSessionId === selectedConversation ? pendingUserMessage : null;
@@ -1754,6 +1941,29 @@ export default function App() {
   }, [sending]);
 
   useEffect(() => {
+    return () => {
+      clearAgentLoopResetTimer();
+    };
+  }, []);
+
+  useEffect(() => {
+    setAgentLoopStage('idle', null, { force: true });
+  }, [selectedConversation]);
+
+  useEffect(() => {
+    if (pendingDecision?.status === 'pending' && pendingDecision.blocking) {
+      setAgentLoopStage('waiting_approval');
+      return;
+    }
+    if (sending) {
+      return;
+    }
+    if (agentLoopState && AGENT_LOOP_ACTIVE_STAGES.has(agentLoopState.stage)) {
+      scheduleAgentLoopIdle(900);
+    }
+  }, [agentLoopState, pendingDecision, sending]);
+
+  useEffect(() => {
     if (typeof window === 'undefined' || !selectedConversation) {
       return;
     }
@@ -1778,9 +1988,50 @@ export default function App() {
         artifact_id?: unknown;
         stream_id?: unknown;
         delta?: unknown;
+        message?: unknown;
+        output?: unknown;
         decision?: unknown;
         workflow?: unknown;
+        state?: unknown;
+        phase?: unknown;
+        detail?: unknown;
+        mode?: unknown;
+        active_plan?: unknown;
+        active_task?: unknown;
+        auto_state?: unknown;
       };
+      if (envelope.type === 'status') {
+        const state = typeof payload.state === 'string' ? payload.state.trim() : '';
+        const pending = pendingDecisionRef.current;
+        const hasBlockingDecision = pending?.status === 'pending' && pending.blocking === true;
+        const currentLoop = agentLoopStateRef.current;
+        if (state === 'busy') {
+          if (!hasBlockingDecision && (sendingRef.current || currentLoop?.stage !== 'idle')) {
+            setAgentLoopStage('thinking');
+          }
+        } else if (state === 'error') {
+          setAgentLoopStage('error');
+        } else if (
+          state === 'ok'
+          && !hasBlockingDecision
+          && (sendingRef.current || (currentLoop?.stage !== 'idle' && currentLoop?.stage !== 'error'))
+        ) {
+          setAgentLoopStage('completed');
+        }
+        return;
+      }
+      if (envelope.type === 'agent.activity') {
+        const phase = typeof payload.phase === 'string' ? payload.phase.trim() : '';
+        const stage = phase ? agentActivityStage(phase) : null;
+        if (stage) {
+          const detail =
+            typeof payload.detail === 'string' && payload.detail.trim()
+              ? payload.detail.trim()
+              : null;
+          setAgentLoopStage(stage, detail);
+        }
+        return;
+      }
       if (envelope.type === 'chat.stream.start') {
         const streamId =
           typeof payload.stream_id === 'string' ? payload.stream_id.trim() : '';
@@ -1789,6 +2040,7 @@ export default function App() {
         }
         setAwaitingFirstAssistantChunk(false);
         setChatStreamingState({ streamId, content: '' });
+        setAgentLoopStage('responding');
         return;
       }
       if (envelope.type === 'chat.stream.delta') {
@@ -1805,9 +2057,28 @@ export default function App() {
           }
           return { streamId, content: `${prev.content}${delta}` };
         });
+        setAgentLoopStage('responding');
         return;
       }
       if (envelope.type === 'chat.stream.done') {
+        return;
+      }
+      if (envelope.type === 'message.append') {
+        const parsedMessage = parseChatMessage(payload.message);
+        if (!parsedMessage) {
+          return;
+        }
+        setMessages((prev) => {
+          if (prev.some((item) => item.message_id === parsedMessage.message_id)) {
+            return prev;
+          }
+          return [...prev, parsedMessage];
+        });
+        return;
+      }
+      if (envelope.type === 'session.output') {
+        const parsedOutput = parseSessionOutput(payload.output);
+        setSessionOutput(parsedOutput.content);
         return;
       }
       if (envelope.type === 'decision.packet') {
@@ -1821,9 +2092,27 @@ export default function App() {
             auto_state?: unknown;
           };
           setSessionMode(parseSessionMode(workflow.mode));
-          setActivePlan(parsePlanEnvelope(workflow.active_plan));
-          setActiveTask(parseTaskExecution(workflow.active_task));
-          setAutoState(parseAutoState(workflow.auto_state));
+          const parsedPlan = parsePlanEnvelope(workflow.active_plan);
+          const parsedTask = parseTaskExecution(workflow.active_task);
+          const parsedAutoState = parseAutoState(workflow.auto_state);
+          setActivePlan(parsedPlan);
+          setActiveTask(parsedTask);
+          setAutoState(parsedAutoState);
+          const taskDetail = buildTaskLoopDetail(parsedPlan, parsedTask);
+          if (taskDetail && AGENT_LOOP_ACTIVE_STAGES.has(agentLoopStateRef.current?.stage ?? 'idle')) {
+            setAgentLoopStage(agentLoopStateRef.current?.stage ?? 'thinking', taskDetail, {
+              force: true,
+            });
+          } else if (
+            parsedAutoState
+            && AGENT_LOOP_ACTIVE_STAGES.has(agentLoopStateRef.current?.stage ?? 'idle')
+          ) {
+            setAgentLoopStage(
+              agentLoopStateRef.current?.stage ?? 'thinking',
+              buildAutoLoopDetail(parsedAutoState),
+              { force: true },
+            );
+          }
         }
         return;
       }
@@ -1834,17 +2123,43 @@ export default function App() {
           active_task?: unknown;
           auto_state?: unknown;
         };
-        setSessionMode(parseSessionMode(workflow.mode));
-        setActivePlan(parsePlanEnvelope(workflow.active_plan));
-        setActiveTask(parseTaskExecution(workflow.active_task));
-        setAutoState(parseAutoState(workflow.auto_state));
+        const parsedMode = parseSessionMode(workflow.mode);
+        const parsedPlan = parsePlanEnvelope(workflow.active_plan);
+        const parsedTask = parseTaskExecution(workflow.active_task);
+        const parsedAutoState = parseAutoState(workflow.auto_state);
+        setSessionMode(parsedMode);
+        setActivePlan(parsedPlan);
+        setActiveTask(parsedTask);
+        setAutoState(parsedAutoState);
+        if (AGENT_LOOP_ACTIVE_STAGES.has(agentLoopStateRef.current?.stage ?? 'idle')) {
+          const taskDetail = buildTaskLoopDetail(parsedPlan, parsedTask);
+          if (taskDetail) {
+            setAgentLoopStage(agentLoopStateRef.current?.stage ?? 'thinking', taskDetail, {
+              force: true,
+            });
+          } else if (parsedMode === 'auto') {
+            setAgentLoopStage(
+              agentLoopStateRef.current?.stage ?? 'thinking',
+              buildAutoLoopDetail(parsedAutoState),
+              { force: true },
+            );
+          }
+        }
         return;
       }
       if (envelope.type === 'auto.progress') {
         const progress = payload as {
           auto_state?: unknown;
         };
-        setAutoState(parseAutoState(progress.auto_state));
+        const parsedAutoState = parseAutoState(progress.auto_state);
+        setAutoState(parsedAutoState);
+        if (AGENT_LOOP_ACTIVE_STAGES.has(agentLoopStateRef.current?.stage ?? 'idle')) {
+          setAgentLoopStage(
+            agentLoopStateRef.current?.stage ?? 'thinking',
+            buildAutoLoopDetail(parsedAutoState),
+            { force: true },
+          );
+        }
         return;
       }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
@@ -2089,7 +2404,13 @@ export default function App() {
   const applySessionPayload = (
     payload: unknown,
     options: SessionPayloadApplyOptions,
-  ): { decision: UiDecision | null } => {
+  ): {
+    decision: UiDecision | null;
+    mode: SessionMode | null;
+    activePlan: PlanEnvelope | null;
+    activeTask: TaskExecutionState | null;
+    autoState: AutoState | null;
+  } => {
     const body = payload as {
       messages?: unknown;
       decision?: unknown;
@@ -2135,15 +2456,31 @@ export default function App() {
     if (body.mode !== undefined) {
       setSessionMode(parseSessionMode(body.mode));
     }
+    const parsedMode =
+      body.mode !== undefined
+        ? parseSessionMode(body.mode)
+        : null;
     if (body.active_plan !== undefined) {
       setActivePlan(parsePlanEnvelope(body.active_plan));
     }
+    const parsedActivePlan =
+      body.active_plan !== undefined
+        ? parsePlanEnvelope(body.active_plan)
+        : null;
     if (body.active_task !== undefined) {
       setActiveTask(parseTaskExecution(body.active_task));
     }
+    const parsedActiveTask =
+      body.active_task !== undefined
+        ? parseTaskExecution(body.active_task)
+        : null;
     if (body.auto_state !== undefined) {
       setAutoState(parseAutoState(body.auto_state));
     }
+    const parsedAutoState =
+      body.auto_state !== undefined
+        ? parseAutoState(body.auto_state)
+        : null;
 
     if (options.applyDisplay) {
       const displayDecision = parseDisplayDecision(body.display);
@@ -2157,7 +2494,13 @@ export default function App() {
       }
     }
 
-    return { decision: parsedDecision };
+    return {
+      decision: parsedDecision,
+      mode: parsedMode,
+      activePlan: parsedActivePlan,
+      activeTask: parsedActiveTask,
+      autoState: parsedAutoState,
+    };
   };
 
   const handleSend = async (payload: CanvasSendPayload): Promise<boolean> => {
@@ -2173,6 +2516,7 @@ export default function App() {
     setPendingSessionId(selectedConversation);
     setChatStreamingState(null);
     setAwaitingFirstAssistantChunk(true);
+    setAgentLoopStage('submitted');
     const forceCanvasForRequest = forceCanvasNext;
     if (forceCanvasForRequest) {
       setForceCanvasNext(false);
@@ -2208,13 +2552,23 @@ export default function App() {
       setPendingUserMessage(null);
       setPendingSessionId(null);
       setChatStreamingState(null);
-      applySessionPayload(payload, { applyDisplay: true });
+      const applied = applySessionPayload(payload, { applyDisplay: true });
+      const hasBlockingDecision =
+        applied.decision?.status === 'pending' && applied.decision.blocking === true;
+      if (hasBlockingDecision) {
+        setAgentLoopStage('waiting_approval');
+      } else {
+        const taskDetail = buildTaskLoopDetail(applied.activePlan, applied.activeTask);
+        const autoDetail = buildAutoLoopDetail(applied.autoState);
+        setAgentLoopStage('completed', taskDetail ?? autoDetail);
+      }
       await loadSessions();
       setStatusMessage(null);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send message.';
       setStatusMessage(message);
+      setAgentLoopStage('error', message, { force: true });
       setPendingUserMessage(null);
       setPendingSessionId(null);
       setChatStreamingState(null);
@@ -2567,7 +2921,16 @@ export default function App() {
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to resolve decision.'));
       }
-      applySessionPayload(payload, { applyDisplay: false });
+      const applied = applySessionPayload(payload, { applyDisplay: false });
+      const hasBlockingDecision =
+        applied.decision?.status === 'pending' && applied.decision.blocking === true;
+      if (hasBlockingDecision) {
+        setAgentLoopStage('waiting_approval');
+      } else {
+        const taskDetail = buildTaskLoopDetail(applied.activePlan, applied.activeTask);
+        const autoDetail = buildAutoLoopDetail(applied.autoState);
+        setAgentLoopStage('completed', taskDetail ?? autoDetail);
+      }
       const resumeRaw = (payload as { resume?: unknown }).resume;
       if (resumeRaw && typeof resumeRaw === 'object') {
         const resume = resumeRaw as {
@@ -2645,6 +3008,7 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to resolve decision.';
       setDecisionError(message);
+      setAgentLoopStage('error', message, { force: true });
     } finally {
       setDecisionBusy(false);
     }
@@ -2698,6 +3062,7 @@ export default function App() {
             messages={workspaceMessages}
             sending={sending}
             statusMessage={statusMessage}
+            agentLoopState={agentLoopState}
             onBackToChat={() => {
               setWorkspaceSettingsOpen(false);
               setView('chat');
@@ -2737,6 +3102,7 @@ export default function App() {
               modelName={modelLabel}
               onOpenSettings={() => setSettingsOpen(true)}
               statusMessage={statusMessage}
+              agentLoopState={agentLoopState}
               longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
               longPasteThresholdChars={composerSettings.longPasteThresholdChars}
               modelOptions={modelOptions}

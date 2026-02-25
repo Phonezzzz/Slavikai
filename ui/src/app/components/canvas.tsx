@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 
 import BrainLogo from "../../assets/brain.png";
-import type { DecisionRespondChoice, UiDecision } from "../types";
+import type { AgentLoopState, DecisionRespondChoice, UiDecision } from "../types";
 import { DecisionPanel } from "./decision-panel";
 
 // ====== Types ======
@@ -136,6 +136,7 @@ interface CanvasProps {
   modelName?: string;
   onOpenSettings?: () => void;
   statusMessage?: string | null;
+  agentLoopState?: AgentLoopState | null;
   modelOptions?: Array<{
     value: string;
     label: string;
@@ -542,6 +543,7 @@ export function Canvas({
   modelName = "Model not selected",
   onOpenSettings,
   statusMessage = null,
+  agentLoopState = null,
   modelOptions = [],
   selectedModelValue = null,
   onSelectModel,
@@ -1105,6 +1107,34 @@ export function Canvas({
       {/* Input area */}
       <div className="border-t border-[#141418] px-4 py-3">
         <div className="max-w-3xl mx-auto">
+          {agentLoopState && agentLoopState.stage !== "idle" ? (
+            <div
+              className={`mb-2 flex items-center gap-2 rounded-lg border px-3 py-2 text-[12px] ${
+                agentLoopState.stage === "waiting_approval"
+                  ? "border-amber-700/40 bg-amber-900/20 text-amber-200"
+                  : agentLoopState.stage === "error"
+                    ? "border-rose-700/40 bg-rose-900/20 text-rose-200"
+                    : agentLoopState.stage === "completed"
+                      ? "border-emerald-700/40 bg-emerald-900/20 text-emerald-200"
+                      : "border-[#1f1f24] bg-[#141418] text-[#c0c0c0]"
+              }`}
+            >
+              {agentLoopState.stage === "thinking"
+              || agentLoopState.stage === "responding"
+              || agentLoopState.stage === "submitted"
+              || agentLoopState.stage === "reading"
+              || agentLoopState.stage === "prepared"
+              || agentLoopState.stage === "finalizing" ? (
+                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                ) : null}
+              <span>{agentLoopState.text}</span>
+              {agentLoopState.detail ? (
+                <span className="truncate text-[#8a8a94]" title={agentLoopState.detail}>
+                  {agentLoopState.detail}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
           {statusMessage ? (
             <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
               {statusMessage}

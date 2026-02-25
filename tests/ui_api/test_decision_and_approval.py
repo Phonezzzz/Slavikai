@@ -345,6 +345,7 @@ def test_ui_decision_respond_auto_run_resume() -> None:
 
     async def run() -> None:
         client = await _create_client(AutoResumeAgent())
+        events_response = None
         try:
             status_resp = await client.get("/ui/api/status")
             status_payload = await status_resp.json()
@@ -353,6 +354,12 @@ def test_ui_decision_respond_auto_run_resume() -> None:
             await _select_local_model(client, session_id)
 
             hub = client.server.app["ui_hub"]
+            events_response = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert events_response.status == 200
+            _ = await _read_first_sse_event(events_response)
             decision_payload = {
                 "id": "decision-auto-1",
                 "kind": "approval",
@@ -394,7 +401,26 @@ def test_ui_decision_respond_auto_run_resume() -> None:
             auto_state = payload.get("auto_state")
             assert isinstance(auto_state, dict)
             assert auto_state.get("status") == "completed"
+            events = await _read_sse_events(events_response, max_events=32)
+            message_events = [event for event in events if event.get("type") == "message.append"]
+            assert message_events
+            message_payload = message_events[-1].get("payload")
+            assert isinstance(message_payload, dict)
+            message_raw = message_payload.get("message")
+            assert isinstance(message_raw, dict)
+            assert message_raw.get("role") == "assistant"
+            assert message_raw.get("content") == "auto resumed"
+
+            output_events = [event for event in events if event.get("type") == "session.output"]
+            assert output_events
+            output_payload = output_events[-1].get("payload")
+            assert isinstance(output_payload, dict)
+            output_raw = output_payload.get("output")
+            assert isinstance(output_raw, dict)
+            assert output_raw.get("content") == "auto resumed"
         finally:
+            if events_response is not None:
+                events_response.close()
             await client.close()
 
     asyncio.run(run())
