@@ -90,10 +90,12 @@ async def load_effective_session_security(
     )
     if not yolo_armed:
         yolo_armed_at = None
+    safe_mode_effective = bool(effective_tools.get("safe_mode", False))
     effective_policy: dict[str, JSONValue] = {
         "profile": profile,
         "yolo_armed": yolo_armed,
         "yolo_armed_at": yolo_armed_at,
+        "safe_mode_effective": safe_mode_effective,
     }
     return effective_tools, effective_policy
 

@@ -217,3 +217,27 @@ def test_auto_runtime_waiting_approval_and_resume(monkeypatch, tmp_path) -> None
     assert isinstance(agent.last_auto_state, dict)
     assert agent.last_auto_state.get("status") == AutoRunStatus.COMPLETED.value
     assert agent.last_auto_state.get("root_path") == str(runtime_root.resolve())
+
+
+def test_auto_runtime_sets_error_code_for_missing_target_path(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    agent = _FakeAgent(brain_text="not-json")
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    failed_result = auto_runtime.CoderResult(
+        coder_id="coder-1",
+        shard_id="shard-1",
+        status="failed",
+        bundle=auto_runtime.PatchBundle(
+            status="failed",
+            diagnostics=["Не указан путь к файлу workspace для записи."],
+        ),
+        error="Не указан путь к файлу workspace для записи.",
+    )
+
+    monkeypatch.setattr(orchestrator, "_run_coder_pool", lambda **kwargs: [failed_result])
+
+    outcome = orchestrator.run("Сделай изменения")
+    assert outcome.status == AutoRunStatus.FAILED_WORKER
+    assert isinstance(agent.last_auto_state, dict)
+    assert agent.last_auto_state.get("error_code") == "missing_target_path"
+    missing_paths = agent.last_auto_state.get("missing_paths")
+    assert missing_paths == []

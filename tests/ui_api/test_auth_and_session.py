@@ -76,6 +76,7 @@ def test_ui_session_policy_set_updates_session_state() -> None:
             policy = payload.get("policy")
             assert isinstance(policy, dict)
             assert policy.get("profile") == "yolo"
+            assert policy.get("yolo_armed") is True
 
             hub: UIHub = client.server.app["ui_hub"]
             stored_policy = await hub.get_session_policy(session_id)
@@ -115,6 +116,8 @@ def test_ui_session_security_get_and_post_updates_state() -> None:
             policy = update_payload.get("policy")
             assert isinstance(policy, dict)
             assert policy.get("profile") == "sandbox"
+            assert policy.get("yolo_armed") is False
+            assert policy.get("safe_mode_effective") is True
 
             get_resp = await client.get(
                 "/ui/api/session/security",
@@ -129,6 +132,8 @@ def test_ui_session_security_get_and_post_updates_state() -> None:
             get_policy = get_payload.get("policy")
             assert isinstance(get_policy, dict)
             assert get_policy.get("profile") == "sandbox"
+            assert get_policy.get("yolo_armed") is False
+            assert get_policy.get("safe_mode_effective") is True
         finally:
             await client.close()
 

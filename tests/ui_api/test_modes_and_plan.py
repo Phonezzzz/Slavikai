@@ -352,7 +352,7 @@ def test_ui_chat_send_in_auto_mode_returns_auto_state_and_progress_event() -> No
                 send_resp = await client.post(
                     "/ui/api/chat/send",
                     headers={"X-Slavik-Session": session_id},
-                    json={"content": "run auto"},
+                    json={"content": "исправь тесты и обнови файл src/main.py"},
                 )
                 assert send_resp.status == 202
                 send_payload = await send_resp.json()
@@ -390,6 +390,102 @@ def test_ui_chat_send_in_auto_mode_returns_auto_state_and_progress_event() -> No
                 assert auto_events
             finally:
                 events_response.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_in_auto_mode_chat_like_request_skips_root_gate() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            to_auto = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "auto"},
+            )
+            assert to_auto.status == 200
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "Какой софт нужен для Raspberry Pi 4 для умной колонки?"},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            assert send_payload.get("decision") is None
+            output_raw = send_payload.get("output")
+            assert isinstance(output_raw, dict)
+            content_raw = output_raw.get("content")
+            assert isinstance(content_raw, str)
+            assert content_raw.strip()
+            auto_state = send_payload.get("auto_state")
+            if isinstance(auto_state, dict):
+                assert auto_state.get("status") != "failed_worker"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_appends_guidance_for_auto_missing_target_path() -> None:
+    class AutoMissingPathAgent(DummyAgent):
+        def respond(self, messages) -> str:  # noqa: ANN001
+            del messages
+            self.last_auto_state = {
+                "run_id": "auto-missing-path-1",
+                "status": "failed_worker",
+                "goal": "goal",
+                "pool_size": 3,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:01+00:00",
+                "planner": {"status": "completed"},
+                "plan": {"plan_id": "p1", "goal": "goal", "shards": []},
+                "coders": [],
+                "merge": {"status": "failed"},
+                "verifier": None,
+                "approval": None,
+                "error": "Не указан путь к файлу workspace для записи.",
+                "error_code": "missing_target_path",
+            }
+            return "AUTO не смог завершить шаг."
+
+    async def run() -> None:
+        client = await _create_client(AutoMissingPathAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            to_auto = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "auto"},
+            )
+            assert to_auto.status == 200
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "Подскажи архитектуру для умной колонки на Raspberry Pi."},
+            )
+            assert send_resp.status == 200
+            send_payload = await send_resp.json()
+            output_raw = send_payload.get("output")
+            assert isinstance(output_raw, dict)
+            content_raw = output_raw.get("content")
+            assert isinstance(content_raw, str)
+            assert "нужен явный путь к файлу" in content_raw
+            assert "создай docs/raspberry-setup.md" in content_raw
         finally:
             await client.close()
 

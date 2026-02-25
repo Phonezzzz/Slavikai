@@ -156,6 +156,7 @@ export function WorkspaceIde({
   const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [workspacePolicy, setWorkspacePolicy] = useState('Sandbox');
   const [workspaceYoloActive, setWorkspaceYoloActive] = useState(false);
+  const [workspaceSafeMode, setWorkspaceSafeMode] = useState(true);
   const [rootPickerOpen, setRootPickerOpen] = useState(false);
   const [rootInput, setRootInput] = useState('');
   const [rootBusy, setRootBusy] = useState(false);
@@ -344,6 +345,8 @@ export function WorkspaceIde({
     if (!sessionId) {
       setWorkspaceRoot('');
       setWorkspacePolicy('Sandbox');
+      setWorkspaceYoloActive(false);
+      setWorkspaceSafeMode(true);
       return;
     }
     try {
@@ -353,9 +356,11 @@ export function WorkspaceIde({
       if (policy) {
         setWorkspacePolicy(policyLabel(policy.profile));
         setWorkspaceYoloActive(policy.yolo_armed === true);
+        setWorkspaceSafeMode(policy.safe_mode_effective !== false);
       } else {
         setWorkspacePolicy('Sandbox');
         setWorkspaceYoloActive(false);
+        setWorkspaceSafeMode(true);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load workspace root.';
@@ -1051,6 +1056,7 @@ export function WorkspaceIde({
         workspaceRoot={workspaceRoot}
         workspacePolicy={workspacePolicy}
         workspaceYoloActive={workspaceYoloActive}
+        workspaceSafeMode={workspaceSafeMode}
         rootPickerOpen={rootPickerOpen}
         rootInput={rootInput}
         rootBusy={rootBusy}

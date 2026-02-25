@@ -39,13 +39,7 @@ class AgentRoutingMixin:
             if runtime_mode == "ask":
                 return self._run_chat_response(messages, last_content, record_in_history)
 
-            if runtime_mode == "auto":
-                result = self.handle_auto_command(last_content)
-                self._log_chat_interaction(raw_input=last_content, response_text=result)
-                if record_in_history:
-                    self._append_short_term([LLMMessage(role="assistant", content=result)])
-                return result
-
+            is_auto_mode = runtime_mode == "auto"
             decision = classify_request(
                 messages,
                 last_content,
@@ -85,6 +79,12 @@ class AgentRoutingMixin:
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_inbox(last_content, decision)
                     self._record_unknown_skill_candidate(last_content, decision)
+                if is_auto_mode:
+                    result = self.handle_auto_command(last_content)
+                    self._log_chat_interaction(raw_input=last_content, response_text=result)
+                    if record_in_history:
+                        self._append_short_term([LLMMessage(role="assistant", content=result)])
+                    return result
                 return self._run_mwv_flow(messages, last_content, decision, record_in_history)
             return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
@@ -144,12 +144,7 @@ class AgentRoutingMixin:
                 )
                 return
 
-            if runtime_mode == "auto":
-                result = self.handle_auto_command(last_content)
-                self.last_stream_response_raw = result
-                yield result
-                return
-
+            is_auto_mode = runtime_mode == "auto"
             decision = classify_request(
                 messages,
                 last_content,
@@ -191,6 +186,11 @@ class AgentRoutingMixin:
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_inbox(last_content, decision)
                     self._record_unknown_skill_candidate(last_content, decision)
+                if is_auto_mode:
+                    response = self.handle_auto_command(last_content)
+                    self.last_stream_response_raw = response
+                    yield response
+                    return
                 response = self._run_mwv_flow(messages, last_content, decision, record_in_history)
                 self.last_stream_response_raw = response
                 yield response

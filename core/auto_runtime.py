@@ -164,6 +164,8 @@ class AutoOrchestrator:
                 if missing_paths:
                     state["error_code"] = "missing_file"
                     state["missing_paths"] = missing_paths
+                elif _is_missing_target_path_error(first_error):
+                    state["error_code"] = "missing_target_path"
                 self._set_status(state, AutoRunStatus.FAILED_WORKER)
                 return AutoRunOutcome(
                     text=self.parent._format_stop_response(
@@ -853,6 +855,12 @@ def _update_coder_state(
 
 
 _MISSING_FILE_PATTERN = re.compile(r"(?:Файл не найден|File not found):\s*(.+)")
+_MISSING_TARGET_PATH_PATTERNS = (
+    re.compile(r"не\s+указан\s+путь\s+к\s+файлу\s+workspace\s+для\s+записи", re.IGNORECASE),
+    re.compile(r"workspace[_\s-]?write.*(path|путь)", re.IGNORECASE),
+    re.compile(r"missing[_\s-]?target[_\s-]?path", re.IGNORECASE),
+    re.compile(r"(target[_\s-]?path|путь).*(required|не\s+указан)", re.IGNORECASE),
+)
 
 
 def _extract_missing_paths(results: list[CoderResult]) -> list[str]:
@@ -869,6 +877,12 @@ def _extract_missing_paths(results: list[CoderResult]) -> list[str]:
             if raw_path:
                 paths.add(raw_path)
     return sorted(paths)
+
+
+def _is_missing_target_path_error(error: str) -> bool:
+    if not error.strip():
+        return False
+    return any(pattern.search(error) for pattern in _MISSING_TARGET_PATH_PATTERNS)
 
 
 def _auto_plan_summary(plan: AutoPlan) -> str:

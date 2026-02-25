@@ -81,8 +81,6 @@ def _request_requires_root_gate(
         return False
     if mode == "ask":
         return False
-    if mode == "auto":
-        return True
     route = classify_request(
         llm_messages,
         content,
@@ -109,6 +107,22 @@ def _auto_missing_paths(auto_state: dict[str, JSONValue] | None) -> list[str]:
             if cleaned:
                 paths.append(cleaned)
     return paths
+
+
+def _auto_missing_target_path_guidance(
+    auto_state: dict[str, JSONValue] | None,
+) -> str | None:
+    if not isinstance(auto_state, dict):
+        return None
+    status_raw = auto_state.get("status")
+    error_code_raw = auto_state.get("error_code")
+    if status_raw != "failed_worker" or error_code_raw != "missing_target_path":
+        return None
+    return (
+        "AUTO не может продолжить: для записи нужен явный путь к файлу в workspace. "
+        "Укажи конкретный файл (например: `создай docs/raspberry-setup.md` "
+        "или `обнови src/main.py`) и запусти ещё раз."
+    )
 
 
 def _build_missing_file_decision(
@@ -803,6 +817,10 @@ async def handle_ui_chat_send(
                 active_plan=active_plan,
                 active_task=active_task,
             )
+        guidance = _auto_missing_target_path_guidance(latest_auto_state)
+        if guidance:
+            trimmed = response_text.strip()
+            response_text = f"{trimmed}\n\n{guidance}" if trimmed else guidance
 
         if _decision_is_pending_blocking(ui_decision):
             await _set_current_plan_step_status(

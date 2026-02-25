@@ -64,3 +64,45 @@ def test_agent_ask_mode_uses_chat_path_for_action_text(tmp_path: Path, monkeypat
     response = agent.respond([LLMMessage(role="user", content="исправь тесты")])
     assert response.startswith("main")
     assert main.calls == 1
+
+
+def test_agent_auto_mode_chat_like_falls_back_to_chat(tmp_path: Path, monkeypatch) -> None:
+    agent, main = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+
+    def _auto_unreachable(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("AUTO runtime should not run for advisory requests")
+
+    monkeypatch.setattr(agent, "handle_auto_command", _auto_unreachable)
+    response = agent.respond(
+        [LLMMessage(role="user", content="Какой софт нужен для Raspberry Pi 4 для умной колонки?")]
+    )
+    assert response.startswith("main")
+    assert main.calls == 1
+    report = extract_report_block(response)
+    assert report["route"] == "chat"
+
+
+def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, monkeypatch) -> None:
+    agent, main = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+    calls: dict[str, object] = {}
+
+    def _chat_unreachable(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("Chat fallback should not run for execution-like AUTO request")
+
+    def _auto_stub(goal: str, *, command_lane: bool = False) -> str:
+        calls["goal"] = goal
+        calls["command_lane"] = command_lane
+        return "auto-run"
+
+    monkeypatch.setattr(agent, "_run_chat_response", _chat_unreachable)
+    monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
+
+    response = agent.respond(
+        [LLMMessage(role="user", content="исправь тесты и обнови файл src/main.py")]
+    )
+    assert response == "auto-run"
+    assert main.calls == 0
+    assert calls.get("goal") == "исправь тесты и обнови файл src/main.py"
+    assert calls.get("command_lane") is False
