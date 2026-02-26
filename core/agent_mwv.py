@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
-# mypy: ignore-errors
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
-from core.approval_policy import ApprovalRequired
+from core.approval_policy import ApprovalCategory, ApprovalRequired
 from core.decision.verifier_fail import build_verifier_fail_packet
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
@@ -40,6 +40,19 @@ from tools.workspace_tools import WORKSPACE_ROOT, workspace_root_context
 
 MAX_MWV_ATTEMPTS = 3
 
+if TYPE_CHECKING:
+    import logging
+
+    from config.memory_config import MemoryConfig
+    from core.decision.models import DecisionPacket
+    from core.executor import Executor
+    from core.planner import Planner
+    from core.skills.index import SkillMatch
+    from core.tool_gateway import ToolGateway
+    from core.tracer import Tracer
+    from llm.types import ModelConfig
+    from shared.models import ToolRequest, ToolResult
+
 
 def _manager_runtime_cls() -> type[ManagerRuntime]:
     import core.agent as agent_module
@@ -63,6 +76,100 @@ def _workspace_root() -> str:
 
 
 class AgentMWVMixin:
+    if TYPE_CHECKING:
+        tracer: Tracer
+        logger: logging.Logger
+        planner: Planner
+        executor: Executor
+        tools_enabled: dict[str, bool]
+        memory_config: MemoryConfig
+        main_config: ModelConfig | None
+        session_id: str | None
+        approved_categories: set[ApprovalCategory]
+        runtime_mode: str
+        runtime_active_plan: dict[str, JSONValue] | None
+        runtime_active_task: dict[str, JSONValue] | None
+        runtime_auto_state: dict[str, JSONValue] | None
+        runtime_plan_guard_enabled: bool
+        _last_skill_match: SkillMatch | None
+
+        def _inc_metric(self, metric_key: str) -> None: ...
+        def _handle_decision_packet(
+            self,
+            packet: DecisionPacket,
+            *,
+            raw_input: str,
+            record_in_history: bool,
+        ) -> str: ...
+        def save_to_memory(self, prompt: str, answer: str) -> None: ...
+        def _log_chat_interaction(
+            self,
+            raw_input: str,
+            response_text: str,
+            *,
+            retrieved_memory_ids: list[str] | None = None,
+            applied_policy_ids: list[str] | None = None,
+        ) -> str: ...
+        def _append_short_term(
+            self,
+            messages: list[LLMMessage],
+            *,
+            history: list[LLMMessage] | None = None,
+        ) -> None: ...
+        def _reset_workspace_diffs(self) -> None: ...
+        def set_runtime_state(
+            self,
+            *,
+            mode: str,
+            active_plan: dict[str, JSONValue] | None,
+            active_task: dict[str, JSONValue] | None,
+            auto_state: dict[str, JSONValue] | None = None,
+            enforce_plan_guard: bool,
+        ) -> None: ...
+        def _build_tool_gateway(
+            self,
+            *,
+            pre_call: Callable[[ToolRequest], object | None] | None = None,
+            post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
+            safe_mode_override: bool | None = None,
+        ) -> ToolGateway: ...
+        def _workspace_diff_pre_call(self, request: ToolRequest) -> str | None: ...
+        def _workspace_diff_post_call(
+            self,
+            request: ToolRequest,
+            result: ToolResult,
+            context: object | None,
+        ) -> None: ...
+        def consume_workspace_diffs(self) -> list[WorkspaceDiffEntry]: ...
+        def _format_plan(self, plan: TaskPlan) -> str: ...
+        def _format_stop_response(
+            self,
+            *,
+            what: str,
+            why: str,
+            next_steps: list[str],
+            stop_reason_code: StopReasonCode,
+            route: str,
+            trace_id: str | None = None,
+            attempts: tuple[int, int] | None = None,
+            verifier: VerificationResult | None = None,
+            plan_summary: str | None = None,
+            execution_summary: str | None = None,
+        ) -> str: ...
+        def _append_report_block(
+            self,
+            text: str,
+            *,
+            route: str,
+            trace_id: str | None,
+            attempts: tuple[int, int] | None,
+            verifier: VerificationResult | None,
+            next_steps: list[str] | None,
+            stop_reason_code: StopReasonCode | None,
+            plan_summary: str | None = None,
+            execution_summary: str | None = None,
+        ) -> str: ...
+
     last_plan: TaskPlan | None
     last_plan_original: TaskPlan | None
 
@@ -100,7 +207,8 @@ class AgentMWVMixin:
             except TypeError:
                 # Backward compatibility for legacy verifier runtime stubs:
                 # run(context) -> VerificationResult
-                result = verifier_runtime.run(run_context)  # type: ignore[misc,call-arg]
+                legacy_run = cast(Callable[[RunContext], VerificationResult], verifier_runtime.run)
+                result = legacy_run(run_context)
             self.tracer.log(
                 "mwv_verifier_done",
                 result.status.value,
@@ -311,7 +419,7 @@ class AgentMWVMixin:
                 for step in task.steps:
                     operation, operation_error = self._resolve_packet_step_operation(step)
                     plan_step = PlanStep(description=step.description, operation=operation)
-                    task_snapshot = {
+                    task_snapshot: dict[str, JSONValue] = {
                         "plan_id": task.task_id,
                         "plan_hash": task.packet_hash,
                         "current_step_id": step.step_id,

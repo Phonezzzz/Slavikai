@@ -26,6 +26,8 @@ help:
 	@echo
 	@echo "Setup:"
 	@echo "  make venv            Create venv/ and install requirements"
+	@echo "  make deps-compile    Generate requirements.txt and constraints.txt from requirements.in"
+	@echo "  make deps-sync       Sync venv packages to requirements.txt lock"
 	@echo "  make activate        Print venv activation command"
 	@echo "  make shell           Open an interactive shell with venv activated"
 	@echo
@@ -72,13 +74,24 @@ help:
 $(VENV_PY):
 	$(PYTHON) -m venv "$(VENV_DIR)"
 
-$(VENV_DIR)/.installed: requirements.txt $(VENV_PY)
+$(VENV_DIR)/.installed: requirements.txt constraints.txt $(VENV_PY)
 	$(VENV_PIP) install --upgrade pip
-	$(VENV_PIP) install -r requirements.txt
+	$(VENV_PIP) install -r requirements.txt -c constraints.txt
 	@touch "$(VENV_DIR)/.installed"
 
 .PHONY: venv
 venv: $(VENV_DIR)/.installed
+
+.PHONY: deps-compile
+deps-compile: $(VENV_PY) requirements.in
+	"$(VENV_PIP)" install pip-tools
+	"$(VENV_DIR)/bin/pip-compile" --strip-extras requirements.in --output-file requirements.txt
+	"$(VENV_DIR)/bin/pip-compile" --strip-extras requirements.in --output-file constraints.txt
+
+.PHONY: deps-sync
+deps-sync: $(VENV_PY) requirements.txt
+	"$(VENV_PIP)" install pip-tools
+	"$(VENV_DIR)/bin/pip-sync" requirements.txt
 
 .PHONY: activate
 activate: $(VENV_PY)

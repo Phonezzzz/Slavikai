@@ -19,6 +19,7 @@ SlavikAI — серверный агент с тремя рабочими кон
   - Поддерживает паузу `waiting_approval` и resume.
 - **LLM слой** (`llm/*`)
   - Провайдеры: `xai`, `openrouter`, `local`, `inception`.
+  - `openai` используется только для STT endpoint/ключа в UI-настройках (не chat provider).
 - **Tools** (`tools/*`)
   - Реестр: `ToolRegistry`.
   - Журнал вызовов: `logs/tool_calls.log`.

@@ -29,7 +29,8 @@ make ui-build
 }
 ```
 
-`provider` поддерживает: `xai`, `openrouter`, `local`, `inception`.
+`provider` для chat-модели поддерживает: `xai`, `openrouter`, `local`, `inception`.
+`openai` в runtime используется только для STT-транскрипции (не как chat provider).
 
 Экспортируй ключи/настройки:
 
@@ -47,6 +48,9 @@ export LOCAL_LLM_API_KEY=""
 # optional: Inception endpoint
 export INCEPTION_API_KEY="..."
 export INCEPTION_API_URL="https://api.inceptionlabs.ai/v1"
+
+# optional: OpenAI key for STT transcription endpoint
+export OPENAI_API_KEY="..."
 
 # важно: whitelist должен содержать выбранный model id
 export SLAVIK_MODEL_WHITELIST="your-model-id"

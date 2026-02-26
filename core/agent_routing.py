@@ -1,19 +1,137 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
-# mypy: ignore-errors
 from collections.abc import Iterator
+from typing import TYPE_CHECKING, Literal
 
 from core.approval_policy import ApprovalRequired
 from core.decision.handler import DecisionContext, DecisionRequired
 from core.mwv.models import StopReasonCode
-from core.mwv.routing import classify_request
+from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
 from llm.types import LLMStreamChunk
 from shared.models import LLMMessage
 
+if TYPE_CHECKING:
+    import logging
+
+    from config.memory_config import MemoryConfig
+    from core.approval_policy import ApprovalRequest
+    from core.decision.handler import DecisionHandler
+    from core.decision.models import DecisionPacket
+    from core.mwv.models import VerificationResult
+    from core.rule_engine import PolicyApplication
+    from core.skills.index import SkillIndex, SkillMatch
+    from core.tracer import Tracer
+    from llm.brain_base import Brain
+    from llm.types import ModelConfig
+    from shared.models import JSONValue
+
 
 class AgentRoutingMixin:
+    if TYPE_CHECKING:
+        tracer: Tracer
+        logger: logging.Logger
+        tools_enabled: dict[str, bool]
+        skill_index: SkillIndex | None
+        decision_handler: DecisionHandler
+        memory_config: MemoryConfig
+        short_term: list[LLMMessage]
+        main_config: ModelConfig | None
+        _last_skill_match: SkillMatch | None
+
+        def _should_record_in_history(self, user_input: str) -> bool: ...
+        def _append_short_term(
+            self,
+            messages: list[LLMMessage],
+            *,
+            history: list[LLMMessage] | None = None,
+        ) -> None: ...
+        def _reset_approval_state(self) -> None: ...
+        def _reset_workspace_diffs(self) -> None: ...
+        def handle_tool_command(self, command: str) -> str: ...
+        def handle_auto_command(self, goal: str, *, command_lane: bool = False) -> str: ...
+        def save_to_memory(self, user_text: str, assistant_text: str) -> None: ...
+        def _log_chat_interaction(
+            self,
+            raw_input: str,
+            response_text: str,
+            *,
+            retrieved_memory_ids: list[str] | None = None,
+            applied_policy_ids: list[str] | None = None,
+        ) -> str: ...
+        def _run_mwv_flow(
+            self,
+            messages: list[LLMMessage],
+            last_content: str,
+            route_decision: RouteDecision,
+            record_in_history: bool,
+        ) -> str: ...
+        def _handle_approval_required(
+            self,
+            request: ApprovalRequest,
+            *,
+            raw_input: str,
+            record_in_history: bool = False,
+            command_lane: bool = False,
+            source_endpoint: str | None = None,
+            resume_payload: dict[str, JSONValue] | None = None,
+        ) -> str: ...
+        def _handle_decision_packet(
+            self,
+            packet: DecisionPacket,
+            *,
+            raw_input: str,
+            record_in_history: bool,
+        ) -> str: ...
+        def _record_unknown_inbox(self, user_input: str, decision: RouteDecision) -> None: ...
+        def _record_unknown_skill_candidate(
+            self,
+            user_input: str,
+            decision: RouteDecision,
+        ) -> None: ...
+        def _apply_policies(self, user_input: str) -> PolicyApplication: ...
+        def _build_context_messages(
+            self,
+            short_term: list[LLMMessage],
+            user_input: str,
+        ) -> list[LLMMessage]: ...
+        def _append_policy_instructions(
+            self,
+            messages: list[LLMMessage],
+            policy_application: PolicyApplication,
+        ) -> list[LLMMessage]: ...
+        def _get_main_brain(self) -> Brain: ...
+        def _review_answer(self, raw_answer: str) -> str: ...
+        def _append_report_block(
+            self,
+            content: str,
+            *,
+            route: str,
+            trace_id: str | None,
+            attempts: tuple[int, int] | None,
+            verifier: VerificationResult | None,
+            next_steps: list[str] | None,
+            stop_reason_code: StopReasonCode | None,
+            plan_summary: str | None = None,
+            execution_summary: str | None = None,
+        ) -> str: ...
+        def _inc_metric(self, metric_key: str) -> None: ...
+        def _format_stop_response(
+            self,
+            *,
+            what: str,
+            why: str,
+            next_steps: list[str],
+            stop_reason_code: StopReasonCode,
+            route: str,
+            trace_id: str | None = None,
+            attempts: tuple[int, int] | None = None,
+            verifier: VerificationResult | None = None,
+            plan_summary: str | None = None,
+            execution_summary: str | None = None,
+        ) -> str: ...
+
     _last_user_input: str | None
     last_reasoning: str | None
     last_stream_response_raw: str | None
@@ -301,7 +419,9 @@ class AgentRoutingMixin:
                 delta = chunk.text
                 if not delta:
                     continue
-                mode = "replace" if chunk.mode == "replace" else "append"
+                mode: Literal["append", "replace"] = (
+                    "replace" if chunk.mode == "replace" else "append"
+                )
                 if mode == "replace":
                     collected_text = delta
                 else:

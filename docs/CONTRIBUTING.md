@@ -3,7 +3,16 @@
 ## Базовые требования
 
 - Python 3.12+.
-- Установленные зависимости из `requirements.txt`.
+- Установленные зависимости из lock-файла `requirements.txt` (source: `requirements.in`).
+
+## Зависимости (pip-tools)
+
+- Source-set: `requirements.in`.
+- Lock/constraints: `requirements.txt`, `constraints.txt` (генерируются из `requirements.in`).
+- Обновление lock-файлов:
+  - `make deps-compile`
+- Синхронизация окружения по lock:
+  - `make deps-sync`
 
 ## Локальный старт
 
@@ -27,7 +36,7 @@
 ## Проверки качества
 
 - `make check` — обязательный прогон перед финализацией.
-- CI: `.github/workflows/check.yml` (запускает `scripts/check.sh`).
+- CI: `.github/workflows/check.yml` (запускает `make check`).
 - Dependabot: `.github/dependabot.yml` (pip + npm/ui).
 
 ## Правила по инструментам

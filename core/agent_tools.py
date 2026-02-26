@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
-# mypy: ignore-errors
 import difflib
 import json
 import re
@@ -9,6 +8,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from config.model_store import save_model_configs
 from core.approval_policy import (
@@ -35,7 +35,6 @@ from core.tool_gateway import ToolGateway
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.types import ModelConfig
-from memory.memory_manager import MemoryRecord
 from shared.memory_companion_models import (
     BlockedReason,
     ChatInteractionLog,
@@ -51,6 +50,7 @@ from shared.models import (
     JSONValue,
     LLMMessage,
     MemoryKind,
+    MemoryRecord,
     PlanStepStatus,
     TaskPlan,
     ToolCallRecord,
@@ -69,6 +69,18 @@ MAX_SHORT_TERM_MESSAGES = 20
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 _MIN_BASE64_LEN = 64
 _MAX_UX_SUMMARY_CHARS = 220
+
+if TYPE_CHECKING:
+    from config.memory_config import MemoryConfig
+    from core.auto_agent import AutoAgent
+    from core.planner import Planner
+    from core.rule_engine import RuleEngine
+    from core.skills.candidates import SkillCandidateWriter
+    from core.tracer import Tracer
+    from memory.memory_companion_store import MemoryCompanionStore
+    from memory.memory_inbox_writer import MemoryInboxWriter
+    from memory.memory_manager import MemoryManager
+    from tools.tool_registry import ToolRegistry
 
 
 def _workspace_root() -> Path:
@@ -93,6 +105,30 @@ def _looks_like_base64(value: str) -> bool:
 
 
 class AgentToolsMixin:
+    if TYPE_CHECKING:
+        brain: Brain
+        tracer: Tracer
+        planner: Planner
+        memory: MemoryManager
+        memory_config: MemoryConfig
+        auto_agent: AutoAgent
+        tool_registry: ToolRegistry
+        tools_enabled: dict[str, bool]
+        short_term: list[LLMMessage]
+        user_id: str
+        shell_config_path: str
+        _interaction_store: MemoryCompanionStore
+        _rule_engine: RuleEngine
+        _skill_candidate_writer: SkillCandidateWriter
+        _memory_inbox_writer: MemoryInboxWriter
+        _skill_metrics: dict[str, int]
+        _tool_error_counts: dict[str, int]
+        _workspace_diff_baselines: dict[str, str]
+        _workspace_diffs: dict[str, WorkspaceDiffEntry]
+        _last_user_input: str | None
+
+        def _build_brain(self) -> Brain: ...
+
     main_config: ModelConfig | None
     main_api_key: str | None
     last_chat_interaction_id: str | None
