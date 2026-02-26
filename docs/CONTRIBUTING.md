@@ -3,16 +3,18 @@
 ## Базовые требования
 
 - Python 3.12+.
-- Установленные зависимости из lock-файла `requirements.txt` (source: `requirements.in`).
+- Установленные зависимости из lock-файла `requirements.txt` (source-set: `requirements.in`).
 
 ## Зависимости (pip-tools)
 
 - Source-set: `requirements.in`.
-- Lock/constraints: `requirements.txt`, `constraints.txt` (генерируются из `requirements.in`).
-- Обновление lock-файлов:
-  - `make deps-compile`
-- Синхронизация окружения по lock:
-  - `make deps-sync`
+- Единственный lock-файл: `requirements.txt` (генерируется из `requirements.in`).
+- Flow обновления:
+  - изменить `requirements.in` (если нужно);
+  - запустить `make deps-compile` (генерирует `requirements.txt`);
+  - синхронизировать окружение `make deps-sync`.
+- Cadence обновления lock: минимум раз в 2 недели.
+- `requirements.txt` не редактируется вручную: только через `pip-compile`/`make deps-compile`.
 
 ## Локальный старт
 

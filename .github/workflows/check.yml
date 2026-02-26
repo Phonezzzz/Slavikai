@@ -23,5 +23,11 @@ jobs:
       - name: Install UI dependencies
         run: npm ci --prefix ui
 
+      - name: Print tool versions
+        run: |
+          python --version
+          node --version
+          pip --version
+
       - name: Run project checks
         run: make check
