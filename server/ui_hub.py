@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 from server.ui_session_storage import (
     InMemoryUISessionStorage,
@@ -59,9 +60,13 @@ class _SessionListSortableItem(TypedDict):
 DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_MAX_SESSIONS = 200
 DEFAULT_MAX_MESSAGES_PER_SESSION = 500
+DEFAULT_SUBSCRIBER_QUEUE_MAXSIZE = 256
+SubscriberDropPolicy = Literal["drop_newest", "coalesce_deltas"]
+DEFAULT_SUBSCRIBER_DROP_POLICY: SubscriberDropPolicy = "coalesce_deltas"
 
 _MESSAGE_ROLES = {"user", "assistant", "system"}
 _MESSAGE_LANES = {"chat", "workspace"}
+_DELTA_EVENT_TYPES = {"chat.stream.delta", "canvas.stream.delta"}
 
 
 def _normalize_message_lane(value: object, *, default: MessageLane = "chat") -> MessageLane:
@@ -234,6 +239,8 @@ class UIHub:
         session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         max_messages_per_session: int = DEFAULT_MAX_MESSAGES_PER_SESSION,
+        subscriber_queue_maxsize: int = DEFAULT_SUBSCRIBER_QUEUE_MAXSIZE,
+        subscriber_drop_policy: SubscriberDropPolicy = DEFAULT_SUBSCRIBER_DROP_POLICY,
     ) -> None:
         self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
         self._sessions: dict[str, _SessionState] = {}
@@ -241,6 +248,16 @@ class UIHub:
         self._session_ttl_seconds = session_ttl_seconds
         self._max_sessions = max_sessions
         self._max_messages_per_session = max_messages_per_session
+        self._subscriber_queue_maxsize = (
+            subscriber_queue_maxsize
+            if subscriber_queue_maxsize > 0
+            else DEFAULT_SUBSCRIBER_QUEUE_MAXSIZE
+        )
+        self._subscriber_drop_policy = (
+            subscriber_drop_policy
+            if subscriber_drop_policy in {"drop_newest", "coalesce_deltas"}
+            else DEFAULT_SUBSCRIBER_DROP_POLICY
+        )
         self._lock = asyncio.Lock()
         self._restore_sessions()
         self._restore_folders()
@@ -1028,7 +1045,9 @@ class UIHub:
         return dict(normalized_message)
 
     async def subscribe(self, session_id: str) -> asyncio.Queue[dict[str, JSONValue]]:
-        queue: asyncio.Queue[dict[str, JSONValue]] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, JSONValue]] = asyncio.Queue(
+            maxsize=self._subscriber_queue_maxsize
+        )
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -1231,7 +1250,118 @@ class UIHub:
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
+                self._handle_subscriber_queue_overflow(queue, event)
+
+    def _handle_subscriber_queue_overflow(
+        self,
+        queue: asyncio.Queue[dict[str, JSONValue]],
+        event: dict[str, JSONValue],
+    ) -> None:
+        if self._subscriber_drop_policy != "coalesce_deltas":
+            return
+        if self._is_delta_event(event) and self._coalesce_delta_event(queue, event):
+            return
+        if not self._evict_oldest_delta_event(queue):
+            return
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            return
+
+    def _is_delta_event(self, event: dict[str, JSONValue]) -> bool:
+        event_type = event.get("type")
+        return isinstance(event_type, str) and event_type in _DELTA_EVENT_TYPES
+
+    def _coalesce_delta_event(
+        self,
+        queue: asyncio.Queue[dict[str, JSONValue]],
+        event: dict[str, JSONValue],
+    ) -> bool:
+        queue_items_raw = getattr(queue, "_queue", None)
+        if not isinstance(queue_items_raw, deque):
+            return False
+        queue_items = cast(deque[dict[str, JSONValue]], queue_items_raw)
+        for idx in range(len(queue_items) - 1, -1, -1):
+            candidate = queue_items[idx]
+            if not isinstance(candidate, dict):
                 continue
+            merged = self._merge_delta_event(candidate, event)
+            if merged is None:
+                continue
+            queue_items[idx] = merged
+            return True
+        return False
+
+    def _merge_delta_event(
+        self,
+        queued_event: dict[str, JSONValue],
+        incoming_event: dict[str, JSONValue],
+    ) -> dict[str, JSONValue] | None:
+        queued_type = queued_event.get("type")
+        incoming_type = incoming_event.get("type")
+        if not isinstance(queued_type, str) or queued_type != incoming_type:
+            return None
+        if queued_type not in _DELTA_EVENT_TYPES:
+            return None
+        queued_payload = queued_event.get("payload")
+        incoming_payload = incoming_event.get("payload")
+        if not isinstance(queued_payload, dict) or not isinstance(incoming_payload, dict):
+            return None
+        incoming_delta = incoming_payload.get("delta")
+        if not isinstance(incoming_delta, str) or not incoming_delta:
+            return None
+        if queued_type == "chat.stream.delta":
+            queued_stream = queued_payload.get("stream_id")
+            incoming_stream = incoming_payload.get("stream_id")
+            queued_lane = queued_payload.get("lane")
+            incoming_lane = incoming_payload.get("lane")
+            if queued_stream != incoming_stream or queued_lane != incoming_lane:
+                return None
+            queued_mode = "replace" if queued_payload.get("mode") == "replace" else "append"
+            incoming_mode = "replace" if incoming_payload.get("mode") == "replace" else "append"
+            queued_delta_raw = queued_payload.get("delta")
+            queued_delta = queued_delta_raw if isinstance(queued_delta_raw, str) else ""
+            if incoming_mode == "replace":
+                merged_mode: JSONValue = "replace"
+                merged_delta = incoming_delta
+            elif queued_mode == "replace":
+                merged_mode = "replace"
+                merged_delta = f"{queued_delta}{incoming_delta}"
+            else:
+                merged_mode = "append"
+                merged_delta = f"{queued_delta}{incoming_delta}"
+            merged_payload = dict(queued_payload)
+            merged_payload["delta"] = merged_delta
+            merged_payload["mode"] = merged_mode
+            return {
+                **queued_event,
+                "payload": merged_payload,
+            }
+        if queued_type == "canvas.stream.delta":
+            queued_artifact = queued_payload.get("artifact_id")
+            incoming_artifact = incoming_payload.get("artifact_id")
+            if queued_artifact != incoming_artifact:
+                return None
+            queued_delta_raw = queued_payload.get("delta")
+            queued_delta = queued_delta_raw if isinstance(queued_delta_raw, str) else ""
+            merged_payload = dict(queued_payload)
+            merged_payload["delta"] = f"{queued_delta}{incoming_delta}"
+            return {
+                **queued_event,
+                "payload": merged_payload,
+            }
+        return None
+
+    def _evict_oldest_delta_event(self, queue: asyncio.Queue[dict[str, JSONValue]]) -> bool:
+        queue_items_raw = getattr(queue, "_queue", None)
+        if not isinstance(queue_items_raw, deque):
+            return False
+        queue_items = cast(deque[dict[str, JSONValue]], queue_items_raw)
+        for idx, candidate in enumerate(queue_items):
+            if isinstance(candidate, dict) and self._is_delta_event(candidate):
+                del queue_items[idx]
+                return True
+        return False
 
     def _restore_sessions(self) -> None:
         for item in self._storage.load_sessions():

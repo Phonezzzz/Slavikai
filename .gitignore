@@ -7,7 +7,8 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
-.env/
+.env
+sandbox/project/
 
 # Local run artifacts
 .run/

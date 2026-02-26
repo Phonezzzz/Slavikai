@@ -12,6 +12,7 @@
   - `MEMORY_COMPANION_MINIPROMPTS.md`
   - `PHASE_0_FINDINGS.md`
   - `API_CONTRACT.md` (старый контракт OpenWebUI)
+  - `ui_consolidation_inventory.md` (инвентаризация периода UI-консолидации)
 
 ## Как использовать
 

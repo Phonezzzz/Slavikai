@@ -1,6 +1,6 @@
 # DEPLOYMENT (production)
 
-Документ описывает минимальный production-сценарий запуска SlavikAI.
+Документ описывает минимальный production-сценарий запуска SlavikAI в текущей архитектуре backend+UI.
 
 ## 1) Требования
 
@@ -40,7 +40,7 @@ export XAI_API_KEY="..."
 # optional: OpenRouter
 export OPENROUTER_API_KEY="..."
 
-# optional: Local endpoint
+# optional: Local endpoint (OpenAI-compatible)
 export LOCAL_LLM_URL="http://localhost:11434/v1/chat/completions"
 export LOCAL_LLM_API_KEY=""
 
@@ -81,6 +81,7 @@ make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000
 ```bash
 curl -sS http://127.0.0.1:8000/ui/api/status
 curl -sS http://127.0.0.1:8000/v1/models
+curl -sS http://127.0.0.1:8000/ui/api/settings
 ```
 
 ## 5) Фоновый режим (без systemd)
@@ -120,3 +121,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now slavikai
 sudo systemctl status slavikai
 ```
+
+## 7) Что важно проверить перед выкладкой
+
+- `make check` проходит локально.
+- UI собран (`make ui-build`), `ui/dist` актуален.
+- `SLAVIK_MODEL_WHITELIST` содержит целевой `model id`.
+- Для выбранного провайдера выставлен корректный API key.

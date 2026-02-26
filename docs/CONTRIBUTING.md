@@ -22,6 +22,7 @@
 5. `make check`
 6. `git rebase origin/main`
 7. `git merge --ff-only <pr-branch>`
+8. `git checkout main`
 
 ## Проверки качества
 

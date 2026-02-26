@@ -13,7 +13,7 @@
 
 1. `ManagerRuntime` строит `TaskPacket` (v2 execution contract).
 2. `WorkerRuntime` выполняет задачу через `Planner` + `Executor` + tools.
-3. `VerifierRuntime` запускает проверку (`scripts/check.sh`, с fallback-командами при отсутствии скрипта).
+3. `VerifierRuntime` запускает проверку. При отсутствии `scripts/check.sh` используется fallback-последовательность (`ruff`, `lint_skills`, `build_manifest --check`, `mypy`, `pytest --cov`).
 4. Успех только если одновременно:
    - `work_result.status == success`
    - `verification_result.status == passed`

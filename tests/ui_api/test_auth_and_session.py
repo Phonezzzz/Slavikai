@@ -951,6 +951,49 @@ def test_ui_chat_send_ignores_stale_trace_id(monkeypatch, tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_ui_chat_send_internal_error_is_sanitized() -> None:
+    class ExplodingAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_chat_interaction_id = "trace-internal-err"
+
+        def respond(self, messages) -> str:  # noqa: ANN001
+            del messages
+            raise RuntimeError("internal secret: db://user:pass@host")
+
+    async def run() -> None:
+        client = await _create_client(ExplodingAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            assert session_id
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "trigger fail"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 500
+            payload = await send_resp.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "agent_error"
+            message = error.get("message")
+            assert isinstance(message, str)
+            assert message == "Внутренняя ошибка агента. См. trace_id."
+            assert "internal secret" not in message
+            trace_id = error.get("trace_id")
+            assert isinstance(trace_id, str)
+            assert trace_id == "trace-internal-err"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_sessions_api_delete_chat() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())

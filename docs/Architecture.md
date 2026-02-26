@@ -2,73 +2,58 @@
 
 ## Цель
 
-SlavikAI — локальный/серверный агент с детерминированной маршрутизацией `chat`/`mwv`, инструментами в песочнице и журналированием всех ключевых действий.
+SlavikAI — серверный агент с тремя рабочими контурами выполнения: chat, MWV и auto. Система опирается на command lane, policy/approval контур, sandbox-ограничения и обязательный trace/tool logging.
 
 ## Основные слои
 
 - **Core** (`core/*`)
-  - `core/agent.py` + mixin-модули `core/agent_routing.py`, `core/agent_mwv.py`, `core/agent_tools.py`.
-  - `Planner` (`core/planner.py`) строит план (LLM или эвристика).
-  - `Executor` (`core/executor.py`) исполняет шаги через `ToolGateway`.
-  - `Tracer` (`core/tracer.py`) пишет trace в `logs/trace.log`.
-- **Auto runtime** (`core/auto_runtime.py`)
-  - `AutoOrchestrator`: `PlannerSubagent -> N CoderWorkers -> VerifierSubagent`.
-  - Coder workers работают параллельно в `.auto/<run_id>/<coder_id>`.
-  - Merge + verifier gate детерминированы; есть `waiting_approval` pause/resume.
+  - Оркестрация: `Agent` + mixins.
+  - Планирование/исполнение: `Planner` + `Executor` через `ToolGateway`.
+  - Трассировка: `Tracer` (`logs/trace.log`).
 - **MWV runtime** (`core/mwv/*`)
-  - `ManagerRuntime` -> `WorkerRuntime` -> `VerifierRuntime`.
-  - Успех только при `WorkStatus.SUCCESS` + `VerificationStatus.PASSED`.
-  - bounded retry с лимитом попыток (через `RunContext.max_retries`).
+  - Цикл `ManagerRuntime -> WorkerRuntime -> VerifierRuntime`.
+  - Успех только при `WorkStatus.SUCCESS` и `VerificationStatus.PASSED`.
+  - Ограниченный retry через `RunContext.max_retries`.
+- **Auto runtime** (`core/auto_runtime.py`)
+  - Контур `planner -> coder pool -> merge -> verifier`.
+  - Поддерживает паузу `waiting_approval` и resume.
 - **LLM слой** (`llm/*`)
-  - Провайдеры: `xai`, `openrouter`, `local`.
-  - Фабрика: `llm/brain_factory.py`.
+  - Провайдеры: `xai`, `openrouter`, `local`, `inception`.
 - **Tools** (`tools/*`)
-  - Реестр: `tools/tool_registry.py`.
-  - Логи вызовов: `logs/tool_calls.log`.
+  - Реестр: `ToolRegistry`.
+  - Журнал вызовов: `logs/tool_calls.log`.
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
-  - Векторный индекс `VectorIndex` с lazy-load.
 
-## Маршрутизация запроса
+## Маршрутизация запроса (факт runtime)
 
-1. `/...` команды -> **command lane** (без MWV), через `Agent.handle_tool_command`.
-2. Обычный текст:
-   - при mode `auto` -> `AutoOrchestrator`;
-   - при mode `ask|plan|act` -> `classify_request(...)` из `core/mwv/routing.py`:
-     - `chat`: прямой LLM-ответ с контекстом.
-     - `mwv`: Manager -> Worker -> Verifier.
+1. Сообщение, начинающееся с `/`, идёт в command lane (`handle_tool_command`) и не проходит через MWV.
+2. Для обычного текста:
+   - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
+   - `runtime_mode=auto` — выполняется классификация/skill-проверка, затем запуск auto-контура.
+   - `runtime_mode=act|plan` — используется `classify_request(...)` (`chat` или `mwv`).
 
-## Инструменты
+## Инструменты (зарегистрированные имена)
 
-Зарегистрированы в `core/agent.py`:
-
-- `fs`, `web`, `shell`, `project`
-- `image_analyze`, `image_generate`
-- `tts`, `stt`
-- `workspace_list`, `workspace_read`, `workspace_write`, `workspace_patch`, `workspace_run`
+- Базовые: `fs`, `web`, `shell`, `project`.
+- Медиа: `image_analyze`, `image_generate`, `tts`, `stt`.
+- Workspace: `workspace_list`, `workspace_read`, `workspace_write`, `workspace_create`, `workspace_rename`, `workspace_move`, `workspace_delete`, `workspace_patch`, `workspace_run`, `workspace_terminal_run`.
 
 ## Sandbox и безопасность
 
-- `filesystem`: внутри `sandbox/`.
-- `workspace_*` и `project`: внутри `sandbox/project/`.
-- `shell`: `sandbox_root` нормализуется относительно `sandbox/` и проверяется от escape.
-- Safe-mode block-list (`SAFE_MODE_TOOLS_OFF`):
-  - `web`, `web_search`, `shell`, `project`,
-  - `tts`, `stt`, `http_client`,
-  - `image_analyze`, `image_generate`,
-  - `workspace_run`.
+- `fs` работает в `sandbox/`.
+- `workspace_*` и `project` ограничены `sandbox/project/`.
+- `shell` использует sandbox root + ограничения конфигурации.
+- Safe-mode отключает рискованные инструменты через `SAFE_MODE_TOOLS_OFF`, включая `workspace_run` и `workspace_terminal_run`.
 
 ## HTTP/UI слой
 
-`server/http_api.py` поднимает OpenAI-совместимые и UI-endpoints:
-
-- `/v1/models`, `/v1/chat/completions`
-- `/slavik/trace/{trace_id}`, `/slavik/tool-calls/{trace_id}`
-- `/slavik/feedback`, `/slavik/approve-session`
-- `/ui/*` API (status, models, sessions, chat, project command, SSE events)
+- OpenAI-совместимые endpoints: `/v1/models`, `/v1/chat/completions`.
+- Служебные endpoints: `/slavik/trace/{trace_id}`, `/slavik/tool-calls/{trace_id}`, `/slavik/feedback`, `/slavik/approve-session`.
+- UI API и workflow endpoints регистрируются в `server/http/routes.py`.
 
 ## Наблюдаемость
 
-- Trace событий: `logs/trace.log`.
-- Tool-call журнал: `logs/tool_calls.log`.
-- Для UI-сессий: `.run/ui_sessions.db`.
+- Trace: `logs/trace.log`.
+- Tool calls: `logs/tool_calls.log`.
+- UI storage: `.run/ui_sessions.db`.

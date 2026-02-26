@@ -505,6 +505,8 @@ class DeleteFileTool:
             return ToolResult.failure("Не указан путь.")
         try:
             target = _ensure_in_workspace(raw_path)
+            if target == get_workspace_root():
+                return ToolResult.failure("Удаление корня workspace запрещено.")
             if not target.exists():
                 return ToolResult.failure("Путь не найден.")
             if target.is_dir():

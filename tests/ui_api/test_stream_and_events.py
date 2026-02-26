@@ -559,3 +559,86 @@ def test_workspace_stream_supports_replace_mode_chunks() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_hub_subscriber_queue_is_bounded_and_coalesces_deltas() -> None:
+    async def run() -> None:
+        hub = UIHub(subscriber_queue_maxsize=2, subscriber_drop_policy="coalesce_deltas")
+        session_id = "queue-session"
+        queue = await hub.subscribe(session_id)
+
+        await hub.publish(
+            session_id,
+            {
+                "type": "chat.stream.delta",
+                "payload": {
+                    "session_id": session_id,
+                    "stream_id": "stream-1",
+                    "delta": "A",
+                    "mode": "append",
+                    "lane": "chat",
+                },
+            },
+        )
+        await hub.publish(
+            session_id,
+            {
+                "type": "chat.stream.delta",
+                "payload": {
+                    "session_id": session_id,
+                    "stream_id": "stream-1",
+                    "delta": "B",
+                    "mode": "append",
+                    "lane": "chat",
+                },
+            },
+        )
+        await hub.publish(
+            session_id,
+            {
+                "type": "chat.stream.delta",
+                "payload": {
+                    "session_id": session_id,
+                    "stream_id": "stream-1",
+                    "delta": "C",
+                    "mode": "append",
+                    "lane": "chat",
+                },
+            },
+        )
+        assert queue.qsize() == 2
+        queued_after_coalesce = list(queue._queue)
+        assert len(queued_after_coalesce) == 2
+        latest_event = queued_after_coalesce[-1]
+        assert isinstance(latest_event, dict)
+        assert latest_event.get("type") == "chat.stream.delta"
+        latest_payload = latest_event.get("payload")
+        assert isinstance(latest_payload, dict)
+        assert latest_payload.get("delta") == "BC"
+
+        await hub.publish(
+            session_id,
+            {
+                "type": "chat.stream.done",
+                "payload": {"session_id": session_id, "stream_id": "stream-1", "lane": "chat"},
+            },
+        )
+        assert queue.qsize() == 2
+        types_after_done = [
+            item.get("type") for item in list(queue._queue) if isinstance(item, dict)
+        ]
+        assert "chat.stream.done" in types_after_done
+
+        await hub.publish(
+            session_id,
+            {
+                "type": "status",
+                "payload": {"session_id": session_id, "state": "ok", "ok": True},
+            },
+        )
+        assert queue.qsize() == 2
+        final_types = [item.get("type") for item in list(queue._queue) if isinstance(item, dict)]
+        assert "chat.stream.done" in final_types
+        assert "status" in final_types
+
+    asyncio.run(run())

@@ -262,9 +262,11 @@ async def handle_ui_chat_send(
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
 
+    agent = None
     session_id: str | None = None
     status_opened = False
     error = False
+    trace_id: str | None = None
     try:
         try:
             agent = await _resolve_agent(request)
@@ -612,7 +614,6 @@ async def handle_ui_chat_send(
         )
 
         mwv_report: dict[str, JSONValue] | None = None
-        trace_id: str | None = None
         approval_request: dict[str, JSONValue] | None = None
         ui_decision: dict[str, JSONValue] | None = None
         latest_auto_state: dict[str, JSONValue] | None = auto_state
@@ -1155,21 +1156,32 @@ async def handle_ui_chat_send(
             detail="chat",
         )
         return response
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         error = True
+        resolved_trace_id = trace_id or _normalize_trace_id(
+            getattr(agent, "last_chat_interaction_id", None)
+        )
+        logger.exception(
+            "UI chat send failed",
+            extra={
+                "session_id": session_id,
+                "trace_id": resolved_trace_id,
+            },
+        )
         if status_opened and session_id is not None:
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
                 phase="error",
-                detail=f"chat: {exc}",
+                detail="chat: internal_error",
             )
             await hub.set_session_status(session_id, "error")
         return error_response(
             status=500,
-            message=f"Agent error: {exc}",
+            message="Внутренняя ошибка агента. См. trace_id.",
             error_type="internal_error",
             code="agent_error",
+            trace_id=resolved_trace_id,
         )
     finally:
         set_runtime_workspace_root(None)

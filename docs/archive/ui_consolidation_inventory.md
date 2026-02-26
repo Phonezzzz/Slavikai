@@ -1,5 +1,7 @@
 # UI Consolidation Inventory (PR-241)
 
+> Архивный документ. Содержит инвентаризацию периода консолидации UI и не является источником текущих runtime-правил.
+
 ## 1) Runtime Entry Graph
 
 Canonical runtime chain:

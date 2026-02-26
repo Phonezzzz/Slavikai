@@ -197,6 +197,26 @@ def test_workspace_create_rename_move_delete_file() -> None:
     assert not read_deleted.ok
 
 
+def test_workspace_delete_rejects_root_and_allows_recursive_dir_delete() -> None:
+    nested_dir = WORKSPACE_ROOT / "ops" / "to_remove"
+    shutil.rmtree(nested_dir, ignore_errors=True)
+    nested_dir.mkdir(parents=True, exist_ok=True)
+    (nested_dir / "tmp.txt").write_text("x", encoding="utf-8")
+
+    root_delete = DeleteFileTool().handle(
+        _make_request("workspace_delete", {"path": ".", "recursive": True})
+    )
+    assert not root_delete.ok
+    assert "корня workspace" in (root_delete.error or "")
+    assert WORKSPACE_ROOT.exists()
+
+    dir_delete = DeleteFileTool().handle(
+        _make_request("workspace_delete", {"path": "ops/to_remove", "recursive": True})
+    )
+    assert dir_delete.ok
+    assert not nested_dir.exists()
+
+
 def test_workspace_terminal_run_uses_workspace_root_cwd(monkeypatch) -> None:
     monkeypatch.setattr(
         workspace_tools_module,

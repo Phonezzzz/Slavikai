@@ -1,58 +1,56 @@
 # PROJECT_OVERVIEW — SlavikAI
 
-SlavikAI — Python-агент с двумя основными режимами выполнения:
-
-- `chat`: ответ без выполнения инструментов.
-- `mwv`: цикл Manager -> Worker -> Verifier для задач с изменениями.
+SlavikAI — Python-агент с command lane, chat/MWV маршрутизацией и auto-orchestrator контуром.
 
 ## Что в проекте есть сейчас
 
-- Поддержка моделей: `xai`, `openrouter`, `local`.
-- Командный режим (`/fs`, `/web`, `/sh`, `/project`, `/plan`, `/auto`, `/imggen`, `/imganalyze`, `/trace`) без MWV.
-- Workspace инструменты: `workspace_list/read/write/patch/run`.
-- Контракт `workspace_patch`: только single-file hunk patch для одного `path`.
-- Session-based выбор модели в UI.
-- Safe-mode и approvals.
+- Модельные провайдеры: `xai`, `openrouter`, `local`, `inception`.
+- Command lane (`/fs`, `/web`, `/sh`, `/project`, `/plan`, `/auto`, `/imggen`, `/imganalyze`, `/trace`) — ручной режим без MWV.
+- Runtime modes:
+  - `ask`: chat-ответ без routing-классификатора;
+  - `act|plan`: детерминированная классификация `chat|mwv`;
+  - `auto`: auto-runtime с предклассификацией/skill-проверкой.
+- Для `/v1/chat/completions`:
+  - `slavik_meta.runtime_mode=ask|auto` — поддерживаемый opt-in;
+  - `slavik_meta.runtime_mode=plan|act` — `invalid_request_error` (с next_steps на UI workflow);
+  - без `runtime_mode` — legacy-поведение текущего runtime.
+- Workspace-инструменты: list/read/write/create/rename/move/delete/patch/run/terminal_run.
+- Контракт `workspace_patch`: single-file hunk patch для одного `path` (без `diff --git`/`---`/`+++`).
+- Session-based выбор модели, security/tools state и approvals в UI.
 
 ## Ключевые модули
 
-- `core/agent.py` + mixin-модули: orchestration, tool commands, MWV integration.
-- `core/planner.py`: построение плана.
-- `core/executor.py`: выполнение шагов плана.
-- `core/mwv/*`: Manager/Worker/Verifier runtime.
-- `server/http_api.py`: HTTP + UI API.
+- `core/agent.py` + mixin-модули: orchestration, command lane, routing, MWV/auto integration.
+- `core/mwv/*`: Manager/Worker/Verifier runtime, retry policy, stop-коды.
+- `core/auto_runtime.py`: planner/coder/verifier оркестрация.
+- `server/http/routes.py`: фактический список HTTP/UI endpoints.
 
 ## Инструменты (факт)
 
-- Файлы: `fs`, `workspace_*`.
-- Команды: `shell`.
-- Сеть/поиск: `web`.
-- Проектный индекс: `project`.
+- Базовые: `fs`, `web`, `shell`, `project`.
 - Медиа: `image_analyze`, `image_generate`, `tts`, `stt`.
+- Workspace: `workspace_list`, `workspace_read`, `workspace_write`, `workspace_create`, `workspace_rename`, `workspace_move`, `workspace_delete`, `workspace_patch`, `workspace_run`, `workspace_terminal_run`.
 
 ## Ограничения безопасности
 
 - Sandbox для файловых/workspace/project операций.
-- Ограничения shell-команд (allowlist + проверка аргументов + sandbox root).
+- Shell-ограничения (валидация + sandbox root + policy checks).
 - Safe-mode блокирует рискованные инструменты через `SAFE_MODE_TOOLS_OFF`.
 
 ## Проверки качества
 
-Основной one-shot прогон:
+`make check` включает:
 
-- `make check`
-
-Включает:
-
+- `scripts/check_no_legacy_ui.sh`
 - `ruff check .`
 - `ruff format --check .`
 - `mypy .`
+- `npm run typecheck` (UI)
 - `pytest` c покрытием (порог >= 80%).
 
-## UI API (папки и чаты)
+## UI API (часто используемые endpoints)
 
-- `GET /ui/api/folders` → `{ folders: [{ folder_id, name, created_at, updated_at }] }`
-- `POST /ui/api/folders` (body: `{ name }`) → `{ folder: { folder_id, name, created_at, updated_at } }`
-- `PATCH /ui/api/sessions/{session_id}/title` (body: `{ title }`) → `{ session_id, title }`
-- `PUT /ui/api/sessions/{session_id}/folder` (body: `{ folder_id: string | null }`) → `{ session_id, folder_id }`
-- `GET /ui/api/sessions` → `{ sessions: [{ session_id, title, title_override, folder_id, created_at, updated_at, message_count }] }`
+- Sessions/folders: `/ui/api/folders`, `/ui/api/sessions`, `/ui/api/sessions/{session_id}`.
+- Workflow: `/ui/api/mode`, `/ui/api/plan/*`, `/ui/api/runtime/init`.
+- Chat/events: `/ui/api/chat/send`, `/ui/api/events/stream`.
+- Workspace: `/ui/api/workspace/*`.
