@@ -642,3 +642,186 @@ def test_ui_hub_subscriber_queue_is_bounded_and_coalesces_deltas() -> None:
         assert "status" in final_types
 
     asyncio.run(run())
+
+
+def test_ui_hub_overflow_control_event_marks_resync_when_queue_has_only_control() -> None:
+    async def run() -> None:
+        hub = UIHub(subscriber_queue_maxsize=2, subscriber_drop_policy="coalesce_deltas")
+        session_id = "control-overflow-session"
+        queue = await hub.subscribe(session_id)
+
+        await hub.publish(
+            session_id,
+            {
+                "type": "status",
+                "payload": {"session_id": session_id, "state": "ok", "ok": True},
+            },
+        )
+        await hub.publish(
+            session_id,
+            {
+                "type": "session.workflow",
+                "payload": {"session_id": session_id, "mode": "ask"},
+            },
+        )
+        await hub.publish(
+            session_id,
+            {
+                "type": "decision.packet",
+                "payload": {
+                    "session_id": session_id,
+                    "decision": {"id": "d-1", "status": "pending"},
+                },
+            },
+        )
+
+        # Освобождаем место и триггерим следующую публикацию, чтобы pending resync был доставлен.
+        _ = await queue.get()
+        await hub.publish(
+            session_id,
+            {
+                "type": "agent.activity",
+                "payload": {"session_id": session_id, "phase": "heartbeat"},
+            },
+        )
+        queued_types = [item.get("type") for item in list(queue._queue) if isinstance(item, dict)]
+        assert "session.resync_required" in queued_types
+
+    asyncio.run(run())
+
+
+def test_ui_hub_overflow_keeps_control_event_by_evicting_non_control() -> None:
+    async def run() -> None:
+        hub = UIHub(subscriber_queue_maxsize=2, subscriber_drop_policy="coalesce_deltas")
+        session_id = "control-priority-session"
+        queue = await hub.subscribe(session_id)
+
+        await hub.publish(
+            session_id,
+            {
+                "type": "chat.stream.delta",
+                "payload": {
+                    "session_id": session_id,
+                    "stream_id": "s-1",
+                    "delta": "A",
+                    "mode": "append",
+                    "lane": "chat",
+                },
+            },
+        )
+        await hub.publish(
+            session_id,
+            {
+                "type": "chat.stream.done",
+                "payload": {"session_id": session_id, "stream_id": "s-1", "lane": "chat"},
+            },
+        )
+        await hub.publish(
+            session_id,
+            {
+                "type": "status",
+                "payload": {"session_id": session_id, "state": "busy", "ok": True},
+            },
+        )
+
+        queued_types = [item.get("type") for item in list(queue._queue) if isinstance(item, dict)]
+        assert "status" in queued_types
+
+    asyncio.run(run())
+
+
+def test_ui_events_stream_replays_buffer_by_last_event_id() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+            _ = await _read_sse_events(stream_resp, max_events=1)  # initial workflow
+
+            await hub.publish(
+                session_id,
+                {"type": "agent.activity", "payload": {"session_id": session_id, "phase": "one"}},
+            )
+            await hub.publish(
+                session_id,
+                {"type": "agent.activity", "payload": {"session_id": session_id, "phase": "two"}},
+            )
+            await hub.publish(
+                session_id,
+                {"type": "agent.activity", "payload": {"session_id": session_id, "phase": "three"}},
+            )
+            first_live_events = await _read_sse_events(stream_resp, max_events=1)
+            assert first_live_events
+            anchor_id_raw = first_live_events[0].get("id")
+            assert isinstance(anchor_id_raw, str)
+            anchor_id = anchor_id_raw
+            stream_resp.close()
+
+            reconnect = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                headers={"Last-Event-ID": anchor_id},
+                timeout=5,
+            )
+            assert reconnect.status == 200
+            _ = await _read_first_sse_event(reconnect)
+            replay_batch = await _read_sse_events(reconnect, max_events=8)
+            replay_phases = []
+            for event in replay_batch:
+                if event.get("type") != "agent.activity":
+                    continue
+                payload = event.get("payload")
+                if isinstance(payload, dict):
+                    phase = payload.get("phase")
+                    if isinstance(phase, str):
+                        replay_phases.append(phase)
+            assert "two" in replay_phases
+            assert "three" in replay_phases
+            reconnect.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_events_stream_stale_last_event_id_emits_resync_required() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            stream_resp = await client.get(
+                f"/ui/api/events/stream?session_id={session_id}",
+                headers={"Last-Event-ID": "stale-event-id"},
+                timeout=5,
+            )
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+            events = await _read_sse_events(stream_resp, max_events=8)
+            resync_events = [
+                event
+                for event in events
+                if isinstance(event, dict) and event.get("type") == "session.resync_required"
+            ]
+            assert resync_events
+            payload = resync_events[0].get("payload")
+            assert isinstance(payload, dict)
+            assert payload.get("resync_only") is True
+            assert payload.get("reason") == "last_event_id_stale"
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

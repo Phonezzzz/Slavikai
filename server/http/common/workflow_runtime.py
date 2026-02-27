@@ -251,6 +251,31 @@ def task_with_status(
     return updated
 
 
+def compute_plan_completion_state(plan: dict[str, JSONValue]) -> str:
+    steps_raw = plan.get("steps")
+    if not isinstance(steps_raw, list) or not steps_raw:
+        return "running"
+    has_failed = False
+    done_count = 0
+    total = 0
+    for step in steps_raw:
+        if not isinstance(step, dict):
+            continue
+        total += 1
+        status = step.get("status")
+        if status == "failed":
+            has_failed = True
+        elif status == "done":
+            done_count += 1
+    if total == 0:
+        return "running"
+    if has_failed:
+        return "failed"
+    if done_count == total:
+        return "completed"
+    return "running"
+
+
 async def run_plan_runner(
     *,
     app: web.Application,
@@ -290,15 +315,29 @@ async def run_plan_runner(
         if current_step_id is None:
             next_step = find_next_todo_step_fn(plan)
             if next_step is None:
-                completed_plan = plan_with_status_fn(plan, "completed")
-                completed_task = task_with_status_fn(task, "completed", None)
-                await hub.set_session_workflow(
-                    session_id,
-                    mode="act",
-                    active_plan=completed_plan,
-                    active_task=completed_task,
-                )
-                return
+                completion_state = compute_plan_completion_state(plan)
+                if completion_state == "completed":
+                    completed_plan = plan_with_status_fn(plan, "completed")
+                    completed_task = task_with_status_fn(task, "completed", None)
+                    await hub.set_session_workflow(
+                        session_id,
+                        mode="act",
+                        active_plan=completed_plan,
+                        active_task=completed_task,
+                    )
+                    return
+                if completion_state == "failed":
+                    failed_plan = plan_with_status_fn(plan, "failed")
+                    failed_task = task_with_status_fn(task, "failed", None)
+                    await hub.set_session_workflow(
+                        session_id,
+                        mode="act",
+                        active_plan=failed_plan,
+                        active_task=failed_task,
+                    )
+                    return
+                await asyncio.sleep(0.05)
+                continue
             step_id_raw = next_step.get("step_id")
             step_id = step_id_raw if isinstance(step_id_raw, str) else None
             if step_id is None:

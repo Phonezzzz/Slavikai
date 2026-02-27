@@ -18,6 +18,7 @@ from config.http_server_config import (
     resolve_http_server_config,
 )
 from server import http_api as api
+from server.http.common.idempotency import IdempotencyStore
 from server.http.common.runtime_contract import AgentProtocol, SessionApprovalStore
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
@@ -84,6 +85,7 @@ def create_app(
         app["agent_provider"] = LazyAgentProvider.from_instance(agent)
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
+    app["idempotency_store"] = IdempotencyStore()
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )

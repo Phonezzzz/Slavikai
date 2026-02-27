@@ -5,6 +5,11 @@ import uuid
 
 from aiohttp import web
 
+from server.http.common.idempotency import (
+    IdempotencyStore,
+    fingerprint_json_payload,
+    normalize_idempotency_key,
+)
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     UI_SESSION_HEADER,
@@ -239,6 +244,7 @@ async def handle_ui_plan_edit(request: web.Request) -> web.Response:
 
 async def handle_ui_plan_execute(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
+    idempotency_store: IdempotencyStore = request.app["idempotency_store"]
     session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
     if session_error is not None:
         return session_error
@@ -255,6 +261,67 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="plan_not_found",
         )
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    normalized_payload = {str(key): _normalize_json_value(value) for key, value in payload.items()}
+    expected_revision = payload.get("plan_revision")
+    requested_revision = (
+        expected_revision if isinstance(expected_revision, int) and expected_revision > 0 else None
+    )
+    actual_revision = _plan_revision_value(plan)
+    idempotency_key = normalize_idempotency_key(request.headers.get("Idempotency-Key"))
+    if mode == "act" and active_task is not None and active_task.get("status") == "running":
+        if idempotency_key is not None:
+            running_act_fingerprint = fingerprint_json_payload(
+                {
+                    "mode": "act",
+                    "session_id": session_id,
+                    "plan_id": plan.get("plan_id"),
+                    "plan_hash": plan.get("plan_hash"),
+                    "plan_revision": requested_revision,
+                    "request": normalized_payload,
+                }
+            )
+            state, replay = await idempotency_store.begin(
+                endpoint="ui.plan.execute",
+                session_id=session_id,
+                key=idempotency_key,
+                fingerprint=running_act_fingerprint,
+            )
+            if state == "replay" and replay is not None:
+                response = json_response(replay.payload, status=replay.status)
+                response.headers[UI_SESSION_HEADER] = session_id
+                return response
+            if state == "conflict":
+                return error_response(
+                    status=409,
+                    message="Idempotency-Key уже использован с другим payload.",
+                    error_type="invalid_request_error",
+                    code="idempotency_key_reused",
+                )
+            if state == "in_progress":
+                return error_response(
+                    status=409,
+                    message="Запрос с таким Idempotency-Key уже выполняется.",
+                    error_type="invalid_request_error",
+                    code="idempotency_in_progress",
+                )
+            await idempotency_store.abort(
+                endpoint="ui.plan.execute",
+                session_id=session_id,
+                key=idempotency_key,
+                fingerprint=running_act_fingerprint,
+            )
+        return error_response(
+            status=409,
+            message="План уже выполняется.",
+            error_type="invalid_request_error",
+            code="task_already_running",
+        )
     if plan.get("status") != "approved":
         return error_response(
             status=409,
@@ -262,14 +329,6 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="plan_not_approved",
         )
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    expected_revision = payload.get("plan_revision")
-    actual_revision = _plan_revision_value(plan)
     if (
         isinstance(expected_revision, int)
         and expected_revision > 0
@@ -284,6 +343,42 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
         )
 
     if mode == "plan":
+        plan_fingerprint: str | None = None
+        if idempotency_key is not None:
+            plan_fingerprint = fingerprint_json_payload(
+                {
+                    "mode": "plan",
+                    "session_id": session_id,
+                    "plan_id": plan.get("plan_id"),
+                    "plan_hash": plan.get("plan_hash"),
+                    "plan_revision": requested_revision,
+                    "request": normalized_payload,
+                }
+            )
+            state, replay = await idempotency_store.begin(
+                endpoint="ui.plan.execute",
+                session_id=session_id,
+                key=idempotency_key,
+                fingerprint=plan_fingerprint,
+            )
+            if state == "replay" and replay is not None:
+                response = json_response(replay.payload, status=replay.status)
+                response.headers[UI_SESSION_HEADER] = session_id
+                return response
+            if state == "conflict":
+                return error_response(
+                    status=409,
+                    message="Idempotency-Key уже использован с другим payload.",
+                    error_type="invalid_request_error",
+                    code="idempotency_key_reused",
+                )
+            if state == "in_progress":
+                return error_response(
+                    status=409,
+                    message="Запрос с таким Idempotency-Key уже выполняется.",
+                    error_type="invalid_request_error",
+                    code="idempotency_in_progress",
+                )
         decision = _build_plan_execute_decision(
             session_id=session_id,
             plan=plan,
@@ -291,27 +386,34 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             active_task=active_task,
         )
         await hub.set_session_decision(session_id, decision)
-        response = json_response(
-            {
-                "error": {
-                    "message": "Switch to Act required before execution.",
-                    "type": "invalid_request_error",
-                    "code": "switch_to_act_required",
-                    "trace_id": None,
-                    "details": {
-                        "session_id": session_id,
-                        "plan_id": plan.get("plan_id"),
-                        "plan_revision": actual_revision,
-                    },
+        response_payload: dict[str, JSONValue] = {
+            "error": {
+                "message": "Switch to Act required before execution.",
+                "type": "invalid_request_error",
+                "code": "switch_to_act_required",
+                "trace_id": None,
+                "details": {
+                    "session_id": session_id,
+                    "plan_id": plan.get("plan_id"),
+                    "plan_revision": actual_revision,
                 },
-                "session_id": session_id,
-                "decision": _normalize_ui_decision(decision, session_id=session_id),
-                "mode": mode,
-                "active_plan": plan,
-                "active_task": active_task,
             },
-            status=409,
-        )
+            "session_id": session_id,
+            "decision": _normalize_ui_decision(decision, session_id=session_id),
+            "mode": mode,
+            "active_plan": plan,
+            "active_task": active_task,
+        }
+        if idempotency_key is not None and plan_fingerprint is not None:
+            await idempotency_store.complete(
+                endpoint="ui.plan.execute",
+                session_id=session_id,
+                key=idempotency_key,
+                fingerprint=plan_fingerprint,
+                status=409,
+                payload=response_payload,
+            )
+        response = json_response(response_payload, status=409)
         response.headers[UI_SESSION_HEADER] = session_id
         return response
 
@@ -323,6 +425,43 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             code="mode_not_act",
         )
 
+    act_fingerprint: str | None = None
+    if idempotency_key is not None:
+        act_fingerprint = fingerprint_json_payload(
+            {
+                "mode": "act",
+                "session_id": session_id,
+                "plan_id": plan.get("plan_id"),
+                "plan_hash": plan.get("plan_hash"),
+                "plan_revision": requested_revision,
+                "request": normalized_payload,
+            }
+        )
+        state, replay = await idempotency_store.begin(
+            endpoint="ui.plan.execute",
+            session_id=session_id,
+            key=idempotency_key,
+            fingerprint=act_fingerprint,
+        )
+        if state == "replay" and replay is not None:
+            response = json_response(replay.payload, status=replay.status)
+            response.headers[UI_SESSION_HEADER] = session_id
+            return response
+        if state == "conflict":
+            return error_response(
+                status=409,
+                message="Idempotency-Key уже использован с другим payload.",
+                error_type="invalid_request_error",
+                code="idempotency_key_reused",
+            )
+        if state == "in_progress":
+            return error_response(
+                status=409,
+                message="Запрос с таким Idempotency-Key уже выполняется.",
+                error_type="invalid_request_error",
+                code="idempotency_in_progress",
+            )
+
     task: dict[str, JSONValue] = {
         "task_id": f"task-{uuid.uuid4().hex}",
         "plan_id": plan.get("plan_id"),
@@ -333,13 +472,60 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
         "updated_at": _utc_now_iso(),
     }
     running_plan = _plan_with_status(plan, status="running")
-    await hub.set_session_decision(session_id, None)
-    await hub.set_session_workflow(
+    started, updated_workflow, start_error = await hub.start_plan_task_if_possible(
         session_id,
-        mode="act",
-        active_plan=running_plan,
-        active_task=task,
+        expected_mode="act",
+        expected_plan_id=str(plan.get("plan_id")),
+        expected_plan_hash=str(plan.get("plan_hash")),
+        expected_plan_revision=actual_revision,
+        running_plan=running_plan,
+        task_payload=task,
+        next_mode="act",
     )
+    if not started:
+        if idempotency_key is not None and act_fingerprint is not None:
+            await idempotency_store.abort(
+                endpoint="ui.plan.execute",
+                session_id=session_id,
+                key=idempotency_key,
+                fingerprint=act_fingerprint,
+            )
+        if start_error == "task_already_running":
+            return error_response(
+                status=409,
+                message="План уже выполняется.",
+                error_type="invalid_request_error",
+                code="task_already_running",
+            )
+        if start_error == "plan_not_found":
+            return error_response(
+                status=404,
+                message="План не найден.",
+                error_type="invalid_request_error",
+                code="plan_not_found",
+            )
+        if start_error == "plan_not_approved":
+            return error_response(
+                status=409,
+                message="Сначала approve план.",
+                error_type="invalid_request_error",
+                code="plan_not_approved",
+            )
+        if start_error == "mode_mismatch":
+            return error_response(
+                status=409,
+                message="Выполнение возможно только в act-режиме.",
+                error_type="invalid_request_error",
+                code="mode_not_act",
+            )
+        return error_response(
+            status=409,
+            message="Состояние плана изменилось, обновите страницу и повторите.",
+            error_type="invalid_request_error",
+            code="plan_state_conflict",
+            details={"workflow": updated_workflow},
+        )
+    await hub.set_session_decision(session_id, None)
     plan_id_raw = task.get("plan_id")
     task_id_raw = task.get("task_id")
     if isinstance(plan_id_raw, str) and isinstance(task_id_raw, str):
@@ -351,16 +537,23 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
                 task_id=task_id_raw,
             )
         )
-    updated = await hub.get_session_workflow(session_id)
-    response = json_response(
-        {
-            "ok": True,
-            "session_id": session_id,
-            "mode": _normalize_mode_value(updated.get("mode"), default="act"),
-            "active_plan": _normalize_plan_payload(updated.get("active_plan")),
-            "active_task": _normalize_task_payload(updated.get("active_task")),
-        }
-    )
+    response_payload = {
+        "ok": True,
+        "session_id": session_id,
+        "mode": _normalize_mode_value(updated_workflow.get("mode"), default="act"),
+        "active_plan": _normalize_plan_payload(updated_workflow.get("active_plan")),
+        "active_task": _normalize_task_payload(updated_workflow.get("active_task")),
+    }
+    if idempotency_key is not None and act_fingerprint is not None:
+        await idempotency_store.complete(
+            endpoint="ui.plan.execute",
+            session_id=session_id,
+            key=idempotency_key,
+            fingerprint=act_fingerprint,
+            status=200,
+            payload=response_payload,
+        )
+    response = json_response(response_payload)
     response.headers[UI_SESSION_HEADER] = session_id
     return response
 

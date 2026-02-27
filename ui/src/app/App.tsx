@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelRight } from 'lucide-react';
 
 import { ArtifactPanel } from './components/artifact-panel';
@@ -1099,6 +1099,7 @@ const compactProviderError = (value: string): string => {
 };
 
 export default function App() {
+  const resyncFetchInFlightRef = useRef(false);
   const [activeView, setActiveView] = useState<AppView>(() => {
     if (typeof window === 'undefined') {
       return 'chat';
@@ -2020,6 +2021,41 @@ export default function App() {
     if (typeof window === 'undefined' || !selectedConversation) {
       return;
     }
+    const activeSessionId = selectedConversation;
+    const refreshWorkflowSnapshot = async () => {
+      if (resyncFetchInFlightRef.current) {
+        return;
+      }
+      resyncFetchInFlightRef.current = true;
+      try {
+        const stateResponse = await fetch('/ui/api/state', {
+          headers: {
+            [SESSION_HEADER]: activeSessionId,
+          },
+        });
+        const statePayload: unknown = await stateResponse.json();
+        if (!stateResponse.ok) {
+          return;
+        }
+        const snapshot = statePayload as {
+          mode?: unknown;
+          active_plan?: unknown;
+          active_task?: unknown;
+          auto_state?: unknown;
+          pending_decision?: unknown;
+        };
+        setSessionMode(parseSessionMode(snapshot.mode));
+        setActivePlan(parsePlanEnvelope(snapshot.active_plan));
+        setActiveTask(parseTaskExecution(snapshot.active_task));
+        setAutoState(parseAutoState(snapshot.auto_state));
+        setPendingDecision(parseUiDecision(snapshot.pending_decision));
+        setDecisionError(null);
+      } catch {
+        // Keep live stream running; next event or manual action will recover UI state.
+      } finally {
+        resyncFetchInFlightRef.current = false;
+      }
+    };
     setChatStreamingState(null);
     setWorkspaceStreamingState(null);
     const streamUrl = `/ui/api/events/stream?session_id=${encodeURIComponent(selectedConversation)}`;
@@ -2139,6 +2175,10 @@ export default function App() {
         setAutoState(parseAutoState(progress.auto_state));
         return;
       }
+      if (envelope.type === 'session.resync_required') {
+        void refreshWorkflowSnapshot();
+        return;
+      }
       const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
       if (!artifactId) {
         return;
@@ -2173,6 +2213,7 @@ export default function App() {
     };
     eventSource.onerror = () => {};
     return () => {
+      resyncFetchInFlightRef.current = false;
       eventSource.close();
       setChatStreamingState(null);
       setWorkspaceStreamingState(null);

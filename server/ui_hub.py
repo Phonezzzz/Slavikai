@@ -63,10 +63,13 @@ DEFAULT_MAX_MESSAGES_PER_SESSION = 500
 DEFAULT_SUBSCRIBER_QUEUE_MAXSIZE = 256
 SubscriberDropPolicy = Literal["drop_newest", "coalesce_deltas"]
 DEFAULT_SUBSCRIBER_DROP_POLICY: SubscriberDropPolicy = "coalesce_deltas"
+DEFAULT_EVENT_BUFFER_SIZE = 512
+DEFAULT_EVENT_BUFFER_TTL_SECONDS = 10 * 60
 
 _MESSAGE_ROLES = {"user", "assistant", "system"}
 _MESSAGE_LANES = {"chat", "workspace"}
 _DELTA_EVENT_TYPES = {"chat.stream.delta", "canvas.stream.delta"}
+_CONTROL_EVENT_TYPES = {"decision.packet", "session.workflow", "status"}
 
 
 def _normalize_message_lane(value: object, *, default: MessageLane = "chat") -> MessageLane:
@@ -196,6 +199,23 @@ def _normalize_message_payload(message: dict[str, JSONValue]) -> dict[str, JSONV
 
 
 @dataclass
+class _EventRecord:
+    event_id: str
+    recorded_at: datetime
+    event: dict[str, JSONValue]
+
+
+@dataclass
+class _SubscriberState:
+    session_id: str
+    queue: asyncio.Queue[dict[str, JSONValue]]
+    out_of_sync: bool = False
+    pending_resync: bool = False
+    out_of_sync_count: int = 0
+    resync_reason: str = "subscriber_overflow"
+
+
+@dataclass
 class _SessionState:
     principal_id: str = DEFAULT_LEGACY_PRINCIPAL_ID
     messages: list[dict[str, JSONValue]] = field(default_factory=list)
@@ -203,7 +223,11 @@ class _SessionState:
     output_updated_at: str | None = None
     files: list[str] = field(default_factory=list)
     artifacts: list[dict[str, JSONValue]] = field(default_factory=list)
-    subscribers: set[asyncio.Queue[dict[str, JSONValue]]] = field(default_factory=set)
+    subscribers: dict[
+        asyncio.Queue[dict[str, JSONValue]],
+        _SubscriberState,
+    ] = field(default_factory=dict)
+    event_buffer: deque[_EventRecord] = field(default_factory=deque)
     last_decision_id: str | None = None
     decision_packet: dict[str, JSONValue] | None = None
     status_state: SessionStatus = "ok"
@@ -241,6 +265,8 @@ class UIHub:
         max_messages_per_session: int = DEFAULT_MAX_MESSAGES_PER_SESSION,
         subscriber_queue_maxsize: int = DEFAULT_SUBSCRIBER_QUEUE_MAXSIZE,
         subscriber_drop_policy: SubscriberDropPolicy = DEFAULT_SUBSCRIBER_DROP_POLICY,
+        event_buffer_size: int = DEFAULT_EVENT_BUFFER_SIZE,
+        event_buffer_ttl_seconds: int = DEFAULT_EVENT_BUFFER_TTL_SECONDS,
     ) -> None:
         self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
         self._sessions: dict[str, _SessionState] = {}
@@ -257,6 +283,14 @@ class UIHub:
             subscriber_drop_policy
             if subscriber_drop_policy in {"drop_newest", "coalesce_deltas"}
             else DEFAULT_SUBSCRIBER_DROP_POLICY
+        )
+        self._event_buffer_size = (
+            event_buffer_size if event_buffer_size > 0 else DEFAULT_EVENT_BUFFER_SIZE
+        )
+        self._event_buffer_ttl_seconds = (
+            event_buffer_ttl_seconds
+            if event_buffer_ttl_seconds > 0
+            else DEFAULT_EVENT_BUFFER_TTL_SECONDS
         )
         self._lock = asyncio.Lock()
         self._restore_sessions()
@@ -666,7 +700,7 @@ class UIHub:
                 existing = self._sessions.get(item.session_id)
                 if existing is not None and existing.principal_id != normalized_principal:
                     continue
-                subscribers = set(existing.subscribers) if existing is not None else set()
+                subscribers = dict(existing.subscribers) if existing is not None else {}
                 self._sessions[item.session_id] = _SessionState(
                     principal_id=normalized_principal,
                     messages=[dict(message) for message in item.messages],
@@ -879,6 +913,8 @@ class UIHub:
             return dict(state.tools_state) if isinstance(state.tools_state, dict) else None
 
     async def set_session_model(self, session_id: str, provider: str, model_id: str) -> None:
+        event: dict[str, JSONValue] | None = None
+        subscribers: list[_SubscriberState] = []
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -892,13 +928,16 @@ class UIHub:
             state.updated_at = _utc_iso_now()
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
-            subscribers = list(state.subscribers)
             selected_model: dict[str, JSONValue] = {"provider": provider, "model": model_id}
             payload: dict[str, JSONValue] = {
                 "session_id": session_id,
                 "selected_model": selected_model,
             }
-        event = self._build_event("session.model", payload)
+            subscribers = list(state.subscribers.values())
+            event = self._build_event("session.model", payload)
+            self._append_event_record_locked(state, event)
+        if event is None:
+            return
         self._publish_to_subscribers(subscribers, event)
 
     async def get_session_model(self, session_id: str) -> dict[str, str] | None:
@@ -917,6 +956,8 @@ class UIHub:
 
     async def set_session_status(self, session_id: str, status_state: str) -> None:
         normalized = self._normalize_status(status_state)
+        event: dict[str, JSONValue] | None = None
+        subscribers: list[_SubscriberState] = []
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -928,9 +969,12 @@ class UIHub:
             state.updated_at = _utc_iso_now()
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
-            subscribers = list(state.subscribers)
             payload = self._status_payload(session_id, normalized)
-        event = self._build_event("status", payload)
+            subscribers = list(state.subscribers.values())
+            event = self._build_event("status", payload)
+            self._append_event_record_locked(state, event)
+        if event is None:
+            return
         self._publish_to_subscribers(subscribers, event)
 
     async def get_session_status_event(self, session_id: str) -> dict[str, JSONValue]:
@@ -942,6 +986,55 @@ class UIHub:
                 self._persist_session_locked(session_id)
             payload = self._status_payload(session_id, state.status_state)
         return self._build_event("status", payload)
+
+    async def get_session_workflow_event(self, session_id: str) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+                self._persist_session_locked(session_id)
+            payload: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "mode": state.mode,
+                "active_plan": (dict(state.active_plan) if state.active_plan is not None else None),
+                "active_task": (dict(state.active_task) if state.active_task is not None else None),
+                "auto_state": (dict(state.auto_state) if state.auto_state is not None else None),
+            }
+        return self._build_event("session.workflow", payload)
+
+    async def get_events_since(
+        self,
+        session_id: str,
+        *,
+        last_event_id: str | None,
+    ) -> tuple[list[dict[str, JSONValue]], bool]:
+        normalized_last_id = (
+            last_event_id.strip()
+            if isinstance(last_event_id, str) and last_event_id.strip()
+            else None
+        )
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                state = _SessionState()
+                self._sessions[session_id] = state
+                self._persist_session_locked(session_id)
+            self._trim_event_buffer_locked(state)
+            if normalized_last_id is None:
+                return [], False
+            if not state.event_buffer:
+                return [], True
+            events = list(state.event_buffer)
+            replay_start = -1
+            for idx, record in enumerate(events):
+                if record.event_id == normalized_last_id:
+                    replay_start = idx + 1
+                    break
+            if replay_start < 0:
+                return [], True
+            replay = [dict(record.event) for record in events[replay_start:]]
+            return replay, False
 
     async def get_session_workflow(self, session_id: str) -> dict[str, JSONValue]:
         async with self._lock:
@@ -956,6 +1049,118 @@ class UIHub:
                 "active_task": dict(state.active_task) if state.active_task is not None else None,
                 "auto_state": dict(state.auto_state) if state.auto_state is not None else None,
             }
+
+    async def start_plan_task_if_possible(
+        self,
+        session_id: str,
+        *,
+        expected_mode: str,
+        expected_plan_id: str,
+        expected_plan_hash: str,
+        expected_plan_revision: int,
+        running_plan: dict[str, JSONValue],
+        task_payload: dict[str, JSONValue],
+        next_mode: str = "act",
+    ) -> tuple[bool, dict[str, JSONValue], str | None]:
+        event: dict[str, JSONValue] | None = None
+        subscribers: list[_SubscriberState] = []
+        reason: str | None = None
+        succeeded = False
+        payload: dict[str, JSONValue] | None = None
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                payload = {
+                    "session_id": session_id,
+                    "mode": "ask",
+                    "active_plan": None,
+                    "active_task": None,
+                    "auto_state": None,
+                }
+                reason = "plan_not_found"
+            else:
+                if state.mode != self._normalize_mode(expected_mode):
+                    reason = "mode_mismatch"
+                current_plan = state.active_plan if isinstance(state.active_plan, dict) else None
+                current_task = state.active_task if isinstance(state.active_task, dict) else None
+                if reason is None and isinstance(current_task, dict):
+                    task_status = current_task.get("status")
+                    if task_status == "running":
+                        reason = "task_already_running"
+                if reason is None and current_plan is None:
+                    reason = "plan_not_found"
+                if reason is None and current_plan is not None:
+                    current_plan_id = current_plan.get("plan_id")
+                    current_plan_hash = current_plan.get("plan_hash")
+                    current_plan_revision_raw = current_plan.get("plan_revision")
+                    current_plan_revision = (
+                        current_plan_revision_raw
+                        if (
+                            isinstance(current_plan_revision_raw, int)
+                            and current_plan_revision_raw > 0
+                        )
+                        else 1
+                    )
+                    if (
+                        current_plan_id != expected_plan_id
+                        or current_plan_hash != expected_plan_hash
+                        or current_plan_revision != expected_plan_revision
+                    ):
+                        reason = "plan_mismatch"
+                    elif current_plan.get("status") != "approved":
+                        reason = "plan_not_approved"
+                if reason is None:
+                    normalized_mode = self._normalize_mode(next_mode)
+                    normalized_plan = self._normalize_optional_object(running_plan)
+                    normalized_task = self._normalize_optional_object(task_payload)
+                    state.mode = normalized_mode
+                    state.active_plan = normalized_plan
+                    state.active_task = normalized_task
+                    state.updated_at = _utc_iso_now()
+                    self._persist_session_locked(session_id)
+                    self._prune_sessions_locked(keep_session_id=session_id)
+                    payload = {
+                        "session_id": session_id,
+                        "mode": state.mode,
+                        "active_plan": (
+                            dict(state.active_plan) if state.active_plan is not None else None
+                        ),
+                        "active_task": (
+                            dict(state.active_task) if state.active_task is not None else None
+                        ),
+                        "auto_state": (
+                            dict(state.auto_state) if state.auto_state is not None else None
+                        ),
+                    }
+                    subscribers = list(state.subscribers.values())
+                    event = self._build_event("session.workflow", payload)
+                    self._append_event_record_locked(state, event)
+                    succeeded = True
+                else:
+                    payload = {
+                        "session_id": session_id,
+                        "mode": state.mode,
+                        "active_plan": (
+                            dict(state.active_plan) if state.active_plan is not None else None
+                        ),
+                        "active_task": (
+                            dict(state.active_task) if state.active_task is not None else None
+                        ),
+                        "auto_state": (
+                            dict(state.auto_state) if state.auto_state is not None else None
+                        ),
+                    }
+        if event is not None:
+            self._publish_to_subscribers(subscribers, event)
+        if payload is None:
+            payload = {
+                "session_id": session_id,
+                "mode": "ask",
+                "active_plan": None,
+                "active_task": None,
+                "auto_state": None,
+            }
+        return succeeded, payload, reason
 
     async def set_session_workflow(
         self,
@@ -1000,17 +1205,18 @@ class UIHub:
                 "auto_state": (dict(state.auto_state) if state.auto_state is not None else None),
             }
             if not changed:
-                subscribers: list[asyncio.Queue[dict[str, JSONValue]]] = []
+                subscribers: list[_SubscriberState] = []
+                event: dict[str, JSONValue] | None = None
             else:
                 state.updated_at = _utc_iso_now()
                 self._persist_session_locked(session_id)
                 self._prune_sessions_locked(keep_session_id=session_id)
-                subscribers = list(state.subscribers)
+                subscribers = list(state.subscribers.values())
+                event = self._build_event("session.workflow", payload)
+                self._append_event_record_locked(state, event)
         if subscribers:
-            self._publish_to_subscribers(
-                subscribers,
-                self._build_event("session.workflow", payload),
-            )
+            if event is not None:
+                self._publish_to_subscribers(subscribers, event)
         return payload
 
     async def append_message(
@@ -1022,6 +1228,8 @@ class UIHub:
     ) -> dict[str, JSONValue]:
         normalized_message = _normalize_message_payload(message)
         normalized_message["lane"] = _normalize_message_lane(lane)
+        event: dict[str, JSONValue] | None = None
+        subscribers: list[_SubscriberState] = []
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -1036,11 +1244,14 @@ class UIHub:
             state.updated_at = _utc_iso_now()
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
-            subscribers = list(state.subscribers)
-        event = self._build_event(
-            "message.append",
-            {"session_id": session_id, "message": dict(normalized_message)},
-        )
+            subscribers = list(state.subscribers.values())
+            event = self._build_event(
+                "message.append",
+                {"session_id": session_id, "message": dict(normalized_message)},
+            )
+            self._append_event_record_locked(state, event)
+        if event is None:
+            return dict(normalized_message)
         self._publish_to_subscribers(subscribers, event)
         return dict(normalized_message)
 
@@ -1054,7 +1265,9 @@ class UIHub:
                 state = _SessionState()
                 self._sessions[session_id] = state
                 self._persist_session_locked(session_id)
-            state.subscribers.add(queue)
+            subscriber = _SubscriberState(session_id=session_id, queue=queue)
+            state.subscribers[queue] = subscriber
+            self._flush_pending_resync(subscriber)
         return queue
 
     async def unsubscribe(
@@ -1066,15 +1279,17 @@ class UIHub:
             state = self._sessions.get(session_id)
             if state is None:
                 return
-            state.subscribers.discard(queue)
+            state.subscribers.pop(queue, None)
 
     async def publish(self, session_id: str, event: dict[str, JSONValue]) -> None:
+        subscribers: list[_SubscriberState] = []
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
                 return
-            subscribers = list(state.subscribers)
-        hydrated = self._ensure_event_fields(event)
+            hydrated = self._ensure_event_fields(event)
+            self._append_event_record_locked(state, hydrated)
+            subscribers = list(state.subscribers.values())
         self._publish_to_subscribers(subscribers, hydrated)
 
     async def set_session_decision(
@@ -1082,6 +1297,8 @@ class UIHub:
         session_id: str,
         decision: dict[str, JSONValue] | None,
     ) -> None:
+        event: dict[str, JSONValue] | None = None
+        subscribers: list[_SubscriberState] = []
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -1105,12 +1322,15 @@ class UIHub:
                 state.last_decision_id = decision_id
             else:
                 state.last_decision_id = None
-            subscribers = list(state.subscribers)
+            subscribers = list(state.subscribers.values())
             decision_payload = dict(state.decision_packet)
-        event = self._build_event(
-            "decision.packet",
-            {"session_id": session_id, "decision": decision_payload},
-        )
+            event = self._build_event(
+                "decision.packet",
+                {"session_id": session_id, "decision": decision_payload},
+            )
+            self._append_event_record_locked(state, event)
+        if event is None:
+            return
         self._publish_to_subscribers(subscribers, event)
 
     async def transition_session_decision(
@@ -1121,6 +1341,8 @@ class UIHub:
         expected_status: str,
         next_decision: dict[str, JSONValue],
     ) -> tuple[bool, dict[str, JSONValue] | None]:
+        event: dict[str, JSONValue] | None = None
+        subscribers: list[_SubscriberState] = []
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None or state.decision_packet is None:
@@ -1147,13 +1369,15 @@ class UIHub:
                 state.last_decision_id = decision_id_raw
             else:
                 state.last_decision_id = None
-            subscribers = list(state.subscribers)
+            subscribers = list(state.subscribers.values())
             decision_payload = dict(candidate)
-
-        event = self._build_event(
-            "decision.packet",
-            {"session_id": session_id, "decision": decision_payload},
-        )
+            event = self._build_event(
+                "decision.packet",
+                {"session_id": session_id, "decision": decision_payload},
+            )
+            self._append_event_record_locked(state, event)
+        if event is None:
+            return True, decision_payload
         self._publish_to_subscribers(subscribers, event)
         return True, decision_payload
 
@@ -1171,6 +1395,19 @@ class UIHub:
             "ts": _utc_iso_now(),
             "payload": payload,
         }
+
+    def build_resync_required_event(
+        self,
+        *,
+        session_id: str,
+        reason: str,
+        resync_only: bool,
+    ) -> dict[str, JSONValue]:
+        return self._build_resync_required_event(
+            session_id=session_id,
+            reason=reason,
+            resync_only=resync_only,
+        )
 
     def _selected_model_payload(self, state: _SessionState) -> dict[str, JSONValue] | None:
         provider = state.model_provider
@@ -1243,34 +1480,49 @@ class UIHub:
 
     def _publish_to_subscribers(
         self,
-        subscribers: list[asyncio.Queue[dict[str, JSONValue]]],
+        subscribers: list[_SubscriberState],
         event: dict[str, JSONValue],
     ) -> None:
-        for queue in subscribers:
+        for subscriber in subscribers:
+            self._flush_pending_resync(subscriber)
             try:
-                queue.put_nowait(event)
+                subscriber.queue.put_nowait(event)
             except asyncio.QueueFull:
-                self._handle_subscriber_queue_overflow(queue, event)
+                self._handle_subscriber_queue_overflow(subscriber, event)
 
     def _handle_subscriber_queue_overflow(
         self,
-        queue: asyncio.Queue[dict[str, JSONValue]],
+        subscriber: _SubscriberState,
         event: dict[str, JSONValue],
     ) -> None:
-        if self._subscriber_drop_policy != "coalesce_deltas":
+        queue = subscriber.queue
+        if self._subscriber_drop_policy == "coalesce_deltas":
+            if self._is_delta_event(event) and self._coalesce_delta_event(queue, event):
+                return
+            if self._evict_oldest_delta_event(queue):
+                try:
+                    queue.put_nowait(event)
+                    return
+                except asyncio.QueueFull:
+                    pass
+        if not self._is_control_event(event):
             return
-        if self._is_delta_event(event) and self._coalesce_delta_event(queue, event):
-            return
-        if not self._evict_oldest_delta_event(queue):
-            return
-        try:
-            queue.put_nowait(event)
-        except asyncio.QueueFull:
-            return
+        if self._evict_oldest_non_control_event(queue):
+            try:
+                queue.put_nowait(event)
+                return
+            except asyncio.QueueFull:
+                pass
+        self._mark_subscriber_out_of_sync(subscriber, reason="control_overflow")
+        self._flush_pending_resync(subscriber)
 
     def _is_delta_event(self, event: dict[str, JSONValue]) -> bool:
         event_type = event.get("type")
         return isinstance(event_type, str) and event_type in _DELTA_EVENT_TYPES
+
+    def _is_control_event(self, event: dict[str, JSONValue]) -> bool:
+        event_type = event.get("type")
+        return isinstance(event_type, str) and event_type in _CONTROL_EVENT_TYPES
 
     def _coalesce_delta_event(
         self,
@@ -1362,6 +1614,95 @@ class UIHub:
                 del queue_items[idx]
                 return True
         return False
+
+    def _evict_oldest_non_control_event(self, queue: asyncio.Queue[dict[str, JSONValue]]) -> bool:
+        queue_items_raw = getattr(queue, "_queue", None)
+        if not isinstance(queue_items_raw, deque):
+            return False
+        queue_items = cast(deque[dict[str, JSONValue]], queue_items_raw)
+        for idx, candidate in enumerate(queue_items):
+            if not isinstance(candidate, dict):
+                del queue_items[idx]
+                return True
+            if not self._is_control_event(candidate):
+                del queue_items[idx]
+                return True
+        return False
+
+    def _mark_subscriber_out_of_sync(self, subscriber: _SubscriberState, *, reason: str) -> None:
+        subscriber.out_of_sync = True
+        subscriber.pending_resync = True
+        subscriber.out_of_sync_count += 1
+        subscriber.resync_reason = reason
+
+    def _build_resync_required_event(
+        self,
+        *,
+        session_id: str,
+        reason: str,
+        resync_only: bool,
+    ) -> dict[str, JSONValue]:
+        return self._build_event(
+            "session.resync_required",
+            {
+                "session_id": session_id,
+                "reason": reason,
+                "resync_only": resync_only,
+            },
+        )
+
+    def _flush_pending_resync(self, subscriber: _SubscriberState) -> None:
+        if not subscriber.pending_resync:
+            return
+        event = self._build_resync_required_event(
+            session_id=subscriber.session_id,
+            reason=subscriber.resync_reason,
+            resync_only=True,
+        )
+        queue = subscriber.queue
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            if not self._evict_oldest_non_control_event(queue):
+                return
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                return
+        subscriber.pending_resync = False
+        subscriber.out_of_sync = False
+
+    def _append_event_record_locked(
+        self,
+        state: _SessionState,
+        event: dict[str, JSONValue],
+    ) -> None:
+        event_id_raw = event.get("id")
+        event_id = event_id_raw if isinstance(event_id_raw, str) and event_id_raw.strip() else None
+        if event_id is None:
+            return
+        now = datetime.now(timezone.utc)  # noqa: UP017
+        state.event_buffer.append(
+            _EventRecord(
+                event_id=event_id,
+                recorded_at=now,
+                event=dict(event),
+            )
+        )
+        self._trim_event_buffer_locked(state, now=now)
+
+    def _trim_event_buffer_locked(
+        self,
+        state: _SessionState,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        current_now = now or datetime.now(timezone.utc)  # noqa: UP017
+        cutoff = current_now - timedelta(seconds=self._event_buffer_ttl_seconds)
+        while state.event_buffer and state.event_buffer[0].recorded_at < cutoff:
+            state.event_buffer.popleft()
+        while len(state.event_buffer) > self._event_buffer_size:
+            state.event_buffer.popleft()
 
     def _restore_sessions(self) -> None:
         for item in self._storage.load_sessions():

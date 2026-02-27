@@ -155,15 +155,20 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     current_status = current_decision.get("status")
     if current_status != "pending":
         status_value = current_status if isinstance(current_status, str) else "unknown"
-        return json_response(
-            {
-                "ok": True,
-                "decision": current_decision,
-                "status": status_value,
-                "resume_started": False,
-                "already_resolved": status_value in {"resolved", "rejected"},
-                "resume": None,
-            }
+        if status_value in {"resolved", "rejected"}:
+            return error_response(
+                status=409,
+                message="Decision уже завершён и не может быть выполнен повторно.",
+                error_type="invalid_request_error",
+                code="decision_already_resolved",
+                details={"decision_status": status_value},
+            )
+        return error_response(
+            status=409,
+            message="Decision не находится в pending состоянии.",
+            error_type="invalid_request_error",
+            code="decision_not_pending",
+            details={"decision_status": status_value},
         )
     decision_type = _decision_type_value(current_decision)
     generic_decision_choices = {
@@ -695,12 +700,22 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "started_at": _utc_now_iso(),
             "updated_at": _utc_now_iso(),
         }
-        await hub.set_session_workflow(
+        started, _, start_error = await hub.start_plan_task_if_possible(
             session_id,
-            mode="act",
-            active_plan=running_plan,
-            active_task=task_payload,
+            expected_mode="plan",
+            expected_plan_id=str(plan.get("plan_id")),
+            expected_plan_hash=str(plan.get("plan_hash")),
+            expected_plan_revision=_plan_revision_value(plan),
+            running_plan=running_plan,
+            task_payload=task_payload,
+            next_mode="act",
         )
+        if not started:
+            if start_error == "mode_mismatch":
+                return {"ok": False, "error": "mode_not_plan"}
+            if start_error == "plan_mismatch":
+                return {"ok": False, "error": "plan_state_conflict"}
+            return {"ok": False, "error": start_error or "plan_state_conflict"}
         plan_id_raw = task_payload.get("plan_id")
         task_id_raw = task_payload.get("task_id")
         if isinstance(plan_id_raw, str) and isinstance(task_id_raw, str):
@@ -995,6 +1010,55 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             hub=hub,
             session_id=session_id,
             status="done" if resume.get("ok") is True else "blocked",
+        )
+    validation_error_codes = {
+        "resume_payload_missing",
+        "plan_revision_mismatch",
+        "plan_not_approved",
+        "switch_to_act_required",
+        "task_already_running",
+        "mode_not_plan",
+        "mode_not_act",
+        "plan_state_conflict",
+    }
+    resume_error_code: str | None = None
+    if isinstance(resume, dict):
+        error_raw = resume.get("error")
+        if isinstance(error_raw, str) and error_raw.strip():
+            resume_error_code = error_raw.strip()
+    if (
+        isinstance(resume, dict)
+        and resume.get("ok") is False
+        and resume_error_code in validation_error_codes
+    ):
+        pending = _decision_with_status(executing, status="pending")
+        await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="executing",
+            next_decision=pending,
+        )
+        message_by_code = {
+            "resume_payload_missing": "Невозможно продолжить: отсутствует resume_payload.",
+            "plan_revision_mismatch": "План изменился, требуется обновление состояния.",
+            "plan_not_approved": "Сначала approve план.",
+            "switch_to_act_required": "Для выполнения нужно перейти в act.",
+            "task_already_running": "План уже выполняется.",
+            "mode_not_plan": "Операция доступна только в plan-режиме.",
+            "mode_not_act": "Операция доступна только в act-режиме.",
+            "plan_state_conflict": "Состояние плана изменилось, повторите действие.",
+        }
+        details_raw = resume.get("details")
+        details = details_raw if isinstance(details_raw, dict) else None
+        return error_response(
+            status=409,
+            message=message_by_code.get(
+                resume_error_code,
+                "Невозможно продолжить: конфликт состояния.",
+            ),
+            error_type="invalid_request_error",
+            code=resume_error_code,
+            details=details,
         )
     resume_started = True
     if isinstance(resume, dict) and "resume_started" in resume:

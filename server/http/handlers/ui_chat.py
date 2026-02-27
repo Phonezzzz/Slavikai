@@ -20,6 +20,11 @@ from server.http.common.chat_payload import (
     _split_response_and_report,
     _ui_messages_to_llm,
 )
+from server.http.common.idempotency import (
+    IdempotencyStore,
+    fingerprint_json_payload,
+    normalize_idempotency_key,
+)
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     CANVAS_STATUS_CHARS_STEP,
@@ -261,12 +266,69 @@ async def handle_ui_chat_send(
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
+    idempotency_store: IdempotencyStore = request.app["idempotency_store"]
 
     agent = None
     session_id: str | None = None
     status_opened = False
     error = False
     trace_id: str | None = None
+    idempotency_key: str | None = None
+    idempotency_fingerprint: str | None = None
+    idempotency_active = False
+
+    async def _complete_idempotency(payload: dict[str, JSONValue], *, status: int) -> None:
+        if (
+            not idempotency_active
+            or idempotency_key is None
+            or idempotency_fingerprint is None
+            or session_id is None
+        ):
+            return
+        await idempotency_store.complete(
+            endpoint="ui.chat.send",
+            session_id=session_id,
+            key=idempotency_key,
+            fingerprint=idempotency_fingerprint,
+            status=status,
+            payload=payload,
+        )
+
+    async def _abort_idempotency() -> None:
+        if (
+            not idempotency_active
+            or idempotency_key is None
+            or idempotency_fingerprint is None
+            or session_id is None
+        ):
+            return
+        await idempotency_store.abort(
+            endpoint="ui.chat.send",
+            session_id=session_id,
+            key=idempotency_key,
+            fingerprint=idempotency_fingerprint,
+        )
+
+    async def _complete_idempotency_error(
+        *,
+        status: int,
+        message: str,
+        error_type: str,
+        code: str,
+        trace: str | None = None,
+        details: dict[str, JSONValue] | None = None,
+    ) -> None:
+        error_payload: dict[str, JSONValue] = {
+            "error": {
+                "message": message,
+                "type": error_type,
+                "code": code,
+                "trace_id": trace,
+                "details": details or {},
+            }
+        }
+        await _complete_idempotency(error_payload, status=status)
+
     try:
         try:
             agent = await _resolve_agent(request)
@@ -385,8 +447,47 @@ async def handle_ui_chat_send(
         if resolved_session_id is None:
             return _session_forbidden_response()
         session_id = resolved_session_id
+        if payload_override is None:
+            idempotency_key = normalize_idempotency_key(request.headers.get("Idempotency-Key"))
+        if idempotency_key is not None:
+            idempotency_fingerprint = fingerprint_json_payload(
+                {
+                    "session_id": session_id,
+                    "content": content_raw,
+                    "force_canvas": force_canvas,
+                    "lane": lane,
+                    "attachments": attachments,
+                    "bypass_root_gate": bypass_root_gate,
+                }
+            )
+            idempotency_state, replay = await idempotency_store.begin(
+                endpoint="ui.chat.send",
+                session_id=session_id,
+                key=idempotency_key,
+                fingerprint=idempotency_fingerprint,
+            )
+            if idempotency_state == "replay" and replay is not None:
+                response = json_response(replay.payload, status=replay.status)
+                response.headers[UI_SESSION_HEADER] = session_id
+                return response
+            if idempotency_state == "conflict":
+                return error_response(
+                    status=409,
+                    message="Idempotency-Key уже использован с другим payload.",
+                    error_type="invalid_request_error",
+                    code="idempotency_key_reused",
+                )
+            if idempotency_state == "in_progress":
+                return error_response(
+                    status=409,
+                    message="Запрос с таким Idempotency-Key уже выполняется.",
+                    error_type="invalid_request_error",
+                    code="idempotency_in_progress",
+                )
+            idempotency_active = True
         selected_model = await hub.get_session_model(session_id)
         if selected_model is None:
+            await _abort_idempotency()
             return _model_not_selected_response()
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
@@ -412,6 +513,7 @@ async def handle_ui_chat_send(
                 session_id=session_id,
             )
             if _decision_is_pending_blocking(existing_decision):
+                await _abort_idempotency()
                 return error_response(
                     status=409,
                     message="Pending decision already exists for this session.",
@@ -485,32 +587,31 @@ async def handle_ui_chat_send(
             )
             current_model = await hub.get_session_model(session_id)
             current_workflow = await hub.get_session_workflow(session_id)
-            response = json_response(
-                {
-                    "session_id": session_id,
-                    "lane": lane,
-                    "messages": chat_messages_payload,
-                    "workspace_messages": workspace_messages_payload,
-                    "output": output_payload,
-                    "files": files_payload or [],
-                    "artifacts": artifacts_payload or [],
-                    "display": {
-                        "target": "chat",
-                        "artifact_id": None,
-                        "forced": force_canvas,
-                    },
-                    "decision": _normalize_ui_decision(root_gate_decision, session_id=session_id),
-                    "selected_model": current_model,
-                    "trace_id": None,
-                    "approval_request": None,
-                    "mwv_report": None,
-                    "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
-                    "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
-                    "active_task": _normalize_task_payload(current_workflow.get("active_task")),
-                    "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+            response_payload_root_gate: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "lane": lane,
+                "messages": chat_messages_payload,
+                "workspace_messages": workspace_messages_payload,
+                "output": output_payload,
+                "files": files_payload or [],
+                "artifacts": artifacts_payload or [],
+                "display": {
+                    "target": "chat",
+                    "artifact_id": None,
+                    "forced": force_canvas,
                 },
-                status=202,
-            )
+                "decision": _normalize_ui_decision(root_gate_decision, session_id=session_id),
+                "selected_model": current_model,
+                "trace_id": None,
+                "approval_request": None,
+                "mwv_report": None,
+                "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
+                "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
+                "active_task": _normalize_task_payload(current_workflow.get("active_task")),
+                "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+            }
+            await _complete_idempotency(response_payload_root_gate, status=202)
+            response = json_response(response_payload_root_gate, status=202)
             response.headers[UI_SESSION_HEADER] = session_id
             return response
 
@@ -571,31 +672,31 @@ async def handle_ui_chat_send(
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
             current_workflow = await hub.get_session_workflow(session_id)
-            response = json_response(
-                {
-                    "session_id": session_id,
-                    "lane": lane,
-                    "messages": messages,
-                    "workspace_messages": workspace_messages,
-                    "output": output_payload,
-                    "files": files_payload or [],
-                    "artifacts": artifacts_payload or [],
-                    "display": {
-                        "target": "chat",
-                        "artifact_id": None,
-                        "forced": force_canvas,
-                    },
-                    "decision": _normalize_ui_decision(current_decision, session_id=session_id),
-                    "selected_model": current_model,
-                    "trace_id": None,
-                    "approval_request": None,
-                    "mwv_report": None,
-                    "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
-                    "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
-                    "active_task": _normalize_task_payload(workflow.get("active_task")),
-                    "auto_state": _normalize_auto_state(workflow.get("auto_state")),
-                }
-            )
+            response_payload_guidance: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "lane": lane,
+                "messages": messages,
+                "workspace_messages": workspace_messages,
+                "output": output_payload,
+                "files": files_payload or [],
+                "artifacts": artifacts_payload or [],
+                "display": {
+                    "target": "chat",
+                    "artifact_id": None,
+                    "forced": force_canvas,
+                },
+                "decision": _normalize_ui_decision(current_decision, session_id=session_id),
+                "selected_model": current_model,
+                "trace_id": None,
+                "approval_request": None,
+                "mwv_report": None,
+                "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
+                "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
+                "active_task": _normalize_task_payload(workflow.get("active_task")),
+                "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+            }
+            await _complete_idempotency(response_payload_guidance, status=200)
+            response = json_response(response_payload_guidance)
             response.headers[UI_SESSION_HEADER] = session_id
             await _publish_agent_activity(
                 hub,
@@ -634,6 +735,16 @@ async def handle_ui_chat_send(
                 api_key = _resolve_provider_api_key(selected_model["provider"])
                 agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
             except Exception as exc:  # noqa: BLE001
+                error_payload: dict[str, JSONValue] = {
+                    "error": {
+                        "message": f"Не удалось применить модель сессии: {exc}",
+                        "type": "configuration_error",
+                        "code": "model_config_invalid",
+                        "trace_id": None,
+                        "details": {},
+                    }
+                }
+                await _complete_idempotency(error_payload, status=400)
                 return error_response(
                     status=400,
                     message=f"Не удалось применить модель сессии: {exc}",
@@ -1003,31 +1114,31 @@ async def handle_ui_chat_send(
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id)
             current_workflow = await hub.get_session_workflow(session_id)
-            response = json_response(
-                {
-                    "session_id": session_id,
-                    "lane": lane,
-                    "messages": messages,
-                    "workspace_messages": workspace_messages,
-                    "output": output_payload,
-                    "files": files_payload or [],
-                    "artifacts": artifacts_payload or [],
-                    "display": {
-                        "target": "chat",
-                        "artifact_id": None,
-                        "forced": force_canvas,
-                    },
-                    "decision": _normalize_ui_decision(current_decision, session_id=session_id),
-                    "selected_model": current_model,
-                    "trace_id": trace_id,
-                    "approval_request": approval_request,
-                    "mwv_report": mwv_report,
-                    "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
-                    "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
-                    "active_task": _normalize_task_payload(current_workflow.get("active_task")),
-                    "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
-                }
-            )
+            response_payload_blocking_decision: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "lane": lane,
+                "messages": messages,
+                "workspace_messages": workspace_messages,
+                "output": output_payload,
+                "files": files_payload or [],
+                "artifacts": artifacts_payload or [],
+                "display": {
+                    "target": "chat",
+                    "artifact_id": None,
+                    "forced": force_canvas,
+                },
+                "decision": _normalize_ui_decision(current_decision, session_id=session_id),
+                "selected_model": current_model,
+                "trace_id": trace_id,
+                "approval_request": approval_request,
+                "mwv_report": mwv_report,
+                "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
+                "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
+                "active_task": _normalize_task_payload(current_workflow.get("active_task")),
+                "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+            }
+            await _complete_idempotency(response_payload_blocking_decision, status=200)
+            response = json_response(response_payload_blocking_decision)
             response.headers[UI_SESSION_HEADER] = session_id
             await _publish_agent_activity(
                 hub,
@@ -1123,30 +1234,32 @@ async def handle_ui_chat_send(
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id)
         current_workflow = await hub.get_session_workflow(session_id)
-        response = json_response(
-            {
-                "session_id": session_id,
-                "lane": lane,
-                "messages": messages,
-                "workspace_messages": workspace_messages,
-                "output": output_payload,
-                "files": files_payload or [],
-                "artifacts": artifacts_payload or [],
-                "display": {
-                    "target": display_target,
-                    "artifact_id": artifact_id,
-                    "forced": force_canvas,
-                },
-                "decision": _normalize_ui_decision(current_decision, session_id=session_id),
-                "selected_model": current_model,
-                "trace_id": trace_id,
-                "approval_request": approval_request,
-                "mwv_report": mwv_report,
-                "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
-                "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
-                "active_task": _normalize_task_payload(current_workflow.get("active_task")),
-                "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+        response_payload_final: dict[str, JSONValue] = {
+            "session_id": session_id,
+            "lane": lane,
+            "messages": messages,
+            "workspace_messages": workspace_messages,
+            "output": output_payload,
+            "files": files_payload or [],
+            "artifacts": artifacts_payload or [],
+            "display": {
+                "target": display_target,
+                "artifact_id": artifact_id,
+                "forced": force_canvas,
             },
+            "decision": _normalize_ui_decision(current_decision, session_id=session_id),
+            "selected_model": current_model,
+            "trace_id": trace_id,
+            "approval_request": approval_request,
+            "mwv_report": mwv_report,
+            "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
+            "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
+            "active_task": _normalize_task_payload(current_workflow.get("active_task")),
+            "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+        }
+        await _complete_idempotency(response_payload_final, status=200)
+        response = json_response(
+            response_payload_final,
         )
         response.headers[UI_SESSION_HEADER] = session_id
         await _publish_agent_activity(
@@ -1176,6 +1289,13 @@ async def handle_ui_chat_send(
                 detail="chat: internal_error",
             )
             await hub.set_session_status(session_id, "error")
+        await _complete_idempotency_error(
+            status=500,
+            message="Внутренняя ошибка агента. См. trace_id.",
+            error_type="internal_error",
+            code="agent_error",
+            trace=resolved_trace_id,
+        )
         return error_response(
             status=500,
             message="Внутренняя ошибка агента. См. trace_id.",

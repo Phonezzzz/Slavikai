@@ -1,9 +1,51 @@
 from __future__ import annotations
 
 # ruff: noqa: F403,F405
+from server.http.common.workflow_runtime import compute_plan_completion_state
 from server.http_api import PLAN_AUDIT_MAX_READ_FILES
 
 from .fakes import *
+
+
+async def _prepare_approved_plan(
+    client,
+    session_id: str,
+    *,
+    switch_to_act: bool,
+) -> int:
+    mode_resp = await client.post(
+        "/ui/api/mode",
+        headers={"X-Slavik-Session": session_id},
+        json={"mode": "plan"},
+    )
+    assert mode_resp.status == 200
+
+    draft_resp = await client.post(
+        "/ui/api/plan/draft",
+        headers={"X-Slavik-Session": session_id},
+        json={"goal": "Подготовка плана для execute"},
+    )
+    assert draft_resp.status == 200
+
+    approve_resp = await client.post(
+        "/ui/api/plan/approve",
+        headers={"X-Slavik-Session": session_id},
+    )
+    assert approve_resp.status == 200
+    approve_payload = await approve_resp.json()
+    active_plan = approve_payload.get("active_plan")
+    assert isinstance(active_plan, dict)
+    plan_revision = active_plan.get("plan_revision")
+    assert isinstance(plan_revision, int)
+
+    if switch_to_act:
+        to_act = await client.post(
+            "/ui/api/mode",
+            headers={"X-Slavik-Session": session_id},
+            json={"mode": "act", "confirm": True},
+        )
+        assert to_act.status == 200
+    return plan_revision
 
 
 def test_ui_state_and_mode_transitions() -> None:
@@ -523,3 +565,210 @@ def test_ui_session_model_not_found_suggests_closest(monkeypatch) -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_plan_execute_rejects_second_start_when_running(monkeypatch) -> None:  # noqa: ANN001
+    async def _slow_runner(**kwargs) -> None:  # noqa: ANN003
+        del kwargs
+        await asyncio.sleep(0.2)
+
+    monkeypatch.setattr("server.http.handlers.plan._run_plan_runner", _slow_runner)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+
+            first = await client.post(
+                "/ui/api/plan/execute",
+                headers={"X-Slavik-Session": session_id},
+                json={"plan_revision": revision},
+            )
+            assert first.status == 200
+            first_payload = await first.json()
+            active_task = first_payload.get("active_task")
+            assert isinstance(active_task, dict)
+            assert active_task.get("status") == "running"
+
+            second = await client.post(
+                "/ui/api/plan/execute",
+                headers={"X-Slavik-Session": session_id},
+                json={"plan_revision": revision},
+            )
+            assert second.status == 409
+            second_payload = await second.json()
+            error = second_payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "task_already_running"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_plan_execute_parallel_race_allows_only_one_runner(monkeypatch) -> None:  # noqa: ANN001
+    async def _slow_runner(**kwargs) -> None:  # noqa: ANN003
+        del kwargs
+        await asyncio.sleep(0.2)
+
+    monkeypatch.setattr("server.http.handlers.plan._run_plan_runner", _slow_runner)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+
+            async def _execute_once():
+                return await client.post(
+                    "/ui/api/plan/execute",
+                    headers={"X-Slavik-Session": session_id},
+                    json={"plan_revision": revision},
+                )
+
+            first_resp, second_resp = await asyncio.gather(_execute_once(), _execute_once())
+            statuses = sorted([first_resp.status, second_resp.status])
+            assert statuses == [200, 409]
+
+            payloads = [await first_resp.json(), await second_resp.json()]
+            success = next((item for item in payloads if item.get("ok") is True), None)
+            conflict = next(
+                (item for item in payloads if isinstance(item.get("error"), dict)),
+                None,
+            )
+            assert isinstance(success, dict)
+            assert isinstance(conflict, dict)
+            conflict_error = conflict.get("error")
+            assert isinstance(conflict_error, dict)
+            assert conflict_error.get("code") == "task_already_running"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_plan_execute_idempotency_key_matrix(monkeypatch) -> None:  # noqa: ANN001
+    async def _slow_runner(**kwargs) -> None:  # noqa: ANN003
+        del kwargs
+        await asyncio.sleep(0.2)
+
+    monkeypatch.setattr("server.http.handlers.plan._run_plan_runner", _slow_runner)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+            headers = {
+                "X-Slavik-Session": session_id,
+                "Idempotency-Key": "plan-exec-k1",
+            }
+
+            first = await client.post(
+                "/ui/api/plan/execute",
+                headers=headers,
+                json={"plan_revision": revision},
+            )
+            assert first.status == 200
+            first_payload = await first.json()
+            first_task = first_payload.get("active_task")
+            assert isinstance(first_task, dict)
+            first_task_id = first_task.get("task_id")
+            assert isinstance(first_task_id, str)
+
+            replay = await client.post(
+                "/ui/api/plan/execute",
+                headers=headers,
+                json={"plan_revision": revision},
+            )
+            assert replay.status == 200
+            replay_payload = await replay.json()
+            replay_task = replay_payload.get("active_task")
+            assert isinstance(replay_task, dict)
+            assert replay_task.get("task_id") == first_task_id
+
+            conflict = await client.post(
+                "/ui/api/plan/execute",
+                headers=headers,
+                json={"plan_revision": revision, "client_nonce": "different"},
+            )
+            assert conflict.status == 409
+            conflict_payload = await conflict.json()
+            conflict_error = conflict_payload.get("error")
+            assert isinstance(conflict_error, dict)
+            assert conflict_error.get("code") == "idempotency_key_reused"
+
+            no_key = await client.post(
+                "/ui/api/plan/execute",
+                headers={"X-Slavik-Session": session_id},
+                json={"plan_revision": revision},
+            )
+            assert no_key.status == 409
+            no_key_payload = await no_key.json()
+            no_key_error = no_key_payload.get("error")
+            assert isinstance(no_key_error, dict)
+            assert no_key_error.get("code") == "task_already_running"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_compute_plan_completion_state_matrix() -> None:
+    assert (
+        compute_plan_completion_state(
+            {
+                "steps": [
+                    {"step_id": "s1", "status": "done"},
+                    {"step_id": "s2", "status": "done"},
+                ]
+            }
+        )
+        == "completed"
+    )
+    assert (
+        compute_plan_completion_state(
+            {
+                "steps": [
+                    {"step_id": "s1", "status": "done"},
+                    {"step_id": "s2", "status": "failed"},
+                ]
+            }
+        )
+        == "failed"
+    )
+    assert (
+        compute_plan_completion_state(
+            {
+                "steps": [
+                    {"step_id": "s1", "status": "done"},
+                    {"step_id": "s2", "status": "waiting_approval"},
+                ]
+            }
+        )
+        == "running"
+    )
+    assert (
+        compute_plan_completion_state(
+            {
+                "steps": [
+                    {"step_id": "s1", "status": "done"},
+                    {"step_id": "s2", "status": "blocked"},
+                ]
+            }
+        )
+        == "running"
+    )

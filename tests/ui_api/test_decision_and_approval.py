@@ -985,14 +985,209 @@ def test_ui_decision_respond_agent_decision_retry_without_resume_payload() -> No
                     "choice": "retry",
                 },
             )
-            assert retry_resp.status == 200
+            assert retry_resp.status == 409
             retry_payload = await retry_resp.json()
-            assert retry_payload.get("status") == "resolved"
-            assert retry_payload.get("resume_started") is False
-            resume = retry_payload.get("resume")
-            assert isinstance(resume, dict)
-            assert resume.get("ok") is False
-            assert resume.get("error") == "resume_payload_missing"
+            error = retry_payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "resume_payload_missing"
+            decision_after = await hub.get_session_decision(session_id)
+            assert isinstance(decision_after, dict)
+            assert decision_after.get("status") == "pending"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_returns_409_for_already_resolved_decision() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id,
+                {
+                    "id": "decision-resolved-1",
+                    "kind": "decision",
+                    "decision_type": "agent_decision",
+                    "status": "pending",
+                    "blocking": True,
+                    "reason": "need_user_input",
+                    "summary": "Resolve once",
+                    "proposed_action": {},
+                    "options": [
+                        {
+                            "id": "abort",
+                            "title": "Abort",
+                            "action": "abort",
+                            "payload": {},
+                            "risk": "low",
+                        }
+                    ],
+                    "default_option_id": "abort",
+                    "context": {
+                        "session_id": session_id,
+                        "source_endpoint": "chat.agent_decision",
+                        "resume_payload": {
+                            "source_request": {
+                                "content": "x",
+                                "force_canvas": False,
+                                "lane": "chat",
+                            },
+                            "selected_model_snapshot": {
+                                "provider": "local",
+                                "model": "local-default",
+                            },
+                        },
+                    },
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "resolved_at": None,
+                },
+            )
+            first = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-resolved-1",
+                    "choice": "abort",
+                },
+            )
+            assert first.status == 200
+
+            second = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-resolved-1",
+                    "choice": "abort",
+                },
+            )
+            assert second.status == 409
+            second_payload = await second.json()
+            error = second_payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "decision_already_resolved"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_returns_409_for_non_pending_status() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id,
+                {
+                    "id": "decision-executing-1",
+                    "kind": "decision",
+                    "decision_type": "agent_decision",
+                    "status": "executing",
+                    "blocking": True,
+                    "reason": "need_user_input",
+                    "summary": "Executing decision",
+                    "proposed_action": {},
+                    "options": [],
+                    "default_option_id": None,
+                    "context": {"session_id": session_id, "source_endpoint": "chat.agent_decision"},
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "resolved_at": None,
+                },
+            )
+
+            response = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-executing-1",
+                    "choice": "reject",
+                },
+            )
+            assert response.status == 409
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "decision_not_pending"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_idempotency_key_matrix() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            headers = {
+                "X-Slavik-Session": session_id,
+                "Idempotency-Key": "chat-send-k1",
+            }
+            first = await client.post(
+                "/ui/api/chat/send",
+                headers=headers,
+                json={"content": "Ping idempotency"},
+            )
+            assert first.status == 200
+            first_payload = await first.json()
+            first_messages = first_payload.get("messages")
+            assert isinstance(first_messages, list)
+            first_count = len(first_messages)
+            assert first_count >= 2
+
+            replay = await client.post(
+                "/ui/api/chat/send",
+                headers=headers,
+                json={"content": "Ping idempotency"},
+            )
+            assert replay.status == 200
+            replay_payload = await replay.json()
+            replay_messages = replay_payload.get("messages")
+            assert isinstance(replay_messages, list)
+            assert len(replay_messages) == first_count
+            assert replay_messages == first_messages
+
+            conflict = await client.post(
+                "/ui/api/chat/send",
+                headers=headers,
+                json={"content": "Ping idempotency changed"},
+            )
+            assert conflict.status == 409
+            conflict_payload = await conflict.json()
+            conflict_error = conflict_payload.get("error")
+            assert isinstance(conflict_error, dict)
+            assert conflict_error.get("code") == "idempotency_key_reused"
+
+            no_key = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "Ping idempotency"},
+            )
+            assert no_key.status == 200
+            no_key_payload = await no_key.json()
+            no_key_messages = no_key_payload.get("messages")
+            assert isinstance(no_key_messages, list)
+            assert len(no_key_messages) > first_count
         finally:
             await client.close()
 
