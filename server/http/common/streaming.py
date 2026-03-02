@@ -33,9 +33,9 @@ def _stream_preview_indicates_canvas(
     auto_detector: Callable[[str], dict[str, str] | None] | None = None,
 ) -> bool:
     """Определяет по превью, должен ли стрим идти в Canvas.
-    
+
     Улучшенная версия с поддержкой AutoCanvasDetector.
-    
+
     Args:
         preview_text: Текущий буфер текста
         canvas_char_threshold: Порог по символам
@@ -47,13 +47,13 @@ def _stream_preview_indicates_canvas(
     normalized = preview_text.strip()
     if not normalized:
         return False
-    
+
     # Если есть auto_detector, используем его
     if auto_detector is not None:
         result = auto_detector(normalized)
         if result is not None:
             return result.get("action") == "promote_to_canvas"
-    
+
     # Fallback на размер
     if len(normalized) >= canvas_char_threshold:
         return True
@@ -169,7 +169,7 @@ async def _publish_chat_stream_from_text(
 
 def _split_canvas_stream_chunks(content: str) -> list[str]:
     """Разбивает контент для Canvas-стрима на чанки.
-    
+
     Использует построчное разбиение для лучшего UX.
     """
     if not content:
@@ -249,7 +249,7 @@ async def _publish_canvas_switch(
     language: str | None = None,
 ) -> None:
     """Публикует событие переключения в Canvas режим.
-    
+
     Используется для mid-stream переключения когда детектор
     решает, что контент должен быть в Canvas.
     """

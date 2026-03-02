@@ -19,6 +19,9 @@ from config.tools_config import (
 )
 from core.approval_policy import ApprovalCategory
 from server.http.common import (
+    canvas_detector as _canvas_detector,
+)
+from server.http.common import (
     chat_payload as _chat_payload,
 )
 from server.http.common import (
@@ -41,9 +44,6 @@ from server.http.common import (
 )
 from server.http.common import (
     ui_artifacts as _ui_artifacts,
-)
-from server.http.common import (
-    canvas_detector as _canvas_detector,
 )
 from server.http.common import (
     ui_runtime as _ui_runtime,

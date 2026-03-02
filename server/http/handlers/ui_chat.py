@@ -68,10 +68,6 @@ from server.http_api import (
     _tool_calls_for_trace_id,
     _utc_now_iso,
     _workspace_root_for_session,
-    AutoCanvasDetector,
-    SmartRouter,
-    CANVAS_THRESHOLDS,
-    CODE_LANGUAGES,
 )
 from server.ui_hub import UIHub
 from shared.models import JSONValue, LLMMessage
@@ -1171,7 +1167,6 @@ async def handle_ui_chat_send(
                 "canvas"
                 if _should_render_result_in_canvas(
                     response_text=response_text,
-                    user_input=content,
                     files_from_tools=files_from_tools,
                     named_files_count=named_files_count,
                     force_canvas=force_canvas,
@@ -1182,7 +1177,6 @@ async def handle_ui_chat_send(
         if lane == "chat":
             artifact_payloads = _build_output_artifacts(
                 response_text=response_text,
-                    user_input=content,
                 display_target=display_target,
                 files_from_tools=files_from_tools,
             )
@@ -1219,7 +1213,10 @@ async def handle_ui_chat_send(
             chat_summary = (
                 response_text
                 if approval_request is not None or display_target == "chat"
-                else _build_canvas_chat_summary(artifact_title=artifact_title, content_preview=response_text, user_input=content)
+                else _build_canvas_chat_summary(
+                    artifact_title=artifact_title,
+                    content_preview=response_text,
+                )
             )
         else:
             chat_summary = response_text
