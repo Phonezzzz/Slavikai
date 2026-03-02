@@ -43,6 +43,9 @@ from server.http.common import (
     ui_artifacts as _ui_artifacts,
 )
 from server.http.common import (
+    canvas_detector as _canvas_detector,
+)
+from server.http.common import (
     ui_runtime as _ui_runtime,
 )
 from server.http.common import (
@@ -414,6 +417,15 @@ _build_output_artifacts = _ui_artifacts._build_output_artifacts
 _build_canvas_chat_summary = _ui_artifacts._build_canvas_chat_summary
 _canvas_summary_title_from_artifact = _ui_artifacts._canvas_summary_title_from_artifact
 _stream_preview_indicates_canvas = _ui_artifacts._stream_preview_indicates_canvas
+
+# Canvas detector exports
+AutoCanvasDetector = _canvas_detector.AutoCanvasDetector
+SmartRouter = _canvas_detector.SmartRouter
+CANVAS_THRESHOLDS = _canvas_detector.CANVAS_THRESHOLDS
+CODE_LANGUAGES = _canvas_detector.CODE_LANGUAGES
+handle_edge_cases = _canvas_detector.handle_edge_cases
+get_threshold_for_lang = _canvas_detector.get_threshold_for_lang
+is_code_language = _canvas_detector.is_code_language
 
 
 _stream_preview_ready_for_chat = _ui_runtime._stream_preview_ready_for_chat

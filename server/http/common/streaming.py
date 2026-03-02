@@ -30,10 +30,31 @@ def _stream_preview_indicates_canvas(
     canvas_code_line_threshold: int,
     extract_named_files_from_output_fn: Callable[[str], Sequence[object]],
     extract_named_file_markers_fn: Callable[[str], list[str]],
+    auto_detector: Callable[[str], dict[str, str] | None] | None = None,
 ) -> bool:
+    """Определяет по превью, должен ли стрим идти в Canvas.
+    
+    Улучшенная версия с поддержкой AutoCanvasDetector.
+    
+    Args:
+        preview_text: Текущий буфер текста
+        canvas_char_threshold: Порог по символам
+        canvas_code_line_threshold: Порог по строкам кода
+        extract_named_files_from_output_fn: Функция извлечения файлов
+        extract_named_file_markers_fn: Функция извлечения имён файлов
+        auto_detector: Опциональная функция-детектор (chunk -> decision | None)
+    """
     normalized = preview_text.strip()
     if not normalized:
         return False
+    
+    # Если есть auto_detector, используем его
+    if auto_detector is not None:
+        result = auto_detector(normalized)
+        if result is not None:
+            return result.get("action") == "promote_to_canvas"
+    
+    # Fallback на размер
     if len(normalized) >= canvas_char_threshold:
         return True
     if len(normalized.splitlines()) >= canvas_code_line_threshold:
@@ -47,6 +68,7 @@ def _stream_preview_indicates_canvas(
 
 
 def _stream_preview_ready_for_chat(preview_text: str, *, chat_stream_warmup_chars: int) -> bool:
+    """Проверяет, достаточно ли текста для начала показа в чате."""
     normalized = preview_text.strip()
     if not normalized:
         return False
@@ -146,6 +168,10 @@ async def _publish_chat_stream_from_text(
 
 
 def _split_canvas_stream_chunks(content: str) -> list[str]:
+    """Разбивает контент для Canvas-стрима на чанки.
+    
+    Использует построчное разбиение для лучшего UX.
+    """
     if not content:
         return []
     lines = content.splitlines(keepends=True)
@@ -166,6 +192,7 @@ async def _publish_canvas_stream(
     artifact_id: str,
     content: str,
 ) -> None:
+    """Публикует контент в Canvas stream."""
     await hub.publish(
         session_id,
         {
@@ -209,6 +236,31 @@ async def _publish_canvas_stream(
             "payload": {
                 "session_id": session_id,
                 "artifact_id": artifact_id,
+            },
+        },
+    )
+
+
+async def _publish_canvas_switch(
+    hub: SessionPublisher,
+    *,
+    session_id: str,
+    artifact_id: str,
+    language: str | None = None,
+) -> None:
+    """Публикует событие переключения в Canvas режим.
+    
+    Используется для mid-stream переключения когда детектор
+    решает, что контент должен быть в Canvas.
+    """
+    await hub.publish(
+        session_id,
+        {
+            "type": "canvas.switch",
+            "payload": {
+                "session_id": session_id,
+                "artifact_id": artifact_id,
+                "language": language,
             },
         },
     )
