@@ -201,7 +201,7 @@ def test_ui_plan_lifecycle_endpoints() -> None:
     asyncio.run(run())
 
 
-def test_ui_plan_draft_allows_audit_soft_cap() -> None:
+def test_ui_plan_draft_allows_audit_soft_cap(tmp_path) -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -209,6 +209,16 @@ def test_ui_plan_draft_allows_audit_soft_cap() -> None:
             status_payload = await status_resp.json()
             session_id = status_payload.get("session_id")
             assert isinstance(session_id, str)
+
+            workspace_root = tmp_path / "audit-soft-cap-workspace"
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            for idx in range(PLAN_AUDIT_MAX_READ_FILES + 3):
+                (workspace_root / f"audit_{idx}.py").write_text(
+                    f"print('audit-{idx}')\n",
+                    encoding="utf-8",
+                )
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
 
             mode_resp = await client.post(
                 "/ui/api/mode",
