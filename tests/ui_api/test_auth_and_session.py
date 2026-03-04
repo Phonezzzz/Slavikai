@@ -638,7 +638,7 @@ def test_ui_chat_send_force_canvas_override() -> None:
             assert isinstance(last, dict)
             last_content = last.get("content")
             assert isinstance(last_content, str)
-            assert last_content.startswith("Статус: результат сформирован в Canvas")
+            assert last_content == "ok"
             display = payload.get("display")
             assert isinstance(display, dict)
             assert display.get("target") == "canvas"

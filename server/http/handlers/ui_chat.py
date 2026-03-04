@@ -36,7 +36,6 @@ from server.http_api import (
     _build_model_config,
     _build_output_artifacts,
     _build_ui_approval_decision,
-    _canvas_summary_title_from_artifact,
     _decision_is_pending_blocking,
     _decision_workflow_context,
     _extract_files_from_tool_calls,
@@ -1185,7 +1184,6 @@ async def handle_ui_chat_send(
         first_artifact = artifact_payloads[0] if artifact_payloads else None
         artifact_id_raw = first_artifact.get("id") if first_artifact is not None else None
         artifact_id = artifact_id_raw if isinstance(artifact_id_raw, str) else None
-        artifact_title = _canvas_summary_title_from_artifact(first_artifact)
         if lane == "chat" and display_target == "canvas" and artifact_id is not None:
             stream_source_raw = (
                 first_artifact.get("content") if first_artifact is not None else response_text
@@ -1212,10 +1210,10 @@ async def handle_ui_chat_send(
         if lane == "chat":
             chat_summary = (
                 response_text
-                if approval_request is not None or display_target == "chat"
+                if approval_request is not None or display_target == "chat" or force_canvas
                 else _build_canvas_chat_summary(
-                    artifact_title=artifact_title,
-                    content_preview=response_text,
+                    artifact_title=None,
+                    content_preview=None,
                 )
             )
         else:

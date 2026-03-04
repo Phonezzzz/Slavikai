@@ -15,7 +15,7 @@ from shared.models import JSONValue
 # Увеличенные пороги для fallback
 CANVAS_LINE_THRESHOLD: Final[int] = 60
 CANVAS_CHAR_THRESHOLD: Final[int] = 3000
-CANVAS_CODE_LINE_THRESHOLD: Final[int] = 15  # Было 28, теперь 15 для кода
+CANVAS_CODE_LINE_THRESHOLD: Final[int] = 28  # Порог для кода
 CANVAS_DOCUMENT_LINE_THRESHOLD: Final[int] = 40  # Было 24, теперь 40 для документов
 CANVAS_STATUS_CHARS_STEP: Final[int] = 640
 _REQUEST_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -257,7 +257,33 @@ def _artifact_mime_from_ext(ext: str | None) -> str:
 
 
 def _normalize_candidate_file_name(raw_name: str) -> str:
-    return raw_name.strip().strip(r"\`\"'()[]{}\u003c\u003e.,;:!?")  # noqa: B005
+    normalized = raw_name.strip()
+    # Удаляем только обрамляющие символы по краям, чтобы не ломать имена вроде "clock.py".
+    wrapping_chars = (
+        "\\",
+        "`",
+        '"',
+        "'",
+        "(",
+        ")",
+        "[",
+        "]",
+        "{",
+        "}",
+        "<",
+        ">",
+        ".",
+        ",",
+        ";",
+        ":",
+        "!",
+        "?",
+    )
+    while normalized.startswith(wrapping_chars):
+        normalized = normalized[1:]
+    while normalized.endswith(wrapping_chars):
+        normalized = normalized[:-1]
+    return normalized
 
 
 def _is_probable_named_file(candidate: str) -> bool:
@@ -397,13 +423,7 @@ def _build_canvas_chat_summary(
     content_preview: str | None = None,
     user_input: str = "",
 ) -> str:
-    """Возвращает осмысленный summary вместо шаблона.
-
-    Args:
-        artifact_title: Название артефакта
-        content_preview: Первые символы контента для превью
-        user_input: Оригинальный запрос пользователя
-    """
+    """Возвращает summary для сообщения в chat-ленте, когда результат показан в Canvas."""
     if isinstance(artifact_title, str):
         normalized = artifact_title.strip()
         if normalized:
@@ -428,7 +448,7 @@ def _build_canvas_chat_summary(
     if "например" in user_input.lower():
         return "Пример кода (см. Canvas):"
 
-    return "Результат сформирован в Canvas."
+    return "Статус: результат сформирован в Canvas."
 
 
 def _canvas_summary_title_from_artifact(
@@ -463,21 +483,3 @@ def _stream_preview_indicates_canvas(preview_text: str) -> bool:
         extract_named_files_from_output_fn=_extract_named_files_from_output,
         extract_named_file_markers_fn=_extract_named_file_markers,
     )
-
-
-def _get_content_preview(response_text: str, max_chars: int = 200) -> str:
-    """Возвращает краткое превью контента для чат-сообщения."""
-    normalized = response_text.strip()
-    if not normalized:
-        return ""
-
-    # Ищем первую осмысленную строку
-    for line in normalized.splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("```"):
-            preview = stripped[:max_chars]
-            if len(stripped) > max_chars:
-                preview += "..."
-            return preview
-
-    return normalized[:max_chars]

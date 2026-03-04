@@ -239,28 +239,3 @@ async def _publish_canvas_stream(
             },
         },
     )
-
-
-async def _publish_canvas_switch(
-    hub: SessionPublisher,
-    *,
-    session_id: str,
-    artifact_id: str,
-    language: str | None = None,
-) -> None:
-    """Публикует событие переключения в Canvas режим.
-
-    Используется для mid-stream переключения когда детектор
-    решает, что контент должен быть в Canvas.
-    """
-    await hub.publish(
-        session_id,
-        {
-            "type": "canvas.switch",
-            "payload": {
-                "session_id": session_id,
-                "artifact_id": artifact_id,
-                "language": language,
-            },
-        },
-    )
