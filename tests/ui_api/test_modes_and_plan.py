@@ -111,6 +111,61 @@ def test_ui_state_and_mode_transitions() -> None:
     asyncio.run(run())
 
 
+def test_ui_mode_transition_clears_stale_workflow_state() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_workflow(
+                session_id,
+                mode="auto",
+                active_plan={"status": "approved", "plan_revision": 3},
+                active_task={"status": "completed", "task_id": "task-1"},
+                auto_state={"status": "completed", "run_id": "auto-1"},
+            )
+
+            to_ask = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "ask"},
+            )
+            assert to_ask.status == 200
+            ask_payload = await to_ask.json()
+            assert ask_payload.get("mode") == "ask"
+            assert ask_payload.get("active_plan") is None
+            assert ask_payload.get("active_task") is None
+            assert ask_payload.get("auto_state") is None
+
+            await hub.set_session_workflow(
+                session_id,
+                mode="ask",
+                active_plan={"status": "draft", "plan_revision": 4},
+                active_task={"status": "running", "task_id": "task-2"},
+                auto_state={"status": "failed_worker", "run_id": "auto-2"},
+            )
+
+            to_auto = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "auto"},
+            )
+            assert to_auto.status == 200
+            auto_payload = await to_auto.json()
+            assert auto_payload.get("mode") == "auto"
+            assert auto_payload.get("active_plan") is None
+            assert auto_payload.get("active_task") is None
+            assert auto_payload.get("auto_state") is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_plan_lifecycle_endpoints() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())

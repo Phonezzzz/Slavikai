@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+
+from llm.types import LLMResult
+from shared.models import JSONValue, ToolRequest, ToolResult
+from tools.workspace_tools import ApplyPatchTool
+
 # ruff: noqa: F403,F405
 from .fakes import *
 
@@ -444,6 +450,316 @@ def test_ui_workspace_file_put_version_conflict_returns_409(tmp_path) -> None:
             error = payload.get("error")
             assert isinstance(error, dict)
             assert error.get("code") == "workspace_version_conflict"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_editor_action_fix_returns_patch_preview(monkeypatch, tmp_path) -> None:
+    class FakeBrain:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def generate(self, messages, config=None):  # noqa: ANN001
+            self.calls.append({"messages": messages, "config": config})
+            return LLMResult(
+                text=json.dumps(
+                    {
+                        "summary": "Переименовал строку вывода.",
+                        "patch": '@@ -1 +1 @@\n-print("old")\n+print("new")',
+                    }
+                )
+            )
+
+    brain = FakeBrain()
+    captured: dict[str, object] = {}
+
+    def _fake_create_brain(config, api_key=None):  # noqa: ANN001
+        captured["provider"] = getattr(config, "provider", None)
+        captured["model"] = getattr(config, "model", None)
+        captured["api_key"] = api_key
+        return brain
+
+    monkeypatch.setattr("server.http.handlers.workspace.create_brain", _fake_create_brain)
+    monkeypatch.setattr(
+        "server.http.handlers.workspace.api._resolve_provider_api_key",
+        lambda provider: "inc-test-key" if provider == "inception" else None,
+    )
+    monkeypatch.setattr(
+        "server.http.handlers.workspace.api._fetch_provider_models",
+        lambda provider: (
+            ["mercury", "mercury-coder", "mercury-edit"],
+            None,
+        )
+        if provider == "inception"
+        else (["local-default"], None),
+    )
+
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    target = workspace_root / "main.py"
+    target.write_text('print("old")\n', encoding="utf-8")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+
+            file_resp = await client.get(
+                "/ui/api/workspace/file?path=main.py",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert file_resp.status == 200
+            file_payload = await file_resp.json()
+            version = file_payload.get("version")
+            assert isinstance(version, str)
+
+            response = await client.post(
+                "/ui/api/workspace/editor/action",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "action": "fix",
+                    "path": "main.py",
+                    "file_content": 'print("old")\n',
+                    "saved_content": 'print("old")\n',
+                    "version": version,
+                    "selection_text": 'print("old")',
+                    "open_tabs": ["main.py"],
+                },
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("mode") == "patch_preview"
+            assert payload.get("summary") == "Переименовал строку вывода."
+            assert payload.get("target_path") == "main.py"
+            assert payload.get("base_version") == version
+            patch = payload.get("patch")
+            assert isinstance(patch, str)
+            assert "@@ -1 +1 @@" in patch
+            assert captured == {
+                "provider": "inception",
+                "model": "mercury-edit",
+                "api_key": "inc-test-key",
+            }
+            assert len(brain.calls) == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_editor_action_review_returns_read_only(monkeypatch, tmp_path) -> None:
+    class FakeBrain:
+        def generate(self, messages, config=None):  # noqa: ANN001
+            del messages, config
+            return LLMResult(text=json.dumps({"message": "Пояснение по текущей функции."}))
+
+    monkeypatch.setattr(
+        "server.http.handlers.workspace.create_brain",
+        lambda config, api_key=None: FakeBrain(),
+    )
+    monkeypatch.setattr(
+        "server.http.handlers.workspace.api._resolve_provider_api_key",
+        lambda provider: "inc-test-key" if provider == "inception" else None,
+    )
+    monkeypatch.setattr(
+        "server.http.handlers.workspace.api._fetch_provider_models",
+        lambda provider: (
+            ["mercury", "mercury-coder", "mercury-edit"],
+            None,
+        )
+        if provider == "inception"
+        else (["local-default"], None),
+    )
+
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    (workspace_root / "main.py").write_text("def run() -> None:\n    pass\n", encoding="utf-8")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+
+            file_resp = await client.get(
+                "/ui/api/workspace/file?path=main.py",
+                headers={"X-Slavik-Session": session_id},
+            )
+            file_payload = await file_resp.json()
+            version = file_payload.get("version")
+            assert isinstance(version, str)
+
+            response = await client.post(
+                "/ui/api/workspace/editor/action",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "action": "review",
+                    "path": "main.py",
+                    "file_content": "def run() -> None:\n    pass\n",
+                    "saved_content": "def run() -> None:\n    pass\n",
+                    "version": version,
+                },
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("mode") == "read_only"
+            assert payload.get("message") == "Пояснение по текущей функции."
+            assert payload.get("target_path") == "main.py"
+            assert "patch" not in payload
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_editor_action_requires_inception_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "server.http.handlers.workspace.api._resolve_provider_api_key",
+        lambda provider: None,
+    )
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    (workspace_root / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+
+            file_resp = await client.get(
+                "/ui/api/workspace/file?path=main.py",
+                headers={"X-Slavik-Session": session_id},
+            )
+            file_payload = await file_resp.json()
+            version = file_payload.get("version")
+            assert isinstance(version, str)
+
+            response = await client.post(
+                "/ui/api/workspace/editor/action",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "action": "explain",
+                    "path": "main.py",
+                    "file_content": "print('ok')\n",
+                    "saved_content": "print('ok')\n",
+                    "version": version,
+                },
+            )
+            assert response.status == 409
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "editor_model_unavailable"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_patch_version_conflict_returns_409(tmp_path) -> None:
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    target = workspace_root / "main.py"
+    target.write_text("old\n", encoding="utf-8")
+
+    async def run() -> None:
+        client = await _create_client(WorkspaceDecisionAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+            await _select_local_model(client, session_id)
+
+            response = await client.post(
+                "/ui/api/workspace/patch",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "path": "main.py",
+                    "patch": "@@ -1 +1 @@\n-old\n+new",
+                    "version": "sha256:stale",
+                },
+            )
+            assert response.status == 409
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "workspace_version_conflict"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_patch_apply_with_version_updates_file(tmp_path) -> None:
+    class PatchApplyAgent(DummyAgent):
+        def call_tool(
+            self,
+            name: str,
+            args: dict[str, JSONValue] | None = None,
+            raw_input: str | None = None,
+        ) -> ToolResult:
+            del raw_input
+            if name != "workspace_patch":
+                return ToolResult.failure(f"unsupported tool {name}")
+            return ApplyPatchTool().handle(ToolRequest(name=name, args=dict(args or {})))
+
+    workspace_root = tmp_path / "workspace-root"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    target = workspace_root / "main.py"
+    target.write_text("old\n", encoding="utf-8")
+
+    async def run() -> None:
+        client = await _create_client(PatchApplyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(workspace_root))
+            await _select_local_model(client, session_id)
+
+            file_resp = await client.get(
+                "/ui/api/workspace/file?path=main.py",
+                headers={"X-Slavik-Session": session_id},
+            )
+            file_payload = await file_resp.json()
+            version = file_payload.get("version")
+            assert isinstance(version, str)
+
+            response = await client.post(
+                "/ui/api/workspace/patch",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "path": "main.py",
+                    "patch": "@@ -1 +1 @@\n-old\n+new",
+                    "version": version,
+                    "dry_run": False,
+                },
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("dry_run") is False
+            assert target.read_text(encoding="utf-8") == "new\n"
         finally:
             await client.close()
 

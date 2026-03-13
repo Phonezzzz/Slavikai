@@ -51,7 +51,7 @@ def test_ui_models_inception_docs_fallback_when_api_unavailable(monkeypatch) -> 
             item = providers[0]
             assert isinstance(item, dict)
             assert item.get("provider") == "inception"
-            assert item.get("models") == ["mercury", "mercury-coder"]
+            assert item.get("models") == ["mercury", "mercury-coder", "mercury-edit"]
             assert item.get("error") is None
         finally:
             await client.close()
@@ -59,11 +59,11 @@ def test_ui_models_inception_docs_fallback_when_api_unavailable(monkeypatch) -> 
     asyncio.run(run())
 
 
-def test_ui_session_model_accepts_inception_mercury(monkeypatch) -> None:
+def test_ui_session_model_accepts_inception_mercury_edit(monkeypatch) -> None:
     monkeypatch.setattr(
         "server.http_api._fetch_provider_models",
         lambda provider: (
-            ["mercury", "mercury-coder"],
+            ["mercury", "mercury-coder", "mercury-edit"],
             None,
         )
         if provider == "inception"
@@ -80,14 +80,14 @@ def test_ui_session_model_accepts_inception_mercury(monkeypatch) -> None:
             response = await client.post(
                 "/ui/api/session-model",
                 headers={"X-Slavik-Session": session_id},
-                json={"provider": "inception", "model": "mercury"},
+                json={"provider": "inception", "model": "mercury-edit"},
             )
             assert response.status == 200
             payload = await response.json()
             selected = payload.get("selected_model")
             assert isinstance(selected, dict)
             assert selected.get("provider") == "inception"
-            assert selected.get("model") == "mercury"
+            assert selected.get("model") == "mercury-edit"
         finally:
             await client.close()
 

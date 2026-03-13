@@ -181,7 +181,9 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
         await hub.set_session_workflow(
             session_id,
             mode="ask",
+            active_plan=None,
             active_task=None,
+            auto_state=None,
         )
     elif next_mode == "auto":
         await hub.set_session_workflow(
@@ -189,6 +191,7 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
             mode="auto",
             active_plan=None,
             active_task=None,
+            auto_state=None,
         )
     else:
         await hub.set_session_workflow(session_id, mode=next_mode)

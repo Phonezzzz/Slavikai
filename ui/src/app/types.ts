@@ -203,3 +203,65 @@ export type UploadHistoryItem = {
   previewUrl: string | null;
   createdAt: string;
 };
+
+export const WORKSPACE_EDITOR_ACTION_VALUES = ['fix', 'improve', 'review', 'explain'] as const;
+
+export type WorkspaceEditorAction = (typeof WORKSPACE_EDITOR_ACTION_VALUES)[number];
+
+export const isWorkspaceEditorAction = (value: unknown): value is WorkspaceEditorAction =>
+  typeof value === 'string' && WORKSPACE_EDITOR_ACTION_VALUES.some((action) => action === value);
+
+export type WorkspaceEditorContextAttachment = {
+  name: string;
+  mime: string;
+  content: string;
+};
+
+export type WorkspaceEditorPatchPreviewResult = {
+  mode: 'patch_preview';
+  action: 'fix' | 'improve';
+  patch: string;
+  summary: string;
+  baseVersion: string | null;
+  targetPath: string;
+  applyAvailable: boolean;
+  patchedContent: string | null;
+};
+
+export type WorkspaceEditorReadOnlyResult = {
+  mode: 'read_only';
+  action: 'review' | 'explain';
+  message: string;
+  targetPath: string;
+};
+
+export type WorkspaceEditorActionResult =
+  | WorkspaceEditorPatchPreviewResult
+  | WorkspaceEditorReadOnlyResult;
+
+export type WorkspaceEditorActionRequest = {
+  action: WorkspaceEditorAction;
+  path: string;
+  fileContent: string;
+  savedContent: string;
+  version: string | null;
+  selectionText: string;
+  wholeFile: boolean;
+  openTabs: string[];
+  gitDiff: string;
+  terminalOutput: string;
+  attachments: WorkspaceEditorContextAttachment[];
+};
+
+export type WorkspaceEditorPreviewState = WorkspaceEditorPatchPreviewResult & {
+  baseContent: string;
+};
+
+export type WorkspaceEditorUiState = {
+  activeAction: WorkspaceEditorAction | null;
+  busy: boolean;
+  applyBusy: boolean;
+  error: string | null;
+  preview: WorkspaceEditorPreviewState | null;
+  readOnlyResult: WorkspaceEditorReadOnlyResult | null;
+};

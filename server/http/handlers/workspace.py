@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 from pathlib import Path
 
 from aiohttp import web
@@ -8,6 +10,8 @@ from aiohttp import web
 from config.model_whitelist import ModelNotAllowedError
 from config.tools_config import DEFAULT_TOOLS_STATE
 from core.approval_policy import ApprovalCategory, ApprovalRequired
+from llm.brain_factory import create_brain
+from llm.types import ModelConfig
 from server import http_api as api
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
@@ -33,14 +37,20 @@ from server.http_api import (
     _workspace_root_for_session,
 )
 from server.ui_hub import UIHub
-from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from tools.workspace_tools import (
+    ApplyPatchTool,
     ListFilesTool,
     ReadFileTool,
 )
 from tools.workspace_tools import (
     set_workspace_root as set_runtime_workspace_root,
 )
+
+EDITOR_ACTIONS = frozenset({"fix", "improve", "review", "explain"})
+EDITOR_PATCH_ACTIONS = frozenset({"fix", "improve"})
+EDITOR_PROVIDER = "inception"
+EDITOR_MODEL = "mercury-edit"
 
 
 async def handle_ui_redirect(request: web.Request) -> web.StreamResponse:
@@ -287,6 +297,205 @@ def _normalize_bool_query_param(raw: str | None) -> bool:
 def _workspace_content_version(content: str) -> str:
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _editor_model_config() -> ModelConfig:
+    return ModelConfig(
+        provider="inception",
+        model=EDITOR_MODEL,
+        temperature=0.1,
+        reasoning_effort="instant",
+        reasoning_summary=True,
+        reasoning_summary_wait=False,
+        diffusing=True,
+        max_tokens=3_000,
+    )
+
+
+def _strip_optional_json_fence(raw_text: str) -> str:
+    stripped = raw_text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if not lines:
+        return stripped
+    first_line = lines[0].strip().lower()
+    if first_line not in {"```", "```json"}:
+        return stripped
+    if len(lines) >= 2 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def _parse_editor_model_payload(raw_text: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(_strip_optional_json_fence(raw_text))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Editor model вернула не-JSON payload: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Editor model должна вернуть JSON object.")
+    return parsed
+
+
+async def _read_workspace_file_content(
+    *,
+    request: web.Request,
+    session_id: str,
+    path_value: str,
+) -> tuple[str, str] | web.Response:
+    current_read = await _call_workspace_read_tool(
+        request=request,
+        session_id=session_id,
+        tool_name="workspace_read",
+        args={"path": path_value},
+    )
+    if not current_read.ok:
+        return error_response(
+            status=400,
+            message=current_read.error or "Не удалось прочитать файл.",
+            error_type="invalid_request_error",
+            code="workspace_read_failed",
+        )
+    current_content_raw = current_read.data.get("output")
+    current_content = current_content_raw if isinstance(current_content_raw, str) else ""
+    return current_content, _workspace_content_version(current_content)
+
+
+def _workspace_version_conflict_response(
+    *,
+    path_value: str,
+    expected_version: str,
+    current_version: str,
+) -> web.Response:
+    return error_response(
+        status=409,
+        message="Конфликт версии: файл был изменён в другой вкладке или процессе.",
+        error_type="conflict_error",
+        code="workspace_version_conflict",
+        details={
+            "path": path_value,
+            "expected_version": expected_version,
+            "current_version": current_version,
+        },
+    )
+
+
+def _normalize_editor_tabs(raw_tabs: object) -> list[str]:
+    if not isinstance(raw_tabs, list):
+        return []
+    normalized: list[str] = []
+    for item in raw_tabs:
+        if isinstance(item, str) and item.strip():
+            normalized.append(item.strip())
+    return normalized[:20]
+
+
+def _editor_context_from_attachments(
+    raw_attachments: object,
+) -> tuple[list[str], str, str]:
+    if not isinstance(raw_attachments, list):
+        return [], "", ""
+    open_tabs: list[str] = []
+    git_diff = ""
+    terminal_output = ""
+    for item in raw_attachments:
+        if not isinstance(item, dict):
+            continue
+        name_raw = item.get("name")
+        content_raw = item.get("content")
+        if not isinstance(name_raw, str) or not isinstance(content_raw, str):
+            continue
+        name = name_raw.strip().lower()
+        if name == "open-tabs.json":
+            try:
+                parsed = json.loads(content_raw)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            tabs_raw = parsed.get("open_files")
+            if isinstance(tabs_raw, list):
+                for entry in tabs_raw:
+                    if not isinstance(entry, dict):
+                        continue
+                    path_raw = entry.get("path")
+                    if isinstance(path_raw, str) and path_raw.strip() and path_raw.strip() not in open_tabs:
+                        open_tabs.append(path_raw.strip())
+            active_file_raw = parsed.get("active_file")
+            if (
+                isinstance(active_file_raw, str)
+                and active_file_raw.strip()
+                and active_file_raw.strip() not in open_tabs
+            ):
+                open_tabs.insert(0, active_file_raw.strip())
+        elif name == "git-diff.patch" and not git_diff:
+            git_diff = content_raw
+        elif name == "terminal-last.txt" and not terminal_output:
+            terminal_output = content_raw
+    return open_tabs[:20], git_diff, terminal_output
+
+
+def _editor_action_messages(
+    *,
+    action: str,
+    path_value: str,
+    selection_text: str,
+    editor_content: str,
+    saved_content: str,
+    git_diff: str,
+    terminal_output: str,
+    open_tabs: list[str],
+) -> list[LLMMessage]:
+    if action in EDITOR_PATCH_ACTIONS:
+        contract = (
+            'Верни только JSON-объект вида {"summary":"...","patch":"@@ ... @@"}. '
+            "patch должен быть single-file unified diff без заголовков diff --git/---/+++."
+        )
+    else:
+        contract = 'Верни только JSON-объект вида {"message":"..."} без markdown fences.'
+    scope = "selection" if selection_text else "full_file"
+    tabs_block = ", ".join(open_tabs) if open_tabs else "(none)"
+    selection_block = selection_text if selection_text else "(no explicit selection)"
+    user_prompt = (
+        f"action={action}\n"
+        f"path={path_value}\n"
+        f"scope={scope}\n"
+        f"open_tabs={tabs_block}\n\n"
+        f"[selection]\n{selection_block}\n\n"
+        f"[saved_content]\n{saved_content}\n\n"
+        f"[editor_content]\n{editor_content}\n\n"
+        f"[git_diff]\n{git_diff or '(empty)'}\n\n"
+        f"[terminal]\n{terminal_output or '(empty)'}\n"
+    )
+    return [
+        LLMMessage(
+            role="system",
+            content=(
+                "Ты backend editor assistant для code editor. "
+                "Никакого prose вне JSON. "
+                f"{contract}"
+            ),
+        ),
+        LLMMessage(role="user", content=user_prompt),
+    ]
+
+
+def _validate_editor_patch_preview(
+    *,
+    workspace_root: Path,
+    path_value: str,
+    patch_text: str,
+) -> ToolResult:
+    set_runtime_workspace_root(workspace_root)
+    try:
+        return ApplyPatchTool().handle(
+            ToolRequest(
+                name="workspace_patch",
+                args={"path": path_value, "patch": patch_text, "dry_run": True},
+            )
+        )
+    finally:
+        set_runtime_workspace_root(None)
 
 
 def _workspace_read_tool(tool_name: str) -> ListFilesTool | ReadFileTool:
@@ -985,6 +1194,246 @@ async def handle_ui_workspace_file_delete(request: web.Request) -> web.Response:
     return response
 
 
+async def handle_ui_workspace_editor_action(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_workspace_session_id(request)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+
+    action_raw = payload.get("action")
+    path_raw = payload.get("path")
+    file_content_raw = payload.get("file_content")
+    saved_content_raw = payload.get("saved_content")
+    selection_text_raw = payload.get("selection_text")
+    version_raw = payload.get("version")
+    git_diff_raw = payload.get("git_diff")
+    terminal_output_raw = payload.get("terminal_output")
+
+    if not isinstance(action_raw, str) or action_raw.strip().lower() not in EDITOR_ACTIONS:
+        return error_response(
+            status=400,
+            message="action должен быть одним из: fix, improve, review, explain.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return error_response(
+            status=400,
+            message="path обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if not isinstance(file_content_raw, str):
+        return error_response(
+            status=400,
+            message="file_content должен быть строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if saved_content_raw is not None and not isinstance(saved_content_raw, str):
+        return error_response(
+            status=400,
+            message="saved_content должен быть строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if selection_text_raw is not None and not isinstance(selection_text_raw, str):
+        return error_response(
+            status=400,
+            message="selection_text должен быть строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if version_raw is not None and (not isinstance(version_raw, str) or not version_raw.strip()):
+        return error_response(
+            status=400,
+            message="version должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    action = action_raw.strip().lower()
+    path_value = path_raw.strip()
+    editor_content = file_content_raw
+    selection_text = selection_text_raw or ""
+    attachment_tabs, attachment_git_diff, attachment_terminal = _editor_context_from_attachments(
+        payload.get("attachments")
+    )
+    git_diff = git_diff_raw if isinstance(git_diff_raw, str) else attachment_git_diff
+    terminal_output = (
+        terminal_output_raw if isinstance(terminal_output_raw, str) else attachment_terminal
+    )
+    open_tabs = _normalize_editor_tabs(payload.get("open_tabs"))
+    for tab in attachment_tabs:
+        if tab not in open_tabs:
+            open_tabs.append(tab)
+
+    current_file_or_error = await _read_workspace_file_content(
+        request=request,
+        session_id=session_id,
+        path_value=path_value,
+    )
+    if isinstance(current_file_or_error, web.Response):
+        return current_file_or_error
+    current_saved_content, current_version = current_file_or_error
+    expected_version = version_raw.strip() if isinstance(version_raw, str) else current_version
+    if expected_version != current_version:
+        return _workspace_version_conflict_response(
+            path_value=path_value,
+            expected_version=expected_version,
+            current_version=current_version,
+        )
+    if isinstance(saved_content_raw, str) and saved_content_raw != current_saved_content:
+        return _workspace_version_conflict_response(
+            path_value=path_value,
+            expected_version=_workspace_content_version(saved_content_raw),
+            current_version=current_version,
+        )
+
+    api_key = api._resolve_provider_api_key(EDITOR_PROVIDER)
+    if not api_key:
+        return error_response(
+            status=409,
+            message="Editor actions недоступны: не задан INCEPTION_API_KEY для inception/mercury-edit.",
+            error_type="configuration_error",
+            code="editor_model_unavailable",
+            details={"provider": EDITOR_PROVIDER, "model": EDITOR_MODEL},
+        )
+    available_models, fetch_error = api._fetch_provider_models(EDITOR_PROVIDER)
+    if fetch_error is not None or EDITOR_MODEL not in available_models:
+        return error_response(
+            status=409,
+            message="Editor actions недоступны: mercury-edit не найден среди доступных моделей Inception.",
+            error_type="configuration_error",
+            code="editor_model_unavailable",
+            details={
+                "provider": EDITOR_PROVIDER,
+                "model": EDITOR_MODEL,
+                "fetch_error": fetch_error,
+            },
+        )
+
+    model_config = _editor_model_config()
+    brain = create_brain(model_config, api_key=api_key)
+    messages = _editor_action_messages(
+        action=action,
+        path_value=path_value,
+        selection_text=selection_text,
+        editor_content=editor_content,
+        saved_content=current_saved_content,
+        git_diff=git_diff,
+        terminal_output=terminal_output,
+        open_tabs=open_tabs,
+    )
+    try:
+        result = await asyncio.to_thread(brain.generate, messages, model_config)
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=502,
+            message=f"Не удалось выполнить editor action: {exc}",
+            error_type="provider_error",
+            code="editor_action_failed",
+        )
+    try:
+        model_payload = _parse_editor_model_payload(result.text)
+    except ValueError as exc:
+        return error_response(
+            status=502,
+            message=str(exc),
+            error_type="provider_error",
+            code="editor_action_invalid_response",
+        )
+
+    root_path = await _workspace_root_for_session(hub, session_id)
+    if action in EDITOR_PATCH_ACTIONS:
+        summary_raw = model_payload.get("summary")
+        patch_raw = model_payload.get("patch")
+        if not isinstance(summary_raw, str) or not summary_raw.strip():
+            return error_response(
+                status=502,
+                message="Editor model не вернула summary для patch preview.",
+                error_type="provider_error",
+                code="editor_action_invalid_response",
+            )
+        if not isinstance(patch_raw, str) or not patch_raw.strip():
+            return error_response(
+                status=502,
+                message="Editor model не вернула patch для patch preview.",
+                error_type="provider_error",
+                code="editor_action_invalid_response",
+            )
+        dry_run_result = _validate_editor_patch_preview(
+            workspace_root=root_path,
+            path_value=path_value,
+            patch_text=patch_raw,
+        )
+        if not dry_run_result.ok:
+            return error_response(
+                status=502,
+                message=dry_run_result.error or "Patch preview не прошёл dry-run validation.",
+                error_type="provider_error",
+                code="editor_patch_invalid",
+            )
+        patched_content_raw = dry_run_result.data.get("content")
+        patched_content = patched_content_raw if isinstance(patched_content_raw, str) else None
+        response = json_response(
+            {
+                "session_id": session_id,
+                "action": action,
+                "mode": "patch_preview",
+                "summary": summary_raw.strip(),
+                "patch": patch_raw,
+                "base_version": current_version,
+                "target_path": path_value,
+                "apply_available": True,
+                "patched_content": patched_content,
+                "root_path": str(root_path),
+            }
+        )
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
+
+    message_raw = model_payload.get("message")
+    if not isinstance(message_raw, str) or not message_raw.strip():
+        return error_response(
+            status=502,
+            message="Editor model не вернула message для read-only action.",
+            error_type="provider_error",
+            code="editor_action_invalid_response",
+        )
+    response = json_response(
+        {
+            "session_id": session_id,
+            "action": action,
+            "mode": "read_only",
+            "message": message_raw.strip(),
+            "base_version": current_version,
+            "target_path": path_value,
+            "root_path": str(root_path),
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
 async def handle_ui_workspace_patch(request: web.Request) -> web.Response:
     try:
         agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
@@ -1017,6 +1466,7 @@ async def handle_ui_workspace_patch(request: web.Request) -> web.Response:
     path_raw = payload.get("path")
     patch_raw = payload.get("patch")
     dry_run_raw = payload.get("dry_run", False)
+    version_raw = payload.get("version")
     if not isinstance(path_raw, str) or not path_raw.strip():
         return error_response(
             status=400,
@@ -1038,7 +1488,36 @@ async def handle_ui_workspace_patch(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    if version_raw is not None and (not isinstance(version_raw, str) or not version_raw.strip()):
+        return error_response(
+            status=400,
+            message="version должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
     path_value = path_raw.strip()
+    if isinstance(version_raw, str):
+        current_file_or_error = await _read_workspace_file_content(
+            request=request,
+            session_id=session_id,
+            path_value=path_value,
+        )
+        if isinstance(current_file_or_error, web.Response):
+            return error_response(
+                status=409,
+                message="Конфликт версии: файл был изменён или удалён перед применением patch.",
+                error_type="conflict_error",
+                code="workspace_version_conflict",
+                details={"path": path_value, "expected_version": version_raw.strip()},
+            )
+        _, current_version = current_file_or_error
+        expected_version = version_raw.strip()
+        if current_version != expected_version:
+            return _workspace_version_conflict_response(
+                path_value=path_value,
+                expected_version=expected_version,
+                current_version=current_version,
+            )
     tool_result_or_error = await _call_workspace_tool(
         request=request,
         agent=agent,

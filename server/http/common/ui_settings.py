@@ -70,7 +70,7 @@ UI_SETTINGS_CONTROL_TOP_LEVEL_KEYS: Final[set[str]] = {
     "approved_categories",
     "safe_mode",
 }
-INCEPTION_DOCS_MODELS: Final[list[str]] = ["mercury", "mercury-coder"]
+INCEPTION_DOCS_MODELS: Final[list[str]] = ["mercury", "mercury-coder", "mercury-edit"]
 
 
 def _normalize_provider(raw_provider: str) -> str | None:

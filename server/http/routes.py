@@ -112,6 +112,10 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/workspace/file/rename", workspace.handle_ui_workspace_file_rename)
     app.router.add_post("/ui/api/workspace/file/move", workspace.handle_ui_workspace_file_move)
     app.router.add_delete("/ui/api/workspace/file", workspace.handle_ui_workspace_file_delete)
+    app.router.add_post(
+        "/ui/api/workspace/editor/action",
+        workspace.handle_ui_workspace_editor_action,
+    )
     app.router.add_post("/ui/api/workspace/patch", workspace.handle_ui_workspace_patch)
     app.router.add_post("/ui/api/workspace/run", workspace.handle_ui_workspace_run)
     app.router.add_post(

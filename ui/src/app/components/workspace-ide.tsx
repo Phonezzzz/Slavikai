@@ -9,6 +9,8 @@ import type {
   SessionMode,
   TaskExecutionState,
   UiDecision,
+  WorkspaceEditorAction,
+  WorkspaceEditorUiState,
 } from '../types';
 import type { CanvasMessage, CanvasSendPayload } from './canvas';
 import {
@@ -42,7 +44,9 @@ import {
   postWorkspaceFileCreate,
   postWorkspaceFileMove,
   postWorkspaceFileRename,
+  postWorkspaceEditorAction,
   postWorkspaceIndex,
+  postWorkspacePatch,
   postWorkspaceRootSelect,
   postWorkspaceRun,
   postWorkspaceTerminalRun,
@@ -112,6 +116,15 @@ type QuickOpenIndexCache = {
   loadedAt: number;
 };
 
+const INITIAL_EDITOR_UI_STATE: WorkspaceEditorUiState = {
+  activeAction: null,
+  busy: false,
+  applyBusy: false,
+  error: null,
+  preview: null,
+  readOnlyResult: null,
+};
+
 export function WorkspaceIde({
   sessionId,
   sessionHeader,
@@ -158,6 +171,7 @@ export function WorkspaceIde({
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [editorSaving, setEditorSaving] = useState(false);
   const [selectionText, setSelectionText] = useState('');
+  const [editorUiState, setEditorUiState] = useState<WorkspaceEditorUiState>(INITIAL_EDITOR_UI_STATE);
 
   const [terminalLines, setTerminalLines] = useState<string[]>([
     `[${terminalTimestamp()}] Workspace terminal ready.`,
@@ -233,6 +247,43 @@ export function WorkspaceIde({
   );
   const hasUnsavedChanges = Boolean(activeTab && activeTab.content !== activeTab.savedContent);
   const isDecisionBlocking = decision?.status === 'pending' && decision.blocking === true;
+  const mercuryEditOption = useMemo(
+    () =>
+      modelOptions.find(
+        (option) => option.provider === 'inception' && option.model === 'mercury-edit',
+      ) ?? null,
+    [modelOptions],
+  );
+  const inceptionUnavailableOption = useMemo(
+    () =>
+      modelOptions.find(
+        (option) => option.provider === 'inception' && option.disabled === true,
+      ) ?? null,
+    [modelOptions],
+  );
+  const editorActionsEnabled = Boolean(mercuryEditOption && mercuryEditOption.disabled !== true);
+  const editorActionsDisabledReason = editorActionsEnabled
+    ? null
+    : inceptionUnavailableOption?.label
+      ? `Editor actions unavailable: ${inceptionUnavailableOption.label}.`
+      : 'Editor actions unavailable: inception/mercury-edit is not available.';
+  const editorPreview =
+    editorUiState.preview && activeTab?.path === editorUiState.preview.targetPath
+      ? editorUiState.preview
+      : null;
+  const editorReadOnlyResult =
+    editorUiState.readOnlyResult && activeTab?.path === editorUiState.readOnlyResult.targetPath
+      ? editorUiState.readOnlyResult
+      : null;
+  const editorPreviewStale = Boolean(
+    editorPreview
+    && (
+      !activeTab
+      || activeTab.path !== editorPreview.targetPath
+      || activeTab.version !== editorPreview.baseVersion
+      || activeTab.content !== editorPreview.baseContent
+    ),
+  );
 
   const requestHeaders = useMemo(() => {
     if (!sessionId) {
@@ -359,6 +410,7 @@ export function WorkspaceIde({
     setLoadingTreePaths(new Set());
     setTreeMeta(null);
     setSelectionText('');
+    setEditorUiState(INITIAL_EDITOR_UI_STATE);
     setQuickOpenOpen(false);
     setQuickOpenQuery('');
     setQuickOpenPartial(false);
@@ -478,6 +530,10 @@ export function WorkspaceIde({
       setDraggingExplorer(false);
     }
   }, [draggingExplorer, explorerVisible]);
+
+  useEffect(() => {
+    setSelectionText('');
+  }, [activeFileId]);
 
   useEffect(() => {
     const syncAssistantWidth = () => {
@@ -910,6 +966,18 @@ export function WorkspaceIde({
         return;
       }
     }
+    if (
+      editorUiState.preview?.targetPath === target.path
+      || editorUiState.readOnlyResult?.targetPath === target.path
+    ) {
+      setEditorUiState((prev) => ({
+        ...prev,
+        error: null,
+        preview: prev.preview?.targetPath === target.path ? null : prev.preview,
+        readOnlyResult:
+          prev.readOnlyResult?.targetPath === target.path ? null : prev.readOnlyResult,
+      }));
+    }
     setOpenFiles((prev) => prev.filter((item) => item.id !== tabId));
     if (activeFileId === tabId) {
       const rest = openFiles.filter((item) => item.id !== tabId);
@@ -1058,6 +1126,7 @@ export function WorkspaceIde({
       setRootPickerOpen(false);
       setOpenFiles([]);
       setActiveFileId(null);
+      setEditorUiState(INITIAL_EDITOR_UI_STATE);
       void loadWorkspaceRoot();
       requestTreeLoad(undefined, 'root_change');
       void loadGitDiff();
@@ -1235,6 +1304,18 @@ export function WorkspaceIde({
       setOpenFiles((prev) =>
         prev.filter((item) => item.path !== targetPath && !item.path.startsWith(`${targetPath}/`)),
       );
+      if (
+        editorUiState.preview?.targetPath === targetPath
+        || editorUiState.readOnlyResult?.targetPath === targetPath
+      ) {
+        setEditorUiState((prev) => ({
+          ...prev,
+          error: null,
+          preview: prev.preview?.targetPath === targetPath ? null : prev.preview,
+          readOnlyResult:
+            prev.readOnlyResult?.targetPath === targetPath ? null : prev.readOnlyResult,
+        }));
+      }
       if (activeTab?.path === targetPath) {
         setActiveFileId(null);
       }
@@ -1261,6 +1342,224 @@ export function WorkspaceIde({
       gitDiff,
       lastTerminalOutput,
     });
+
+  const handleEditorAction = async (action: WorkspaceEditorAction) => {
+    if (
+      !activeTab
+      || activeTab.loading
+      || !editorActionsEnabled
+      || editorUiState.busy
+      || editorUiState.applyBusy
+      || isDecisionBlocking
+    ) {
+      return;
+    }
+    setEditorUiState((prev) => ({
+      ...prev,
+      activeAction: action,
+      busy: true,
+      error: null,
+      preview: null,
+      readOnlyResult: null,
+    }));
+    setTerminalLines((prev) => [
+      ...prev,
+      `[${terminalTimestamp()}] editor ${action}: ${activeTab.path}`,
+    ]);
+    try {
+      const selectedText = selectionText.trim();
+      const response = await postWorkspaceEditorAction(
+        {
+          action,
+          path: activeTab.path,
+          fileContent: activeTab.content,
+          savedContent: activeTab.savedContent,
+          version: activeTab.version,
+          selectionText: selectedText,
+          wholeFile: selectedText.length === 0,
+          openTabs: openFiles.map((item) => item.path),
+          gitDiff,
+          terminalOutput: lastTerminalOutput,
+          attachments: buildContextAttachments(),
+        },
+        requestHeaders,
+      );
+      if (response.pendingApproval || !response.result) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: editor ${action} ${activeTab.path}`,
+        ]);
+        return;
+      }
+      const result = response.result;
+      if (result.mode === 'patch_preview') {
+        setEditorUiState({
+          activeAction: action,
+          busy: false,
+          applyBusy: false,
+          error: null,
+          preview: {
+            ...result,
+            baseContent: activeTab.content,
+          },
+          readOnlyResult: null,
+        });
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] preview ready: ${result.targetPath}`,
+        ]);
+        return;
+      }
+      setEditorUiState({
+        activeAction: action,
+        busy: false,
+        applyBusy: false,
+        error: null,
+        preview: null,
+        readOnlyResult: result,
+      });
+      setTerminalLines((prev) => [
+        ...prev,
+        `[${terminalTimestamp()}] ${action} ready: ${result.targetPath}`,
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Failed to ${action} file.`;
+      setEditorUiState((prev) => ({
+        ...prev,
+        busy: false,
+        error: message,
+      }));
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+    } finally {
+      setEditorUiState((prev) => ({
+        ...prev,
+        busy: false,
+      }));
+    }
+  };
+
+  const handleApplyEditorPreview = async () => {
+    const preview = editorUiState.preview;
+    if (!preview || editorUiState.applyBusy || editorPreviewStale) {
+      if (preview && editorPreviewStale) {
+        setEditorUiState((prev) => ({
+          ...prev,
+          error: 'Preview устарел. Пересоберите Fix/Improve перед Apply.',
+        }));
+      }
+      return;
+    }
+    if (!activeTab || activeTab.path !== preview.targetPath) {
+      setEditorUiState((prev) => ({
+        ...prev,
+        error: 'Active tab no longer matches the preview target.',
+      }));
+      return;
+    }
+    setEditorUiState((prev) => ({
+      ...prev,
+      applyBusy: true,
+      error: null,
+    }));
+    setTerminalLines((prev) => [
+      ...prev,
+      `[${terminalTimestamp()}] patch dry-run: ${preview.targetPath}`,
+    ]);
+    try {
+      const dryRunResult = await postWorkspacePatch(
+        preview.targetPath,
+        preview.patch,
+        true,
+        preview.baseVersion,
+        requestHeaders,
+      );
+      if (dryRunResult.pendingApproval) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: patch dry-run ${preview.targetPath}`,
+        ]);
+        return;
+      }
+      const applyResult = await postWorkspacePatch(
+        preview.targetPath,
+        preview.patch,
+        false,
+        preview.baseVersion,
+        requestHeaders,
+      );
+      if (applyResult.pendingApproval) {
+        setTerminalLines((prev) => [
+          ...prev,
+          `[${terminalTimestamp()}] pending approval: apply patch ${preview.targetPath}`,
+        ]);
+        return;
+      }
+      const refreshedFile = await readFileContent(preview.targetPath);
+      if (refreshedFile) {
+        setOpenFiles((prev) =>
+          prev.map((item) =>
+            item.id === activeTab.id
+              ? {
+                  ...item,
+                  content: refreshedFile.content,
+                  savedContent: refreshedFile.content,
+                  version: refreshedFile.version,
+                }
+              : item,
+          ),
+        );
+      }
+      setEditorUiState({
+        activeAction: preview.action,
+        busy: false,
+        applyBusy: false,
+        error: null,
+        preview: null,
+        readOnlyResult: null,
+      });
+      setTerminalLines((prev) => [
+        ...prev,
+        `[${terminalTimestamp()}] patch applied: ${preview.targetPath}`,
+      ]);
+      requestTreeLoad(undefined, 'patch_apply');
+      void loadGitDiff();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to apply preview patch.';
+      setEditorUiState((prev) => ({
+        ...prev,
+        error: message,
+      }));
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
+    } finally {
+      setEditorUiState((prev) => ({
+        ...prev,
+        applyBusy: false,
+      }));
+    }
+  };
+
+  const handleCancelEditorPreview = () => {
+    const targetPath = editorUiState.preview?.targetPath ?? null;
+    setEditorUiState((prev) => ({
+      ...prev,
+      error: null,
+      preview: null,
+    }));
+    if (targetPath) {
+      setTerminalLines((prev) => [
+        ...prev,
+        `[${terminalTimestamp()}] preview cleared: ${targetPath}`,
+      ]);
+    }
+  };
+
+  const handleClearEditorReadOnly = () => {
+    setEditorUiState((prev) => ({
+      ...prev,
+      error: null,
+      readOnlyResult: null,
+    }));
+  };
 
   const handleAgentSend = async () => {
     const content = agentInput.trim();
@@ -1459,6 +1758,15 @@ export function WorkspaceIde({
           terminalInput={terminalInput}
           terminalInputDisabled={!sessionId || terminalBusy || isDecisionBlocking}
           terminalEndRef={terminalEndRef}
+          editorActionsEnabled={editorActionsEnabled}
+          editorActionsDisabledReason={editorActionsDisabledReason}
+          editorActionBusy={editorUiState.busy}
+          editorActiveAction={editorUiState.activeAction}
+          editorApplyBusy={editorUiState.applyBusy}
+          editorActionError={editorUiState.error}
+          editorPreview={editorPreview}
+          editorReadOnlyResult={editorReadOnlyResult}
+          editorPreviewStale={editorPreviewStale}
           onSelectTab={setActiveFileId}
           onCloseTab={closeTab}
           onRunActiveFile={() => {
@@ -1467,6 +1775,14 @@ export function WorkspaceIde({
           onSaveActiveFile={() => {
             void handleSave();
           }}
+          onEditorAction={(action) => {
+            void handleEditorAction(action);
+          }}
+          onApplyEditorPreview={() => {
+            void handleApplyEditorPreview();
+          }}
+          onCancelEditorPreview={handleCancelEditorPreview}
+          onClearEditorReadOnly={handleClearEditorReadOnly}
           onEditorMount={handleEditorMount}
           onEditorChange={updateActiveContent}
           onTerminalResizeStart={() => setDraggingTerminal(true)}

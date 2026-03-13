@@ -1,4 +1,10 @@
-import { getNumber, getRecord, getString, isRecord } from '../../codecs/guards';
+import type {
+  WorkspaceEditorActionRequest,
+  WorkspaceEditorActionResult,
+  WorkspaceEditorPatchPreviewResult,
+  WorkspaceEditorReadOnlyResult,
+} from '../../app/types';
+import { getBoolean, getNumber, getRecord, getString, isRecord } from '../../codecs/guards';
 import {
   explainWorkspaceFailure,
   extractApiError,
@@ -30,6 +36,34 @@ const fetchJson = async (
 const throwWorkspaceError = (payload: unknown, fallback: string): never => {
   const errorInfo = extractApiError(payload, fallback);
   throw new Error(explainWorkspaceFailure(errorInfo));
+};
+
+const parseWorkspaceEditorPatchPreview = (
+  payload: unknown,
+  request: WorkspaceEditorActionRequest,
+): WorkspaceEditorPatchPreviewResult => {
+  return {
+    mode: 'patch_preview',
+    action: request.action === 'improve' ? 'improve' : 'fix',
+    patch: getString(payload, 'patch') ?? '',
+    summary: getString(payload, 'summary') ?? '',
+    baseVersion: getString(payload, 'base_version'),
+    targetPath: getString(payload, 'target_path') ?? request.path,
+    applyAvailable: getBoolean(payload, 'apply_available') ?? true,
+    patchedContent: getString(payload, 'patched_content'),
+  };
+};
+
+const parseWorkspaceEditorReadOnlyResult = (
+  payload: unknown,
+  request: WorkspaceEditorActionRequest,
+): WorkspaceEditorReadOnlyResult => {
+  return {
+    mode: 'read_only',
+    action: request.action === 'explain' ? 'explain' : 'review',
+    message: getString(payload, 'message') ?? '',
+    targetPath: getString(payload, 'target_path') ?? request.path,
+  };
 };
 
 export const fetchWorkspaceRoot = async (
@@ -312,6 +346,7 @@ export const postWorkspacePatch = async (
   path: string,
   patch: string,
   dryRun: boolean,
+  version: string | null,
   headers: Record<string, string>,
 ): Promise<{ pendingApproval: boolean; output: string }> => {
   const { response, payload } = await fetchJson('/ui/api/workspace/patch', {
@@ -320,7 +355,7 @@ export const postWorkspacePatch = async (
       'Content-Type': 'application/json',
       ...headers,
     },
-    body: JSON.stringify({ path, patch, dry_run: dryRun }),
+    body: JSON.stringify({ path, patch, dry_run: dryRun, version }),
   });
   if (response.status === 202) {
     return { pendingApproval: true, output: '' };
@@ -329,6 +364,53 @@ export const postWorkspacePatch = async (
     throwWorkspaceError(payload, 'Failed to apply patch.');
   }
   return { pendingApproval: false, output: getString(payload, 'output') ?? '' };
+};
+
+export const postWorkspaceEditorAction = async (
+  request: WorkspaceEditorActionRequest,
+  headers: Record<string, string>,
+): Promise<{ pendingApproval: boolean; result: WorkspaceEditorActionResult | null }> => {
+  const { response, payload } = await fetchJson('/ui/api/workspace/editor/action', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+    body: JSON.stringify({
+      action: request.action,
+      path: request.path,
+      file_content: request.fileContent,
+      saved_content: request.savedContent,
+      version: request.version,
+      selection_text: request.selectionText,
+      whole_file: request.wholeFile,
+      open_tabs: request.openTabs,
+      git_diff: request.gitDiff,
+      terminal_output: request.terminalOutput,
+      attachments: request.attachments,
+    }),
+  });
+  if (response.status === 202) {
+    return { pendingApproval: true, result: null };
+  }
+  if (!response.ok) {
+    throwWorkspaceError(payload, 'Failed to run editor action.');
+  }
+  const mode = getString(payload, 'mode');
+  if (mode === 'patch_preview') {
+    return {
+      pendingApproval: false,
+      result: parseWorkspaceEditorPatchPreview(payload, request),
+    };
+  }
+  if (mode === 'read_only') {
+    return {
+      pendingApproval: false,
+      result: parseWorkspaceEditorReadOnlyResult(payload, request),
+    };
+  }
+  throwWorkspaceError(payload, 'Editor action returned an invalid response.');
+  throw new Error('Editor action returned an invalid response.');
 };
 
 export const postWorkspaceRootSelect = async (
