@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Literal, cast
 
 from aiohttp import web
@@ -11,8 +12,10 @@ from config.memory_config import MemoryConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server import http_api as api
 from server.http.common.responses import error_response, json_response
+from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
+_SANDBOX_AUDIO_ROOT = Path("sandbox/audio").resolve()
 
 
 def _openai_error_message(response: object) -> str | None:
@@ -32,6 +35,28 @@ def _openai_error_message(response: object) -> str | None:
         return None
     normalized = message_raw.strip()
     return normalized or None
+
+
+def _tts_error_response(message: str) -> web.Response:
+    normalized = message.strip() or "TTS tool failed."
+    lowered = normalized.lower()
+    status = 502
+    error_type = "upstream_error"
+    code = "tts_failed"
+    if "пуст" in lowered or "format" in lowered or "формат" in lowered or "voice_id" in lowered:
+        status = 400
+        error_type = "invalid_request_error"
+        code = "invalid_request_error"
+    elif "api key" in lowered or "отключ" in lowered:
+        status = 409
+        error_type = "configuration_error"
+        code = "tts_unavailable"
+    return error_response(
+        status=status,
+        message=normalized,
+        error_type=error_type,
+        code=code,
+    )
 
 
 async def handle_ui_settings(request: web.Request) -> web.Response:
@@ -548,6 +573,128 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
                     update_tools_enabled(next_tools_state)
 
     return json_response(api._build_settings_payload())
+
+
+async def handle_ui_tts_speak(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+
+    text_raw = payload.get("text")
+    if not isinstance(text_raw, str) or not text_raw.strip():
+        return error_response(
+            status=400,
+            message="text должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    voice_id_raw = payload.get("voice_id")
+    if voice_id_raw is not None and not isinstance(voice_id_raw, str):
+        return error_response(
+            status=400,
+            message="voice_id должен быть строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    format_raw = payload.get("format")
+    if format_raw is not None and not isinstance(format_raw, str):
+        return error_response(
+            status=400,
+            message="format должен быть строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    try:
+        agent = await api._resolve_agent(request)
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=500,
+            message=f"Не удалось получить agent для TTS: {exc}",
+            error_type="internal_error",
+            code="internal_error",
+        )
+    if agent is None:
+        return error_response(
+            status=409,
+            message="Не выбрана модель. Выберите модель в UI и повторите.",
+            error_type="configuration_error",
+            code="model_not_selected",
+        )
+
+    args: dict[str, JSONValue] = {"text": text_raw.strip()}
+    if isinstance(voice_id_raw, str) and voice_id_raw.strip():
+        args["voice_id"] = voice_id_raw.strip()
+    if isinstance(format_raw, str) and format_raw.strip():
+        args["format"] = format_raw.strip().lower()
+
+    agent_lock: asyncio.Lock = request.app["agent_lock"]
+    async with agent_lock:
+        result = agent.call_tool("tts", args=args, raw_input="ui:tts")
+    if not result.ok:
+        return _tts_error_response(result.error or "TTS tool failed.")
+
+    file_path_raw = result.data.get("file_path")
+    format_value = str(result.data.get("format") or args.get("format") or "mp3").strip().lower()
+    if format_value not in {"mp3", "wav"}:
+        format_value = "mp3"
+    if not isinstance(file_path_raw, str) or not file_path_raw.strip():
+        return error_response(
+            status=502,
+            message="TTS tool не вернул путь к аудиофайлу.",
+            error_type="upstream_error",
+            code="tts_failed",
+        )
+
+    file_path = Path(file_path_raw).resolve()
+    try:
+        file_path.relative_to(_SANDBOX_AUDIO_ROOT)
+    except ValueError:
+        return error_response(
+            status=502,
+            message="TTS tool вернул недопустимый путь аудиофайла.",
+            error_type="upstream_error",
+            code="tts_failed",
+        )
+    if not file_path.exists() or not file_path.is_file():
+        return error_response(
+            status=502,
+            message="Аудиофайл TTS не найден.",
+            error_type="upstream_error",
+            code="tts_failed",
+        )
+
+    try:
+        audio_bytes = file_path.read_bytes()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=502,
+            message=f"Не удалось прочитать TTS-аудио: {exc}",
+            error_type="upstream_error",
+            code="tts_failed",
+        )
+
+    return web.Response(
+        body=audio_bytes,
+        content_type=f"audio/{format_value}",
+        headers={
+            "Content-Disposition": f'inline; filename="{file_path.name}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 async def handle_ui_stt_transcribe(request: web.Request) -> web.Response:

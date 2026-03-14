@@ -19,9 +19,9 @@ type BuildContextAttachmentsParams = {
   lastTerminalOutput: string;
 };
 
-const MAX_ATTACHMENTS = 8;
-const MAX_ATTACHMENT_CHARS = 80_000;
-const MAX_TOTAL_ATTACHMENT_CHARS = 160_000;
+export const MAX_ATTACHMENTS = 8;
+export const MAX_ATTACHMENT_CHARS = 80_000;
+export const MAX_TOTAL_ATTACHMENT_CHARS = 160_000;
 
 const truncateAttachmentContent = (content: string, limit: number): string => {
   if (content.length <= limit) {
@@ -51,6 +51,17 @@ const pushAttachmentWithinBudget = (
   }
   attachments.push({ ...attachment, content: normalized });
   state.totalChars += normalized.length;
+};
+
+export const mergeWorkspaceAttachments = (
+  primary: WorkspaceContextAttachment[],
+  secondary: WorkspaceContextAttachment[],
+): WorkspaceContextAttachment[] => {
+  const merged: WorkspaceContextAttachment[] = [];
+  const budgetState = { totalChars: 0 };
+  primary.forEach((attachment) => pushAttachmentWithinBudget(merged, budgetState, attachment));
+  secondary.forEach((attachment) => pushAttachmentWithinBudget(merged, budgetState, attachment));
+  return merged;
 };
 
 export const buildWorkspaceContextAttachments = ({

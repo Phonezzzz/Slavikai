@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from "react";
 import {
   Send,
   Copy,
@@ -23,6 +31,12 @@ import { MessageRenderer } from "../../features/messages";
 import type { RenderableMessage } from "../../features/messages";
 import type { DecisionRespondChoice, MessageRuntimeMeta, UiDecision } from "../types";
 import { DecisionPanel } from "./decision-panel";
+import {
+  MAX_COMPOSER_ATTACHMENTS,
+  buildPastedTextAttachment,
+  createComposerAttachmentId,
+  readComposerAttachmentFromFile,
+} from "../../features/composer/attachment-utils";
 
 // ====== Types ======
 
@@ -286,11 +300,15 @@ export function Canvas({
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [sttError, setSttError] = useState<string | null>(null);
+  const [ttsNotice, setTtsNotice] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
   const caretSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const displayMessages = useMemo(() => {
     const items = [...messages];
@@ -309,6 +327,15 @@ export function Canvas({
 
   useEffect(() => {
     return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+        audioRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         window.speechSynthesis.cancel();
       }
@@ -434,6 +461,67 @@ export function Canvas({
     return fallback;
   };
 
+  const stopPlayback = () => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+    setSpeakingMessageId(null);
+  };
+
+  const pushComposerAttachments = (attachments: CanvasComposerAttachment[]): boolean => {
+    if (attachments.length === 0) {
+      return true;
+    }
+    let appended = false;
+    let truncated = false;
+    setComposerAttachments((prev) => {
+      const remaining = MAX_COMPOSER_ATTACHMENTS - prev.length;
+      if (remaining <= 0) {
+        truncated = true;
+        return prev;
+      }
+      const nextItems = attachments.slice(0, remaining).map((attachment) => ({
+        id: createComposerAttachmentId("canvas-attachment"),
+        ...attachment,
+      }));
+      truncated = attachments.length > remaining;
+      appended = nextItems.length > 0;
+      return [...prev, ...nextItems];
+    });
+    if (truncated) {
+      setSttError("Достигнут лимит вложений в одном сообщении.");
+    }
+    return appended;
+  };
+
+  const appendFilesToComposer = async (files: File[]) => {
+    if (files.length === 0) {
+      return;
+    }
+    setSttError(null);
+    try {
+      const attachments = await Promise.all(files.map((file) => readComposerAttachmentFromFile(file)));
+      pushComposerAttachments(attachments);
+    } catch (error) {
+      setSttError(error instanceof Error ? error.message : "Не удалось подготовить вложение.");
+    }
+  };
+
+  const handleAttachFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    await appendFilesToComposer(files);
+  };
+
   const handleSend = async () => {
     if (sending || isTranscribing) {
       return;
@@ -454,6 +542,7 @@ export function Canvas({
     setComposerAttachments([]);
     setPasteUndo(null);
     setSttError(null);
+    setTtsNotice(null);
 
     const sent = await onSendMessage?.({
       content: trimmed,
@@ -512,21 +601,70 @@ export function Canvas({
     });
   };
 
-  const handleListenToggle = (message: CanvasMessage) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window) || !message.content.trim()) {
-      return;
+  const playViaBrowserTts = (message: CanvasMessage): boolean => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return false;
     }
-    if (speakingMessageId === message.messageId) {
-      window.speechSynthesis.cancel();
-      setSpeakingMessageId(null);
-      return;
-    }
-    window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(message.content);
     utterance.onend = () => setSpeakingMessageId((prev) => (prev === message.messageId ? null : prev));
     utterance.onerror = () => setSpeakingMessageId((prev) => (prev === message.messageId ? null : prev));
     setSpeakingMessageId(message.messageId);
     window.speechSynthesis.speak(utterance);
+    return true;
+  };
+
+  const handleListenToggle = async (message: CanvasMessage) => {
+    if (!message.content.trim()) {
+      return;
+    }
+    if (speakingMessageId === message.messageId) {
+      stopPlayback();
+      return;
+    }
+
+    stopPlayback();
+    setTtsNotice(null);
+    setSttError(null);
+    try {
+      const response = await fetch("/ui/api/tts/speak", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: message.content }),
+      });
+      if (!response.ok) {
+        let payload: unknown = null;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        throw new Error(extractErrorMessage(payload, "TTS request failed."));
+      }
+      const audioBlob = await response.blob();
+      if (audioBlob.size === 0) {
+        throw new Error("TTS returned empty audio.");
+      }
+      const objectUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(objectUrl);
+      audioRef.current = audio;
+      audioUrlRef.current = objectUrl;
+      audio.onended = () => stopPlayback();
+      audio.onerror = () => {
+        stopPlayback();
+        setSttError("Не удалось воспроизвести аудио от TTS сервиса.");
+      };
+      setSpeakingMessageId(message.messageId);
+      await audio.play();
+    } catch (error) {
+      stopPlayback();
+      if (playViaBrowserTts(message)) {
+        setTtsNotice("Server TTS недоступен, использую browser speech synthesis.");
+      } else {
+        setSttError(error instanceof Error ? error.message : "TTS failed.");
+      }
+    }
   };
 
   const handleFeedback = async (message: CanvasMessage, rating: "good" | "bad") => {
@@ -657,26 +795,27 @@ export function Canvas({
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageFiles = Array.from(event.clipboardData.items ?? [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file instanceof File);
+    if (imageFiles.length > 0) {
+      event.preventDefault();
+      void appendFilesToComposer(imageFiles);
+      return;
+    }
     const text = event.clipboardData.getData("text/plain");
     if (!longPasteToFileEnabled || !text || text.length <= effectiveLongPasteThreshold) {
       return;
     }
-    if (composerAttachments.length >= 8) {
+    if (composerAttachments.length >= MAX_COMPOSER_ATTACHMENTS) {
       setSttError("Достигнут лимит вложений в одном сообщении.");
       return;
     }
     event.preventDefault();
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const attachmentId = `paste-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setComposerAttachments((prev) => [
-      ...prev,
-      {
-        id: attachmentId,
-        name: `pasted-${stamp}.txt`,
-        mime: "text/plain",
-        content: text,
-      },
-    ]);
+    const attachmentId = createComposerAttachmentId("paste");
+    const attachment = buildPastedTextAttachment(text);
+    setComposerAttachments((prev) => [...prev, { id: attachmentId, ...attachment }]);
     setPasteUndo({ attachmentId, originalText: text });
   };
 
@@ -823,6 +962,11 @@ export function Canvas({
               {statusMessage}
             </div>
           ) : null}
+          {ttsNotice ? (
+            <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
+              {ttsNotice}
+            </div>
+          ) : null}
           {sttError ? (
             <div className="mb-2 rounded-lg border border-rose-700/40 bg-rose-900/20 px-3 py-2 text-[12px] text-rose-200">
               {sttError}
@@ -862,12 +1006,24 @@ export function Canvas({
               ))}
             </div>
           ) : null}
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            multiple
+            accept="image/*,.txt,.md,.markdown,.json,.yaml,.yml,.toml,.csv,.log,.py,.ts,.tsx,.js,.jsx,.css,.scss,.html,.xml,.sh,.bash,.zsh,.ini,.cfg,.conf,.sql,.env"
+            onChange={(event) => {
+              void handleAttachFiles(event);
+            }}
+          />
           <div className="flex items-end gap-2 bg-[#141418] rounded-xl border border-[#1f1f24] focus-within:border-[#2a2a30] transition-colors px-4 py-3">
             {/* Attachment button */}
             <button
               type="button"
-              className="text-[#555] hover:text-[#999] transition-colors pb-0.5 cursor-pointer"
-              title="Paste long text to create file attachment automatically"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={sending || isTranscribing || composerBlocked}
+              className="text-[#555] hover:text-[#999] transition-colors pb-0.5 cursor-pointer disabled:cursor-not-allowed disabled:text-[#444]"
+              title="Attach file"
             >
               <Paperclip className="w-4.5 h-4.5" />
             </button>

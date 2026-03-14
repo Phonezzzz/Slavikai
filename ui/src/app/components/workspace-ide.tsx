@@ -51,6 +51,7 @@ import {
 import {
   buildWorkspaceContextAttachments,
   buildWorkspaceContextChips,
+  mergeWorkspaceAttachments,
 } from '../../features/workspace/workspace-context';
 
 type WorkspaceIdeProps = {
@@ -1262,21 +1263,22 @@ export function WorkspaceIde({
       lastTerminalOutput,
     });
 
-  const handleAgentSend = async () => {
-    const content = agentInput.trim();
-    const attachments = buildContextAttachments();
+  const buildAssistantAttachments = (
+    payloadAttachments: CanvasSendPayload['attachments'] | undefined = undefined,
+  ) => {
+    return mergeWorkspaceAttachments(payloadAttachments ?? [], buildContextAttachments());
+  };
+
+  const handleWorkspaceAssistantSend = async (payload: CanvasSendPayload): Promise<boolean> => {
+    const content = payload.content.trim();
+    const attachments = buildAssistantAttachments(payload.attachments);
     if ((!content && attachments.length === 0) || sending || isDecisionBlocking) {
-      return;
+      return false;
     }
-    const previousInput = agentInput;
-    setAgentInput('');
-    const ok = await onSendAgentMessage({
+    return onSendAgentMessage({
       content,
       attachments: attachments.length > 0 ? attachments : undefined,
     });
-    if (!ok) {
-      setAgentInput((current) => (current.trim().length === 0 ? previousInput : current));
-    }
   };
 
   const handleEditorMount: OnMount = (editor) => {
@@ -1433,10 +1435,7 @@ export function WorkspaceIde({
           canSend={canSendWithContext}
           onSendFeedback={onSendFeedback}
           onAgentInputChange={setAgentInput}
-          onAgentSend={() => {
-            void handleAgentSend();
-          }}
-          onSendPayload={onSendAgentMessage}
+          onSendPayload={handleWorkspaceAssistantSend}
         />
 
         <button

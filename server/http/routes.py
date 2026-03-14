@@ -55,6 +55,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/memory/triage/preview", memory.handle_ui_memory_triage_preview)
     app.router.add_post("/ui/api/memory/triage/apply", memory.handle_ui_memory_triage_apply)
     app.router.add_post("/ui/api/memory/triage/undo", memory.handle_ui_memory_triage_undo)
+    app.router.add_post("/ui/api/tts/speak", settings.handle_ui_tts_speak)
     app.router.add_post("/ui/api/stt/transcribe", settings.handle_ui_stt_transcribe)
     app.router.add_get("/ui/api/settings/chats/export", sessions.handle_ui_chats_export)
     app.router.add_post("/ui/api/settings/chats/import", sessions.handle_ui_chats_import)

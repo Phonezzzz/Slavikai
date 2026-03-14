@@ -70,6 +70,41 @@ class DummyAgent:
         return ToolResult.failure(f"Инструмент {name} не поддерживается в тестовом агенте")
 
 
+class TtsAgent(DummyAgent):
+    def __init__(
+        self,
+        *,
+        audio_path: Path | None = None,
+        fail_message: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.audio_path = audio_path
+        self.fail_message = fail_message
+        self.last_tts_args: dict[str, JSONValue] | None = None
+
+    def call_tool(
+        self,
+        name: str,
+        args: dict[str, JSONValue] | None = None,
+        raw_input: str | None = None,
+    ) -> ToolResult:
+        if name != "tts":
+            return super().call_tool(name, args=args, raw_input=raw_input)
+        self.last_tts_args = dict(args or {})
+        if self.fail_message is not None:
+            return ToolResult.failure(self.fail_message)
+        if self.audio_path is None:
+            return ToolResult.failure("missing test audio")
+        format_value = str((args or {}).get("format") or "mp3")
+        return ToolResult.success(
+            {
+                "file_path": str(self.audio_path),
+                "format": format_value,
+                "voice_id": "test-voice",
+            }
+        )
+
+
 class WorkspaceDecisionAgent(DummyAgent):
     def __init__(self) -> None:
         super().__init__()

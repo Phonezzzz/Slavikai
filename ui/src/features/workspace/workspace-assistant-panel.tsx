@@ -1,18 +1,29 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from 'react';
 import {
   Bot,
   Check,
   ChevronDown,
   Copy,
   Edit2,
+  FileText,
   LoaderCircle,
   Mic,
+  Paperclip,
   RefreshCcw,
   Send,
   Square,
   ThumbsDown,
   ThumbsUp,
   Volume2,
+  X,
 } from 'lucide-react';
 
 import { SESSION_MODE_VALUES, isSessionMode } from '../../app/types';
@@ -24,10 +35,19 @@ import type {
   TaskExecutionState,
   UiDecision,
 } from '../../app/types';
-import type { CanvasMessage, CanvasSendPayload } from '../../app/components/canvas';
+import type {
+  CanvasComposerAttachment,
+  CanvasMessage,
+  CanvasSendPayload,
+} from '../../app/components/canvas';
 import { MessageRenderer } from '../messages';
 import type { RenderableMessage } from '../messages';
 import { PlanPanel } from '../../app/components/plan-panel';
+import {
+  MAX_COMPOSER_ATTACHMENTS,
+  createComposerAttachmentId,
+  readComposerAttachmentFromFile,
+} from '../composer/attachment-utils';
 
 export type WorkspaceContextChip = {
   key: string;
@@ -77,7 +97,6 @@ type WorkspaceAssistantPanelProps = {
   canSend: boolean;
   onSendFeedback?: (interactionId: string, rating: 'good' | 'bad') => Promise<boolean>;
   onAgentInputChange: (value: string) => void;
-  onAgentSend: () => void;
   onSendPayload: (payload: CanvasSendPayload) => Promise<boolean> | boolean;
 };
 
@@ -111,9 +130,11 @@ export function WorkspaceAssistantPanel({
   canSend,
   onSendFeedback,
   onAgentInputChange,
-  onAgentSend,
   onSendPayload,
 }: WorkspaceAssistantPanelProps) {
+  const [composerAttachments, setComposerAttachments] = useState<
+    Array<CanvasComposerAttachment & { id: string }>
+  >([]);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, 'good' | 'bad'>>({});
@@ -121,10 +142,14 @@ export function WorkspaceAssistantPanel({
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [sttError, setSttError] = useState<string | null>(null);
+  const [ttsNotice, setTtsNotice] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
 
   const visibleMessages = useMemo(() => messages.slice(-24), [messages]);
   const renderItems = useMemo<RenderableMessage[]>(() => {
@@ -169,6 +194,15 @@ export function WorkspaceAssistantPanel({
 
   useEffect(() => {
     return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = '';
+        audioRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
@@ -190,6 +224,71 @@ export function WorkspaceAssistantPanel({
       return body.error.message;
     }
     return fallback;
+  };
+
+  const stopPlayback = () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = '';
+      audioRef.current = null;
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+    setSpeakingMessageId(null);
+  };
+
+  const pushComposerAttachments = (attachments: CanvasComposerAttachment[]): boolean => {
+    if (attachments.length === 0) {
+      return true;
+    }
+    let appended = false;
+    let truncated = false;
+    setComposerAttachments((prev) => {
+      const remaining = MAX_COMPOSER_ATTACHMENTS - prev.length;
+      if (remaining <= 0) {
+        truncated = true;
+        return prev;
+      }
+      const nextItems = attachments.slice(0, remaining).map((attachment) => ({
+        id: createComposerAttachmentId('workspace-attachment'),
+        ...attachment,
+      }));
+      truncated = attachments.length > remaining;
+      appended = nextItems.length > 0;
+      return [...prev, ...nextItems];
+    });
+    if (truncated) {
+      setSttError('Достигнут лимит вложений в одном сообщении.');
+    }
+    return appended;
+  };
+
+  const appendFilesToComposer = async (files: File[]) => {
+    if (files.length === 0) {
+      return;
+    }
+    setSttError(null);
+    try {
+      const attachments = await Promise.all(files.map((file) => readComposerAttachmentFromFile(file)));
+      pushComposerAttachments(attachments);
+    } catch (error) {
+      setSttError(error instanceof Error ? error.message : 'Не удалось подготовить вложение.');
+    }
+  };
+
+  const handleAttachFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    await appendFilesToComposer(files);
+  };
+
+  const handleRemoveComposerAttachment = (attachmentId: string) => {
+    setComposerAttachments((prev) => prev.filter((item) => item.id !== attachmentId));
   };
 
   const buildMessageTextForCopy = (message: CanvasMessage): string => {
@@ -280,21 +379,70 @@ export function WorkspaceAssistantPanel({
     });
   };
 
-  const handleListenToggle = (message: CanvasMessage) => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window) || !message.content.trim()) {
-      return;
+  const playViaBrowserTts = (message: CanvasMessage): boolean => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      return false;
     }
-    if (speakingMessageId === message.messageId) {
-      window.speechSynthesis.cancel();
-      setSpeakingMessageId(null);
-      return;
-    }
-    window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(message.content);
     utterance.onend = () => setSpeakingMessageId((prev) => (prev === message.messageId ? null : prev));
     utterance.onerror = () => setSpeakingMessageId((prev) => (prev === message.messageId ? null : prev));
     setSpeakingMessageId(message.messageId);
     window.speechSynthesis.speak(utterance);
+    return true;
+  };
+
+  const handleListenToggle = async (message: CanvasMessage) => {
+    if (!message.content.trim()) {
+      return;
+    }
+    if (speakingMessageId === message.messageId) {
+      stopPlayback();
+      return;
+    }
+
+    stopPlayback();
+    setTtsNotice(null);
+    setSttError(null);
+    try {
+      const response = await fetch('/ui/api/tts/speak', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text: message.content }),
+      });
+      if (!response.ok) {
+        let payload: unknown = null;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        throw new Error(extractErrorMessage(payload, 'TTS request failed.'));
+      }
+      const audioBlob = await response.blob();
+      if (audioBlob.size === 0) {
+        throw new Error('TTS returned empty audio.');
+      }
+      const objectUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(objectUrl);
+      audioRef.current = audio;
+      audioUrlRef.current = objectUrl;
+      audio.onended = () => stopPlayback();
+      audio.onerror = () => {
+        stopPlayback();
+        setSttError('Не удалось воспроизвести аудио от TTS сервиса.');
+      };
+      setSpeakingMessageId(message.messageId);
+      await audio.play();
+    } catch (error) {
+      stopPlayback();
+      if (playViaBrowserTts(message)) {
+        setTtsNotice('Server TTS недоступен, использую browser speech synthesis.');
+      } else {
+        setSttError(error instanceof Error ? error.message : 'TTS failed.');
+      }
+    }
   };
 
   const handleFeedback = async (message: CanvasMessage, rating: 'good' | 'bad') => {
@@ -425,10 +573,52 @@ export function WorkspaceAssistantPanel({
     }
   };
 
+  const handleSend = async () => {
+    if (sending || isTranscribing || isDecisionBlocking) {
+      return;
+    }
+    const trimmed = agentInput.trim();
+    const attachmentsPayload: CanvasComposerAttachment[] = composerAttachments.map((item) => ({
+      name: item.name,
+      mime: item.mime,
+      content: item.content,
+    }));
+    if (!trimmed && attachmentsPayload.length === 0 && !canSend) {
+      return;
+    }
+    const previousInput = agentInput;
+    const previousAttachments = composerAttachments;
+    onAgentInputChange('');
+    setComposerAttachments([]);
+    setSttError(null);
+    setTtsNotice(null);
+    const ok = await onSendPayload({
+      content: trimmed,
+      attachments: attachmentsPayload.length > 0 ? attachmentsPayload : undefined,
+    });
+    if (!ok) {
+      onAgentInputChange(previousInput);
+      setComposerAttachments((current) => (current.length === 0 ? previousAttachments : current));
+    }
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(event.clipboardData.items ?? []);
+    const imageFiles = items
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file instanceof File);
+    if (imageFiles.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    void appendFilesToComposer(imageFiles);
+  };
+
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      onAgentSend();
+      void handleSend();
     }
   };
 
@@ -608,6 +798,11 @@ export function WorkspaceAssistantPanel({
         {terminalPendingText ? (
           <div className="text-[11px] text-amber-300">{terminalPendingText}</div>
         ) : null}
+        {ttsNotice ? (
+          <div className="rounded-md border border-[#2d2d38] bg-[#17171d] px-2.5 py-2 text-[11px] text-[#c8c8d2]">
+            {ttsNotice}
+          </div>
+        ) : null}
         {sttError ? (
           <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-2.5 py-2 text-[11px] text-rose-200">
             {sttError}
@@ -664,11 +859,56 @@ export function WorkspaceAssistantPanel({
           </div>
         </div>
 
+        {composerAttachments.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {composerAttachments.map((attachment) => (
+              <div
+                key={attachment.id}
+                className="inline-flex items-center gap-2 rounded-md border border-[#2a2a30] bg-[#141418] px-2.5 py-1 text-[11px] text-[#c8c8cc]"
+              >
+                <FileText className="h-3.5 w-3.5 text-[#8f8f95]" />
+                <span className="max-w-[180px] truncate">{attachment.name}</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveComposerAttachment(attachment.id)}
+                  className="rounded p-0.5 text-[#8f8f95] hover:bg-[#1f1f24] hover:text-[#d6d6db]"
+                  title="Remove attachment"
+                  aria-label="Remove attachment"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          multiple
+          accept="image/*,.txt,.md,.markdown,.json,.yaml,.yml,.toml,.csv,.log,.py,.ts,.tsx,.js,.jsx,.css,.scss,.html,.xml,.sh,.bash,.zsh,.ini,.cfg,.conf,.sql,.env"
+          onChange={(event) => {
+            void handleAttachFiles(event);
+          }}
+        />
+
         <div className="flex items-end gap-2 rounded-md border border-[#252530] bg-[#111116] px-2.5 py-2">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={sending || isTranscribing || isDecisionBlocking}
+            className="rounded p-1 text-[#6f6f78] transition-colors hover:text-[#c1c1ca] disabled:cursor-not-allowed disabled:text-[#444]"
+            title="Attach file"
+            aria-label="Attach file"
+          >
+            <Paperclip className="h-4 w-4" />
+          </button>
           <textarea
             ref={textareaRef}
             value={agentInput}
             onChange={(event) => onAgentInputChange(event.target.value)}
+            onPaste={handlePaste}
             onKeyDown={handleComposerKeyDown}
             placeholder="Ask agent..."
             className="workspace-composer-textarea min-h-[24px] max-h-[110px] flex-1 resize-none bg-transparent text-[12px] text-[#d4d4db] outline-none"
@@ -713,10 +953,20 @@ export function WorkspaceAssistantPanel({
           </button>
           <button
             type="button"
-            onClick={onAgentSend}
-            disabled={sending || isTranscribing || isDecisionBlocking || !canSend}
+            onClick={() => {
+              void handleSend();
+            }}
+            disabled={
+              sending
+              || isTranscribing
+              || isDecisionBlocking
+              || (!canSend && !agentInput.trim() && composerAttachments.length === 0)
+            }
             className={`rounded p-1.5 transition-colors ${
-              !sending && !isTranscribing && !isDecisionBlocking && canSend
+              !sending
+              && !isTranscribing
+              && !isDecisionBlocking
+              && (canSend || agentInput.trim().length > 0 || composerAttachments.length > 0)
                 ? 'bg-[#6366f1] text-white hover:bg-[#5558e6]'
                 : 'bg-[#1b1b20] text-[#555]'
             }`}

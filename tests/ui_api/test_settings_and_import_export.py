@@ -592,6 +592,42 @@ def test_ui_stt_transcribe_handles_unsupported_format(monkeypatch, tmp_path) -> 
     asyncio.run(run())
 
 
+def test_ui_tts_speak_success(monkeypatch, tmp_path) -> None:
+    audio_dir = tmp_path / "sandbox" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "tts_test.mp3"
+    audio_path.write_bytes(b"fake-mp3")
+    monkeypatch.setattr("server.http.handlers.settings._SANDBOX_AUDIO_ROOT", audio_dir.resolve())
+
+    async def run() -> None:
+        client = await _create_client(TtsAgent(audio_path=audio_path))
+        try:
+            response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
+            assert response.status == 200
+            assert response.headers.get("Content-Type") == "audio/mp3"
+            assert await response.read() == b"fake-mp3"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_tts_speak_returns_controlled_error_on_tool_failure() -> None:
+    async def run() -> None:
+        client = await _create_client(TtsAgent(fail_message="TTS API key не задан (TTS_API_KEY)."))
+        try:
+            response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
+            assert response.status == 409
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "tts_unavailable"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_uses_api_key_from_env(monkeypatch, tmp_path) -> None:
     ui_settings_path = tmp_path / "ui_settings.json"
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-env-test-key")
