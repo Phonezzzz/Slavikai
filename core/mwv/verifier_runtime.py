@@ -32,6 +32,7 @@ DEFAULT_FALLBACK_COMMANDS: tuple[tuple[str, ...], ...] = (
     (_PYTHON_EXECUTABLE, "-m", "pytest", "--cov", "--cov-fail-under=80"),
 )
 SCRIPT_NOT_FOUND_PREFIX = "Verifier script not found:"
+NON_REPO_VERIFIER_REQUIRED_ERROR = "verifier_command_required_for_non_repo_workspace"
 
 
 def _default_project_root() -> Path:
@@ -45,10 +46,12 @@ class VerifierRuntime:
     project_root: Path = field(default_factory=_default_project_root)
 
     def run(self, task: TaskPacket, context: RunContext) -> VerificationResult:
+        start = time.monotonic()
         try:
+            workspace_root = _resolve_workspace_root(context.workspace_root)
             command = _resolve_packet_command(task.verifier)
             timeout_seconds = _resolve_timeout(task.verifier)
-            cwd = _resolve_cwd(task.verifier, workspace_root=context.workspace_root)
+            cwd = _resolve_cwd(task.verifier, workspace_root=workspace_root)
         except ValueError as exc:
             return VerificationResult(
                 status=VerificationStatus.ERROR,
@@ -56,16 +59,23 @@ class VerifierRuntime:
                 exit_code=None,
                 stdout="",
                 stderr="",
-                duration_seconds=0.0,
+                duration_seconds=time.monotonic() - start,
                 error=f"invalid_verifier_config: {exc}",
             )
 
         if command is not None:
             return self._run_command(command, cwd=cwd, timeout_seconds=timeout_seconds)
 
-        result = self.runner.run()
-        if not _should_run_fallback(result):
-            return result
+        if not _is_repo_like_workspace(workspace_root):
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=[],
+                exit_code=None,
+                stdout="",
+                stderr="",
+                duration_seconds=time.monotonic() - start,
+                error=NON_REPO_VERIFIER_REQUIRED_ERROR,
+            )
         return self._run_fallback(cwd=cwd, timeout_seconds=timeout_seconds)
 
     def _run_command(
@@ -225,10 +235,15 @@ def _resolve_timeout(verifier: object) -> int:
     return timeout_raw
 
 
-def _resolve_cwd(verifier: object, *, workspace_root: str) -> Path:
+def _resolve_workspace_root(workspace_root: str) -> Path:
     root = Path(workspace_root).resolve()
     if not root.exists() or not root.is_dir():
         raise ValueError(f"workspace_root недоступен: {root}")
+    return root
+
+
+def _resolve_cwd(verifier: object, *, workspace_root: Path) -> Path:
+    root = workspace_root
     if not isinstance(verifier, dict):
         return root
     cwd_raw = verifier.get("cwd")
@@ -261,9 +276,13 @@ def _join_output(parts: list[str]) -> str:
     return "\n".join(filtered)
 
 
-def _should_run_fallback(result: VerificationResult) -> bool:
-    if result.status != VerificationStatus.ERROR:
-        return False
-    if result.error is None:
-        return False
-    return result.error.startswith(SCRIPT_NOT_FOUND_PREFIX)
+def _is_repo_like_workspace(root: Path) -> bool:
+    if (root / ".git").exists():
+        return True
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 from core.mwv.manager import (
     ManagerRuntime,
@@ -24,7 +23,11 @@ from core.mwv.models import (
 )
 from core.mwv.routing import RouteDecision
 from core.mwv.verifier import VerifierRunner
-from core.mwv.verifier_runtime import VerifierRuntime, _default_runner
+from core.mwv.verifier_runtime import (
+    NON_REPO_VERIFIER_REQUIRED_ERROR,
+    VerifierRuntime,
+    _default_runner,
+)
 from core.mwv.worker import WorkerRuntime
 from shared.models import JSONValue
 
@@ -80,30 +83,14 @@ def test_worker_runtime_delegates() -> None:
     assert result.status == WorkStatus.SUCCESS
 
 
-@dataclass(frozen=True)
-class DummyVerifierRunner:
-    result: VerificationResult
-
-    def run(self) -> VerificationResult:
-        return self.result
-
-
-def test_verifier_runtime_returns_runner_result() -> None:
-    expected = VerificationResult(
-        status=VerificationStatus.PASSED,
-        command=["check"],
-        exit_code=0,
-        stdout="ok",
-        stderr="",
-        duration_seconds=0.1,
-        error=None,
-    )
-    runtime = VerifierRuntime(runner=DummyVerifierRunner(expected))
+def test_verifier_runtime_requires_explicit_command_for_non_repo_workspace() -> None:
+    runtime = VerifierRuntime()
     result = runtime.run(
         TaskPacket(task_id="task-1", session_id="s", trace_id="t", goal="g"),
         RunContext(session_id="s", trace_id="t", workspace_root="/tmp", safe_mode=True),
     )
-    assert result == expected
+    assert result.status == VerificationStatus.ERROR
+    assert result.error == NON_REPO_VERIFIER_REQUIRED_ERROR
 
 
 def test_default_verifier_runner_factory() -> None:

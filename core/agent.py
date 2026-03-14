@@ -217,6 +217,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         self.runtime_active_task: dict[str, JSONValue] | None = None
         self.runtime_auto_state: dict[str, JSONValue] | None = None
         self.runtime_plan_guard_enabled = False
+        self.runtime_workspace_root: str | None = None
         self.last_plan: TaskPlan | None = None
         self.last_plan_original: TaskPlan | None = None
         self.last_hints_used: list[str] = []

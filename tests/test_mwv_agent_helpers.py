@@ -13,14 +13,18 @@ from core.mwv.models import (
     RetryDecision,
     RetryPolicy,
     RunContext,
+    StopReasonCode,
     TaskPacket,
+    TaskStepContract,
     VerificationResult,
     VerificationStatus,
     WorkChange,
     WorkResult,
     WorkStatus,
+    with_task_packet_hash,
 )
 from core.mwv.routing import RouteDecision
+from core.mwv.verifier_runtime import NON_REPO_VERIFIER_REQUIRED_ERROR
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage, PlanStep, PlanStepStatus, TaskPlan, WorkspaceDiffEntry
@@ -38,6 +42,15 @@ def _make_agent(tmp_path: Path) -> Agent:
         brain=DummyBrain(),
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+
+
+def _context(tmp_path: Path) -> RunContext:
+    return RunContext(
+        session_id="s",
+        trace_id="trace",
+        workspace_root=str(tmp_path),
+        safe_mode=True,
     )
 
 
@@ -60,6 +73,26 @@ def test_mwv_context_and_task_builder(tmp_path: Path) -> None:
     assert task.goal == "fix bug"
     assert task.context["route_reason"] == "trigger:code_change"
     assert "code_change" in task.context["risk_flags"]
+    assert task.verifier == {}
+
+
+def test_mwv_context_uses_runtime_workspace_root_and_detects_verifier_script(
+    tmp_path: Path,
+) -> None:
+    agent = _make_agent(tmp_path)
+    agent.apply_runtime_workspace_root(str(tmp_path))
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "check.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+    context = agent._build_mwv_context(trace_id="trace-1")
+    assert context.workspace_root == str(tmp_path)
+
+    decision = RouteDecision(route="mwv", reason="trigger:code_change", risk_flags=["code_change"])
+    builder = agent._mwv_task_builder(decision)
+    task = builder([MWVMessage(role="user", content="fix bug")], context)
+    assert task.scope["workspace_root"] == str(tmp_path)
+    assert task.verifier == {"command": ["bash", "scripts/check.sh"], "cwd": "."}
 
 
 def test_mwv_goal_and_changes(tmp_path: Path) -> None:
@@ -265,6 +298,34 @@ def test_mwv_default_next_steps_on_verifier_fail(tmp_path: Path) -> None:
     assert "trace_id=trace" in response
 
 
+def test_mwv_verifier_non_repo_guidance(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    task = TaskPacket(task_id="t", session_id="s", trace_id="trace", goal="g")
+    work_ok = WorkResult(task_id="t", status=WorkStatus.SUCCESS, summary="summary")
+    verify_error = VerificationResult(
+        status=VerificationStatus.ERROR,
+        command=[],
+        exit_code=None,
+        stdout="",
+        stderr="",
+        duration_seconds=0.1,
+        error=NON_REPO_VERIFIER_REQUIRED_ERROR,
+    )
+    result = MWVRunResult(
+        task=task,
+        work_result=work_ok,
+        verification_result=verify_error,
+        attempt=1,
+        max_attempts=3,
+        retry_decision=None,
+    )
+
+    response = agent._format_mwv_response(result)
+    assert "verifier.command" in response
+    assert "repo-like workspace_root" in response
+    assert "scripts/check.sh" not in response
+
+
 def test_mwv_verifier_note_uses_exit_code(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
     note = agent._mwv_verifier_note(
@@ -279,3 +340,52 @@ def test_mwv_verifier_note_uses_exit_code(tmp_path: Path) -> None:
         )
     )
     assert note == "exit_code=2"
+
+
+def test_mwv_action_route_rejects_no_observable_action(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    packet = TaskPacket(
+        task_id="task-1",
+        session_id="s",
+        trace_id="trace",
+        goal="g",
+        steps=[
+            TaskStepContract(
+                step_id="step-1",
+                title="noop",
+                description="noop",
+                allowed_tool_kinds=["workspace_magic"],
+                inputs={"operation": "workspace_magic"},
+            )
+        ],
+        context={"risk_flags": ["code_change"]},
+    )
+    packet = with_task_packet_hash(packet)
+
+    result = agent._mwv_worker_runner(packet, _context(tmp_path))
+    assert result.status == WorkStatus.FAILURE
+    assert result.diagnostics.get("stop_reason_code") == StopReasonCode.REPLAN_REQUIRED.value
+
+
+def test_mwv_diagnostic_route_allows_no_observable_action(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    packet = TaskPacket(
+        task_id="task-1",
+        session_id="s",
+        trace_id="trace",
+        goal="g",
+        steps=[
+            TaskStepContract(
+                step_id="step-1",
+                title="noop",
+                description="noop",
+                allowed_tool_kinds=["workspace_magic"],
+                inputs={"operation": "workspace_magic"},
+            )
+        ],
+        context={"risk_flags": ["tools"]},
+    )
+    packet = with_task_packet_hash(packet)
+
+    result = agent._mwv_worker_runner(packet, _context(tmp_path))
+    assert result.status == WorkStatus.SUCCESS

@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
 from aiohttp import web
@@ -109,6 +110,10 @@ async def apply_agent_runtime_state(
         [WorkflowHubProtocol, str],
         Coroutine[object, object, tuple[dict[str, bool], dict[str, JSONValue]]],
     ],
+    resolve_workspace_root_fn: Callable[
+        [WorkflowHubProtocol, str],
+        Coroutine[object, object, Path],
+    ],
     normalize_mode_value_fn: Callable[[object], str],
     normalize_plan_payload_fn: Callable[[object], dict[str, JSONValue] | None],
     normalize_task_payload_fn: Callable[[object], dict[str, JSONValue] | None],
@@ -118,6 +123,10 @@ async def apply_agent_runtime_state(
     runtime_tools_setter = getattr(agent, "apply_runtime_tools_enabled", None)
     if callable(runtime_tools_setter):
         runtime_tools_setter(effective_tools)
+    workspace_root = await resolve_workspace_root_fn(hub, session_id)
+    runtime_workspace_setter = getattr(agent, "apply_runtime_workspace_root", None)
+    if callable(runtime_workspace_setter):
+        runtime_workspace_setter(str(workspace_root))
 
     workflow = await hub.get_session_workflow(session_id)
     mode = normalize_mode_value_fn(workflow.get("mode"))

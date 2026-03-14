@@ -19,6 +19,7 @@ from core.mwv.models import (
 from core.mwv.single_attempt import MWVSingleAttemptResult, MWVSingleAttemptRuntime
 from core.mwv.verifier import VerifierRunner
 from core.mwv.verifier_runtime import VerifierRuntime
+from shared.models import JSONValue
 
 _TARGET_RE = re.compile(r"\b(?:file|\u0444\u0430\u0439\u043b)\b\s+([^\s]+)", re.IGNORECASE)
 
@@ -67,11 +68,19 @@ class CodingTaskRuntime:
         path: Path,
     ) -> Callable[[Sequence[MWVMessage], RunContext], TaskPacket]:
         def _build(_messages: Sequence[MWVMessage], context: RunContext) -> TaskPacket:
+            verifier: dict[str, JSONValue] = {}
+            script_path = self.workspace_root / "scripts" / "check.sh"
+            if script_path.exists() and script_path.is_file():
+                verifier = {
+                    "command": ["bash", "scripts/check.sh"],
+                    "cwd": ".",
+                }
             return TaskPacket(
                 task_id=str(uuid.uuid4()),
                 session_id=context.session_id,
                 trace_id=context.trace_id,
                 goal=f"Update {path.name}",
+                verifier=verifier,
                 context={"target_path": str(path)},
             )
 

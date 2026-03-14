@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
+import shlex
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -25,7 +26,7 @@ from core.mwv.models import (
     with_task_packet_hash,
 )
 from core.mwv.routing import RouteDecision
-from core.mwv.verifier_runtime import VerifierRuntime
+from core.mwv.verifier_runtime import NON_REPO_VERIFIER_REQUIRED_ERROR, VerifierRuntime
 from core.mwv.worker import WorkerRuntime
 from llm.brain_base import Brain
 from shared.models import (
@@ -39,6 +40,10 @@ from shared.models import (
 from tools.workspace_tools import WORKSPACE_ROOT, workspace_root_context
 
 MAX_MWV_ATTEMPTS = 3
+_ACTION_ORIENTED_RISK_FLAGS = frozenset({"code_change", "filesystem", "git", "install", "sudo"})
+_NO_OBSERVABLE_ACTION_ERROR = (
+    "MWV route требует наблюдаемого действия, но tool calls/diffs отсутствуют."
+)
 
 if TYPE_CHECKING:
     import logging
@@ -91,6 +96,7 @@ class AgentMWVMixin:
         runtime_active_task: dict[str, JSONValue] | None
         runtime_auto_state: dict[str, JSONValue] | None
         runtime_plan_guard_enabled: bool
+        runtime_workspace_root: str | None
         _last_skill_match: SkillMatch | None
 
         def _inc_metric(self, metric_key: str) -> None: ...
@@ -126,6 +132,7 @@ class AgentMWVMixin:
             auto_state: dict[str, JSONValue] | None = None,
             enforce_plan_guard: bool,
         ) -> None: ...
+        def apply_runtime_workspace_root(self, workspace_root: str | None) -> None: ...
         def _build_tool_gateway(
             self,
             *,
@@ -264,10 +271,11 @@ class AgentMWVMixin:
         session_id = self.session_id or "local"
         approved = sorted(self.approved_categories)
         resolved_trace_id = trace_id or str(uuid.uuid4())
+        workspace_root = self.runtime_workspace_root or _workspace_root()
         return RunContext(
             session_id=session_id,
             trace_id=resolved_trace_id,
-            workspace_root=_workspace_root(),
+            workspace_root=workspace_root,
             safe_mode=bool(self.tools_enabled.get("safe_mode", False)),
             approved_categories=[str(item) for item in approved],
             max_retries=max(0, MAX_MWV_ATTEMPTS - 1),
@@ -316,9 +324,7 @@ class AgentMWVMixin:
                 approvals={
                     "approved_categories": list(context.approved_categories),
                 },
-                verifier={
-                    "command": "scripts/check.sh",
-                },
+                verifier=self._build_packet_verifier_config(context.workspace_root),
                 context={
                     "route_reason": decision.reason,
                     "risk_flags": decision.risk_flags,
@@ -413,11 +419,31 @@ class AgentMWVMixin:
         plan_snapshot = self._build_packet_plan_snapshot(task)
         step_states: list[PlanStep] = []
         stop_reason = StopReasonCode.WORKER_FAILED
+        action_oriented = self._mwv_is_action_oriented_task(task)
+        successful_tool_calls = 0
 
         try:
             with workspace_root_context(workspace_root):
+
+                def _mwv_post_call(
+                    request: ToolRequest,
+                    result: ToolResult,
+                    call_context: object | None,
+                ) -> None:
+                    nonlocal successful_tool_calls
+                    self._workspace_diff_post_call(request, result, call_context)
+                    if result.ok:
+                        successful_tool_calls += 1
+
                 for step in task.steps:
-                    operation, operation_error = self._resolve_packet_step_operation(step)
+                    require_operation = self._mwv_step_requires_operation(
+                        step,
+                        action_oriented=action_oriented,
+                    )
+                    operation, operation_error = self._resolve_packet_step_operation(
+                        step,
+                        require_operation=require_operation,
+                    )
                     plan_step = PlanStep(description=step.description, operation=operation)
                     task_snapshot: dict[str, JSONValue] = {
                         "plan_id": task.task_id,
@@ -442,7 +468,7 @@ class AgentMWVMixin:
                         step_plan,
                         tool_gateway=self._build_tool_gateway(
                             pre_call=self._workspace_diff_pre_call,
-                            post_call=self._workspace_diff_post_call,
+                            post_call=_mwv_post_call,
                         ),
                     )
                     executed_step = executed.steps[0]
@@ -464,6 +490,25 @@ class AgentMWVMixin:
         )
         changes = self._mwv_changes_from_diffs(self.consume_workspace_diffs())
         diagnostics = self._build_mwv_diagnostics(executed_plan)
+        diagnostics["tool_calls_ok"] = successful_tool_calls
+        diagnostics["changes_total"] = len(changes)
+        diagnostics["risk_flags"] = sorted(self._mwv_risk_flags(task))
+        if (
+            status == WorkStatus.SUCCESS
+            and action_oriented
+            and successful_tool_calls == 0
+            and not changes
+        ):
+            status = WorkStatus.FAILURE
+            stop_reason = StopReasonCode.REPLAN_REQUIRED
+            step_errors = diagnostics.get("step_errors")
+            if isinstance(step_errors, list):
+                step_errors.append(
+                    {
+                        "description": "MWV execution",
+                        "result": _NO_OBSERVABLE_ACTION_ERROR,
+                    }
+                )
         if status == WorkStatus.FAILURE:
             diagnostics["stop_reason_code"] = stop_reason.value
         summary = self._format_plan(executed_plan)
@@ -534,6 +579,7 @@ class AgentMWVMixin:
             "active_task": dict(self.runtime_active_task) if self.runtime_active_task else None,
             "auto_state": dict(self.runtime_auto_state) if self.runtime_auto_state else None,
             "enforce_plan_guard": self.runtime_plan_guard_enabled,
+            "workspace_root": self.runtime_workspace_root,
         }
 
     def _restore_runtime_execution_state(self, snapshot: dict[str, JSONValue]) -> None:
@@ -543,6 +589,10 @@ class AgentMWVMixin:
         active_task_raw = snapshot.get("active_task")
         auto_state_raw = snapshot.get("auto_state")
         enforce = bool(snapshot.get("enforce_plan_guard"))
+        workspace_root_raw = snapshot.get("workspace_root")
+        self.apply_runtime_workspace_root(
+            workspace_root_raw if isinstance(workspace_root_raw, str) else None
+        )
         self.set_runtime_state(
             mode=mode,
             active_plan=active_plan_raw if isinstance(active_plan_raw, dict) else None,
@@ -554,19 +604,62 @@ class AgentMWVMixin:
     def _resolve_packet_step_operation(
         self,
         step: TaskStepContract,
+        *,
+        require_operation: bool,
     ) -> tuple[str | None, str | None]:
+        allowed_tool_kinds = [item.strip() for item in step.allowed_tool_kinds if item.strip()]
         operation_raw = step.inputs.get("operation")
         operation = operation_raw.strip() if isinstance(operation_raw, str) else ""
         if not operation:
-            if len(step.allowed_tool_kinds) == 1:
-                operation = step.allowed_tool_kinds[0].strip()
+            if len(allowed_tool_kinds) == 1:
+                operation = allowed_tool_kinds[0]
+            elif len(allowed_tool_kinds) > 1:
+                return None, "step operation неоднозначен: нужно явно выбрать operation."
         if not operation:
-            if step.allowed_tool_kinds:
+            if require_operation:
+                return None, "step operation не определён для исполнимого MWV-шага."
+            if allowed_tool_kinds:
                 return None, "step operation не определён при непустом allowed_tool_kinds."
             return None, None
-        if operation not in step.allowed_tool_kinds:
+        if not allowed_tool_kinds:
+            if require_operation:
+                return None, "allowed_tool_kinds пуст для исполнимого MWV-шага."
+            return operation, None
+        if operation not in allowed_tool_kinds:
             return None, f"operation '{operation}' не входит в allowed_tool_kinds."
         return operation, None
+
+    def _mwv_risk_flags(self, task: TaskPacket) -> set[str]:
+        raw = task.context.get("risk_flags")
+        if not isinstance(raw, list):
+            return set()
+        return {item.strip() for item in raw if isinstance(item, str) and item.strip()}
+
+    def _mwv_is_action_oriented_task(self, task: TaskPacket) -> bool:
+        return bool(self._mwv_risk_flags(task) & _ACTION_ORIENTED_RISK_FLAGS)
+
+    def _mwv_step_requires_operation(
+        self,
+        step: TaskStepContract,
+        *,
+        action_oriented: bool,
+    ) -> bool:
+        if action_oriented:
+            return True
+        operation_raw = step.inputs.get("operation")
+        if isinstance(operation_raw, str) and operation_raw.strip():
+            return True
+        return bool([item for item in step.allowed_tool_kinds if item.strip()])
+
+    def _build_packet_verifier_config(self, workspace_root: str) -> dict[str, JSONValue]:
+        root = Path(workspace_root).resolve()
+        script_path = root / "scripts" / "check.sh"
+        if script_path.exists() and script_path.is_file():
+            return {
+                "command": ["bash", "scripts/check.sh"],
+                "cwd": ".",
+            }
+        return {}
 
     def _stop_reason_from_execution_error(self, error_text: str) -> StopReasonCode:
         normalized = error_text.lower()
@@ -648,11 +741,7 @@ class AgentMWVMixin:
             return self._format_stop_response(
                 what=status_label,
                 why=note,
-                next_steps=[
-                    "Открой trace по trace_id и посмотри детали проверки.",
-                    "Запусти scripts/check.sh вручную для диагностики.",
-                    "Исправь проблему и повтори запрос.",
-                ],
+                next_steps=self._mwv_verifier_stop_next_steps(result.verification_result),
                 stop_reason_code=StopReasonCode.VERIFIER_FAILED,
                 route="mwv",
                 trace_id=trace_id,
@@ -782,16 +871,18 @@ class AgentMWVMixin:
                 "- Разреши повтор с более узким фокусом.",
             ]
         if result.verification_result.status == VerificationStatus.ERROR:
-            return [
-                "- Проверь окружение проверки и доступность скрипта.",
-                "- Запусти scripts/check.sh вручную для деталей.",
-            ]
+            return self._mwv_bulletize(
+                self._mwv_verifier_stop_next_steps(result.verification_result)[:2]
+            )
         if result.retry_decision and result.retry_decision.reason == "retry_limit_reached":
-            return [
-                "- Сузь задачу или уточни требования.",
-                "- Запусти scripts/check.sh вручную, чтобы понять, что падает.",
-                "- Разреши дополнительную попытку, если нужно.",
-            ]
+            steps = ["Сузь задачу или уточни требования."]
+            command = self._mwv_verifier_manual_command(result.verification_result)
+            if command:
+                steps.append(f"Запусти вручную: {command}.")
+            else:
+                steps.append("Проверь verifier.command и рабочую директорию проверки.")
+            steps.append("Разреши дополнительную попытку, если нужно.")
+            return self._mwv_bulletize(steps)
         steps = [
             "- Посмотри краткие детали ниже и уточни требования.",
             "- Разреши дополнительную попытку, если нужно.",
@@ -815,6 +906,10 @@ class AgentMWVMixin:
     def _mwv_verifier_note(self, verification: VerificationResult) -> str:
         if verification.status == VerificationStatus.PASSED:
             return "ok"
+        if verification.error == NON_REPO_VERIFIER_REQUIRED_ERROR:
+            return (
+                "Для non-repo workspace нужен явный verifier.command или repo-like workspace_root."
+            )
         if verification.error:
             return verification.error
         text = (verification.stderr or verification.stdout or "").strip()
@@ -868,3 +963,26 @@ class AgentMWVMixin:
         if not isinstance(raw_skill, str) or not raw_skill:
             return None
         return f"- Навык {raw_skill} не прошел проверку. Нужна доработка skill."
+
+    def _mwv_verifier_manual_command(self, verification: VerificationResult) -> str | None:
+        if not verification.command:
+            return None
+        return shlex.join(verification.command)
+
+    def _mwv_verifier_stop_next_steps(self, verification: VerificationResult) -> list[str]:
+        command = self._mwv_verifier_manual_command(verification)
+        if verification.error == NON_REPO_VERIFIER_REQUIRED_ERROR:
+            return [
+                "Укажи verifier.command для этого workspace или выбери repo-like workspace_root.",
+                "Повтори запрос после настройки проверки.",
+            ]
+        steps = ["Открой trace по trace_id и посмотри детали проверки."]
+        if command:
+            steps.append(f"Запусти вручную: {command}.")
+        else:
+            steps.append("Проверь verifier.command и рабочую директорию проверки.")
+        steps.append("Исправь проблему и повтори запрос.")
+        return steps
+
+    def _mwv_bulletize(self, steps: list[str]) -> list[str]:
+        return [f"- {item}" for item in steps]

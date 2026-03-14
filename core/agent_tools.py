@@ -146,6 +146,7 @@ class AgentToolsMixin:
     runtime_active_task: dict[str, JSONValue] | None
     runtime_auto_state: dict[str, JSONValue] | None
     runtime_plan_guard_enabled: bool
+    runtime_workspace_root: str | None
     last_auto_state: dict[str, JSONValue] | None
     last_approval_source_endpoint: str | None
     last_approval_resume_payload: dict[str, JSONValue] | None
@@ -360,6 +361,7 @@ class AgentToolsMixin:
         self.runtime_active_task = None
         self.runtime_auto_state = None
         self.runtime_plan_guard_enabled = False
+        self.runtime_workspace_root = None
         short_term = getattr(self, "short_term", None)
         if isinstance(short_term, list):
             short_term.clear()
@@ -423,6 +425,16 @@ class AgentToolsMixin:
         self.runtime_active_task = dict(active_task) if isinstance(active_task, dict) else None
         self.runtime_auto_state = dict(auto_state) if isinstance(auto_state, dict) else None
         self.runtime_plan_guard_enabled = bool(enforce_plan_guard)
+
+    def apply_runtime_workspace_root(self, workspace_root: str | None) -> None:
+        if not isinstance(workspace_root, str) or not workspace_root.strip():
+            self.runtime_workspace_root = None
+            return
+        candidate = Path(workspace_root.strip()).expanduser().resolve()
+        if not candidate.exists() or not candidate.is_dir():
+            self.runtime_workspace_root = None
+            return
+        self.runtime_workspace_root = str(candidate)
 
     def _approval_context(self, *, safe_mode_override: bool | None = None) -> ApprovalContext:
         safe_mode = bool(self.tools_enabled.get("safe_mode", False))

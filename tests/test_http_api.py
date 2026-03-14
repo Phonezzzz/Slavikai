@@ -48,6 +48,7 @@ class DummyAgent:
         self.runtime_active_task: dict[str, object] | None = None
         self.runtime_auto_state: dict[str, object] | None = None
         self.runtime_plan_guard_enabled = False
+        self.runtime_workspace_root: str | None = None
         self.runtime_state_calls: list[dict[str, object]] = []
         self.runtime_tools_calls: list[dict[str, bool]] = []
 
@@ -58,6 +59,9 @@ class DummyAgent:
     def apply_runtime_tools_enabled(self, state: dict[str, bool]) -> None:
         self.runtime_tools_calls.append(dict(state))
         self.tools_enabled.update(state)
+
+    def apply_runtime_workspace_root(self, workspace_root: str | None) -> None:
+        self.runtime_workspace_root = workspace_root
 
     def set_runtime_state(
         self,

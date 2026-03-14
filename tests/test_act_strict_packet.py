@@ -87,3 +87,27 @@ def test_act_strict_rejects_operation_outside_allowed(tmp_path: Path) -> None:
     result = agent._mwv_worker_runner(packet, _context(tmp_path))
     assert result.status == WorkStatus.FAILURE
     assert result.diagnostics.get("stop_reason_code") == StopReasonCode.REPLAN_REQUIRED.value
+
+
+def test_act_strict_rejects_missing_operation_for_action_route(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    packet = TaskPacket(
+        task_id="task-1",
+        session_id="s",
+        trace_id="trace",
+        goal="g",
+        steps=[
+            TaskStepContract(
+                step_id="step-1",
+                title="missing-op",
+                description="missing-op",
+                allowed_tool_kinds=[],
+                inputs={},
+            )
+        ],
+        context={"risk_flags": ["code_change"]},
+    )
+    packet = with_task_packet_hash(packet)
+    result = agent._mwv_worker_runner(packet, _context(tmp_path))
+    assert result.status == WorkStatus.FAILURE
+    assert result.diagnostics.get("stop_reason_code") == StopReasonCode.REPLAN_REQUIRED.value

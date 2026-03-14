@@ -371,11 +371,21 @@ async def _apply_agent_runtime_state(
             session_id=loader_session_id,
         )
 
+    async def _workspace_root_loader(
+        loader_hub: _workflow_runtime.WorkflowHubProtocol,
+        loader_session_id: str,
+    ) -> Path:
+        return await _workspace_root_for_session(
+            cast(UIHub, loader_hub),
+            loader_session_id,
+        )
+
     return await _workflow_runtime.apply_agent_runtime_state(
         agent=agent,
         hub=hub,
         session_id=session_id,
         load_effective_session_security_fn=_security_loader,
+        resolve_workspace_root_fn=_workspace_root_loader,
         normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),
         normalize_plan_payload_fn=_normalize_plan_payload,
         normalize_task_payload_fn=_normalize_task_payload,
