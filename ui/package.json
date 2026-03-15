@@ -15,7 +15,7 @@
     "clsx": "2.1.1",
     "jszip": "3.10.1",
     "lucide-react": "0.487.0",
-    "monaco-editor": "^0.55.1",
+    "monaco-editor": "0.53.0",
     "motion": "12.23.24",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -26,11 +26,11 @@
     "tailwind-merge": "^2.5.4"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "4.1.12",
+    "@tailwindcss/vite": "4.2.1",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "4.7.0",
-    "tailwindcss": "4.1.12",
+    "tailwindcss": "4.2.1",
     "typescript": "^5.6.3",
     "vite": "^6.4.1"
   },
