@@ -68,7 +68,7 @@ help:
 	@echo "  make ui-clean         Remove UI dist and UI pid/log"
 	@echo
 	@echo "Cleanup:"
-	@echo "  make clean           Remove caches and .run/"
+	@echo "  make clean           Remove caches, node_modules, build artifacts and .run/"
 	@echo "  make clean-venv      Remove venv/ (destructive)"
 
 $(VENV_PY):
@@ -84,13 +84,13 @@ venv: $(VENV_DIR)/.installed
 
 .PHONY: deps-compile
 deps-compile: $(VENV_PY) requirements.in
-	"$(VENV_PIP)" install pip-tools
+	$(VENV_PIP) install pip-tools
 	"$(VENV_DIR)/bin/pip-compile" --strip-extras requirements.in --output-file requirements.txt
 	"$(VENV_DIR)/bin/pip-compile" --strip-extras requirements.in --output-file constraints.txt
 
 .PHONY: deps-sync
 deps-sync: $(VENV_PY) requirements.txt
-	"$(VENV_PIP)" install pip-tools
+	$(VENV_PIP) install pip-tools
 	"$(VENV_DIR)/bin/pip-sync" requirements.txt
 
 .PHONY: activate
@@ -384,9 +384,15 @@ clean:
 		.pytest_cache \
 		.mypy_cache \
 		.ruff_cache \
+		.cache \
+		build \
+		dist \
 		__pycache__ \
+		ui/dist \
+		ui/node_modules \
 		"$(RUN_DIR)"
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
+	find . -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*.tsbuildinfo" \) -delete
 
 .PHONY: clean-venv
 clean-venv:
