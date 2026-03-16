@@ -15,6 +15,7 @@ from config.tools_config import (
     load_tools_config,
     save_tools_config,
 )
+from config.tts_config import TtsConfig
 from config.ui_embeddings_settings import (
     UIEmbeddingsSettings,
     load_ui_embeddings_settings,
@@ -43,6 +44,7 @@ XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
 OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
 INCEPTION_DEFAULT_API_BASE: Final[str] = "https://api.inceptionlabs.ai/v1"
 OPENAI_STT_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/transcriptions"
+OPENAI_TTS_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/speech"
 MODEL_FETCH_TIMEOUT: Final[int] = 20
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parents[3] / ".run" / "ui_settings.json"
 DEFAULT_UI_TONE: Final[str] = "balanced"
@@ -643,6 +645,24 @@ def _provider_settings_payload(
     ]
 
 
+def _tts_settings_payload() -> dict[str, JSONValue]:
+    config = TtsConfig()
+    api_key = config.resolve_api_key()
+    model = config.resolve_model()
+    voice = config.resolve_voice()
+    format_value = config.resolve_format()
+    return {
+        "provider": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "api_key_set": api_key is not None,
+        "endpoint": OPENAI_TTS_ENDPOINT,
+        "model": model,
+        "voice": voice,
+        "format": format_value,
+        "backend_ready": api_key is not None,
+    }
+
+
 def _build_settings_payload(
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
@@ -684,6 +704,9 @@ def _build_settings_payload(
                 "profile": policy_profile,
                 "yolo_armed": yolo_armed,
                 "yolo_armed_at": yolo_armed_at,
+            },
+            "audio": {
+                "tts": _tts_settings_payload(),
             },
             "providers": _provider_settings_payload(ui_settings_path=ui_settings_path),
         },

@@ -38,16 +38,23 @@ def _openai_error_message(response: object) -> str | None:
 
 
 def _tts_error_response(message: str) -> web.Response:
-    normalized = message.strip() or "TTS tool failed."
+    normalized = message.strip() or "OpenAI TTS request failed."
     lowered = normalized.lower()
     status = 502
     error_type = "upstream_error"
     code = "tts_failed"
-    if "пуст" in lowered or "format" in lowered or "формат" in lowered or "voice_id" in lowered:
+    if (
+        "пуст" in lowered
+        or "format" in lowered
+        or "формат" in lowered
+        or "voice" in lowered
+        or "превышает лимит" in lowered
+        or "4096" in lowered
+    ):
         status = 400
         error_type = "invalid_request_error"
         code = "invalid_request_error"
-    elif "api key" in lowered or "отключ" in lowered:
+    elif "api key" in lowered or "отключ" in lowered or "safe mode" in lowered:
         status = 409
         error_type = "configuration_error"
         code = "tts_unavailable"
@@ -609,6 +616,14 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    voice_raw = payload.get("voice")
+    if voice_raw is not None and not isinstance(voice_raw, str):
+        return error_response(
+            status=400,
+            message="voice должен быть строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
     format_raw = payload.get("format")
     if format_raw is not None and not isinstance(format_raw, str):
         return error_response(
@@ -636,8 +651,16 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
         )
 
     args: dict[str, JSONValue] = {"text": text_raw.strip()}
-    if isinstance(voice_id_raw, str) and voice_id_raw.strip():
-        args["voice_id"] = voice_id_raw.strip()
+    voice_value = (
+        voice_raw.strip()
+        if isinstance(voice_raw, str) and voice_raw.strip()
+        else voice_id_raw.strip()
+        if isinstance(voice_id_raw, str) and voice_id_raw.strip()
+        else None
+    )
+    if voice_value is not None:
+        args["voice"] = voice_value
+        args["voice_id"] = voice_value
     if isinstance(format_raw, str) and format_raw.strip():
         args["format"] = format_raw.strip().lower()
 

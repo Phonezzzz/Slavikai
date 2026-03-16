@@ -21,25 +21,55 @@ class TtsTool:
         text = str(request.args.get("text") or "").strip()
         if not text:
             return ToolResult.failure("Текст для озвучки пуст.")
-        voice_id = str(request.args.get("voice_id") or self.config.resolve_voice_id() or "").strip()
-        if not voice_id:
-            return ToolResult.failure("voice_id не задан. Укажите голос или настройте в конфиге.")
-        fmt = str(request.args.get("format") or self.config.format).lower()
+        if len(text) > self.config.max_input_chars:
+            return ToolResult.failure(
+                f"Текст для озвучки превышает лимит {self.config.max_input_chars} символов."
+            )
+        voice = str(
+            request.args.get("voice")
+            or request.args.get("voice_id")
+            or self.config.resolve_voice()
+            or ""
+        ).strip()
+        if not voice:
+            return ToolResult.failure(
+                "voice не задан. Укажите голос или настройте OPENAI_TTS_VOICE."
+            )
+        fmt = str(request.args.get("format") or self.config.resolve_format()).lower()
         if fmt not in {"mp3", "wav"}:
             return ToolResult.failure("Формат должен быть mp3 или wav.")
+        model = str(request.args.get("model") or self.config.resolve_model()).strip()
+        if not model:
+            return ToolResult.failure(
+                "TTS model не задан. Укажите модель или настройте OPENAI_TTS_MODEL."
+            )
         api_key = self.config.resolve_api_key()
         if not api_key:
-            return ToolResult.failure("TTS API key не задан (TTS_API_KEY).")
+            return ToolResult.failure("OpenAI API key не задан для TTS (env OPENAI_API_KEY).")
 
-        url = f"{self.config.endpoint}/{voice_id}"
-        headers = {"xi-api-key": api_key, "Accept": f"audio/{fmt}"}
-        payload = {"text": text, "model_id": "eleven_multilingual_v2"}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": f"audio/{fmt}",
+        }
+        payload = {
+            "model": model,
+            "voice": voice,
+            "input": text,
+            "response_format": fmt,
+        }
 
         result: HttpResult = self.http.post_bytes(
-            url, json=payload, headers=headers, timeout=self.config.timeout
+            self.config.endpoint,
+            json=payload,
+            headers=headers,
+            timeout=self.config.timeout,
         )
-        if not result.ok or not isinstance(result.data, (bytes, bytearray)):
-            return ToolResult.failure(result.error or "Ошибка TTS сервиса.")
+        if (
+            not result.ok
+            or not isinstance(result.data, (bytes, bytearray))
+            or len(result.data) == 0
+        ):
+            return ToolResult.failure(result.error or "Ошибка OpenAI TTS сервиса.")
 
         file_name = self._build_filename(text, fmt)
         file_path = SANDBOX_AUDIO / file_name
@@ -53,7 +83,9 @@ class TtsTool:
                 "output": "Аудио сгенерировано",
                 "file_path": str(file_path),
                 "format": fmt,
-                "voice_id": voice_id,
+                "voice": voice,
+                "voice_id": voice,
+                "model": model,
             }
         )
 

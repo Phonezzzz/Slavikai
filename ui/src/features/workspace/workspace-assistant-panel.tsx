@@ -142,7 +142,6 @@ export function WorkspaceAssistantPanel({
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [sttError, setSttError] = useState<string | null>(null);
-  const [ttsNotice, setTtsNotice] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -203,9 +202,6 @@ export function WorkspaceAssistantPanel({
         URL.revokeObjectURL(audioUrlRef.current);
         audioUrlRef.current = null;
       }
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-      }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       }
@@ -227,9 +223,6 @@ export function WorkspaceAssistantPanel({
   };
 
   const stopPlayback = () => {
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = '';
@@ -379,18 +372,6 @@ export function WorkspaceAssistantPanel({
     });
   };
 
-  const playViaBrowserTts = (message: CanvasMessage): boolean => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      return false;
-    }
-    const utterance = new SpeechSynthesisUtterance(message.content);
-    utterance.onend = () => setSpeakingMessageId((prev) => (prev === message.messageId ? null : prev));
-    utterance.onerror = () => setSpeakingMessageId((prev) => (prev === message.messageId ? null : prev));
-    setSpeakingMessageId(message.messageId);
-    window.speechSynthesis.speak(utterance);
-    return true;
-  };
-
   const handleListenToggle = async (message: CanvasMessage) => {
     if (!message.content.trim()) {
       return;
@@ -401,7 +382,6 @@ export function WorkspaceAssistantPanel({
     }
 
     stopPlayback();
-    setTtsNotice(null);
     setSttError(null);
     try {
       const response = await fetch('/ui/api/tts/speak', {
@@ -437,11 +417,7 @@ export function WorkspaceAssistantPanel({
       await audio.play();
     } catch (error) {
       stopPlayback();
-      if (playViaBrowserTts(message)) {
-        setTtsNotice('Server TTS недоступен, использую browser speech synthesis.');
-      } else {
-        setSttError(error instanceof Error ? error.message : 'TTS failed.');
-      }
+      setSttError(error instanceof Error ? error.message : 'TTS failed.');
     }
   };
 
@@ -591,7 +567,6 @@ export function WorkspaceAssistantPanel({
     onAgentInputChange('');
     setComposerAttachments([]);
     setSttError(null);
-    setTtsNotice(null);
     const ok = await onSendPayload({
       content: trimmed,
       attachments: attachmentsPayload.length > 0 ? attachmentsPayload : undefined,
@@ -797,11 +772,6 @@ export function WorkspaceAssistantPanel({
       <div className="border-t border-[#1f1f24] p-3 space-y-2">
         {terminalPendingText ? (
           <div className="text-[11px] text-amber-300">{terminalPendingText}</div>
-        ) : null}
-        {ttsNotice ? (
-          <div className="rounded-md border border-[#2d2d38] bg-[#17171d] px-2.5 py-2 text-[11px] text-[#c8c8d2]">
-            {ttsNotice}
-          </div>
         ) : null}
         {sttError ? (
           <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-2.5 py-2 text-[11px] text-rose-200">

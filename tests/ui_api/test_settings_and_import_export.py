@@ -80,6 +80,14 @@ def test_ui_settings_endpoint() -> None:
             for provider in providers:
                 assert isinstance(provider, dict)
                 assert "api_key_value" not in provider
+            audio = settings.get("audio")
+            assert isinstance(audio, dict)
+            tts = audio.get("tts")
+            assert isinstance(tts, dict)
+            assert tts.get("provider") == "openai"
+            assert tts.get("api_key_env") == "OPENAI_API_KEY"
+            assert isinstance(tts.get("api_key_set"), bool)
+            assert isinstance(tts.get("backend_ready"), bool)
         finally:
             await client.close()
 
@@ -201,6 +209,14 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert openai_provider.get("api_key_set") is False
             assert openai_provider.get("api_key_source") == "missing"
             assert "api_key_value" not in openai_provider
+            audio = settings.get("audio")
+            assert isinstance(audio, dict)
+            tts = audio.get("tts")
+            assert isinstance(tts, dict)
+            assert tts.get("provider") == "openai"
+            assert tts.get("api_key_env") == "OPENAI_API_KEY"
+            assert tts.get("api_key_set") is False
+            assert tts.get("backend_ready") is False
         finally:
             await client.close()
 
@@ -602,7 +618,10 @@ def test_ui_tts_speak_success(monkeypatch, tmp_path) -> None:
     async def run() -> None:
         client = await _create_client(TtsAgent(audio_path=audio_path))
         try:
-            response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
+            response = await client.post(
+                "/ui/api/tts/speak",
+                json={"text": "Привет, мир", "voice_id": "nova"},
+            )
             assert response.status == 200
             assert response.headers.get("Content-Type") == "audio/mp3"
             assert await response.read() == b"fake-mp3"
@@ -614,7 +633,9 @@ def test_ui_tts_speak_success(monkeypatch, tmp_path) -> None:
 
 def test_ui_tts_speak_returns_controlled_error_on_tool_failure() -> None:
     async def run() -> None:
-        client = await _create_client(TtsAgent(fail_message="TTS API key не задан (TTS_API_KEY)."))
+        client = await _create_client(
+            TtsAgent(fail_message="OpenAI API key не задан для TTS (env OPENAI_API_KEY).")
+        )
         try:
             response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
             assert response.status == 409
@@ -622,6 +643,57 @@ def test_ui_tts_speak_returns_controlled_error_on_tool_failure() -> None:
             error = payload.get("error")
             assert isinstance(error, dict)
             assert error.get("code") == "tts_unavailable"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_tts_speak_returns_409_when_safe_mode_blocks_tool() -> None:
+    async def run() -> None:
+        client = await _create_client(TtsAgent(fail_message="Safe mode: инструмент отключён"))
+        try:
+            response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
+            assert response.status == 409
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "tts_unavailable"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_tts_speak_returns_502_on_upstream_failure() -> None:
+    async def run() -> None:
+        client = await _create_client(TtsAgent(fail_message="Ошибка OpenAI TTS сервиса."))
+        try:
+            response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
+            assert response.status == 502
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "tts_failed"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_tts_speak_rejects_invalid_voice_type() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post(
+                "/ui/api/tts/speak",
+                json={"text": "Привет, мир", "voice": 7},
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
         finally:
             await client.close()
 

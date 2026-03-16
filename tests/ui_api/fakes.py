@@ -100,6 +100,7 @@ class TtsAgent(DummyAgent):
             {
                 "file_path": str(self.audio_path),
                 "format": format_value,
+                "voice": "test-voice",
                 "voice_id": "test-voice",
             }
         )

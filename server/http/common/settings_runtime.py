@@ -185,6 +185,9 @@ class SettingsRuntimeBindings:
                     "yolo_armed": yolo_armed,
                     "yolo_armed_at": yolo_armed_at,
                 },
+                "audio": {
+                    "tts": ui_settings._tts_settings_payload(),
+                },
                 "providers": self.provider_settings_payload(),
             },
         }

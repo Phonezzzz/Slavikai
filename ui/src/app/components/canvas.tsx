@@ -300,7 +300,6 @@ export function Canvas({
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [sttError, setSttError] = useState<string | null>(null);
-  const [ttsNotice, setTtsNotice] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -335,9 +334,6 @@ export function Canvas({
       if (audioUrlRef.current) {
         URL.revokeObjectURL(audioUrlRef.current);
         audioUrlRef.current = null;
-      }
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
       }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.stop();
@@ -462,9 +458,6 @@ export function Canvas({
   };
 
   const stopPlayback = () => {
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = "";
@@ -542,7 +535,6 @@ export function Canvas({
     setComposerAttachments([]);
     setPasteUndo(null);
     setSttError(null);
-    setTtsNotice(null);
 
     const sent = await onSendMessage?.({
       content: trimmed,
@@ -601,18 +593,6 @@ export function Canvas({
     });
   };
 
-  const playViaBrowserTts = (message: CanvasMessage): boolean => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      return false;
-    }
-    const utterance = new SpeechSynthesisUtterance(message.content);
-    utterance.onend = () => setSpeakingMessageId((prev) => (prev === message.messageId ? null : prev));
-    utterance.onerror = () => setSpeakingMessageId((prev) => (prev === message.messageId ? null : prev));
-    setSpeakingMessageId(message.messageId);
-    window.speechSynthesis.speak(utterance);
-    return true;
-  };
-
   const handleListenToggle = async (message: CanvasMessage) => {
     if (!message.content.trim()) {
       return;
@@ -623,7 +603,6 @@ export function Canvas({
     }
 
     stopPlayback();
-    setTtsNotice(null);
     setSttError(null);
     try {
       const response = await fetch("/ui/api/tts/speak", {
@@ -659,11 +638,7 @@ export function Canvas({
       await audio.play();
     } catch (error) {
       stopPlayback();
-      if (playViaBrowserTts(message)) {
-        setTtsNotice("Server TTS недоступен, использую browser speech synthesis.");
-      } else {
-        setSttError(error instanceof Error ? error.message : "TTS failed.");
-      }
+      setSttError(error instanceof Error ? error.message : "TTS failed.");
     }
   };
 
@@ -960,11 +935,6 @@ export function Canvas({
           {statusMessage ? (
             <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
               {statusMessage}
-            </div>
-          ) : null}
-          {ttsNotice ? (
-            <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
-              {ttsNotice}
             </div>
           ) : null}
           {sttError ? (

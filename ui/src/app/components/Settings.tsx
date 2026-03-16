@@ -34,10 +34,22 @@ type ProviderRuntimeState = {
   error: string | null;
 };
 
+type TtsBackendSettings = {
+  provider: 'openai';
+  api_key_env: string;
+  api_key_set: boolean;
+  endpoint: string;
+  model: string;
+  voice: string;
+  format: string;
+  backend_ready: boolean;
+};
+
 type ProviderRuntimeByModel = Record<ModelProvider, ProviderRuntimeState | null>;
 
 type ParsedSettings = {
   providers: ProviderSettings[];
+  ttsBackend: TtsBackendSettings;
   toolsState: Record<ToolKey, boolean>;
   policyProfile: PolicyProfile;
   yoloArmed: boolean;
@@ -158,6 +170,16 @@ const DEFAULT_TOOLS_STATE: Record<ToolKey, boolean> = {
   stt: false,
   safe_mode: true,
 };
+const DEFAULT_TTS_BACKEND: TtsBackendSettings = {
+  provider: 'openai',
+  api_key_env: 'OPENAI_API_KEY',
+  api_key_set: false,
+  endpoint: 'https://api.openai.com/v1/audio/speech',
+  model: 'gpt-4o-mini-tts',
+  voice: 'alloy',
+  format: 'mp3',
+  backend_ready: false,
+};
 
 const isApiKeyProvider = (value: unknown): value is ApiKeyProvider =>
   value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception' || value === 'openai';
@@ -198,6 +220,7 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
 const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   const defaults: ParsedSettings = {
     providers: DEFAULT_PROVIDER_SETTINGS,
+    ttsBackend: DEFAULT_TTS_BACKEND,
     toolsState: DEFAULT_TOOLS_STATE,
     policyProfile: DEFAULT_POLICY_PROFILE,
     yoloArmed: false,
@@ -366,8 +389,43 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
+  let ttsBackend = defaults.ttsBackend;
+  const audioRaw = (settings as { audio?: unknown }).audio;
+  if (audioRaw && typeof audioRaw === 'object') {
+    const ttsRaw = (audioRaw as { tts?: unknown }).tts;
+    if (ttsRaw && typeof ttsRaw === 'object') {
+      const provider = (ttsRaw as { provider?: unknown }).provider;
+      const apiKeyEnv = (ttsRaw as { api_key_env?: unknown }).api_key_env;
+      const apiKeySet = (ttsRaw as { api_key_set?: unknown }).api_key_set;
+      const endpoint = (ttsRaw as { endpoint?: unknown }).endpoint;
+      const model = (ttsRaw as { model?: unknown }).model;
+      const voice = (ttsRaw as { voice?: unknown }).voice;
+      const format = (ttsRaw as { format?: unknown }).format;
+      const backendReady = (ttsRaw as { backend_ready?: unknown }).backend_ready;
+      ttsBackend = {
+        provider: provider === 'openai' ? 'openai' : defaults.ttsBackend.provider,
+        api_key_env:
+          typeof apiKeyEnv === 'string' && apiKeyEnv.trim()
+            ? apiKeyEnv
+            : defaults.ttsBackend.api_key_env,
+        api_key_set: typeof apiKeySet === 'boolean' ? apiKeySet : defaults.ttsBackend.api_key_set,
+        endpoint:
+          typeof endpoint === 'string' && endpoint.trim()
+            ? endpoint
+            : defaults.ttsBackend.endpoint,
+        model: typeof model === 'string' && model.trim() ? model : defaults.ttsBackend.model,
+        voice: typeof voice === 'string' && voice.trim() ? voice : defaults.ttsBackend.voice,
+        format:
+          typeof format === 'string' && format.trim() ? format : defaults.ttsBackend.format,
+        backend_ready:
+          typeof backendReady === 'boolean' ? backendReady : defaults.ttsBackend.backend_ready,
+      };
+    }
+  }
+
   return {
     providers,
+    ttsBackend,
     toolsState,
     policyProfile,
     yoloArmed,
@@ -541,6 +599,7 @@ export function Settings({
   const [yoloConfirmText, setYoloConfirmText] = useState('');
   const [yoloSecondConfirm, setYoloSecondConfirm] = useState(false);
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
+  const [ttsBackend, setTtsBackend] = useState<TtsBackendSettings>(DEFAULT_TTS_BACKEND);
   const [providerRuntime, setProviderRuntime] = useState<ProviderRuntimeByModel>(
     DEFAULT_PROVIDER_RUNTIME,
   );
@@ -574,6 +633,7 @@ export function Settings({
 
   const applyParsedSettings = (parsed: ParsedSettings): void => {
     setProviders(parsed.providers);
+    setTtsBackend(parsed.ttsBackend);
     setToolsState(parsed.toolsState);
     setPolicyProfile(parsed.policyProfile);
     setYoloArmed(parsed.yoloArmed);
@@ -975,6 +1035,52 @@ export function Settings({
 
                   {!loading && activeTab === 'api' ? (
                     <div className="space-y-4">
+                      <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
+                        <div className="mb-3 flex items-center justify-between">
+                          <h3 className="font-medium text-zinc-100">OpenAI TTS backend</h3>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`rounded-md px-2 py-1 text-xs font-medium ${
+                                ttsBackend.backend_ready
+                                  ? 'bg-emerald-500/20 text-emerald-300'
+                                  : 'bg-amber-500/20 text-amber-300'
+                              }`}
+                            >
+                              {ttsBackend.backend_ready ? 'backend ready' : 'backend not ready'}
+                            </span>
+                            <span
+                              className={`rounded-md px-2 py-1 text-xs font-medium ${
+                                ttsBackend.api_key_set
+                                  ? 'bg-emerald-500/20 text-emerald-300'
+                                  : 'bg-amber-500/20 text-amber-300'
+                              }`}
+                            >
+                              {ttsBackend.api_key_set ? 'key set' : 'key missing'}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="space-y-2 text-xs text-zinc-400">
+                          <div>
+                            Provider: <span className="text-zinc-300">{PROVIDER_LABELS[ttsBackend.provider]}</span>
+                          </div>
+                          <div>
+                            Env: <span className="font-mono text-zinc-300">{ttsBackend.api_key_env}</span>
+                          </div>
+                          <div className="break-all">Endpoint: {ttsBackend.endpoint}</div>
+                          <div>
+                            Model: <span className="font-mono text-zinc-300">{ttsBackend.model}</span>
+                          </div>
+                          <div>
+                            Voice: <span className="font-mono text-zinc-300">{ttsBackend.voice}</span>
+                          </div>
+                          <div>
+                            Format: <span className="font-mono text-zinc-300">{ttsBackend.format}</span>
+                          </div>
+                          <div className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-zinc-400">
+                            TTS backend is env-only. Runtime delivery still depends on Tools &gt; Text to speech and Safe mode.
+                          </div>
+                        </div>
+                      </div>
                       {providers.map((provider) => {
                         const runtime = isModelProvider(provider.provider)
                           ? providerRuntime[provider.provider]
