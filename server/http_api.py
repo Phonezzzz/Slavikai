@@ -495,6 +495,7 @@ _run_plan_readonly_audit = _WORKSPACE_RUNTIME.run_plan_readonly_audit
 
 _build_plan_draft = _ui_runtime._build_plan_draft
 _compile_plan_to_task_packet = _ui_runtime._compile_plan_to_task_packet
+_serialize_task_packet_payload = _ui_runtime._serialize_task_packet_payload
 _plan_with_status = _ui_runtime._plan_with_status
 _task_with_status = _ui_runtime._task_with_status
 _plan_mark_step = _ui_runtime._plan_mark_step

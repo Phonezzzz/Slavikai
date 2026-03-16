@@ -79,6 +79,7 @@ async def handle_ui_state(request: web.Request) -> web.Response:
         "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
         "active_task": _normalize_task_payload(workflow.get("active_task")),
         "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+        "decision": decision,
         "pending_decision": decision,
     }
     response = json_response(payload)

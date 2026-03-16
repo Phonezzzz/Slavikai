@@ -35,7 +35,9 @@ from server.http_api import (
     _resolve_workspace_root_candidate,
     _run_plan_runner,
     _serialize_approval_request,
+    _serialize_task_packet_payload,
     _set_current_plan_step_status,
+    _task_with_status,
     _utc_now_iso,
     _workspace_root_for_session,
 )
@@ -289,6 +291,21 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    if tool_source_endpoint == "plan.execute_runner":
+        if choice == "edit_and_approve":
+            return error_response(
+                status=400,
+                message="edit_and_approve не поддерживается для plan.execute_runner.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        if choice not in {"approve_once", "approve_session", "reject"}:
+            return error_response(
+                status=400,
+                message="Для plan.execute_runner доступны approve_once|approve_session|reject.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
 
     async def _resolve_tool_decision() -> dict[str, JSONValue]:
         context_raw = current_decision.get("context")
@@ -447,6 +464,57 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "output": response_text,
                     "auto_state": auto_state,
                 },
+            }
+
+        if source_endpoint == "plan.execute_runner":
+            workflow = await hub.get_session_workflow(session_id)
+            current_plan = _normalize_plan_payload(workflow.get("active_plan"))
+            current_task = _normalize_task_payload(workflow.get("active_task"))
+            plan_id_raw = resume_payload.get("plan_id")
+            task_id_raw = resume_payload.get("task_id")
+            if current_plan is None or current_task is None:
+                return {
+                    "ok": False,
+                    "error": "plan_state_conflict",
+                    "source_endpoint": source_endpoint,
+                }
+            if (
+                not isinstance(plan_id_raw, str)
+                or not plan_id_raw.strip()
+                or current_plan.get("plan_id") != plan_id_raw
+            ):
+                return {
+                    "ok": False,
+                    "error": "plan_state_conflict",
+                    "source_endpoint": source_endpoint,
+                }
+            if (
+                not isinstance(task_id_raw, str)
+                or not task_id_raw.strip()
+                or current_task.get("task_id") != task_id_raw
+            ):
+                return {
+                    "ok": False,
+                    "error": "task_already_running",
+                    "source_endpoint": source_endpoint,
+                }
+            asyncio.create_task(
+                _run_plan_runner(
+                    app=request.app,
+                    session_id=session_id,
+                    plan_id=plan_id_raw,
+                    task_id=task_id_raw,
+                )
+            )
+            return {
+                "ok": True,
+                "source_endpoint": source_endpoint,
+                "data": {
+                    "plan_id": plan_id_raw,
+                    "task_id": task_id_raw,
+                    "blocked_step_id": resume_payload.get("blocked_step_id"),
+                },
+                "resume_started": True,
             }
 
         if source_endpoint != "workspace.tool":
@@ -735,36 +803,18 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "updated_at": _utc_now_iso(),
         }
         workspace_root = await _workspace_root_for_session(hub, session_id)
+        approved_categories = sorted(await session_store.get_categories(session_id))
         try:
             compiled_packet = _compile_plan_to_task_packet(
                 plan=running_plan,
                 session_id=session_id,
                 trace_id=str(uuid.uuid4()),
                 workspace_root=str(workspace_root),
+                approved_categories=approved_categories,
             )
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        task_payload["task_packet"] = {
-            "task_id": compiled_packet.task_id,
-            "packet_hash": compiled_packet.packet_hash,
-            "packet_revision": compiled_packet.packet_revision,
-            "scope": dict(compiled_packet.scope),
-            "budgets": dict(compiled_packet.budgets),
-            "approvals": dict(compiled_packet.approvals),
-            "verifier": dict(compiled_packet.verifier),
-            "steps": [
-                {
-                    "step_id": step.step_id,
-                    "title": step.title,
-                    "description": step.description,
-                    "allowed_tool_kinds": list(step.allowed_tool_kinds),
-                    "inputs": dict(step.inputs),
-                    "expected_outputs": list(step.expected_outputs),
-                    "acceptance_checks": list(step.acceptance_checks),
-                }
-                for step in compiled_packet.steps
-            ],
-        }
+        task_payload["task_packet"] = _serialize_task_packet_payload(compiled_packet)
         started, _, start_error = await hub.start_plan_task_if_possible(
             session_id,
             expected_mode="plan",
@@ -989,6 +1039,37 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             resolved_status_raw if isinstance(resolved_status_raw, str) else "rejected"
         )
         resume_payload_response: dict[str, JSONValue] | None = None
+        if source_endpoint == "plan.execute_runner":
+            await _set_current_plan_step_status(
+                hub=hub,
+                session_id=session_id,
+                status="failed",
+            )
+            workflow_before = await hub.get_session_workflow(session_id)
+            plan_before = _normalize_plan_payload(workflow_before.get("active_plan"))
+            task_before = _normalize_task_payload(workflow_before.get("active_task"))
+            blocked_step_id_raw = resume_payload.get("blocked_step_id")
+            blocked_step_id = (
+                blocked_step_id_raw.strip()
+                if isinstance(blocked_step_id_raw, str) and blocked_step_id_raw.strip()
+                else None
+            )
+            if plan_before is not None:
+                plan_before = _plan_with_status(plan_before, status="failed")
+            if task_before is not None:
+                task_before = _task_with_status(task_before, status="failed", current_step_id=None)
+                execution_raw = task_before.get("execution")
+                execution = dict(execution_raw) if isinstance(execution_raw, dict) else {}
+                execution["status"] = "failed"
+                execution["stop_reason_code"] = "APPROVAL_REQUIRED"
+                execution["rejected_step_id"] = blocked_step_id
+                task_before["execution"] = execution
+            await hub.set_session_workflow(
+                session_id,
+                mode="act",
+                active_plan=plan_before,
+                active_task=task_before,
+            )
         if source_endpoint == "auto.run":
             run_id_raw = resume_payload.get("run_id")
             run_id = (
@@ -1070,7 +1151,13 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     else:
         resume = await _resolve_agent_decision()
 
-    if decision_type == "tool_approval":
+    current_context_raw = current_decision.get("context")
+    current_context = current_context_raw if isinstance(current_context_raw, dict) else {}
+    current_source_endpoint_raw = current_context.get("source_endpoint")
+    current_source_endpoint = (
+        current_source_endpoint_raw if isinstance(current_source_endpoint_raw, str) else ""
+    )
+    if decision_type == "tool_approval" and current_source_endpoint != "plan.execute_runner":
         await _set_current_plan_step_status(
             hub=hub,
             session_id=session_id,

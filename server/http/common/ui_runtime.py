@@ -305,6 +305,10 @@ def _compile_plan_to_task_packet(
     )
 
 
+def _serialize_task_packet_payload(packet: TaskPacket) -> dict[str, JSONValue]:
+    return workflow_runtime.serialize_task_packet_payload(packet)
+
+
 def _plan_with_status(
     plan: dict[str, JSONValue],
     *,
@@ -473,6 +477,38 @@ async def _run_plan_runner(
     plan_id: str,
     task_id: str,
 ) -> None:
+    def _approval_decision_builder(
+        approval_request: dict[str, JSONValue],
+        session_id_value: str,
+        source_endpoint: str,
+        resume_payload: dict[str, JSONValue],
+        trace_id: str | None,
+        workflow_context: dict[str, JSONValue] | None,
+    ) -> dict[str, JSONValue]:
+        return _build_ui_approval_decision(
+            approval_request=approval_request,
+            session_id=session_id_value,
+            source_endpoint=source_endpoint,
+            resume_payload=resume_payload,
+            trace_id=trace_id,
+            workflow_context=workflow_context,
+        )
+
+    def _workflow_context_builder(
+        mode: str,
+        active_plan: dict[str, JSONValue] | None,
+        active_task: dict[str, JSONValue] | None,
+    ) -> dict[str, JSONValue]:
+        return _decision_workflow_context(
+            mode=mode,
+            active_plan=active_plan,
+            active_task=active_task,
+        )
+
+    def _approval_serializer(request: object) -> dict[str, JSONValue] | None:
+        normalized = request if isinstance(request, ApprovalRequest) else None
+        return _serialize_approval_request(normalized)
+
     return await workflow_runtime.run_plan_runner(
         app=app,
         session_id=session_id,
@@ -494,5 +530,8 @@ async def _run_plan_runner(
             status=status,
             evidence=evidence,
         ),
+        build_ui_approval_decision_fn=_approval_decision_builder,
+        decision_workflow_context_fn=_workflow_context_builder,
+        serialize_approval_request_fn=_approval_serializer,
         utc_now_iso_fn=_utc_now_iso,
     )

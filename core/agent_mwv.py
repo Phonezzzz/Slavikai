@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from core.approval_policy import ApprovalCategory, ApprovalRequired
+from core.approval_policy import ApprovalCategory, ApprovalRequest, ApprovalRequired
 from core.decision.handler import DecisionEvent
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
@@ -46,6 +46,27 @@ _ACTION_ORIENTED_RISK_FLAGS = frozenset({"code_change", "filesystem", "git", "in
 _NO_OBSERVABLE_ACTION_ERROR = (
     "MWV route требует наблюдаемого действия, но tool calls/diffs отсутствуют."
 )
+
+
+class TaskPacketApprovalPending(Exception):
+    def __init__(
+        self,
+        *,
+        request: ApprovalRequest,
+        blocked_step_id: str,
+        step_results: list[dict[str, JSONValue]],
+        changes: list[dict[str, JSONValue]],
+        tool_calls_used: int,
+        diff_size: int,
+    ) -> None:
+        super().__init__("TaskPacket execution requires approval.")
+        self.request = request
+        self.blocked_step_id = blocked_step_id
+        self.step_results = step_results
+        self.changes = changes
+        self.tool_calls_used = tool_calls_used
+        self.diff_size = diff_size
+
 
 if TYPE_CHECKING:
     import logging
@@ -102,6 +123,7 @@ class AgentMWVMixin:
         runtime_plan_guard_enabled: bool
         runtime_workspace_root: str | None
         _last_skill_match: SkillMatch | None
+        _workspace_diffs: dict[str, WorkspaceDiffEntry]
 
         def _inc_metric(self, metric_key: str) -> None: ...
         def _handle_decision_packet(
@@ -439,12 +461,52 @@ class AgentMWVMixin:
                 root_cause_tag="scope_error",
             )
 
+        resume_state = self._mwv_resume_state(task)
+        prior_step_results_raw = resume_state.get("step_results")
+        prior_step_results = (
+            [dict(item) for item in prior_step_results_raw if isinstance(item, dict)]
+            if isinstance(prior_step_results_raw, list)
+            else []
+        )
+        prior_changes_raw = resume_state.get("changes")
+        prior_changes = (
+            [
+                change
+                for change in (self._work_change_from_json(item) for item in prior_changes_raw)
+                if change is not None
+            ]
+            if isinstance(prior_changes_raw, list)
+            else []
+        )
+        prior_tool_calls_raw = resume_state.get("tool_calls_used")
+        prior_tool_calls = (
+            prior_tool_calls_raw
+            if isinstance(prior_tool_calls_raw, int) and prior_tool_calls_raw >= 0
+            else 0
+        )
+        prior_diff_size_raw = resume_state.get("diff_size")
+        prior_diff_size = (
+            prior_diff_size_raw
+            if isinstance(prior_diff_size_raw, int) and prior_diff_size_raw >= 0
+            else 0
+        )
+
         runtime_snapshot = self._capture_runtime_execution_state()
         plan_snapshot = self._build_packet_plan_snapshot(task)
-        step_states: list[PlanStep] = []
+        step_states = [
+            plan_step
+            for plan_step in (self._plan_step_from_snapshot(item) for item in prior_step_results)
+            if plan_step is not None
+        ]
+        step_results = list(prior_step_results)
+        completed_step_ids = {
+            str(item.get("step_id"))
+            for item in prior_step_results
+            if item.get("status") == "done" and isinstance(item.get("step_id"), str)
+        }
         stop_reason = StopReasonCode.WORKER_FAILED
         action_oriented = self._mwv_is_action_oriented_task(task)
-        successful_tool_calls = 0
+        successful_tool_calls = prior_tool_calls
 
         try:
             with workspace_root_context(workspace_root):
@@ -460,10 +522,14 @@ class AgentMWVMixin:
                         successful_tool_calls += 1
 
                 for step in task.steps:
+                    if step.step_id in completed_step_ids:
+                        continue
                     require_operation = self._mwv_step_requires_operation(
                         step,
                         action_oriented=action_oriented,
                     )
+                    tool_calls_before = successful_tool_calls
+                    diff_totals_before = self._workspace_diff_totals()
                     operation, operation_error = self._resolve_packet_step_operation(
                         step,
                         require_operation=require_operation,
@@ -485,18 +551,85 @@ class AgentMWVMixin:
                         plan_step.status = PlanStepStatus.ERROR
                         plan_step.result = operation_error
                         step_states.append(plan_step)
+                        step_results.append(
+                            self._step_result_snapshot(
+                                step_id=step.step_id,
+                                description=step.description,
+                                status="failed",
+                                operation=operation,
+                                result=operation_error,
+                                tool_calls_used=0,
+                                changes=[],
+                            )
+                        )
                         stop_reason = StopReasonCode.REPLAN_REQUIRED
                         break
                     step_plan = TaskPlan(goal=task.goal, steps=[plan_step])
-                    executed = self.executor.run(
-                        step_plan,
-                        tool_gateway=self._build_tool_gateway(
-                            pre_call=self._workspace_diff_pre_call,
-                            post_call=_mwv_post_call,
-                        ),
-                    )
+                    try:
+                        executed = self.executor.run(
+                            step_plan,
+                            tool_gateway=self._build_tool_gateway(
+                                pre_call=self._workspace_diff_pre_call,
+                                post_call=_mwv_post_call,
+                            ),
+                        )
+                    except ApprovalRequired as exc:
+                        step_results.append(
+                            self._step_result_snapshot(
+                                step_id=step.step_id,
+                                description=step.description,
+                                status="waiting_approval",
+                                operation=operation,
+                                result="Требуется подтверждение",
+                                tool_calls_used=0,
+                                changes=[],
+                            )
+                        )
+                        current_diff_entries = self._workspace_diff_entries_delta(
+                            {},
+                            self._workspace_diff_totals(),
+                        )
+                        current_changes = self._mwv_changes_from_diffs(current_diff_entries)
+                        current_diff_size = sum(
+                            max(0, diff.added) + max(0, diff.removed)
+                            for diff in current_diff_entries
+                        )
+                        raise TaskPacketApprovalPending(
+                            request=exc.request,
+                            blocked_step_id=step.step_id,
+                            step_results=[
+                                item for item in step_results if item.get("status") == "done"
+                            ],
+                            changes=[
+                                self._work_change_to_json(change)
+                                for change in self._merge_work_changes(
+                                    prior_changes,
+                                    current_changes,
+                                )
+                            ],
+                            tool_calls_used=successful_tool_calls,
+                            diff_size=prior_diff_size + current_diff_size,
+                        ) from exc
                     executed_step = executed.steps[0]
                     step_states.append(executed_step)
+                    step_diff_entries = self._workspace_diff_entries_delta(
+                        diff_totals_before,
+                        self._workspace_diff_totals(),
+                    )
+                    step_changes = self._mwv_changes_from_diffs(step_diff_entries)
+                    step_results.append(
+                        self._step_result_snapshot(
+                            step_id=step.step_id,
+                            description=step.description,
+                            status="failed"
+                            if executed_step.status == PlanStepStatus.ERROR
+                            else "done",
+                            operation=operation,
+                            result=executed_step.result or "",
+                            tool_calls_used=successful_tool_calls - tool_calls_before,
+                            changes=step_changes,
+                        )
+                    )
                     if executed_step.status == PlanStepStatus.ERROR:
                         error_text = executed_step.result or ""
                         stop_reason = self._stop_reason_from_execution_error(error_text)
@@ -513,12 +646,18 @@ class AgentMWVMixin:
             else WorkStatus.SUCCESS
         )
         diff_entries = self.consume_workspace_diffs()
-        changes = self._mwv_changes_from_diffs(diff_entries)
+        changes = self._merge_work_changes(
+            prior_changes,
+            self._mwv_changes_from_diffs(diff_entries),
+        )
         diagnostics = self._build_mwv_diagnostics(executed_plan)
+        diagnostics["step_results"] = step_results
         diagnostics["tool_calls_ok"] = successful_tool_calls
         diagnostics["changes_total"] = len(changes)
         diagnostics["risk_flags"] = sorted(self._mwv_risk_flags(task))
-        diff_size = sum(max(0, diff.added) + max(0, diff.removed) for diff in diff_entries)
+        diff_size = prior_diff_size + sum(
+            max(0, diff.added) + max(0, diff.removed) for diff in diff_entries
+        )
         root_cause_tag = "success"
         if (
             status == WorkStatus.SUCCESS
@@ -569,6 +708,134 @@ class AgentMWVMixin:
             return task.goal
         constraints = "\n".join(f"- {item}" for item in task.constraints)
         return f"{task.goal}\nОграничения:\n{constraints}"
+
+    def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
+        verifier_runtime = _verifier_runtime_cls()()
+        worker = WorkerRuntime(runner=self._mwv_worker_runner)
+        manager = _manager_runtime_cls()(task_builder=lambda _messages, _context: packet)
+
+        def _worker(task: TaskPacket, run_context: RunContext) -> WorkResult:
+            return worker.run(task, run_context)
+
+        def _verifier(task: TaskPacket, run_context: RunContext) -> VerificationResult:
+            try:
+                return verifier_runtime.run(task, run_context)
+            except TypeError:
+                legacy_run = cast(Callable[[RunContext], VerificationResult], verifier_runtime.run)
+                return legacy_run(run_context)
+
+        return manager.run_flow(packet.messages, context, worker=_worker, verifier=_verifier)
+
+    def _mwv_resume_state(self, task: TaskPacket) -> dict[str, JSONValue]:
+        raw = task.context.get("plan_runner_resume")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _work_change_to_json(self, change: WorkChange) -> dict[str, JSONValue]:
+        return {
+            "path": change.path,
+            "change_type": change.change_type.value,
+            "summary": change.summary,
+        }
+
+    def _work_change_from_json(self, raw: object) -> WorkChange | None:
+        if not isinstance(raw, dict):
+            return None
+        path_raw = raw.get("path")
+        change_type_raw = raw.get("change_type")
+        summary_raw = raw.get("summary")
+        if not isinstance(path_raw, str) or not path_raw.strip():
+            return None
+        if not isinstance(change_type_raw, str):
+            return None
+        try:
+            change_type = ChangeType(change_type_raw)
+        except ValueError:
+            return None
+        summary = summary_raw if isinstance(summary_raw, str) else ""
+        return WorkChange(path=path_raw.strip(), change_type=change_type, summary=summary)
+
+    def _merge_work_changes(
+        self,
+        prior_changes: list[WorkChange],
+        current_changes: list[WorkChange],
+    ) -> list[WorkChange]:
+        merged: dict[str, WorkChange] = {change.path: change for change in prior_changes}
+        for change in current_changes:
+            merged[change.path] = change
+        ordered_paths = [change.path for change in prior_changes]
+        existing = set(ordered_paths)
+        for change in current_changes:
+            if change.path not in existing:
+                ordered_paths.append(change.path)
+                existing.add(change.path)
+        seen: set[str] = set()
+        ordered: list[WorkChange] = []
+        for path in [*ordered_paths, *merged.keys()]:
+            if path in seen:
+                continue
+            seen.add(path)
+            ordered.append(merged[path])
+        return ordered
+
+    def _step_result_snapshot(
+        self,
+        *,
+        step_id: str,
+        description: str,
+        status: str,
+        operation: str | None,
+        result: str,
+        tool_calls_used: int,
+        changes: list[WorkChange],
+    ) -> dict[str, JSONValue]:
+        return {
+            "step_id": step_id,
+            "description": description,
+            "status": status,
+            "operation": operation,
+            "result": result,
+            "tool_calls_used": tool_calls_used,
+            "changes": [self._work_change_to_json(change) for change in changes],
+        }
+
+    def _plan_step_from_snapshot(self, snapshot: dict[str, JSONValue]) -> PlanStep | None:
+        status_raw = snapshot.get("status")
+        description_raw = snapshot.get("result")
+        if not isinstance(status_raw, str):
+            return None
+        if status_raw == "done":
+            status = PlanStepStatus.DONE
+        elif status_raw in {"failed", "waiting_approval"}:
+            status = PlanStepStatus.ERROR
+        else:
+            return None
+        operation_raw = snapshot.get("operation")
+        return PlanStep(
+            description=str(snapshot.get("description") or snapshot.get("step_id") or ""),
+            operation=operation_raw if isinstance(operation_raw, str) else None,
+            status=status,
+            result=description_raw if isinstance(description_raw, str) else "",
+        )
+
+    def _workspace_diff_totals(self) -> dict[str, tuple[int, int]]:
+        return {path: (entry.added, entry.removed) for path, entry in self._workspace_diffs.items()}
+
+    def _workspace_diff_entries_delta(
+        self,
+        before: dict[str, tuple[int, int]],
+        after: dict[str, tuple[int, int]],
+    ) -> list[WorkspaceDiffEntry]:
+        deltas: list[WorkspaceDiffEntry] = []
+        for path, (added_after, removed_after) in after.items():
+            added_before, removed_before = before.get(path, (0, 0))
+            added_delta = max(0, added_after - added_before)
+            removed_delta = max(0, removed_after - removed_before)
+            if added_delta == 0 and removed_delta == 0:
+                continue
+            deltas.append(
+                WorkspaceDiffEntry(path=path, added=added_delta, removed=removed_delta, diff="")
+            )
+        return deltas
 
     def _resolve_packet_workspace_root(
         self,

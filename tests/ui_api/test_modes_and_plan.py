@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: F403,F405
+from core.agent_mwv import TaskPacketApprovalPending
+from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from server.http.common.workflow_runtime import compute_plan_completion_state
 from server.http_api import PLAN_AUDIT_MAX_READ_FILES
 
@@ -185,7 +187,7 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             steps = task_packet.get("steps")
             assert isinstance(steps, list) and steps
 
-            # runner skeleton доходит до completed асинхронно
+            # реальный packet runner доходит до completed асинхронно
             completed = False
             for _ in range(20):
                 await asyncio.sleep(0.02)
@@ -197,6 +199,120 @@ def test_ui_plan_lifecycle_endpoints() -> None:
                 state_payload = await state_resp.json()
                 next_task = state_payload.get("active_task")
                 if isinstance(next_task, dict) and next_task.get("status") == "completed":
+                    execution = next_task.get("execution")
+                    assert isinstance(execution, dict)
+                    assert execution.get("runner") == "mwv_packet_runner"
+                    assert execution.get("work_status") == "success"
+                    assert execution.get("verifier_status") == "passed"
+                    completed = True
+                    break
+            assert completed is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_plan_execute_waiting_approval_then_resume() -> None:
+    class PlanApprovalAgent(DummyAgent):
+        def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
+            if "EXEC_ARBITRARY" not in self._approved_categories:
+                raise TaskPacketApprovalPending(
+                    request=ApprovalRequest(
+                        category="EXEC_ARBITRARY",
+                        required_categories=["EXEC_ARBITRARY"],
+                        prompt=ApprovalPrompt(
+                            what="Разрешить шаг плана.",
+                            why="Нужно выполнить потенциально рискованное действие.",
+                            risk="Может изменить workspace.",
+                            changes=["workspace files"],
+                        ),
+                        tool="workspace_patch",
+                        details={"task_id": packet.task_id},
+                        session_id=self._session_id,
+                    ),
+                    blocked_step_id=packet.steps[0].step_id,
+                    step_results=[],
+                    changes=[],
+                    tool_calls_used=0,
+                    diff_size=0,
+                )
+            return super().run_task_packet(packet, context)
+
+    async def run() -> None:
+        client = await _create_client(PlanApprovalAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+
+            execute_resp = await client.post(
+                "/ui/api/plan/execute",
+                headers={"X-Slavik-Session": session_id},
+                json={"plan_revision": revision},
+            )
+            assert execute_resp.status == 200
+
+            waiting = False
+            decision_id = None
+            for _ in range(20):
+                await asyncio.sleep(0.02)
+                state_resp = await client.get(
+                    "/ui/api/state",
+                    headers={"X-Slavik-Session": session_id},
+                )
+                assert state_resp.status == 200
+                state_payload = await state_resp.json()
+                active_task = state_payload.get("active_task")
+                decision = state_payload.get("decision")
+                if isinstance(active_task, dict):
+                    execution = active_task.get("execution")
+                    if (
+                        isinstance(execution, dict)
+                        and execution.get("status") == "waiting_approval"
+                    ):
+                        assert active_task.get("current_step_id")
+                        if isinstance(decision, dict):
+                            context_raw = decision.get("context")
+                            assert isinstance(context_raw, dict)
+                            assert context_raw.get("source_endpoint") == "plan.execute_runner"
+                            decision_id_raw = decision.get("id")
+                            assert isinstance(decision_id_raw, str)
+                            decision_id = decision_id_raw
+                            waiting = True
+                            break
+            assert waiting is True
+            assert isinstance(decision_id, str)
+
+            approve_resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_session",
+                },
+            )
+            assert approve_resp.status == 200
+
+            completed = False
+            for _ in range(30):
+                await asyncio.sleep(0.02)
+                state_resp = await client.get(
+                    "/ui/api/state",
+                    headers={"X-Slavik-Session": session_id},
+                )
+                assert state_resp.status == 200
+                state_payload = await state_resp.json()
+                active_task = state_payload.get("active_task")
+                if isinstance(active_task, dict) and active_task.get("status") == "completed":
+                    execution = active_task.get("execution")
+                    assert isinstance(execution, dict)
+                    assert execution.get("runner") == "mwv_packet_runner"
+                    assert execution.get("work_status") == "success"
                     completed = True
                     break
             assert completed is True

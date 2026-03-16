@@ -233,6 +233,11 @@ def normalize_task_payload(
             if isinstance(raw.get("task_packet"), dict)
             else None
         ),
+        "execution": (
+            normalize_json_value(raw.get("execution"))
+            if isinstance(raw.get("execution"), dict)
+            else None
+        ),
         "started_at": (
             started_at_raw if isinstance(started_at_raw, str) and started_at_raw.strip() else now
         ),

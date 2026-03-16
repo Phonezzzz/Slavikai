@@ -7,6 +7,8 @@ import requests
 from aiohttp import web
 
 from core.approval_policy import ApprovalCategory, ApprovalRequest
+from core.mwv.manager import MWVRunResult
+from core.mwv.models import RunContext, TaskPacket
 from llm.types import ModelConfig
 from server.http.common.responses import error_response as _error_response
 from server.lazy_agent import LazyAgentProvider
@@ -72,6 +74,7 @@ class AgentProtocol(Protocol):
     def update_tools_enabled(self, state: dict[str, bool]) -> None: ...
     def apply_runtime_tools_enabled(self, state: dict[str, bool]) -> None: ...
     def apply_runtime_workspace_root(self, workspace_root: str | None) -> None: ...
+    def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult: ...
 
     def call_tool(
         self,

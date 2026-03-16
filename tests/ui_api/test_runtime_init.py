@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: F403,F405
+import time
+
 from .fakes import *
 
 
@@ -124,8 +126,13 @@ def test_ui_runtime_init_preserves_session_history() -> None:
 
 
 def test_ui_runtime_init_blocks_running_task_without_force() -> None:
+    class SlowTaskAgent(DummyAgent):
+        def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
+            time.sleep(0.2)
+            return super().run_task_packet(packet, context)
+
     async def run() -> None:
-        client = await _create_client(DummyAgent())
+        client = await _create_client(SlowTaskAgent())
         try:
             status_resp = await client.get("/ui/api/status")
             status_payload = await status_resp.json()

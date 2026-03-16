@@ -130,3 +130,28 @@ def test_compile_plan_to_task_packet(tmp_path: Path) -> None:
     assert packet.approvals["approved_categories"] == ["EXEC_ARBITRARY"]
     assert packet.packet_hash
     assert len(packet.steps) == 3
+
+
+def test_task_packet_payload_roundtrip_preserves_hash(tmp_path: Path) -> None:
+    plan = workflow_runtime.build_plan_draft(
+        goal="Исправить файл",
+        audit_log=[],
+        utc_now_iso_fn=lambda: "2026-01-01T00:00:00+00:00",
+        plan_hash_payload_fn=lambda payload: "plan-hash",
+    )
+    packet = workflow_runtime.compile_plan_to_task_packet(
+        plan=plan,
+        session_id="session-1",
+        trace_id="trace-1",
+        workspace_root=str(tmp_path),
+        approved_categories=["EXEC_ARBITRARY"],
+    )
+
+    payload = workflow_runtime.serialize_task_packet_payload(packet)
+    restored = workflow_runtime.deserialize_task_packet_payload(payload)
+
+    assert restored.task_id == packet.task_id
+    assert restored.packet_hash == packet.packet_hash
+    assert restored.scope == packet.scope
+    assert restored.approvals == packet.approvals
+    assert [step.step_id for step in restored.steps] == [step.step_id for step in packet.steps]
