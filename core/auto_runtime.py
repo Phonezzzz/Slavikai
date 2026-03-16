@@ -22,6 +22,7 @@ from core.mwv.models import (
     VerificationStatus,
 )
 from core.mwv.verifier_runtime import VerifierRuntime
+from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.planner import Planner
 from shared.auto_models import (
     AUTO_CODER_POOL_DEFAULT,
@@ -164,6 +165,7 @@ class AutoOrchestrator:
             "plan": None,
             "coders": [],
             "merge": {"status": "idle", "changed_paths": []},
+            "execution_metrics": None,
             "budgets": budgets.to_dict(),
             "verifier": None,
             "approval": None,
@@ -346,6 +348,10 @@ class AutoOrchestrator:
                 "status": "completed",
                 "changed_paths": sorted(merged_paths),
             }
+            state["execution_metrics"] = {
+                "tool_calls_used": len(coder_results),
+                "files_touched": len(merged_paths),
+            }
             self._set_state(state)
 
             self._set_status(state, AutoRunStatus.VERIFYING)
@@ -389,6 +395,9 @@ class AutoOrchestrator:
                 "exit_code": verification.exit_code,
                 "error": verification.error,
                 "duration_ms": verification.duration_ms,
+                "fail_type": verification.fail_type,
+                "excerpt": verification.excerpt,
+                "verifier_profile": verification.verifier_profile,
             }
             self._set_state(state)
 
@@ -1083,12 +1092,4 @@ def _auto_plan_summary(plan: AutoPlan) -> str:
 
 
 def _verifier_reason(verification: VerificationResult) -> str:
-    if verification.error:
-        return verification.error
-    if verification.stderr.strip():
-        return verification.stderr.splitlines()[0][:300]
-    if verification.stdout.strip():
-        return verification.stdout.splitlines()[0][:300]
-    if verification.exit_code is None:
-        return "Verifier завершился с ошибкой без exit code."
-    return f"Verifier завершился с кодом {verification.exit_code}."
+    return extract_verifier_excerpt(verification, max_lines=3, max_chars=300)

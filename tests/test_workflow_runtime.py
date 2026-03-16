@@ -108,3 +108,25 @@ def test_apply_agent_runtime_state_propagates_workspace_root(tmp_path: Path) -> 
         }
 
     asyncio.run(run())
+
+
+def test_compile_plan_to_task_packet(tmp_path: Path) -> None:
+    plan = workflow_runtime.build_plan_draft(
+        goal="Исправить файл",
+        audit_log=[],
+        utc_now_iso_fn=lambda: "2026-01-01T00:00:00+00:00",
+        plan_hash_payload_fn=lambda payload: "plan-hash",
+    )
+
+    packet = workflow_runtime.compile_plan_to_task_packet(
+        plan=plan,
+        session_id="session-1",
+        trace_id="trace-1",
+        workspace_root=str(tmp_path),
+        approved_categories=["EXEC_ARBITRARY"],
+    )
+
+    assert packet.scope["workspace_root"] == str(tmp_path)
+    assert packet.approvals["approved_categories"] == ["EXEC_ARBITRARY"]
+    assert packet.packet_hash
+    assert len(packet.steps) == 3

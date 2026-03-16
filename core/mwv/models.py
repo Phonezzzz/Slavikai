@@ -98,6 +98,11 @@ class WorkResult:
     changes: list[WorkChange] = field(default_factory=list)
     tool_summaries: list[str] = field(default_factory=list)
     diagnostics: dict[str, JSONValue] = field(default_factory=dict)
+    elapsed_ms: int | None = None
+    files_touched: int | None = None
+    tool_calls_used: int | None = None
+    diff_size: int | None = None
+    root_cause_tag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,9 @@ class VerificationResult:
     stderr: str
     duration_seconds: float
     error: str | None = None
+    fail_type: str | None = None
+    excerpt: str | None = None
+    verifier_profile: str | None = None
 
     @property
     def ok(self) -> bool:

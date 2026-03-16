@@ -2,13 +2,14 @@ from __future__ import annotations
 
 # ruff: noqa: F401
 import shlex
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from core.approval_policy import ApprovalCategory, ApprovalRequired
-from core.decision.verifier_fail import build_verifier_fail_packet
+from core.decision.handler import DecisionEvent
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
     ChangeType,
@@ -27,6 +28,7 @@ from core.mwv.models import (
 )
 from core.mwv.routing import RouteDecision
 from core.mwv.verifier_runtime import NON_REPO_VERIFIER_REQUIRED_ERROR, VerifierRuntime
+from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.mwv.worker import WorkerRuntime
 from llm.brain_base import Brain
 from shared.models import (
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
     import logging
 
     from config.memory_config import MemoryConfig
+    from core.decision.handler import DecisionHandler
     from core.decision.models import DecisionPacket
     from core.executor import Executor
     from core.planner import Planner
@@ -84,6 +87,7 @@ class AgentMWVMixin:
     if TYPE_CHECKING:
         tracer: Tracer
         logger: logging.Logger
+        decision_handler: DecisionHandler
         planner: Planner
         executor: Executor
         tools_enabled: dict[str, bool]
@@ -244,16 +248,20 @@ class AgentMWVMixin:
             )
         if run_result.verification_result.status != VerificationStatus.PASSED:
             self._inc_metric("verifier_fail_count")
-            decision_packet = build_verifier_fail_packet(
-                run_result.verification_result,
-                task_id=run_result.task.task_id,
-                trace_id=run_result.task.trace_id,
-                attempt=run_result.attempt,
-                max_attempts=run_result.max_attempts,
-                retry_allowed=bool(
-                    run_result.retry_decision and run_result.retry_decision.allow_retry
-                ),
+            decision_packet = self.decision_handler.evaluate(
+                event=DecisionEvent.verifier_fail(
+                    verification_result=run_result.verification_result,
+                    task_id=run_result.task.task_id,
+                    trace_id=run_result.task.trace_id,
+                    attempt=run_result.attempt,
+                    max_attempts=run_result.max_attempts,
+                    retry_allowed=bool(
+                        run_result.retry_decision and run_result.retry_decision.allow_retry
+                    ),
+                )
             )
+            if decision_packet is None:
+                raise RuntimeError("DecisionHandler did not build verifier_fail packet.")
             return self._handle_decision_packet(
                 decision_packet,
                 raw_input=raw_input,
@@ -357,6 +365,7 @@ class AgentMWVMixin:
         return steps
 
     def _mwv_worker_runner(self, task: TaskPacket, context: RunContext) -> WorkResult:
+        started = time.monotonic()
         self._reset_workspace_diffs()
         if not is_task_packet_hash_valid(task):
             return WorkResult(
@@ -375,6 +384,11 @@ class AgentMWVMixin:
                     ],
                     "stop_reason_code": StopReasonCode.REPLAN_REQUIRED.value,
                 },
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                files_touched=0,
+                tool_calls_used=0,
+                diff_size=0,
+                root_cause_tag="packet_hash_mismatch",
             )
         if not task.steps:
             return WorkResult(
@@ -393,6 +407,11 @@ class AgentMWVMixin:
                     ],
                     "stop_reason_code": StopReasonCode.REPLAN_REQUIRED.value,
                 },
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                files_touched=0,
+                tool_calls_used=0,
+                diff_size=0,
+                root_cause_tag="missing_steps",
             )
 
         workspace_root, scope_error = self._resolve_packet_workspace_root(task, context)
@@ -413,6 +432,11 @@ class AgentMWVMixin:
                     ],
                     "stop_reason_code": StopReasonCode.REPLAN_REQUIRED.value,
                 },
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                files_touched=0,
+                tool_calls_used=0,
+                diff_size=0,
+                root_cause_tag="scope_error",
             )
 
         runtime_snapshot = self._capture_runtime_execution_state()
@@ -488,11 +512,14 @@ class AgentMWVMixin:
             if any(step.status == PlanStepStatus.ERROR for step in step_states)
             else WorkStatus.SUCCESS
         )
-        changes = self._mwv_changes_from_diffs(self.consume_workspace_diffs())
+        diff_entries = self.consume_workspace_diffs()
+        changes = self._mwv_changes_from_diffs(diff_entries)
         diagnostics = self._build_mwv_diagnostics(executed_plan)
         diagnostics["tool_calls_ok"] = successful_tool_calls
         diagnostics["changes_total"] = len(changes)
         diagnostics["risk_flags"] = sorted(self._mwv_risk_flags(task))
+        diff_size = sum(max(0, diff.added) + max(0, diff.removed) for diff in diff_entries)
+        root_cause_tag = "success"
         if (
             status == WorkStatus.SUCCESS
             and action_oriented
@@ -509,8 +536,11 @@ class AgentMWVMixin:
                         "result": _NO_OBSERVABLE_ACTION_ERROR,
                     }
                 )
+            root_cause_tag = "no_observable_action"
         if status == WorkStatus.FAILURE:
             diagnostics["stop_reason_code"] = stop_reason.value
+            if root_cause_tag == "success":
+                root_cause_tag = stop_reason.value.lower()
         summary = self._format_plan(executed_plan)
         return WorkResult(
             task_id=task.task_id,
@@ -519,6 +549,11 @@ class AgentMWVMixin:
             changes=changes,
             tool_summaries=[],
             diagnostics=diagnostics,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            files_touched=len({change.path for change in changes}),
+            tool_calls_used=successful_tool_calls,
+            diff_size=diff_size,
+            root_cause_tag=root_cause_tag,
         )
 
     def _to_mwv_messages(self, messages: list[LLMMessage]) -> list[MWVMessage]:
@@ -910,14 +945,7 @@ class AgentMWVMixin:
             return (
                 "Для non-repo workspace нужен явный verifier.command или repo-like workspace_root."
             )
-        if verification.error:
-            return verification.error
-        text = (verification.stderr or verification.stdout or "").strip()
-        if not text:
-            if verification.exit_code is None:
-                return "нет деталей"
-            return f"exit_code={verification.exit_code}"
-        return text.splitlines()[0][:160]
+        return extract_verifier_excerpt(verification, max_lines=3, max_chars=300)
 
     def _handle_mwv_error(
         self,

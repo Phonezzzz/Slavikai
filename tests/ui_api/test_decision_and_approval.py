@@ -1129,6 +1129,82 @@ def test_ui_decision_respond_returns_409_for_non_pending_status() -> None:
     asyncio.run(run())
 
 
+def test_ui_decision_respond_rejects_expired_packet() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id,
+                {
+                    "id": "decision-expired-1",
+                    "kind": "decision",
+                    "decision_type": "agent_decision",
+                    "status": "pending",
+                    "blocking": True,
+                    "reason": "need_user_input",
+                    "summary": "Expired packet",
+                    "proposed_action": {},
+                    "options": [
+                        {
+                            "id": "ask_user",
+                            "title": "Ask user",
+                            "action": "ask_user",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                        {
+                            "id": "retry",
+                            "title": "Retry",
+                            "action": "retry",
+                            "payload": {},
+                            "risk": "medium",
+                        },
+                        {
+                            "id": "abort",
+                            "title": "Abort",
+                            "action": "abort",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                    ],
+                    "default_option_id": "ask_user",
+                    "context": {"session_id": session_id},
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2026-01-01T00:00:01+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "resolved_at": None,
+                },
+            )
+
+            response = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-expired-1",
+                    "choice": "abort",
+                },
+            )
+            assert response.status == 410
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "decision_expired"
+
+            current = await hub.get_session_decision(session_id)
+            assert isinstance(current, dict)
+            assert current.get("status") == "expired"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_idempotency_key_matrix() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())

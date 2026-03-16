@@ -76,6 +76,7 @@ def normalize_ui_decision(
     options_raw = raw.get("options")
     default_option_id_raw = raw.get("default_option_id")
     created_at_raw = raw.get("created_at")
+    expires_at_raw = raw.get("expires_at")
     updated_at_raw = raw.get("updated_at")
     resolved_at_raw = raw.get("resolved_at")
 
@@ -124,6 +125,9 @@ def normalize_ui_decision(
             if isinstance(resolved_at_raw, str) and resolved_at_raw.strip()
             else None
         )
+        expires_at = (
+            expires_at_raw if isinstance(expires_at_raw, str) and expires_at_raw.strip() else None
+        )
         return {
             "id": decision_id,
             "kind": kind,
@@ -141,6 +145,7 @@ def normalize_ui_decision(
             "default_option_id": default_option_id,
             "context": context,
             "created_at": created_at,
+            "expires_at": expires_at,
             "updated_at": updated_at,
             "resolved_at": resolved_at,
         }
@@ -167,6 +172,9 @@ def normalize_ui_decision(
         "default_option_id": default_option_id,
         "context": context,
         "created_at": created_at,
+        "expires_at": (
+            expires_at_raw if isinstance(expires_at_raw, str) and expires_at_raw.strip() else None
+        ),
         "updated_at": now,
         "resolved_at": None,
     }
@@ -264,6 +272,7 @@ def build_ui_approval_decision(
         "default_option_id": "approve_once",
         "context": context_payload,
         "created_at": now,
+        "expires_at": None,
         "updated_at": now,
         "resolved_at": None,
     }
@@ -336,6 +345,7 @@ def build_plan_execute_decision(
             "workflow": decision_workflow_context_fn(mode, plan, active_task),
         },
         "created_at": now,
+        "expires_at": None,
         "updated_at": now,
         "resolved_at": None,
     }

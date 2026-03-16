@@ -93,6 +93,8 @@ def normalize_plan_step_insert(
         "description",
         "intent",
         "allowed_tool_kinds",
+        "inputs",
+        "expected_outputs",
         "acceptance_checks",
         "status",
         "evidence",
@@ -126,6 +128,12 @@ def normalize_plan_step_insert(
         "title": title_raw.strip(),
         "description": description,
         "allowed_tool_kinds": normalize_string_list_fn(raw.get("allowed_tool_kinds")),
+        "inputs": (
+            normalize_json_value_fn(raw.get("inputs"))
+            if isinstance(raw.get("inputs"), dict)
+            else {}
+        ),
+        "expected_outputs": normalize_string_list_fn(raw.get("expected_outputs")),
         "acceptance_checks": normalize_string_list_fn(raw.get("acceptance_checks")),
         "status": status,
         "evidence": (
@@ -151,6 +159,8 @@ def normalize_plan_step_changes(
         "description",
         "intent",
         "allowed_tool_kinds",
+        "inputs",
+        "expected_outputs",
         "acceptance_checks",
         "status",
         "evidence",
@@ -173,6 +183,16 @@ def normalize_plan_step_changes(
         normalized["description"] = source
     if "allowed_tool_kinds" in raw:
         normalized["allowed_tool_kinds"] = normalize_string_list_fn(raw.get("allowed_tool_kinds"))
+    if "inputs" in raw:
+        inputs_raw = raw.get("inputs")
+        if inputs_raw is None:
+            normalized["inputs"] = {}
+        elif isinstance(inputs_raw, dict):
+            normalized["inputs"] = normalize_json_value_fn(inputs_raw)
+        else:
+            raise ValueError("changes.inputs должен быть объектом или null.")
+    if "expected_outputs" in raw:
+        normalized["expected_outputs"] = normalize_string_list_fn(raw.get("expected_outputs"))
     if "acceptance_checks" in raw:
         normalized["acceptance_checks"] = normalize_string_list_fn(raw.get("acceptance_checks"))
     if "status" in raw:
@@ -217,6 +237,9 @@ def validate_plan_document(
         "inputs_needed",
         "audit_log",
         "steps",
+        "budgets",
+        "approvals",
+        "verifier",
         "exit_criteria",
         "created_at",
         "updated_at",

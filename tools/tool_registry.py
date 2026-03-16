@@ -11,6 +11,16 @@ from tools.tool_logger import ToolCallLogger
 
 ToolHandler = Callable[[ToolRequest], ToolResult]
 ToolCapability = Literal["read", "write", "exec"]
+ToolRiskClass = Literal[
+    "read",
+    "write",
+    "execute",
+    "install",
+    "network",
+    "destructive",
+    "privileged",
+    "external_side_effect",
+]
 ExecutionMode = Literal["ask", "plan", "act", "auto"]
 
 
@@ -20,6 +30,7 @@ class ToolDescriptor:
     handler: ToolHandler
     enabled: bool = True
     capability: ToolCapability = "exec"
+    risk_classes: list[ToolRiskClass] | None = None
 
 
 class ToolRegistry:
@@ -45,6 +56,7 @@ class ToolRegistry:
         handler: Tool | ToolHandler,
         enabled: bool = True,
         capability: ToolCapability = "exec",
+        risk_classes: list[str] | None = None,
     ) -> None:
         resolved: ToolHandler
         if isinstance(handler, Tool):
@@ -56,10 +68,19 @@ class ToolRegistry:
             handler=resolved,
             enabled=enabled,
             capability=self._normalize_capability(capability),
+            risk_classes=self._normalize_risk_classes(
+                risk_classes,
+                capability=self._normalize_capability(capability),
+            ),
         )
         self._logger.info(
             "tool_registered",
-            extra={"tool": name, "enabled": enabled, "capability": capability},
+            extra={
+                "tool": name,
+                "enabled": enabled,
+                "capability": capability,
+                "risk_classes": self.get_risk_classes(name),
+            },
         )
 
     def set_enabled(self, name: str, enabled: bool) -> None:
@@ -76,6 +97,12 @@ class ToolRegistry:
         if descriptor is None:
             return None
         return descriptor.capability
+
+    def get_risk_classes(self, name: str) -> list[ToolRiskClass]:
+        descriptor = self._tools.get(name)
+        if descriptor is None or descriptor.risk_classes is None:
+            return []
+        return list(descriptor.risk_classes)
 
     def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
         descriptor = self._tools.get(request.name)
@@ -193,6 +220,50 @@ class ToolRegistry:
         if normalized == "write":
             return "write"
         return "exec"
+
+    def _normalize_risk_classes(
+        self,
+        risk_classes: list[str] | None,
+        *,
+        capability: ToolCapability,
+    ) -> list[ToolRiskClass]:
+        normalized: list[ToolRiskClass] = []
+        if isinstance(risk_classes, list):
+            for item in risk_classes:
+                if not isinstance(item, str):
+                    continue
+                candidate = item.strip().lower()
+                typed_candidate: ToolRiskClass | None = None
+                if candidate == "read":
+                    typed_candidate = "read"
+                elif candidate == "write":
+                    typed_candidate = "write"
+                elif candidate == "execute":
+                    typed_candidate = "execute"
+                elif candidate == "install":
+                    typed_candidate = "install"
+                elif candidate == "network":
+                    typed_candidate = "network"
+                elif candidate == "destructive":
+                    typed_candidate = "destructive"
+                elif candidate == "privileged":
+                    typed_candidate = "privileged"
+                elif candidate == "external_side_effect":
+                    typed_candidate = "external_side_effect"
+                if typed_candidate is None:
+                    continue
+                if typed_candidate not in normalized:
+                    normalized.append(typed_candidate)
+        default_class: ToolRiskClass | None
+        if capability == "read":
+            default_class = "read"
+        elif capability == "write":
+            default_class = "write"
+        else:
+            default_class = None
+        if default_class is not None and default_class not in normalized:
+            normalized.insert(0, default_class)
+        return normalized
 
     def _mode_policy_error(
         self,

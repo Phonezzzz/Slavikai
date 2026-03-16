@@ -28,7 +28,10 @@ class ToolGateway:
     def call(self, request: ToolRequest) -> ToolResult:
         bypass_safe_mode = False
         if self.approval_context is not None:
-            intents = detect_action_intents(request)
+            intents = detect_action_intents(
+                request,
+                risk_classes=self.registry.get_risk_classes(request.name),
+            )
             decision = decide_action(context=self.approval_context, intents=intents)
             if decision.status == "require_approval":
                 approval_request = build_approval_request(

@@ -10,6 +10,7 @@ from typing import Protocol
 
 from core.mwv.models import RunContext, TaskPacket, VerificationResult, VerificationStatus
 from core.mwv.verifier import VerifierRunner
+from core.mwv.verifier_summary import extract_verifier_excerpt, verifier_fail_type
 
 
 class VerifierRunnerProtocol(Protocol):
@@ -61,6 +62,13 @@ class VerifierRuntime:
                 stderr="",
                 duration_seconds=time.monotonic() - start,
                 error=f"invalid_verifier_config: {exc}",
+                fail_type="invalid_config",
+                excerpt=str(exc),
+                verifier_profile=(
+                    "explicit"
+                    if isinstance(task.verifier, dict) and task.verifier.get("command") is not None
+                    else "fallback"
+                ),
             )
 
         if command is not None:
@@ -75,6 +83,9 @@ class VerifierRuntime:
                 stderr="",
                 duration_seconds=time.monotonic() - start,
                 error=NON_REPO_VERIFIER_REQUIRED_ERROR,
+                fail_type="non_repo_workspace",
+                excerpt=NON_REPO_VERIFIER_REQUIRED_ERROR,
+                verifier_profile="fallback",
             )
         return self._run_fallback(cwd=cwd, timeout_seconds=timeout_seconds)
 
@@ -104,6 +115,9 @@ class VerifierRuntime:
                 stderr=_coerce_output(exc.stderr),
                 duration_seconds=time.monotonic() - start,
                 error="verifier_timeout",
+                fail_type="timeout",
+                excerpt="verifier_timeout",
+                verifier_profile="explicit",
             )
         except OSError as exc:
             return VerificationResult(
@@ -114,12 +128,15 @@ class VerifierRuntime:
                 stderr="",
                 duration_seconds=time.monotonic() - start,
                 error=f"verifier_os_error: {exc}",
+                fail_type="os_error",
+                excerpt=str(exc),
+                verifier_profile="explicit",
             )
 
         status = (
             VerificationStatus.PASSED if completed.returncode == 0 else VerificationStatus.FAILED
         )
-        return VerificationResult(
+        result = VerificationResult(
             status=status,
             command=command,
             exit_code=completed.returncode,
@@ -127,7 +144,35 @@ class VerifierRuntime:
             stderr=completed.stderr or "",
             duration_seconds=time.monotonic() - start,
             error=None,
+            fail_type=None
+            if status == VerificationStatus.PASSED
+            else verifier_fail_type(
+                VerificationResult(
+                    status=status,
+                    command=command,
+                    exit_code=completed.returncode,
+                    stdout=completed.stdout or "",
+                    stderr=completed.stderr or "",
+                    duration_seconds=0.0,
+                )
+            ),
+            excerpt=None,
+            verifier_profile="explicit",
         )
+        if status != VerificationStatus.PASSED:
+            return VerificationResult(
+                status=result.status,
+                command=result.command,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                duration_seconds=result.duration_seconds,
+                error=result.error,
+                fail_type=result.fail_type,
+                excerpt=extract_verifier_excerpt(result),
+                verifier_profile=result.verifier_profile,
+            )
+        return result
 
     def _run_fallback(
         self,
@@ -160,6 +205,9 @@ class VerifierRuntime:
                     stderr=_join_output([*stderr_parts, _coerce_output(exc.stderr)]),
                     duration_seconds=time.monotonic() - start,
                     error="verifier_timeout",
+                    fail_type="timeout",
+                    excerpt="verifier_timeout",
+                    verifier_profile="fallback",
                 )
             except OSError as exc:
                 return VerificationResult(
@@ -170,12 +218,15 @@ class VerifierRuntime:
                     stderr=_join_output([*stderr_parts, str(exc)]),
                     duration_seconds=time.monotonic() - start,
                     error=f"fallback_failed: {exc}",
+                    fail_type="os_error",
+                    excerpt=str(exc),
+                    verifier_profile="fallback",
                 )
 
             stdout_parts.extend((f"$ {' '.join(command)}", completed.stdout or ""))
             stderr_parts.extend((f"$ {' '.join(command)}", completed.stderr or ""))
             if completed.returncode != 0:
-                return VerificationResult(
+                result = VerificationResult(
                     status=VerificationStatus.FAILED,
                     command=command,
                     exit_code=completed.returncode,
@@ -183,6 +234,21 @@ class VerifierRuntime:
                     stderr=_join_output(stderr_parts),
                     duration_seconds=time.monotonic() - start,
                     error=None,
+                    fail_type="stderr",
+                    excerpt=None,
+                    verifier_profile="fallback",
+                )
+                return VerificationResult(
+                    status=result.status,
+                    command=result.command,
+                    exit_code=result.exit_code,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    duration_seconds=result.duration_seconds,
+                    error=result.error,
+                    fail_type=verifier_fail_type(result),
+                    excerpt=extract_verifier_excerpt(result),
+                    verifier_profile=result.verifier_profile,
                 )
 
         return VerificationResult(
@@ -193,6 +259,9 @@ class VerifierRuntime:
             stderr=_join_output(stderr_parts),
             duration_seconds=time.monotonic() - start,
             error=None,
+            fail_type=None,
+            excerpt=None,
+            verifier_profile="fallback",
         )
 
 

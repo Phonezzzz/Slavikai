@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Literal
 
@@ -81,10 +81,28 @@ class DecisionPacket:
         if self.default_option_id and self.default_option_id not in option_ids:
             raise ValueError("DecisionPacket.default_option_id отсутствует в options")
 
+    @property
+    def expires_at(self) -> datetime:
+        created_at = self.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        else:
+            created_at = created_at.astimezone(UTC)
+        return created_at + timedelta(seconds=self.ttl_seconds)
+
+    def is_expired(self, *, now: datetime | None = None) -> bool:
+        reference = now or datetime.now(UTC)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=UTC)
+        else:
+            reference = reference.astimezone(UTC)
+        return reference >= self.expires_at
+
     def to_dict(self) -> dict[str, JSONValue]:
         return {
             "id": self.id,
             "created_at": self.created_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
             "reason": self.reason.value,
             "summary": self.summary,
             "context": self.context,

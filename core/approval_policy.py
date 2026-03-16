@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -183,20 +184,25 @@ def build_approval_request(
     )
 
 
-def detect_action_intents(request: ToolRequest) -> list[ActionIntent]:
+def detect_action_intents(
+    request: ToolRequest,
+    *,
+    risk_classes: Sequence[str] | None = None,
+) -> list[ActionIntent]:
     tool = request.name
     args = request.args
+    risk_intents = _risk_class_intents(tool, risk_classes or [])
     intents: list[ActionIntent] = []
 
     if tool in {"shell", "workspace_run", "workspace_terminal_run"}:
         command = str(args.get("command") or args.get("path") or "")
         if command.strip():
             intents.extend(_shell_intents(tool, command))
-        return intents
+        return _extend_missing_intents(intents, risk_intents)
 
     if tool == "web":
         intents.append(_intent(tool, "NETWORK_RISK", {"tool": tool}))
-        return intents
+        return _extend_missing_intents(intents, risk_intents)
 
     if tool in {"workspace_write", "workspace_create", "workspace_patch"}:
         path = str(args.get("path") or "")
@@ -213,7 +219,7 @@ def detect_action_intents(request: ToolRequest) -> list[ActionIntent]:
                     ),
                 )
             intents.extend(_write_intents(tool, path))
-        return intents
+        return _extend_missing_intents(intents, risk_intents)
 
     if tool == "workspace_rename":
         old_path = str(args.get("old_path") or "")
@@ -230,7 +236,7 @@ def detect_action_intents(request: ToolRequest) -> list[ActionIntent]:
             intents.extend(_write_intents(tool, old_path))
         if new_path:
             intents.extend(_write_intents(tool, new_path))
-        return intents
+        return _extend_missing_intents(intents, risk_intents)
 
     if tool == "workspace_move":
         from_path = str(args.get("from_path") or "")
@@ -243,7 +249,7 @@ def detect_action_intents(request: ToolRequest) -> list[ActionIntent]:
             intents.extend(_write_intents(tool, from_path))
         if to_path:
             intents.extend(_write_intents(tool, to_path))
-        return intents
+        return _extend_missing_intents(intents, risk_intents)
 
     if tool == "workspace_delete":
         path = str(args.get("path") or "")
@@ -251,14 +257,48 @@ def detect_action_intents(request: ToolRequest) -> list[ActionIntent]:
             intents.append(_intent(tool, "FS_OUTSIDE_WORKSPACE", {"path": path, "op": "delete"}))
         if path:
             intents.extend(_write_intents(tool, path))
-        return intents
+        return _extend_missing_intents(intents, risk_intents)
 
     if tool == "fs":
         op = str(args.get("op") or "").lower().strip()
         path = str(args.get("path") or "")
         intents.extend(_fs_intents(tool, op, path))
-        return intents
+        return _extend_missing_intents(intents, risk_intents)
 
+    return _extend_missing_intents(intents, risk_intents)
+
+
+def _risk_class_intents(tool: str, risk_classes: Sequence[str]) -> list[ActionIntent]:
+    intents: list[ActionIntent] = []
+    mapping: dict[str, ApprovalCategory] = {
+        "execute": "EXEC_ARBITRARY",
+        "install": "DEPS_INSTALL_UPDATE",
+        "network": "NETWORK_RISK",
+        "external_side_effect": "NETWORK_RISK",
+        "privileged": "SUDO",
+        "destructive": "FS_DELETE_OVERWRITE",
+    }
+    seen: set[ApprovalCategory] = set()
+    for item in risk_classes:
+        category = mapping.get(item)
+        if category is None or category in seen:
+            continue
+        seen.add(category)
+        intents.append(_intent(tool, category, {"tool": tool, "risk_class": item}))
+    return intents
+
+
+def _extend_missing_intents(
+    intents: list[ActionIntent],
+    extra: list[ActionIntent],
+) -> list[ActionIntent]:
+    seen = {(intent.category, intent.tool) for intent in intents}
+    for intent in extra:
+        key = (intent.category, intent.tool)
+        if key in seen:
+            continue
+        intents.append(intent)
+        seen.add(key)
     return intents
 
 

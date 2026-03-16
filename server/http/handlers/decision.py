@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime
 
 from aiohttp import web
 
@@ -13,6 +14,7 @@ from server.http.handlers.ui_chat import handle_ui_chat_send
 from server.http_api import (
     UI_DECISION_RESPONSES,
     _apply_agent_runtime_state,
+    _compile_plan_to_task_packet,
     _decision_categories,
     _decision_mismatch_response,
     _decision_type_value,
@@ -47,6 +49,22 @@ def _normalize_message_lane(value: object) -> str:
         if normalized == "workspace":
             return "workspace"
     return "chat"
+
+
+def _decision_is_expired(decision: dict[str, JSONValue]) -> bool:
+    expires_at_raw = decision.get("expires_at")
+    if not isinstance(expires_at_raw, str) or not expires_at_raw.strip():
+        return False
+    try:
+        normalized = expires_at_raw.replace("Z", "+00:00")
+        expires_at = datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    else:
+        expires_at = expires_at.astimezone(UTC)
+    return datetime.now(UTC) >= expires_at
 
 
 async def handle_ui_decision_respond(request: web.Request) -> web.Response:
@@ -153,9 +171,25 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             actual_decision=current_decision,
         )
     current_status = current_decision.get("status")
+    if current_status == "pending" and _decision_is_expired(current_decision):
+        expired = _decision_with_status(current_decision, status="expired", resolved=True)
+        _, latest_expired = await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="pending",
+            next_decision=expired,
+        )
+        normalized_expired = _normalize_ui_decision(latest_expired, session_id=session_id)
+        return error_response(
+            status=410,
+            message="Decision packet протух и больше не может быть применён.",
+            error_type="invalid_request_error",
+            code="decision_expired",
+            details={"decision": normalized_expired},
+        )
     if current_status != "pending":
         status_value = current_status if isinstance(current_status, str) else "unknown"
-        if status_value in {"resolved", "rejected"}:
+        if status_value in {"resolved", "rejected", "expired"}:
             return error_response(
                 status=409,
                 message="Decision уже завершён и не может быть выполнен повторно.",
@@ -699,6 +733,37 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "status": "running",
             "started_at": _utc_now_iso(),
             "updated_at": _utc_now_iso(),
+        }
+        workspace_root = await _workspace_root_for_session(hub, session_id)
+        try:
+            compiled_packet = _compile_plan_to_task_packet(
+                plan=running_plan,
+                session_id=session_id,
+                trace_id=str(uuid.uuid4()),
+                workspace_root=str(workspace_root),
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        task_payload["task_packet"] = {
+            "task_id": compiled_packet.task_id,
+            "packet_hash": compiled_packet.packet_hash,
+            "packet_revision": compiled_packet.packet_revision,
+            "scope": dict(compiled_packet.scope),
+            "budgets": dict(compiled_packet.budgets),
+            "approvals": dict(compiled_packet.approvals),
+            "verifier": dict(compiled_packet.verifier),
+            "steps": [
+                {
+                    "step_id": step.step_id,
+                    "title": step.title,
+                    "description": step.description,
+                    "allowed_tool_kinds": list(step.allowed_tool_kinds),
+                    "inputs": dict(step.inputs),
+                    "expected_outputs": list(step.expected_outputs),
+                    "acceptance_checks": list(step.acceptance_checks),
+                }
+                for step in compiled_packet.steps
+            ],
         }
         started, _, start_error = await hub.start_plan_task_if_possible(
             session_id,

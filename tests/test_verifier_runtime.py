@@ -62,6 +62,7 @@ def test_verifier_runtime_fallback_pass_for_repo_like_workspace(
 
     assert result.status == VerificationStatus.PASSED
     assert result.exit_code == 0
+    assert result.verifier_profile == "fallback"
     assert calls == [["python", "-m", "ruff", "check", "."], ["python", "-m", "pytest", "-q"]]
 
 
@@ -94,6 +95,8 @@ def test_verifier_runtime_fallback_fail_for_repo_like_workspace(
     assert result.command == ["python", "-m", "ruff", "check", "."]
     assert result.exit_code == 3
     assert "boom" in result.stderr
+    assert result.fail_type == "stderr"
+    assert result.excerpt is not None and "boom" in result.excerpt
 
 
 def test_verifier_runtime_disables_fallback_for_non_repo_workspace(tmp_path: Path) -> None:
@@ -103,6 +106,7 @@ def test_verifier_runtime_disables_fallback_for_non_repo_workspace(tmp_path: Pat
     assert result.status == VerificationStatus.ERROR
     assert result.error == NON_REPO_VERIFIER_REQUIRED_ERROR
     assert result.command == []
+    assert result.fail_type == "non_repo_workspace"
 
 
 def test_verifier_runtime_runs_explicit_command_in_non_repo_workspace(tmp_path: Path) -> None:
@@ -122,6 +126,7 @@ def test_verifier_runtime_runs_explicit_command_in_non_repo_workspace(tmp_path: 
     assert result.status == VerificationStatus.PASSED
     assert result.command[0] == sys.executable
     assert "explicit-ok" in result.stdout
+    assert result.verifier_profile == "explicit"
 
 
 def test_verifier_runtime_fallback_os_error(

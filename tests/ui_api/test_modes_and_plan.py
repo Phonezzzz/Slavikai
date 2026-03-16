@@ -179,6 +179,11 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             task_raw = decision_payload.get("active_task")
             assert isinstance(task_raw, dict)
             assert task_raw.get("status") == "running"
+            task_packet = task_raw.get("task_packet")
+            assert isinstance(task_packet, dict)
+            assert isinstance(task_packet.get("packet_hash"), str)
+            steps = task_packet.get("steps")
+            assert isinstance(steps, list) and steps
 
             # runner skeleton доходит до completed асинхронно
             completed = False

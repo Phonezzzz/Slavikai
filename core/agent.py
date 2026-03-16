@@ -285,18 +285,21 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             self.web_tool.handle,
             enabled=self.tools_enabled.get("web", False),
             capability="read",
+            risk_classes=["read", "network", "external_side_effect"],
         )
         self.tool_registry.register(
             "shell",
             ShellTool(),
             enabled=self.tools_enabled.get("shell", False),
             capability="exec",
+            risk_classes=["execute"],
         )
         self.tool_registry.register(
             "project",
             ProjectTool(),
             enabled=self.tools_enabled.get("project", False),
             capability="exec",
+            risk_classes=["execute"],
         )
         self.tool_registry.register(
             "image_analyze",
@@ -309,6 +312,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             ImageGenerateTool(),
             enabled=self.tools_enabled.get("image_generate", False),
             capability="exec",
+            risk_classes=["execute", "network", "external_side_effect"],
         )
         http_client = HttpClient()
         self.tool_registry.register(
@@ -316,12 +320,14 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             TtsTool(http_client),
             enabled=self.tools_enabled.get("tts", False),
             capability="exec",
+            risk_classes=["execute", "network", "external_side_effect"],
         )
         self.tool_registry.register(
             "stt",
             SttTool(http_client),
             enabled=self.tools_enabled.get("stt", False),
             capability="exec",
+            risk_classes=["execute", "network", "external_side_effect"],
         )
         self.tool_registry.register(
             "workspace_list", ListFilesTool(), enabled=True, capability="read"
@@ -342,7 +348,11 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             "workspace_move", MoveFileTool(), enabled=True, capability="write"
         )
         self.tool_registry.register(
-            "workspace_delete", DeleteFileTool(), enabled=True, capability="write"
+            "workspace_delete",
+            DeleteFileTool(),
+            enabled=True,
+            capability="write",
+            risk_classes=["write", "destructive"],
         )
         self.tool_registry.register(
             "workspace_patch", ApplyPatchTool(), enabled=True, capability="write"
@@ -352,12 +362,14 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             RunCodeTool(),
             enabled=self.tools_enabled.get("workspace_run", True),
             capability="exec",
+            risk_classes=["execute"],
         )
         self.tool_registry.register(
             "workspace_terminal_run",
             WorkspaceTerminalRunTool(),
             enabled=self.tools_enabled.get("workspace_run", True),
             capability="exec",
+            risk_classes=["execute"],
         )
 
     def synthesize_speech(

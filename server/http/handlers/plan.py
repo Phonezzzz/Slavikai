@@ -15,6 +15,7 @@ from server.http_api import (
     UI_SESSION_HEADER,
     _build_plan_draft,
     _build_plan_execute_decision,
+    _compile_plan_to_task_packet,
     _normalize_json_value,
     _normalize_mode_value,
     _normalize_plan_payload,
@@ -470,6 +471,49 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
         "status": "running",
         "started_at": _utc_now_iso(),
         "updated_at": _utc_now_iso(),
+    }
+    workspace_root = await _workspace_root_for_session(hub, session_id)
+    try:
+        compiled_packet = _compile_plan_to_task_packet(
+            plan=plan,
+            session_id=session_id,
+            trace_id=str(uuid.uuid4()),
+            workspace_root=str(workspace_root),
+        )
+    except ValueError as exc:
+        if idempotency_key is not None and act_fingerprint is not None:
+            await idempotency_store.abort(
+                endpoint="ui.plan.execute",
+                session_id=session_id,
+                key=idempotency_key,
+                fingerprint=act_fingerprint,
+            )
+        return error_response(
+            status=409,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="plan_contract_invalid",
+        )
+    task["task_packet"] = {
+        "task_id": compiled_packet.task_id,
+        "packet_hash": compiled_packet.packet_hash,
+        "packet_revision": compiled_packet.packet_revision,
+        "scope": dict(compiled_packet.scope),
+        "budgets": dict(compiled_packet.budgets),
+        "approvals": dict(compiled_packet.approvals),
+        "verifier": dict(compiled_packet.verifier),
+        "steps": [
+            {
+                "step_id": step.step_id,
+                "title": step.title,
+                "description": step.description,
+                "allowed_tool_kinds": list(step.allowed_tool_kinds),
+                "inputs": dict(step.inputs),
+                "expected_outputs": list(step.expected_outputs),
+                "acceptance_checks": list(step.acceptance_checks),
+            }
+            for step in compiled_packet.steps
+        ],
     }
     running_plan = _plan_with_status(plan, status="running")
     started, updated_workflow, start_error = await hub.start_plan_task_if_possible(

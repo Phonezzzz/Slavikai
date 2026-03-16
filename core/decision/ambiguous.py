@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from core.decision.models import (
     DecisionAction,
@@ -63,7 +63,7 @@ def build_ambiguous_skill_packet(
 
     return DecisionPacket(
         id=_packet_id(),
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(UTC),
         reason=DecisionReason.AMBIGUOUS_SKILL,
         summary="Найдено несколько подходящих навыков. Нужен выбор.",
         context={

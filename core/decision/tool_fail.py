@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from core.decision.models import (
     DecisionAction,
@@ -57,7 +57,7 @@ def build_tool_fail_packet(
     ]
     return DecisionPacket(
         id=_packet_id(),
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(UTC),
         reason=DecisionReason.TOOL_FAIL,
         summary=summary,
         context=_build_context(tool_name, error_text, count, threshold, user_input),

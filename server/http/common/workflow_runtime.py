@@ -9,6 +9,7 @@ from typing import Protocol
 
 from aiohttp import web
 
+from core.mwv.models import TaskPacket, TaskStepContract, with_task_packet_hash
 from shared.models import JSONValue
 
 WorkflowRuntimeState = tuple[
@@ -154,6 +155,8 @@ def build_default_plan_steps() -> list[dict[str, JSONValue]]:
             "title": "Аудит контекста",
             "description": "Проверить релевантные файлы и текущее состояние проекта.",
             "allowed_tool_kinds": ["workspace_list", "workspace_read", "project"],
+            "inputs": {},
+            "expected_outputs": ["Понять текущее поведение и ограничения"],
             "acceptance_checks": ["Понять текущее поведение и ограничения"],
             "status": "todo",
             "evidence": None,
@@ -170,6 +173,8 @@ def build_default_plan_steps() -> list[dict[str, JSONValue]]:
                 "shell",
                 "fs",
             ],
+            "inputs": {},
+            "expected_outputs": ["Изменения применены в нужных файлах"],
             "acceptance_checks": ["Изменения применены в нужных файлах"],
             "status": "todo",
             "evidence": None,
@@ -179,6 +184,8 @@ def build_default_plan_steps() -> list[dict[str, JSONValue]]:
             "title": "Проверка",
             "description": "Запустить проверки и убедиться, что задача закрыта.",
             "allowed_tool_kinds": ["workspace_read", "workspace_run", "shell", "project"],
+            "inputs": {},
+            "expected_outputs": ["make check или эквивалентные проверки зелёные"],
             "acceptance_checks": ["make check или эквивалентные проверки зелёные"],
             "status": "todo",
             "evidence": None,
@@ -210,6 +217,9 @@ def build_plan_draft(
         "inputs_needed": [],
         "audit_log": audit_log,
         "steps": build_default_plan_steps_fn(),
+        "budgets": {"max_attempts": 1},
+        "approvals": {"approved_categories": []},
+        "verifier": {},
         "exit_criteria": [
             "Целевое изменение внедрено",
             "Регрессии не обнаружены",
@@ -222,6 +232,106 @@ def build_plan_draft(
     }
     plan["plan_hash"] = plan_hash_payload_fn(plan)
     return plan
+
+
+def compile_plan_to_task_packet(
+    *,
+    plan: dict[str, JSONValue],
+    session_id: str,
+    trace_id: str,
+    workspace_root: str,
+    approved_categories: list[str] | None = None,
+) -> TaskPacket:
+    steps_raw = plan.get("steps")
+    if not isinstance(steps_raw, list) or not steps_raw:
+        raise ValueError("plan.steps должен содержать хотя бы один шаг.")
+
+    task_steps: list[TaskStepContract] = []
+    for index, item in enumerate(steps_raw, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"plan.steps[{index - 1}] должен быть объектом.")
+        step_id_raw = item.get("step_id")
+        title_raw = item.get("title")
+        description_raw = item.get("description")
+        if not isinstance(step_id_raw, str) or not step_id_raw.strip():
+            raise ValueError(f"plan.steps[{index - 1}].step_id обязателен.")
+        if not isinstance(title_raw, str) or not title_raw.strip():
+            raise ValueError(f"plan.steps[{index - 1}].title обязателен.")
+        if not isinstance(description_raw, str):
+            raise ValueError(f"plan.steps[{index - 1}].description должен быть строкой.")
+        allowed_raw = item.get("allowed_tool_kinds")
+        if not isinstance(allowed_raw, list) or not any(
+            isinstance(tool_name, str) and tool_name.strip() for tool_name in allowed_raw
+        ):
+            raise ValueError(
+                f"plan.steps[{index - 1}].allowed_tool_kinds "
+                "должен содержать хотя бы один инструмент."
+            )
+        inputs_raw = item.get("inputs")
+        inputs = inputs_raw if isinstance(inputs_raw, dict) else {}
+        expected_outputs_raw = item.get("expected_outputs")
+        expected_outputs = (
+            [
+                str(value).strip()
+                for value in expected_outputs_raw
+                if isinstance(value, str) and value.strip()
+            ]
+            if isinstance(expected_outputs_raw, list)
+            else []
+        )
+        acceptance_checks_raw = item.get("acceptance_checks")
+        acceptance_checks = (
+            [
+                str(value).strip()
+                for value in acceptance_checks_raw
+                if isinstance(value, str) and value.strip()
+            ]
+            if isinstance(acceptance_checks_raw, list)
+            else []
+        )
+        task_steps.append(
+            TaskStepContract(
+                step_id=step_id_raw.strip(),
+                title=title_raw.strip(),
+                description=description_raw,
+                allowed_tool_kinds=[
+                    tool_name.strip()
+                    for tool_name in allowed_raw
+                    if isinstance(tool_name, str) and tool_name.strip()
+                ],
+                inputs={str(key): value for key, value in inputs.items()},
+                expected_outputs=expected_outputs,
+                acceptance_checks=acceptance_checks,
+            )
+        )
+
+    budgets_raw = plan.get("budgets")
+    budgets = dict(budgets_raw) if isinstance(budgets_raw, dict) else {"max_attempts": 1}
+    approvals_raw = plan.get("approvals")
+    approvals = dict(approvals_raw) if isinstance(approvals_raw, dict) else {}
+    if approved_categories is not None:
+        approvals["approved_categories"] = list(approved_categories)
+    verifier_raw = plan.get("verifier")
+    verifier = dict(verifier_raw) if isinstance(verifier_raw, dict) else {}
+
+    packet = TaskPacket(
+        task_id=f"task-{uuid.uuid4().hex}",
+        session_id=session_id,
+        trace_id=trace_id,
+        goal=str(plan.get("goal") or ""),
+        steps=task_steps,
+        policy={"source": "plan_execute"},
+        scope={"workspace_root": workspace_root},
+        budgets=budgets,
+        approvals=approvals,
+        verifier=verifier,
+        context={
+            "plan_id": plan.get("plan_id"),
+            "plan_revision": plan.get("plan_revision"),
+            "source": "plan_execute",
+        },
+    )
+    return with_task_packet_hash(packet)
 
 
 def plan_with_status(
@@ -371,7 +481,7 @@ async def run_plan_runner(
             continue
 
         evidence: dict[str, JSONValue] = {
-            "runner": "skeleton",
+            "runner": "provisional_contract_runner",
             "completed_at": utc_now_iso_fn(),
         }
         plan = plan_mark_step_fn(plan, current_step_id, "done", evidence)

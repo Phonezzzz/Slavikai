@@ -16,6 +16,7 @@ from core.mwv.models import (
     with_task_packet_hash,
 )
 from core.mwv.routing import MessageLike, RouteDecision, classify_request
+from core.mwv.verifier_summary import summarize_verifier_failure
 from shared.models import JSONValue
 
 RouteClassifier = Callable[[Sequence[MessageLike], str, dict[str, JSONValue] | None], RouteDecision]
@@ -189,17 +190,6 @@ def build_retry_task(
         context=task.context,
     )
     return with_task_packet_hash(next_task)
-
-
-def summarize_verifier_failure(result: VerificationResult) -> str:
-    if result.status == VerificationStatus.ERROR:
-        return result.error or "Ошибка верификации"
-    text = (result.stderr or result.stdout or "").strip()
-    if not text:
-        if result.exit_code is None:
-            return "Неизвестная ошибка проверки"
-        return f"Код возврата: {result.exit_code}"
-    return text.splitlines()[0][:200]
 
 
 def _is_success(work_result: WorkResult, verification_result: VerificationResult) -> bool:

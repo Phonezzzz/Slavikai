@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -57,8 +57,10 @@ def test_decision_packet_to_dict_and_json() -> None:
     assert data["id"] == "dp-1"
     assert data["reason"] == "ambiguous_skill"
     assert data["created_at"] == created.isoformat()
+    assert data["expires_at"] == (created.replace(tzinfo=UTC) + timedelta(seconds=600)).isoformat()
     assert data["default_option_id"] == "ask"
     assert data["ttl_seconds"] == 600
+    assert packet.is_expired(now=datetime(2025, 1, 1, 0, 10, 1, tzinfo=UTC)) is True
 
     options = data["options"]
     assert isinstance(options, list)

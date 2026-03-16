@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from core.decision.models import (
     DecisionAction,
@@ -9,8 +9,8 @@ from core.decision.models import (
     DecisionPacket,
     DecisionReason,
 )
-from core.mwv.manager import summarize_verifier_failure
 from core.mwv.models import VerificationResult
+from core.mwv.verifier_summary import extract_verifier_excerpt, summarize_verifier_failure
 from shared.models import JSONValue
 
 
@@ -56,7 +56,7 @@ def build_verifier_fail_packet(
     ]
     return DecisionPacket(
         id=_packet_id(),
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(UTC),
         reason=DecisionReason.VERIFIER_FAIL,
         summary=f"Проверка не прошла: {summary}",
         context=_build_context(result, task_id, trace_id, attempt, max_attempts),
@@ -84,15 +84,18 @@ def _build_context(
         "exit_code": result.exit_code,
         "attempt": attempt,
         "max_attempts": max_attempts,
+        "excerpt": extract_verifier_excerpt(result, max_lines=3, max_chars=300),
         "stderr": _truncate_text(result.stderr),
         "stdout": _truncate_text(result.stdout),
         "error": result.error or "",
     }
 
 
-def _truncate_text(text: str, *, limit: int = 200) -> str:
-    cleaned = (text or "").strip()
-    if not cleaned:
+def _truncate_text(text: str, *, limit: int = 300) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
         return ""
-    line = cleaned.splitlines()[0]
-    return line[:limit]
+    excerpt = "\n".join(lines[:3])
+    if len(excerpt) <= limit:
+        return excerpt
+    return f"{excerpt[: limit - 3].rstrip()}..."

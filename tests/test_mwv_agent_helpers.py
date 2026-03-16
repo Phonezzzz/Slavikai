@@ -389,3 +389,7 @@ def test_mwv_diagnostic_route_allows_no_observable_action(tmp_path: Path) -> Non
 
     result = agent._mwv_worker_runner(packet, _context(tmp_path))
     assert result.status == WorkStatus.SUCCESS
+    assert result.elapsed_ms is not None
+    assert result.tool_calls_used == 0
+    assert result.files_touched == 0
+    assert result.diff_size == 0

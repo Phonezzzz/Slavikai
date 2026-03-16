@@ -183,7 +183,7 @@ class AgentRoutingMixin:
                 DecisionContext(
                     user_input=last_content,
                     route=decision.route,
-                    reason=decision.reason,
+                    routing_reason=decision.reason,
                     risk_flags=list(decision.risk_flags),
                     skill_decision=decision.skill_decision,
                 ),
@@ -289,7 +289,7 @@ class AgentRoutingMixin:
                 DecisionContext(
                     user_input=last_content,
                     route=decision.route,
-                    reason=decision.reason,
+                    routing_reason=decision.reason,
                     risk_flags=list(decision.risk_flags),
                     skill_decision=decision.skill_decision,
                 ),

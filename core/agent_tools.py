@@ -17,9 +17,8 @@ from core.approval_policy import (
     ApprovalRequest,
     ApprovalRequired,
 )
-from core.decision.handler import DecisionContext, DecisionRequired
+from core.decision.handler import DecisionContext, DecisionEvent, DecisionRequired
 from core.decision.models import DecisionPacket
-from core.decision.tool_fail import build_tool_fail_packet
 from core.mwv.models import (
     MWV_REPORT_PREFIX,
     StopReasonCode,
@@ -73,6 +72,7 @@ _MAX_UX_SUMMARY_CHARS = 220
 if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
     from core.auto_agent import AutoAgent
+    from core.decision.handler import DecisionHandler
     from core.planner import Planner
     from core.rule_engine import RuleEngine
     from core.skills.candidates import SkillCandidateWriter
@@ -108,6 +108,7 @@ class AgentToolsMixin:
     if TYPE_CHECKING:
         brain: Brain
         tracer: Tracer
+        decision_handler: DecisionHandler
         planner: Planner
         memory: MemoryManager
         memory_config: MemoryConfig
@@ -486,12 +487,14 @@ class AgentToolsMixin:
             return
         self._tool_error_counts[request.name] = 0
         error_text = sanitize_text(result.error or "unknown error")
-        self._pending_decision_packet = build_tool_fail_packet(
-            tool_name=request.name,
-            error_text=error_text,
-            count=count,
-            threshold=SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD,
-            user_input=self._last_user_input,
+        self._pending_decision_packet = self.decision_handler.evaluate(
+            event=DecisionEvent.tool_fail(
+                tool_name=request.name,
+                error_text=error_text,
+                count=count,
+                threshold=SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD,
+                user_input=self._last_user_input,
+            )
         )
         self._record_tool_error_inbox(request, result, count)
         self._record_tool_error_candidate(request, result, count)

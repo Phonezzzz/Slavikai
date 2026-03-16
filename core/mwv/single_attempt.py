@@ -12,6 +12,7 @@ from core.mwv.models import (
     WorkResult,
     WorkStatus,
 )
+from core.mwv.verifier_summary import summarize_verifier_failure
 
 TaskBuilder = Callable[[Sequence[MWVMessage], RunContext], TaskPacket]
 WorkRunner = Callable[[TaskPacket, RunContext], WorkResult]
@@ -119,23 +120,12 @@ def _collect_changed_files(work_result: WorkResult) -> list[str]:
 
 def _build_diagnostics(result: VerificationResult) -> MWVDiagnostics:
     return MWVDiagnostics(
-        summary=_summarize_verifier_failure(result),
+        summary=summarize_verifier_failure(result),
         command=list(result.command),
         exit_code=result.exit_code,
         stdout=result.stdout,
         stderr=result.stderr,
     )
-
-
-def _summarize_verifier_failure(result: VerificationResult) -> str:
-    if result.status == VerificationStatus.ERROR and result.error:
-        return result.error
-    text = (result.stderr or result.stdout or "").strip()
-    if text:
-        return text.splitlines()[0][:200]
-    if result.exit_code is None:
-        return "verifier_failed"
-    return f"exit_code={result.exit_code}"
 
 
 def _next_steps(

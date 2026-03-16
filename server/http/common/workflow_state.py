@@ -69,6 +69,10 @@ def normalize_plan_step(
         "title": title_raw.strip(),
         "description": description_raw,
         "allowed_tool_kinds": normalize_string_list(step.get("allowed_tool_kinds")),
+        "inputs": (
+            normalize_json_value(step.get("inputs")) if isinstance(step.get("inputs"), dict) else {}
+        ),
+        "expected_outputs": normalize_string_list(step.get("expected_outputs")),
         "acceptance_checks": normalize_string_list(step.get("acceptance_checks")),
         "status": status,
         "evidence": evidence,
@@ -90,6 +94,8 @@ def plan_hash_payload(plan: dict[str, JSONValue]) -> str:
                 "title": item.get("title"),
                 "description": item.get("description"),
                 "allowed_tool_kinds": item.get("allowed_tool_kinds"),
+                "inputs": item.get("inputs"),
+                "expected_outputs": item.get("expected_outputs"),
                 "acceptance_checks": item.get("acceptance_checks"),
             }
             for item in step_items
@@ -157,6 +163,21 @@ def normalize_plan_payload(
             else []
         ),
         "steps": steps,
+        "budgets": (
+            json_value_normalizer(raw.get("budgets"))
+            if isinstance(raw.get("budgets"), dict)
+            else {"max_attempts": 1}
+        ),
+        "approvals": (
+            json_value_normalizer(raw.get("approvals"))
+            if isinstance(raw.get("approvals"), dict)
+            else {"approved_categories": []}
+        ),
+        "verifier": (
+            json_value_normalizer(raw.get("verifier"))
+            if isinstance(raw.get("verifier"), dict)
+            else {}
+        ),
         "exit_criteria": string_list_normalizer(raw.get("exit_criteria")),
         "created_at": (
             created_at_raw if isinstance(created_at_raw, str) and created_at_raw.strip() else now
@@ -207,6 +228,11 @@ def normalize_task_payload(
         "plan_hash": plan_hash_raw.strip(),
         "current_step_id": current_step,
         "status": status,
+        "task_packet": (
+            normalize_json_value(raw.get("task_packet"))
+            if isinstance(raw.get("task_packet"), dict)
+            else None
+        ),
         "started_at": (
             started_at_raw if isinstance(started_at_raw, str) and started_at_raw.strip() else now
         ),

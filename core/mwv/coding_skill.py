@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.mwv.manager import ManagerRuntime, MWVRunResult, summarize_verifier_failure
+from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.models import (
     ChangeType,
     MWVMessage,
@@ -19,6 +19,7 @@ from core.mwv.models import (
     WorkStatus,
 )
 from core.mwv.verifier import VerifierRunner
+from core.mwv.verifier_summary import summarize_verifier_failure
 
 _TARGET_RE = re.compile(r"\b(?:file|файл)\b\s+([^\s]+)", re.IGNORECASE)
 

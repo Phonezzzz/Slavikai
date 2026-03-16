@@ -7,6 +7,7 @@ from typing import Final
 from aiohttp import web
 
 from core.approval_policy import ALL_CATEGORIES, ApprovalCategory, ApprovalRequest
+from core.mwv.models import TaskPacket
 from server.http.common import decision_flow, plan_edit, streaming, workflow_runtime, workflow_state
 from server.ui_hub import UIHub
 from shared.auto_models import normalize_auto_state
@@ -152,7 +153,14 @@ def _normalize_ui_decision(
         normalize_json_value_fn=_normalize_json_value,
         normalize_ui_decision_options_fn=_normalize_ui_decision_options,
         ui_decision_kinds={"approval", "decision"},
-        ui_decision_statuses={"pending", "approved", "rejected", "executing", "resolved"},
+        ui_decision_statuses={
+            "pending",
+            "approved",
+            "rejected",
+            "executing",
+            "resolved",
+            "expired",
+        },
     )
 
 
@@ -277,6 +285,23 @@ def _build_plan_draft(
         utc_now_iso_fn=_utc_now_iso,
         plan_hash_payload_fn=_plan_hash_payload,
         build_default_plan_steps_fn=_build_default_plan_steps,
+    )
+
+
+def _compile_plan_to_task_packet(
+    *,
+    plan: dict[str, JSONValue],
+    session_id: str,
+    trace_id: str,
+    workspace_root: str,
+    approved_categories: list[str] | None = None,
+) -> TaskPacket:
+    return workflow_runtime.compile_plan_to_task_packet(
+        plan=plan,
+        session_id=session_id,
+        trace_id=trace_id,
+        workspace_root=workspace_root,
+        approved_categories=approved_categories,
     )
 
 
