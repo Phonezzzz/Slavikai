@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 from aiohttp import web
 
@@ -20,6 +21,7 @@ from server.http_api import (
     _trace_log_path,
 )
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
+from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
@@ -38,7 +40,12 @@ async def handle_trace(request: web.Request) -> web.Response:
     for group in groups:
         if group.interaction_id == trace_id:
             return json_response(
-                {"trace_id": trace_id, "events": _serialize_trace_events(group.events)},
+                {
+                    "trace_id": trace_id,
+                    "events": _serialize_trace_events(
+                        cast("list[dict[str, JSONValue]]", group.events)
+                    ),
+                },
             )
     return error_response(
         status=404,

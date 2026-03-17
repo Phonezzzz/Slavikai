@@ -8,7 +8,9 @@ from aiohttp import web
 
 from server.http_api import (
     UI_SESSION_HEADER,
-    _resolve_ui_session_id_for_principal,
+    _ensure_chat_owned,
+    _extract_ui_session_id,
+    _resolve_transport_token,
     _session_forbidden_response,
 )
 from server.ui_hub import UIHub
@@ -26,18 +28,27 @@ def _encode_sse_event(event: Mapping[str, JSONValue]) -> bytes:
 
 async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
     hub: UIHub = request.app["ui_hub"]
-    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
-    if session_error is not None:
-        return session_error
-    if session_id is None:
-        return _session_forbidden_response()
+    chat_id = request.match_info.get("chat_id", "").strip()
+    if not chat_id:
+        legacy_id = _extract_ui_session_id(request)
+        chat_id = legacy_id.strip() if isinstance(legacy_id, str) and legacy_id.strip() else ""
+    if not chat_id:
+        return web.json_response(
+            {"error": {"message": "chat_id обязателен.", "code": "invalid_request_error"}},
+            status=400,
+        )
+    ownership_error = await _ensure_chat_owned(request, hub, chat_id)
+    if ownership_error is not None:
+        if not request.match_info.get("chat_id", "").strip() and ownership_error.status == 403:
+            return _session_forbidden_response()
+        return ownership_error
     last_event_id_raw = request.headers.get("Last-Event-ID")
     last_event_id = (
         last_event_id_raw.strip()
         if isinstance(last_event_id_raw, str) and last_event_id_raw.strip()
         else None
     )
-    queue = await hub.subscribe(session_id)
+    queue = await hub.subscribe(chat_id)
 
     response = web.StreamResponse(
         status=200,
@@ -45,27 +56,17 @@ async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            UI_SESSION_HEADER: session_id,
+            UI_SESSION_HEADER: _resolve_transport_token(request),
         },
     )
     await response.prepare(request)
-    initial_status_event = await hub.get_session_status_event(session_id)
+    initial_status_event = await hub.get_session_status_event(chat_id)
     await response.write(_encode_sse_event(initial_status_event))
-    initial_workflow_event = await hub.get_session_workflow_event(session_id)
+    initial_workflow_event = await hub.get_session_workflow_event(chat_id)
     await response.write(_encode_sse_event(initial_workflow_event))
-    replay_events, stale_last_event_id = await hub.get_events_since(
-        session_id,
-        last_event_id=last_event_id,
-    )
+    replay_events = await hub.get_events_since(chat_id, after_event_id=last_event_id)
     for replay_event in replay_events:
         await response.write(_encode_sse_event(replay_event))
-    if stale_last_event_id and last_event_id is not None:
-        resync_event = hub.build_resync_required_event(
-            session_id=session_id,
-            reason="last_event_id_stale",
-            resync_only=True,
-        )
-        await response.write(_encode_sse_event(resync_event))
 
     try:
         while True:
@@ -77,5 +78,5 @@ async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
     except (asyncio.CancelledError, ConnectionResetError):
         pass
     finally:
-        await hub.unsubscribe(session_id, queue)
+        await hub.unsubscribe(chat_id, queue)
     return response

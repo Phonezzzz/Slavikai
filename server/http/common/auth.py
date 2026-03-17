@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 import os
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,23 @@ def _extract_ui_session_id(request: web.Request) -> str | None:
     if query_value:
         return query_value
     return None
+
+
+def _extract_transport_token(request: web.Request) -> str | None:
+    header_value = request.headers.get("X-Slavik-Session", "").strip()
+    if header_value:
+        return header_value
+    query_value = request.query.get("transport_token", "").strip()
+    if query_value:
+        return query_value
+    return None
+
+
+def _resolve_transport_token(request: web.Request) -> str:
+    existing = _extract_transport_token(request)
+    if isinstance(existing, str) and existing.strip():
+        return existing.strip()
+    return uuid.uuid4().hex
 
 
 def _extract_bearer_token(request: web.Request) -> str | None:
@@ -207,3 +225,65 @@ async def _ensure_session_owned(
             code="session_not_found",
         )
     return _session_forbidden_response()
+
+
+async def _ensure_workspace_owned(
+    request: web.Request,
+    hub: UIHub,
+    workspace_id: str,
+) -> web.Response | None:
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
+    access = await hub.get_workspace_access(workspace_id, principal_id)
+    if access == "owned":
+        return None
+    if access == "missing":
+        return error_response(
+            status=404,
+            message="Workspace not found.",
+            error_type="invalid_request_error",
+            code="workspace_not_found",
+        )
+    return error_response(
+        status=403,
+        message="Workspace access forbidden.",
+        error_type="invalid_request_error",
+        code="workspace_forbidden",
+    )
+
+
+async def _ensure_chat_owned(
+    request: web.Request,
+    hub: UIHub,
+    chat_id: str,
+) -> web.Response | None:
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
+    access = await hub.get_chat_access(chat_id, principal_id)
+    if access == "owned":
+        return None
+    if access == "missing":
+        return error_response(
+            status=404,
+            message="Chat not found.",
+            error_type="invalid_request_error",
+            code="chat_not_found",
+        )
+    return error_response(
+        status=403,
+        message="Chat access forbidden.",
+        error_type="invalid_request_error",
+        code="chat_forbidden",
+    )

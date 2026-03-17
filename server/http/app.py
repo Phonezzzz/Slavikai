@@ -87,7 +87,7 @@ def create_app(
     app["session_store"] = SessionApprovalStore()
     app["idempotency_store"] = IdempotencyStore()
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
-        api.PROJECT_ROOT / ".run" / "ui_sessions.db",
+        api.PROJECT_ROOT / ".run" / "ui_workspaces.db",
     )
     app["ui_hub"] = UIHub(storage=resolved_ui_storage)
     dist_path = api.PROJECT_ROOT / "ui" / "dist"

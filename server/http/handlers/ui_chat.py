@@ -38,8 +38,10 @@ from server.http_api import (
     _build_ui_approval_decision,
     _decision_is_pending_blocking,
     _decision_workflow_context,
+    _ensure_chat_owned,
     _extract_files_from_tool_calls,
     _extract_named_files_from_output,
+    _extract_ui_session_id,
     _model_not_allowed_response,
     _model_not_selected_response,
     _normalize_auto_state,
@@ -56,9 +58,9 @@ from server.http_api import (
     _request_likely_canvas,
     _resolve_agent,
     _resolve_provider_api_key,
+    _resolve_transport_token,
     _resolve_ui_session_id_for_principal,
     _serialize_approval_request,
-    _session_forbidden_response,
     _set_current_plan_step_status,
     _should_render_result_in_canvas,
     _split_chat_stream_chunks,
@@ -437,15 +439,42 @@ async def handle_ui_chat_send(
                 code="payload_too_large",
             )
 
-        resolved_session_id, session_error = await _resolve_ui_session_id_for_principal(
-            request,
-            hub,
-        )
-        if session_error is not None:
-            return session_error
-        if resolved_session_id is None:
-            return _session_forbidden_response()
-        session_id = resolved_session_id
+        resolved_chat_id = request.match_info.get("chat_id", "").strip()
+        if not resolved_chat_id:
+            session_id_raw = payload.get("session_id")
+            if isinstance(session_id_raw, str) and session_id_raw.strip():
+                resolved_chat_id = session_id_raw.strip()
+            else:
+                legacy_chat_id = _extract_ui_session_id(request)
+                if isinstance(legacy_chat_id, str) and legacy_chat_id.strip():
+                    resolved_chat_id = legacy_chat_id.strip()
+        if not resolved_chat_id:
+            session_id_resolved, session_error = await _resolve_ui_session_id_for_principal(
+                request,
+                hub,
+            )
+            if session_error is not None:
+                await _abort_idempotency()
+                return session_error
+            if session_id_resolved is None:
+                return error_response(
+                    status=400,
+                    message="chat_id обязателен.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            resolved_chat_id = session_id_resolved
+        ownership_error = await _ensure_chat_owned(request, hub, resolved_chat_id)
+        if ownership_error is not None:
+            if not request.match_info.get("chat_id", "").strip() and ownership_error.status == 403:
+                return error_response(
+                    status=403,
+                    message="Session access forbidden.",
+                    error_type="invalid_request_error",
+                    code="session_forbidden",
+                )
+            return ownership_error
+        session_id = resolved_chat_id
         if payload_override is None:
             idempotency_key = normalize_idempotency_key(request.headers.get("Idempotency-Key"))
         if idempotency_key is not None:
@@ -467,7 +496,7 @@ async def handle_ui_chat_send(
             )
             if idempotency_state == "replay" and replay is not None:
                 response = json_response(replay.payload, status=replay.status)
-                response.headers[UI_SESSION_HEADER] = session_id
+                response.headers[UI_SESSION_HEADER] = _resolve_transport_token(request)
                 return response
             if idempotency_state == "conflict":
                 return error_response(
@@ -611,7 +640,7 @@ async def handle_ui_chat_send(
             }
             await _complete_idempotency(response_payload_root_gate, status=202)
             response = json_response(response_payload_root_gate, status=202)
-            response.headers[UI_SESSION_HEADER] = session_id
+            response.headers[UI_SESSION_HEADER] = _resolve_transport_token(request)
             return response
 
         await hub.set_session_status(session_id, "busy")
@@ -696,7 +725,7 @@ async def handle_ui_chat_send(
             }
             await _complete_idempotency(response_payload_guidance, status=200)
             response = json_response(response_payload_guidance)
-            response.headers[UI_SESSION_HEADER] = session_id
+            response.headers[UI_SESSION_HEADER] = _resolve_transport_token(request)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -1138,7 +1167,7 @@ async def handle_ui_chat_send(
             }
             await _complete_idempotency(response_payload_blocking_decision, status=200)
             response = json_response(response_payload_blocking_decision)
-            response.headers[UI_SESSION_HEADER] = session_id
+            response.headers[UI_SESSION_HEADER] = _resolve_transport_token(request)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -1262,7 +1291,7 @@ async def handle_ui_chat_send(
         response = json_response(
             response_payload_final,
         )
-        response.headers[UI_SESSION_HEADER] = session_id
+        response.headers[UI_SESSION_HEADER] = _resolve_transport_token(request)
         await _publish_agent_activity(
             hub,
             session_id=session_id,

@@ -8,37 +8,27 @@ from aiohttp import web
 
 from server import http_api as api
 from server.http.common.responses import error_response, json_response
+from server.http.common.session_transfer import (
+    _parse_imported_session,
+    _serialize_persisted_session,
+    _utc_iso,
+)
 from server.http_api import (
-    SUPPORTED_MODEL_PROVIDERS,
     UI_SESSION_HEADER,
     _artifact_file_payload,
     _artifact_mime_from_ext,
     _closest_model_suggestion,
     _ensure_session_owned,
     _normalize_provider,
-    _normalize_ui_decision,
-    _parse_imported_session,
     _request_principal_id,
+    _resolve_transport_token,
     _resolve_ui_session_id_for_principal,
-    _resolve_workspace_file,
     _safe_zip_entry_name,
     _sanitize_download_filename,
-    _serialize_persisted_session,
-    _session_forbidden_response,
-    _utc_iso,
 )
 from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession
 from shared.models import JSONValue
-
-
-def _normalize_history_lane(value: str | None) -> Literal["chat", "workspace"]:
-    if not isinstance(value, str):
-        return "chat"
-    normalized = value.strip().lower()
-    if normalized == "workspace":
-        return "workspace"
-    return "chat"
 
 
 async def handle_ui_chats_export(request: web.Request) -> web.Response:
@@ -52,7 +42,17 @@ async def handle_ui_chats_export(request: web.Request) -> web.Response:
             code="unauthorized",
         )
     sessions = await hub.export_sessions(principal_id)
-    payload_sessions = [_serialize_persisted_session(item) for item in sessions]
+    payload_sessions = [
+        _serialize_persisted_session(
+            item,
+            normalize_policy_profile_fn=hub._normalize_policy_profile,
+            normalize_mode_value_fn=hub._normalize_mode,
+            normalize_plan_payload_fn=hub._normalize_plan_payload,
+            normalize_task_payload_fn=hub._normalize_task_payload,
+            normalize_auto_state_fn=hub._normalize_auto_state_payload,
+        )
+        for item in sessions
+    ]
     return json_response(
         {
             "exported_at": _utc_iso(),
@@ -112,7 +112,16 @@ async def handle_ui_chats_import(request: web.Request) -> web.Response:
 
     sessions: list[PersistedSession] = []
     for index, item in enumerate(sessions_raw):
-        parsed = _parse_imported_session(item, principal_id=principal_id)
+        parsed = _parse_imported_session(
+            item,
+            principal_id=principal_id,
+            normalize_policy_profile_fn=hub._normalize_policy_profile,
+            normalize_tools_state_payload_fn=hub._normalize_tools_state_payload,
+            normalize_mode_value_fn=hub._normalize_mode,
+            normalize_plan_payload_fn=hub._normalize_plan_payload,
+            normalize_task_payload_fn=hub._normalize_task_payload,
+            normalize_auto_state_fn=hub._normalize_auto_state_payload,
+        )
         if parsed is None:
             return error_response(
                 status=400,
@@ -120,36 +129,72 @@ async def handle_ui_chats_import(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+        parsed = PersistedSession(
+            session_id=parsed.session_id,
+            principal_id=parsed.principal_id,
+            created_at=parsed.created_at,
+            updated_at=parsed.updated_at,
+            status="ok",
+            decision=None,
+            messages=list(parsed.messages),
+            model_provider=None,
+            model_id=None,
+            title_override=parsed.title_override,
+            folder_id=parsed.folder_id,
+            output_text=None,
+            output_updated_at=None,
+            files=[],
+            artifacts=[],
+            workspace_root=parsed.workspace_root,
+            policy_profile=parsed.policy_profile,
+            yolo_armed=parsed.yolo_armed,
+            yolo_armed_at=parsed.yolo_armed_at,
+            tools_state=(
+                dict(parsed.tools_state) if isinstance(parsed.tools_state, dict) else None
+            ),
+            mode="ask",
+            active_plan=None,
+            active_task=None,
+            auto_state=None,
+        )
         sessions.append(parsed)
     imported = await hub.import_sessions(sessions, principal_id=principal_id, mode=mode)
-    return json_response(
-        {
-            "imported": imported,
-            "mode": mode,
-        },
-    )
+    return json_response({"imported": imported, "mode": mode})
 
 
-async def handle_ui_models(request: web.Request) -> web.Response:
-    provider_query = request.query.get("provider", "").strip().lower()
-    providers: list[str]
-    if provider_query:
-        normalized = _normalize_provider(provider_query)
-        if normalized is None:
-            return error_response(
-                status=400,
-                message=f"Неизвестный провайдер: {provider_query}",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        providers = [normalized]
-    else:
-        providers = sorted(SUPPORTED_MODEL_PROVIDERS)
-    payload_items: list[dict[str, JSONValue]] = []
-    for provider in providers:
-        models, error_text = api._fetch_provider_models(provider)
-        payload_items.append({"provider": provider, "models": models, "error": error_text})
-    return json_response({"providers": payload_items})
+async def handle_ui_folders_list(request: web.Request) -> web.Response:
+    del request
+    return json_response({"folders": []})
+
+
+async def handle_ui_folders_create(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    name_raw = payload.get("name")
+    if not isinstance(name_raw, str) or not name_raw.strip():
+        return error_response(
+            status=400,
+            message="name должен быть непустой строкой.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    folder = await hub.create_folder(name_raw)
+    return json_response({"folder": folder})
 
 
 async def handle_ui_session_model(request: web.Request) -> web.Response:
@@ -205,7 +250,7 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
         }
         message = (
             f"Модель '{model_raw}' не найдена у провайдера '{provider}'. "
-            f"Выберите модель из списка доступных."
+            "Выберите модель из списка доступных."
         )
         if suggestion:
             message = f"{message} Возможно, вы имели в виду '{suggestion}'."
@@ -218,10 +263,21 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
         )
     session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
     if session_error is not None or session_id is None:
-        return session_error or _session_forbidden_response()
+        return session_error or error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
     await hub.set_session_model(session_id, provider, model_raw)
     response = json_response(
-        {"session_id": session_id, "selected_model": {"provider": provider, "model": model_raw}}
+        {
+            "session_id": session_id,
+            "selected_model": {
+                "provider": provider,
+                "model": model_raw,
+            },
+        }
     )
     response.headers[UI_SESSION_HEADER] = session_id
     return response
@@ -238,66 +294,7 @@ async def handle_ui_sessions_list(request: web.Request) -> web.Response:
             code="unauthorized",
         )
     sessions = await hub.list_sessions(principal_id)
-    serialized_sessions: list[dict[str, JSONValue]] = [
-        {
-            "session_id": item["session_id"],
-            "title": item["title"],
-            "created_at": item["created_at"],
-            "updated_at": item["updated_at"],
-            "message_count": item["message_count"],
-            "chat_message_count": item["chat_message_count"],
-            "workspace_message_count": item["workspace_message_count"],
-            "last_message_lane": item["last_message_lane"],
-            "title_override": item["title_override"],
-            "folder_id": item["folder_id"],
-        }
-        for item in sessions
-    ]
-    return json_response({"sessions": serialized_sessions})
-
-
-async def handle_ui_folders_list(request: web.Request) -> web.Response:
-    hub: UIHub = request.app["ui_hub"]
-    folders = await hub.list_folders()
-    return json_response({"folders": folders})
-
-
-async def handle_ui_folders_create(request: web.Request) -> web.Response:
-    hub: UIHub = request.app["ui_hub"]
-    try:
-        payload = await request.json()
-    except Exception as exc:  # noqa: BLE001
-        return error_response(
-            status=400,
-            message=f"Некорректный JSON: {exc}",
-            error_type="invalid_request_error",
-            code="invalid_json",
-        )
-    if not isinstance(payload, dict):
-        return error_response(
-            status=400,
-            message="JSON должен быть объектом.",
-            error_type="invalid_request_error",
-            code="invalid_json",
-        )
-    name_raw = payload.get("name")
-    if not isinstance(name_raw, str) or not name_raw.strip():
-        return error_response(
-            status=400,
-            message="name должен быть непустой строкой.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-    try:
-        folder = await hub.create_folder(name_raw)
-    except ValueError:
-        return error_response(
-            status=400,
-            message="name должен быть непустой строкой.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-    return json_response({"folder": folder})
+    return json_response({"sessions": cast("JSONValue", sessions)})
 
 
 async def handle_ui_sessions_create(request: web.Request) -> web.Response:
@@ -345,8 +342,6 @@ async def handle_ui_session_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="session_not_found",
         )
-    raw_decision = session.get("decision")
-    session["decision"] = _normalize_ui_decision(raw_decision, session_id=session_id)
     response = json_response({"session": session})
     response.headers[UI_SESSION_HEADER] = session_id
     return response
@@ -365,16 +360,15 @@ async def handle_ui_session_history_get(request: web.Request) -> web.Response:
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
-    lane_query = request.query.get("lane")
-    lane = _normalize_history_lane(lane_query)
-    if lane_query is not None and lane_query.strip().lower() not in {"chat", "workspace"}:
+    lane_raw = request.query.get("lane", "chat")
+    if lane_raw not in {"chat", "workspace"}:
         return error_response(
             status=400,
-            message="lane должен быть chat|workspace.",
+            message="lane должен быть chat или workspace.",
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    messages = await hub.get_session_history(session_id, lane=lane)
+    messages = await hub.get_session_history(session_id, lane=lane_raw)
     if messages is None:
         return error_response(
             status=404,
@@ -382,19 +376,12 @@ async def handle_ui_session_history_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="session_not_found",
         )
-    return json_response({"session_id": session_id, "lane": lane, "messages": messages})
+    return json_response({"session_id": session_id, "lane": lane_raw, "messages": messages})
 
 
 async def handle_ui_session_output_get(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
-    if not session_id:
-        return error_response(
-            status=400,
-            message="session_id обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -412,13 +399,6 @@ async def handle_ui_session_output_get(request: web.Request) -> web.Response:
 async def handle_ui_session_files_get(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
-    if not session_id:
-        return error_response(
-            status=400,
-            message="session_id обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -436,13 +416,6 @@ async def handle_ui_session_files_get(request: web.Request) -> web.Response:
 async def handle_ui_session_file_download(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
-    if not session_id:
-        return error_response(
-            status=400,
-            message="session_id обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -455,20 +428,15 @@ async def handle_ui_session_file_download(request: web.Request) -> web.Response:
             code="session_not_found",
         )
     path_raw = request.query.get("path", "").strip()
-    if not path_raw:
-        return error_response(
-            status=400,
-            message="path обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
-    if path_raw not in files:
+    if not path_raw or path_raw not in files:
         return error_response(
             status=404,
             message="File not found in session.",
             error_type="invalid_request_error",
             code="session_file_not_found",
         )
+    from server.http_api import _resolve_workspace_file
+
     try:
         file_path = _resolve_workspace_file(path_raw)
         content = file_path.read_bytes()
@@ -486,7 +454,6 @@ async def handle_ui_session_file_download(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-
     safe_name = _sanitize_download_filename(path_raw)
     ext = safe_name.rsplit(".", 1)[-1].lower() if "." in safe_name else ""
     mime = _artifact_mime_from_ext(ext)
@@ -500,13 +467,6 @@ async def handle_ui_session_artifact_download(request: web.Request) -> web.Respo
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
     artifact_id = request.match_info.get("artifact_id", "").strip()
-    if not session_id or not artifact_id:
-        return error_response(
-            status=400,
-            message="session_id и artifact_id обязательны.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -542,7 +502,6 @@ async def handle_ui_session_artifact_download(request: web.Request) -> web.Respo
             error_type="invalid_request_error",
             code="artifact_not_file",
         )
-
     response = web.Response(body=file_content.encode("utf-8"), content_type=mime)
     response.headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
     response.headers[UI_SESSION_HEADER] = session_id
@@ -552,13 +511,6 @@ async def handle_ui_session_artifact_download(request: web.Request) -> web.Respo
 async def handle_ui_session_artifacts_download_all(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
-    if not session_id:
-        return error_response(
-            status=400,
-            message="session_id обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -570,7 +522,6 @@ async def handle_ui_session_artifacts_download_all(request: web.Request) -> web.
             error_type="invalid_request_error",
             code="session_not_found",
         )
-
     file_items: list[tuple[str, str, str]] = []
     for artifact in artifacts:
         try:
@@ -584,15 +535,6 @@ async def handle_ui_session_artifacts_download_all(request: web.Request) -> web.
             error_type="invalid_request_error",
             code="artifact_not_file",
         )
-
-    force_zip = request.query.get("format", "").strip().lower() == "zip"
-    if len(file_items) == 1 and not force_zip:
-        file_name, file_content, mime = file_items[0]
-        response = web.Response(body=file_content.encode("utf-8"), content_type=mime)
-        response.headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
-        response.headers[UI_SESSION_HEADER] = session_id
-        return response
-
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         used_names: set[str] = set()
@@ -602,15 +544,11 @@ async def handle_ui_session_artifacts_download_all(request: web.Request) -> web.
             suffix = 1
             while entry_name in used_names:
                 stem, dot, ext = base_name.partition(".")
-                if dot:
-                    entry_name = f"{stem}_{suffix}.{ext}"
-                else:
-                    entry_name = f"{base_name}_{suffix}"
+                entry_name = f"{stem}_{suffix}.{ext}" if dot else f"{base_name}_{suffix}"
                 suffix += 1
             used_names.add(entry_name)
             archive.writestr(entry_name, file_content)
-    zip_bytes = zip_buffer.getvalue()
-    response = web.Response(body=zip_bytes, content_type="application/zip")
+    response = web.Response(body=zip_buffer.getvalue(), content_type="application/zip")
     response.headers["Content-Disposition"] = 'attachment; filename="artifacts.zip"'
     response.headers[UI_SESSION_HEADER] = session_id
     return response
@@ -619,13 +557,6 @@ async def handle_ui_session_artifacts_download_all(request: web.Request) -> web.
 async def handle_ui_session_title_update(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
-    if not session_id:
-        return error_response(
-            status=400,
-            message="session_id обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -653,35 +584,13 @@ async def handle_ui_session_title_update(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    try:
-        result = await hub.set_session_title(session_id, title_raw)
-    except KeyError:
-        return error_response(
-            status=404,
-            message="Session not found.",
-            error_type="invalid_request_error",
-            code="session_not_found",
-        )
-    except ValueError:
-        return error_response(
-            status=400,
-            message="title должен быть непустой строкой.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
+    result = await hub.set_session_title(session_id, title_raw)
     return json_response(result)
 
 
 async def handle_ui_session_folder_update(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
-    if not session_id:
-        return error_response(
-            status=400,
-            message="session_id обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -694,55 +603,22 @@ async def handle_ui_session_folder_update(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_json",
         )
-    if not isinstance(payload, dict):
-        return error_response(
-            status=400,
-            message="JSON должен быть объектом.",
-            error_type="invalid_request_error",
-            code="invalid_json",
-        )
-    folder_raw = payload.get("folder_id")
-    folder_id: str | None
-    if folder_raw is None:
-        folder_id = None
-    elif isinstance(folder_raw, str):
-        folder_id = folder_raw.strip() or None
-    else:
+    folder_id = payload.get("folder_id") if isinstance(payload, dict) else None
+    if folder_id is not None and not isinstance(folder_id, str):
         return error_response(
             status=400,
             message="folder_id должен быть строкой или null.",
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    try:
-        result = await hub.assign_session_folder(session_id, folder_id)
-    except KeyError as exc:
-        if "folder" in str(exc).lower():
-            return error_response(
-                status=404,
-                message="Folder not found.",
-                error_type="invalid_request_error",
-                code="folder_not_found",
-            )
-        return error_response(
-            status=404,
-            message="Session not found.",
-            error_type="invalid_request_error",
-            code="session_not_found",
-        )
-    return json_response(result)
+    normalized_folder_id = folder_id.strip() if isinstance(folder_id, str) else None
+    await hub.set_session_folder(session_id, normalized_folder_id)
+    return json_response({"session_id": session_id, "folder_id": folder_id})
 
 
 async def handle_ui_session_delete(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()
-    if not session_id:
-        return error_response(
-            status=400,
-            message="session_id обязателен.",
-            error_type="invalid_request_error",
-            code="invalid_request_error",
-        )
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
@@ -754,4 +630,6 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="session_not_found",
         )
-    return json_response({"session_id": session_id, "deleted": True})
+    response = json_response({"ok": True, "session_id": session_id, "deleted": True})
+    response.headers[UI_SESSION_HEADER] = _resolve_transport_token(request)
+    return response

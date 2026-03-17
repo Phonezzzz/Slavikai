@@ -565,12 +565,26 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
                 task_id=task_id_raw,
             )
         )
+    workflow_payload = updated_workflow if isinstance(updated_workflow, dict) else {}
+    response_active_task = (
+        _normalize_task_payload(workflow_payload)
+        if isinstance(workflow_payload.get("task_id"), str)
+        else _normalize_task_payload(workflow_payload.get("active_task"))
+    )
     response_payload = {
         "ok": True,
         "session_id": session_id,
-        "mode": _normalize_mode_value(updated_workflow.get("mode"), default="act"),
-        "active_plan": _normalize_plan_payload(updated_workflow.get("active_plan")),
-        "active_task": _normalize_task_payload(updated_workflow.get("active_task")),
+        "mode": (
+            "act"
+            if isinstance(workflow_payload.get("task_id"), str)
+            else _normalize_mode_value(workflow_payload.get("mode"), default="act")
+        ),
+        "active_plan": (
+            running_plan
+            if isinstance(workflow_payload.get("task_id"), str)
+            else _normalize_plan_payload(workflow_payload.get("active_plan"))
+        ),
+        "active_task": response_active_task,
     }
     if idempotency_key is not None and act_fingerprint is not None:
         await idempotency_store.complete(

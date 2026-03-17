@@ -30,7 +30,6 @@ from server.http.common import (
 from server.http.common import (
     github_import,
     runtime_contract,
-    session_transfer,
     settings_runtime,
     workspace_index,
     workspace_runtime,
@@ -58,10 +57,19 @@ from server.http.common.auth import (
     AUTH_PROTECTED_PREFIXES as AUTH_PROTECTED_PREFIXES,
 )
 from server.http.common.auth import (
+    _ensure_chat_owned as _ensure_chat_owned,
+)
+from server.http.common.auth import (
     _ensure_session_owned as _ensure_session_owned,
 )
 from server.http.common.auth import (
+    _ensure_workspace_owned as _ensure_workspace_owned,
+)
+from server.http.common.auth import (
     _extract_bearer_token as _extract_bearer_token,
+)
+from server.http.common.auth import (
+    _extract_transport_token as _extract_transport_token,
 )
 from server.http.common.auth import (
     _extract_ui_session_id as _extract_ui_session_id,
@@ -82,6 +90,9 @@ from server.http.common.auth import (
     _resolve_request_principal_id as _resolve_request_principal_id,
 )
 from server.http.common.auth import (
+    _resolve_transport_token as _resolve_transport_token,
+)
+from server.http.common.auth import (
     _resolve_ui_session_id_for_principal as _resolve_ui_session_id_for_principal,
 )
 from server.http.common.auth import (
@@ -94,7 +105,7 @@ from server.http.common.responses import (
     error_response as _error_response,
 )
 from server.ui_hub import UIHub
-from server.ui_session_storage import PersistedSession, UISessionStorage
+from server.ui_session_storage import UISessionStorage
 from shared.models import JSONValue
 from tools.workspace_tools import (
     WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT,
@@ -131,9 +142,12 @@ _filter_tool_calls = _trace_views._filter_tool_calls
 _normalize_logged_path = _trace_views._normalize_logged_path
 _extract_paths_from_tool_call = _trace_views._extract_paths_from_tool_call
 _extract_files_from_tool_calls = _trace_views._extract_files_from_tool_calls
-_serialize_trace_events = session_transfer._serialize_trace_events
-_parse_imported_message = session_transfer._parse_imported_message
-_utc_iso = session_transfer._utc_iso
+
+
+def _serialize_trace_events(events: list[dict[str, JSONValue]]) -> list[dict[str, JSONValue]]:
+    return [dict(event) for event in events]
+
+
 SessionApprovalStore = runtime_contract.SessionApprovalStore
 TracerProtocol = runtime_contract.TracerProtocol
 AgentProtocol = runtime_contract.AgentProtocol
@@ -366,10 +380,20 @@ async def _apply_agent_runtime_state(
         loader_hub: _workflow_runtime.WorkflowHubProtocol,
         loader_session_id: str,
     ) -> tuple[dict[str, bool], dict[str, JSONValue]]:
-        return await _load_effective_session_security(
-            hub=cast(UIHub, loader_hub),
-            session_id=loader_session_id,
-        )
+        try:
+            return await _load_effective_session_security(
+                hub=cast(UIHub, loader_hub),
+                session_id=loader_session_id,
+            )
+        except KeyError:
+            effective_tools = _build_effective_tools_state(session_override=None)
+            effective_policy: dict[str, JSONValue] = {
+                "profile": "sandbox",
+                "yolo_armed": False,
+                "yolo_armed_at": None,
+                "safe_mode_effective": bool(effective_tools.get("safe_mode", False)),
+            }
+            return effective_tools, effective_policy
 
     async def _workspace_root_loader(
         loader_hub: _workflow_runtime.WorkflowHubProtocol,
@@ -445,31 +469,6 @@ _publish_canvas_stream = _ui_runtime._publish_canvas_stream
 _user_plane_forbidden_settings_key = _ui_settings._user_plane_forbidden_settings_key
 _normalize_policy_profile = _ui_settings._normalize_policy_profile
 _tools_state_for_profile = _ui_settings._tools_state_for_profile
-
-
-def _parse_imported_session(raw: object, *, principal_id: str) -> PersistedSession | None:
-    return session_transfer._parse_imported_session(
-        raw,
-        principal_id=principal_id,
-        normalize_policy_profile_fn=_normalize_policy_profile,
-        normalize_tools_state_payload_fn=_normalize_tools_state_payload,
-        normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),
-        normalize_plan_payload_fn=_normalize_plan_payload,
-        normalize_task_payload_fn=_normalize_task_payload,
-        normalize_auto_state_fn=_normalize_auto_state,
-        utc_iso_fn=_utc_iso,
-    )
-
-
-def _serialize_persisted_session(session: PersistedSession) -> dict[str, JSONValue]:
-    return session_transfer._serialize_persisted_session(
-        session,
-        normalize_policy_profile_fn=_normalize_policy_profile,
-        normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),
-        normalize_plan_payload_fn=_normalize_plan_payload,
-        normalize_task_payload_fn=_normalize_task_payload,
-        normalize_auto_state_fn=_normalize_auto_state,
-    )
 
 
 _publish_agent_activity = _ui_runtime._publish_agent_activity
