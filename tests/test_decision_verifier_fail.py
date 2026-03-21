@@ -5,6 +5,8 @@ from pathlib import Path
 
 import core.agent as agent_module
 from core.agent import Agent
+from core.decision.models import DecisionAction
+from core.decision.verifier_fail import build_verifier_fail_packet
 from core.mwv.models import (
     ChangeType,
     VerificationResult,
@@ -19,7 +21,11 @@ from shared.models import LLMMessage
 
 
 class DummyBrain(Brain):
+    def __init__(self) -> None:
+        self.calls = 0
+
     def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+        self.calls += 1
         return LLMResult(text="chat")
 
 
@@ -65,4 +71,40 @@ def test_decision_packet_on_verifier_fail(tmp_path: Path, monkeypatch) -> None:
     payload = json.loads(response)
     assert payload["reason"] == "verifier_fail"
     assert 3 <= len(payload["options"]) <= 5
-    assert any(option["action"] == "retry" for option in payload["options"])
+    actions = {option["action"] for option in payload["options"]}
+    assert "retry" not in actions
+    assert {"ask_user", "proceed_safe", "abort"} <= actions
+    assert agent.brain.calls == 0
+
+
+def test_build_verifier_fail_packet_respects_retry_flag() -> None:
+    result = VerificationResult(
+        status=VerificationStatus.FAILED,
+        command=["check"],
+        exit_code=1,
+        stdout="line1\nline2\nline3\nline4",
+        stderr="tests failed",
+        duration_seconds=0.1,
+        error=None,
+    )
+
+    no_retry = build_verifier_fail_packet(
+        result,
+        task_id="t1",
+        trace_id="trace-1",
+        attempt=1,
+        max_attempts=3,
+        retry_allowed=False,
+    )
+    assert DecisionAction.RETRY not in [option.action for option in no_retry.options]
+
+    with_retry = build_verifier_fail_packet(
+        result,
+        task_id="t1",
+        trace_id="trace-1",
+        attempt=1,
+        max_attempts=3,
+        retry_allowed=True,
+    )
+    retry_actions = [option.action for option in with_retry.options]
+    assert retry_actions.count(DecisionAction.RETRY) == 1

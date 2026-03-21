@@ -130,5 +130,7 @@ def test_m10_verifier_failure_returns_diagnostics(tmp_path: Path, monkeypatch) -
     payload = json.loads(response)
     assert payload["reason"] == "verifier_fail"
     assert 3 <= len(payload["options"]) <= 5
-    assert any(option["action"] == "retry" for option in payload["options"])
+    actions = {option["action"] for option in payload["options"]}
+    assert "retry" not in actions
+    assert {"ask_user", "proceed_safe", "abort"} <= actions
     assert brain.calls == 0

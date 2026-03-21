@@ -40,13 +40,6 @@ def build_verifier_fail_packet(
             risk="low",
         ),
         DecisionOption(
-            id="retry",
-            title="Повторить проверку после исправления",
-            action=DecisionAction.RETRY,
-            payload={"allowed": retry_allowed, "attempt": attempt, "max_attempts": max_attempts},
-            risk="medium",
-        ),
-        DecisionOption(
             id="abort",
             title="Остановить выполнение",
             action=DecisionAction.ABORT,
@@ -54,6 +47,17 @@ def build_verifier_fail_packet(
             risk="low",
         ),
     ]
+    if retry_allowed:
+        options.insert(
+            2,
+            DecisionOption(
+                id="retry",
+                title="Повторить проверку после исправления",
+                action=DecisionAction.RETRY,
+                payload={"attempt": attempt, "max_attempts": max_attempts},
+                risk="medium",
+            ),
+        )
     return DecisionPacket(
         id=_packet_id(),
         created_at=datetime.now(UTC),
