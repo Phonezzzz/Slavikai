@@ -384,9 +384,15 @@ clean:
 		.pytest_cache \
 		.mypy_cache \
 		.ruff_cache \
+		.cache \
+		build \
+		dist \
 		__pycache__ \
+		ui/dist \
+		ui/.vite \
 		"$(RUN_DIR)"
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
+	find . -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*.tsbuildinfo" \) -delete
 
 .PHONY: clean-venv
 clean-venv:
