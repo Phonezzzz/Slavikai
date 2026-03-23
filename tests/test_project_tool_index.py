@@ -49,6 +49,34 @@ def test_project_index_rejects_absolute_path(tmp_path, monkeypatch) -> None:
     assert "sandbox/project" in (result.error or "")
 
 
+def test_project_index_rejects_parent_reference(tmp_path, monkeypatch) -> None:
+    sandbox_root = (tmp_path / "sandbox" / "project").resolve()
+    sandbox_root.mkdir(parents=True)
+    monkeypatch.setattr("tools.project_tool.SANDBOX_ROOT", sandbox_root)
+    monkeypatch.setattr("tools.project_tool.VectorIndex", DummyVectorIndex)
+
+    req = ToolRequest(name="project", args={"cmd": "index", "args": ["../outside"]})
+    result = handle_project_request(req)
+    assert not result.ok
+    assert "sandbox/project" in (result.error or "")
+
+
+def test_project_index_allows_nested_workspace_relative_path(tmp_path, monkeypatch) -> None:
+    sandbox_root = (tmp_path / "sandbox" / "project").resolve()
+    base = sandbox_root / "proj" / "nested"
+    base.mkdir(parents=True)
+    (base / "a.py").write_text("print('hi')", encoding="utf-8")
+
+    monkeypatch.setattr("tools.project_tool.SANDBOX_ROOT", sandbox_root)
+    monkeypatch.setattr("tools.project_tool.VectorIndex", DummyVectorIndex)
+
+    req = ToolRequest(name="project", args={"cmd": "index", "args": ["proj/nested"]})
+    result = handle_project_request(req)
+    assert result.ok
+    assert result.data.get("indexed_code") == 1
+    assert result.data.get("indexed_docs") == 0
+
+
 def test_project_index_rejects_symlink_escape(tmp_path, monkeypatch) -> None:
     sandbox_root = (tmp_path / "sandbox" / "project").resolve()
     sandbox_root.mkdir(parents=True)
