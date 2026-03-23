@@ -18,7 +18,7 @@ from server.http_api import (
     _model_not_allowed_response,
     _model_not_selected_response,
     _parse_chat_request,
-    _resolve_agent,
+    _resolve_agent_for_base_http,
 )
 from shared.models import JSONValue
 
@@ -27,7 +27,7 @@ logger = logging.getLogger("SlavikAI.HttpAPI")
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
     try:
-        agent = await _resolve_agent(request)
+        agent = await _resolve_agent_for_base_http(request)
     except ModelNotAllowedError as exc:
         return _model_not_allowed_response(exc.model_id)
     if agent is None:

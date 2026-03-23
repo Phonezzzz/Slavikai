@@ -23,3 +23,11 @@ class LazyAgentProvider[T]:
             if self._agent is None:
                 self._agent = self._factory()
             return self._agent
+
+    async def ensure(self, factory: Callable[[], T]) -> T:
+        if self._agent is not None:
+            return self._agent
+        async with self._lock:
+            if self._agent is None:
+                self._agent = factory()
+            return self._agent

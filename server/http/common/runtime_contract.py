@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+import importlib
+from collections.abc import Callable
+from typing import Protocol, cast
 
 import requests
 from aiohttp import web
 
+from config.model_whitelist import ensure_model_allowed
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import RunContext, TaskPacket
@@ -121,6 +124,14 @@ class RuntimeModelResolverProtocol(Protocol):
     async def resolve_main(self, session_id: str | None) -> ModelConfig | None: ...
 
 
+def _load_agent_factory() -> Callable[..., AgentProtocol]:
+    module = importlib.import_module("core.agent")
+    agent_factory = getattr(module, "Agent", None)
+    if not callable(agent_factory):
+        raise RuntimeError("Agent class not found in core.agent")
+    return cast(Callable[..., AgentProtocol], agent_factory)
+
+
 def _model_not_selected_response() -> web.Response:
     return _error_response(
         status=409,
@@ -144,6 +155,30 @@ async def _resolve_agent(request: web.Request) -> AgentProtocol | None:
     provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
     try:
         return await provider.get()
+    except RuntimeError as exc:
+        if "Не выбрана модель" in str(exc):
+            return None
+        raise
+
+
+async def _resolve_agent_for_base_http(request: web.Request) -> AgentProtocol | None:
+    provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
+    if request.app.get("agent") is not None:
+        try:
+            return await provider.get()
+        except RuntimeError as exc:
+            if "Не выбрана модель" in str(exc):
+                return None
+            raise
+
+    resolver = cast(RuntimeModelResolverProtocol, request.app["runtime_model_resolver"])
+    main_config = await resolver.resolve_main(None)
+    if main_config is None:
+        return None
+    ensure_model_allowed(main_config.model, main_config.provider)
+    agent_factory = _load_agent_factory()
+    try:
+        return await provider.ensure(lambda: agent_factory(main_config=main_config))
     except RuntimeError as exc:
         if "Не выбрана модель" in str(exc):
             return None

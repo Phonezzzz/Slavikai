@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -162,6 +164,7 @@ async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> Te
 
 async def _create_client_without_agent(trace_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
+    monkeypatch.setattr("server.http.app.load_model_configs", lambda: None)
     app = create_app(
         agent=None,
         max_request_bytes=1_000_000,
@@ -172,6 +175,11 @@ async def _create_client_without_agent(trace_path: Path, monkeypatch) -> TestCli
     client = TestClient(server, headers=TEST_AUTH_HEADERS)
     await client.start_server()
     return client
+
+
+async def _set_runtime_global_main(client: TestClient, main_config: ModelConfig | None) -> None:
+    runtime_state = client.server.app["runtime_model_state"]
+    await runtime_state.set_global_main(main_config)
 
 
 def test_auth_gate_rejects_missing_bearer(monkeypatch, tmp_path) -> None:
@@ -516,11 +524,11 @@ def test_create_app_without_agent_does_not_raise(monkeypatch, tmp_path) -> None:
 
 def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
-    monkeypatch.setattr("core.agent.load_model_configs", lambda: None)
 
     async def run() -> None:
         client = await _create_client_without_agent(trace_path, monkeypatch)
         try:
+            await _set_runtime_global_main(client, None)
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
@@ -546,14 +554,11 @@ def test_chat_completions_returns_409_when_model_not_whitelisted(
     provider: str,
 ) -> None:
     trace_path = tmp_path / "trace.log"
-    monkeypatch.setattr(
-        "core.agent.load_model_configs",
-        lambda: _forbidden_model_config(provider),
-    )
 
     async def run() -> None:
         client = await _create_client_without_agent(trace_path, monkeypatch)
         try:
+            await _set_runtime_global_main(client, _forbidden_model_config(provider))
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
@@ -570,6 +575,97 @@ def test_chat_completions_returns_409_when_model_not_whitelisted(
             details = error.get("details")
             assert isinstance(details, dict)
             assert details.get("model") == "forbidden-model"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent(
+    monkeypatch, tmp_path
+) -> None:
+    trace_path = tmp_path / "trace.log"
+    captured_main_configs: list[ModelConfig | None] = []
+    original_import_module = importlib.import_module
+
+    class RuntimeTracer:
+        def log(self, event_type: str, message: str, meta=None) -> None:
+            del event_type, message, meta
+
+    class RuntimeAgent:
+        def __init__(self, main_config: ModelConfig | None = None) -> None:
+            self.main_config = main_config
+            captured_main_configs.append(main_config)
+            self.brain = object()
+            self.tools_enabled = {"safe_mode": True}
+            self.last_approval_request = None
+            self.last_chat_interaction_id: str | None = None
+            self.tracer = RuntimeTracer()
+
+        def set_session_context(
+            self,
+            session_id: str | None,
+            approved_categories: set[str],
+        ) -> None:
+            del session_id, approved_categories
+
+        def respond(self, messages) -> str:
+            del messages
+            self.last_chat_interaction_id = "trace-from-runtime-state"
+            return "ok"
+
+        def record_feedback_event(
+            self,
+            *,
+            interaction_id: str,
+            rating,
+            labels=None,
+            free_text=None,
+        ) -> None:
+            del interaction_id, rating, labels, free_text
+
+    monkeypatch.setattr(
+        "server.http.common.runtime_contract.importlib.import_module",
+        lambda module_name: (
+            SimpleNamespace(Agent=RuntimeAgent)
+            if module_name == "core.agent"
+            else original_import_module(module_name)
+        ),
+    )
+
+    async def run() -> None:
+        client = await _create_client_without_agent(trace_path, monkeypatch)
+        try:
+            await _set_runtime_global_main(
+                client,
+                ModelConfig(
+                    provider="xai",
+                    model="slavik",
+                ),
+            )
+            first = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                },
+            )
+            assert first.status == 200
+            second = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Ещё раз"}],
+                    "stream": False,
+                },
+            )
+            assert second.status == 200
+            assert len(captured_main_configs) == 1
+            captured = captured_main_configs[0]
+            assert captured is not None
+            assert captured.provider == "xai"
+            assert captured.model == "slavik"
         finally:
             await client.close()
 
@@ -614,6 +710,31 @@ def test_trace_endpoint_returns_events(monkeypatch, tmp_path) -> None:
             events = trace_payload.get("events", [])
             assert isinstance(events, list)
             assert events
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_injected_agent_chat_completions_still_work_when_runtime_global_empty(
+    monkeypatch, tmp_path
+) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+    monkeypatch.setattr("server.http.app.load_model_configs", lambda: None)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                },
+            )
+            assert resp.status == 200
         finally:
             await client.close()
 

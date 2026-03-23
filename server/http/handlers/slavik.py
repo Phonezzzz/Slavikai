@@ -14,7 +14,7 @@ from server.http_api import (
     _model_not_selected_response,
     _parse_trace_log,
     _require_admin_bearer,
-    _resolve_agent,
+    _resolve_agent_for_base_http,
     _serialize_trace_events,
     _tool_calls_for_trace_id,
     _trace_log_path,
@@ -70,7 +70,7 @@ async def handle_tool_calls(request: web.Request) -> web.Response:
 
 async def handle_feedback(request: web.Request) -> web.Response:
     try:
-        agent = await _resolve_agent(request)
+        agent = await _resolve_agent_for_base_http(request)
     except ModelNotAllowedError as exc:
         return _model_not_allowed_response(exc.model_id)
     if agent is None:
