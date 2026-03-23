@@ -404,6 +404,8 @@ def test_ui_chat_send_requires_model_selection() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
+            runtime_model_state = client.server.app["runtime_model_state"]
+            await runtime_model_state.set_global_main(None)
             response = await client.post("/ui/api/chat/send", json={"content": "Ping"})
             assert response.status == 409
             payload = await response.json()

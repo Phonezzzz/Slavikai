@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from llm.types import ModelConfig
+
 # ruff: noqa: F403,F405
 from .fakes import *
 
@@ -88,6 +90,42 @@ def test_ui_session_model_accepts_inception_mercury(monkeypatch) -> None:
             assert isinstance(selected, dict)
             assert selected.get("provider") == "inception"
             assert selected.get("model") == "mercury"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_model_updates_runtime_override_and_delete_clears_it(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["local-default"], None),
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            response = await client.post(
+                "/ui/api/session-model",
+                headers={"X-Slavik-Session": session_id},
+                json={"provider": "local", "model": "local-default"},
+            )
+            assert response.status == 200
+
+            runtime_model_state = client.server.app["runtime_model_state"]
+            selected = await runtime_model_state.get_session_override(session_id)
+            assert isinstance(selected, ModelConfig)
+            assert selected.provider == "local"
+            assert selected.model == "local-default"
+
+            delete_resp = await client.delete(f"/ui/api/sessions/{session_id}")
+            assert delete_resp.status == 200
+            assert await runtime_model_state.get_session_override(session_id) is None
         finally:
             await client.close()
 
@@ -328,6 +366,117 @@ def test_ui_chat_send_endpoint() -> None:
             artifacts = payload.get("artifacts")
             assert isinstance(artifacts, list)
             assert artifacts == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_uses_global_runtime_model_when_session_override_missing() -> None:
+    async def run() -> None:
+        agent = CaptureConfigAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            runtime_model_state = client.server.app["runtime_model_state"]
+            await runtime_model_state.set_global_main(
+                ModelConfig(provider="local", model="local-default")
+            )
+
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "Ping"},
+            )
+            assert response.status == 200
+            assert agent.last_provider == "local"
+            assert agent.last_model == "local-default"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_prefers_session_runtime_override_over_global_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["local-default"], None),
+    )
+
+    async def run() -> None:
+        agent = CaptureConfigAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            runtime_model_state = client.server.app["runtime_model_state"]
+            await runtime_model_state.set_global_main(
+                ModelConfig(provider="xai", model="global-default")
+            )
+
+            select_resp = await client.post(
+                "/ui/api/session-model",
+                headers={"X-Slavik-Session": session_id},
+                json={"provider": "local", "model": "local-default"},
+            )
+            assert select_resp.status == 200
+
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "Ping"},
+            )
+            assert response.status == 200
+            assert agent.last_provider == "local"
+            assert agent.last_model == "local-default"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_project_command_uses_session_runtime_override_over_global_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["local-default"], None),
+    )
+
+    async def run() -> None:
+        agent = CaptureConfigAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            runtime_model_state = client.server.app["runtime_model_state"]
+            await runtime_model_state.set_global_main(
+                ModelConfig(provider="xai", model="global-default")
+            )
+
+            select_resp = await client.post(
+                "/ui/api/session-model",
+                headers={"X-Slavik-Session": session_id},
+                json={"provider": "local", "model": "local-default"},
+            )
+            assert select_resp.status == 200
+
+            response = await client.post(
+                "/ui/api/tools/project",
+                headers={"X-Slavik-Session": session_id},
+                json={"command": "find", "args": "README.md"},
+            )
+            assert response.status == 200
+            assert agent.last_provider == "local"
+            assert agent.last_model == "local-default"
         finally:
             await client.close()
 
@@ -1141,6 +1290,75 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             assert isinstance(selected_from_status, dict)
             assert selected_from_status.get("provider") == "local"
             assert selected_from_status.get("model") == selected_model
+        finally:
+            await client_after.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_uses_restored_session_model_as_runtime_override(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["local-default"], None),
+    )
+
+    async def run() -> None:
+        db_path = tmp_path / "ui_sessions.db"
+
+        storage_before = SQLiteUISessionStorage(db_path)
+        app_before = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=storage_before,
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server_before = TestServer(app_before)
+        client_before = TestClient(server_before, headers=TEST_AUTH_HEADERS)
+        await client_before.start_server()
+
+        session_id: str | None = None
+        try:
+            status_resp = await client_before.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            raw_session_id = status_payload.get("session_id")
+            assert isinstance(raw_session_id, str)
+            session_id = raw_session_id
+
+            select_resp = await client_before.post(
+                "/ui/api/session-model",
+                headers={"X-Slavik-Session": session_id},
+                json={"provider": "local", "model": "local-default"},
+            )
+            assert select_resp.status == 200
+        finally:
+            await client_before.close()
+
+        assert isinstance(session_id, str)
+        storage_after = SQLiteUISessionStorage(db_path)
+        agent_after = CaptureConfigAgent()
+        app_after = create_app(
+            agent=agent_after,
+            max_request_bytes=1_000_000,
+            ui_storage=storage_after,
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        runtime_model_state = app_after["runtime_model_state"]
+        await runtime_model_state.set_global_main(None)
+        server_after = TestServer(app_after)
+        client_after = TestClient(server_after, headers=TEST_AUTH_HEADERS)
+        await client_after.start_server()
+        try:
+            send_resp = await client_after.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "Persist me again"},
+            )
+            assert send_resp.status == 200
+            assert agent_after.last_provider == "local"
+            assert agent_after.last_model == "local-default"
         finally:
             await client_after.close()
 

@@ -6,7 +6,6 @@ from typing import Literal
 
 from aiohttp import web
 
-from config.model_whitelist import ModelNotAllowedError
 from llm.types import ModelConfig
 from server import http_api as api
 from server.http.common.chat_payload import (
@@ -22,11 +21,9 @@ from server.http_api import (
     UI_SESSION_HEADER,
     _apply_agent_runtime_state,
     _build_github_import_approval_request,
-    _build_model_config,
     _build_ui_approval_decision,
     _decision_is_pending_blocking,
     _decision_workflow_context,
-    _model_not_allowed_response,
     _model_not_selected_response,
     _normalize_mode_value,
     _normalize_plan_payload,
@@ -34,12 +31,14 @@ from server.http_api import (
     _normalize_ui_decision,
     _parse_github_import_args,
     _publish_agent_activity,
-    _resolve_agent,
+    _resolve_agent_for_ui_session,
     _resolve_provider_api_key,
     _resolve_ui_session_id_for_principal,
+    _selected_model_snapshot,
     _serialize_approval_request,
     _session_forbidden_response,
     _set_current_plan_step_status,
+    _sync_session_runtime_override,
 )
 from server.ui_hub import UIHub
 from shared.models import JSONValue
@@ -69,13 +68,6 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
     status_opened = False
     error = False
     try:
-        try:
-            agent = await _resolve_agent(request)
-        except ModelNotAllowedError as exc:
-            return _model_not_allowed_response(exc.model_id)
-        if agent is None:
-            return _model_not_selected_response()
-
         try:
             payload = await request.json()
         except Exception as exc:  # noqa: BLE001
@@ -115,9 +107,27 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         if resolved_session_id is None:
             return _session_forbidden_response()
         session_id = resolved_session_id
-        selected_model = await hub.get_session_model(session_id)
-        if selected_model is None:
+        selected_model_metadata = await hub.get_session_model(session_id)
+        try:
+            await _sync_session_runtime_override(
+                request,
+                session_id,
+                selected_model_metadata,
+            )
+            agent, selected_main_config = await _resolve_agent_for_ui_session(
+                request,
+                session_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return error_response(
+                status=400,
+                message=f"Не удалось применить модель сессии: {exc}",
+                error_type="configuration_error",
+                code="model_config_invalid",
+            )
+        if agent is None or selected_main_config is None:
             return _model_not_selected_response()
+        selected_model = _selected_model_snapshot(selected_main_config)
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
         active_plan = _normalize_plan_payload(workflow.get("active_plan"))
@@ -180,10 +190,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                             "args": args_raw,
                         },
                         "user_message_id": user_message_id,
-                        "selected_model_snapshot": {
-                            "provider": selected_model["provider"],
-                            "model": selected_model["model"],
-                        },
+                        "selected_model_snapshot": dict(selected_model),
                     },
                     workflow_context=_decision_workflow_context(
                         mode=mode,
@@ -200,7 +207,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 messages = await hub.get_messages(session_id, lane="chat")
                 workspace_messages = await hub.get_messages(session_id, lane="workspace")
                 current_decision = await hub.get_session_decision(session_id)
-                current_model = await hub.get_session_model(session_id)
+                current_model = await hub.get_session_model(session_id) or dict(selected_model)
                 current_workflow = await hub.get_session_workflow(session_id)
                 response = json_response(
                     {
@@ -290,7 +297,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             messages = await hub.get_messages(session_id, lane="chat")
             workspace_messages = await hub.get_messages(session_id, lane="workspace")
             current_decision = await hub.get_session_decision(session_id)
-            current_model = await hub.get_session_model(session_id)
+            current_model = await hub.get_session_model(session_id) or dict(selected_model)
             current_workflow = await hub.get_session_workflow(session_id)
             response = json_response(
                 {
@@ -322,11 +329,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         ui_decision: dict[str, JSONValue] | None = None
         async with agent_lock:
             try:
-                model_config = _build_model_config(
-                    selected_model["provider"],
-                    selected_model["model"],
-                )
-                model_config = _workspace_inception_runtime_config(model_config)
+                model_config = _workspace_inception_runtime_config(selected_main_config)
                 api_key = _resolve_provider_api_key(selected_model["provider"])
                 agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
             except Exception as exc:  # noqa: BLE001
@@ -384,10 +387,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                             "args": args_raw,
                         },
                         "user_message_id": user_message_id,
-                        "selected_model_snapshot": {
-                            "provider": selected_model["provider"],
-                            "model": selected_model["model"],
-                        },
+                        "selected_model_snapshot": dict(selected_model),
                     },
                     trace_id=_normalize_trace_id(trace_id),
                     workflow_context=_decision_workflow_context(
@@ -413,7 +413,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             messages = await hub.get_messages(session_id, lane="chat")
             workspace_messages = await hub.get_messages(session_id, lane="workspace")
             current_decision = await hub.get_session_decision(session_id)
-            current_model = await hub.get_session_model(session_id)
+            current_model = await hub.get_session_model(session_id) or dict(selected_model)
             current_workflow = await hub.get_session_workflow(session_id)
             response = json_response(
                 {
@@ -455,7 +455,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         messages = await hub.get_messages(session_id, lane="chat")
         workspace_messages = await hub.get_messages(session_id, lane="workspace")
         current_decision = await hub.get_session_decision(session_id)
-        current_model = await hub.get_session_model(session_id)
+        current_model = await hub.get_session_model(session_id) or dict(selected_model)
         current_workflow = await hub.get_session_workflow(session_id)
         response = json_response(
             {

@@ -14,6 +14,7 @@ from core.mwv.manager import MWVRunResult
 from core.mwv.models import RunContext, TaskPacket
 from llm.types import ModelConfig
 from server.http.common.responses import error_response as _error_response
+from server.http.common.ui_settings import _build_model_config
 from server.lazy_agent import LazyAgentProvider
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
@@ -182,4 +183,57 @@ async def _resolve_agent_for_base_http(request: web.Request) -> AgentProtocol | 
     except RuntimeError as exc:
         if "Не выбрана модель" in str(exc):
             return None
+        raise
+
+
+def _selected_model_snapshot(main_config: ModelConfig) -> dict[str, str]:
+    return {"provider": main_config.provider, "model": main_config.model}
+
+
+async def _sync_session_runtime_override(
+    request: web.Request,
+    session_id: str,
+    selected_model: dict[str, str] | None,
+) -> ModelConfig | None:
+    if not isinstance(selected_model, dict):
+        return None
+    provider = selected_model.get("provider")
+    model_id = selected_model.get("model")
+    if not isinstance(provider, str) or not isinstance(model_id, str):
+        return None
+    main_config = _build_model_config(provider, model_id)
+    store = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
+    await store.set_session_override(session_id, main_config)
+    return main_config
+
+
+async def _resolve_runtime_main_for_session(
+    request: web.Request,
+    session_id: str,
+) -> ModelConfig | None:
+    resolver = cast(RuntimeModelResolverProtocol, request.app["runtime_model_resolver"])
+    return await resolver.resolve_main(session_id)
+
+
+async def _resolve_agent_for_ui_session(
+    request: web.Request,
+    session_id: str,
+) -> tuple[AgentProtocol | None, ModelConfig | None]:
+    main_config = await _resolve_runtime_main_for_session(request, session_id)
+    if main_config is None:
+        return None, None
+    provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
+    if request.app.get("agent") is not None:
+        try:
+            return await provider.get(), main_config
+        except RuntimeError as exc:
+            if "Не выбрана модель" in str(exc):
+                return None, None
+            raise
+    agent_factory = _load_agent_factory()
+    try:
+        return await provider.ensure(lambda: agent_factory(main_config=main_config)), main_config
+    except RuntimeError as exc:
+        if "Не выбрана модель" in str(exc):
+            return None, None
         raise

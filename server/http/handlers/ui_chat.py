@@ -8,7 +8,6 @@ from typing import Literal
 
 from aiohttp import web
 
-from config.model_whitelist import ModelNotAllowedError
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
 from llm.types import LLMStreamChunk, ModelConfig
@@ -33,14 +32,12 @@ from server.http_api import (
     UI_SESSION_HEADER,
     _apply_agent_runtime_state,
     _build_canvas_chat_summary,
-    _build_model_config,
     _build_output_artifacts,
     _build_ui_approval_decision,
     _decision_is_pending_blocking,
     _decision_workflow_context,
     _extract_files_from_tool_calls,
     _extract_named_files_from_output,
-    _model_not_allowed_response,
     _model_not_selected_response,
     _normalize_auto_state,
     _normalize_mode_value,
@@ -54,9 +51,10 @@ from server.http_api import (
     _publish_chat_stream_from_text,
     _publish_chat_stream_start,
     _request_likely_canvas,
-    _resolve_agent,
+    _resolve_agent_for_ui_session,
     _resolve_provider_api_key,
     _resolve_ui_session_id_for_principal,
+    _selected_model_snapshot,
     _serialize_approval_request,
     _session_forbidden_response,
     _set_current_plan_step_status,
@@ -64,6 +62,7 @@ from server.http_api import (
     _split_chat_stream_chunks,
     _stream_preview_indicates_canvas,
     _stream_preview_ready_for_chat,
+    _sync_session_runtime_override,
     _tool_calls_for_trace_id,
     _utc_now_iso,
     _workspace_root_for_session,
@@ -329,13 +328,6 @@ async def handle_ui_chat_send(
         await _complete_idempotency(error_payload, status=status)
 
     try:
-        try:
-            agent = await _resolve_agent(request)
-        except ModelNotAllowedError as exc:
-            return _model_not_allowed_response(exc.model_id)
-        if agent is None:
-            return _model_not_selected_response()
-
         if payload_override is None:
             try:
                 payload = await request.json()
@@ -484,10 +476,25 @@ async def handle_ui_chat_send(
                     code="idempotency_in_progress",
                 )
             idempotency_active = True
-        selected_model = await hub.get_session_model(session_id)
-        if selected_model is None:
+        selected_model_metadata = await hub.get_session_model(session_id)
+        try:
+            await _sync_session_runtime_override(request, session_id, selected_model_metadata)
+            agent, selected_main_config = await _resolve_agent_for_ui_session(
+                request,
+                session_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await _abort_idempotency()
+            return error_response(
+                status=400,
+                message=f"Не удалось применить модель сессии: {exc}",
+                error_type="configuration_error",
+                code="model_config_invalid",
+            )
+        if agent is None or selected_main_config is None:
             await _abort_idempotency()
             return _model_not_selected_response()
+        selected_model = _selected_model_snapshot(selected_main_config)
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
         active_plan = _normalize_plan_payload(workflow.get("active_plan"))
@@ -548,10 +555,7 @@ async def handle_ui_chat_send(
                         "attachments": attachments,
                     },
                     "user_message_id": None,
-                    "selected_model_snapshot": {
-                        "provider": selected_model["provider"],
-                        "model": selected_model["model"],
-                    },
+                    "selected_model_snapshot": dict(selected_model),
                 },
                 workflow_context=_decision_workflow_context(
                     mode=mode,
@@ -584,7 +588,7 @@ async def handle_ui_chat_send(
             artifacts_payload = (
                 await hub.get_session_artifacts(session_id) if lane == "chat" else []
             )
-            current_model = await hub.get_session_model(session_id)
+            current_model = await hub.get_session_model(session_id) or dict(selected_model)
             current_workflow = await hub.get_session_workflow(session_id)
             response_payload_root_gate: dict[str, JSONValue] = {
                 "session_id": session_id,
@@ -669,7 +673,7 @@ async def handle_ui_chat_send(
                 await hub.get_session_artifacts(session_id) if lane == "chat" else []
             )
             current_decision = await hub.get_session_decision(session_id)
-            current_model = await hub.get_session_model(session_id)
+            current_model = await hub.get_session_model(session_id) or dict(selected_model)
             current_workflow = await hub.get_session_workflow(session_id)
             response_payload_guidance: dict[str, JSONValue] = {
                 "session_id": session_id,
@@ -726,11 +730,7 @@ async def handle_ui_chat_send(
                 getattr(agent, "last_chat_interaction_id", None)
             )
             try:
-                model_config = _build_model_config(
-                    selected_model["provider"],
-                    selected_model["model"],
-                )
-                model_config = _inception_runtime_config_for_lane(model_config, lane)
+                model_config = _inception_runtime_config_for_lane(selected_main_config, lane)
                 api_key = _resolve_provider_api_key(selected_model["provider"])
                 agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
             except Exception as exc:  # noqa: BLE001
@@ -1033,10 +1033,7 @@ async def handle_ui_chat_send(
                             "attachments": attachments,
                         },
                         "user_message_id": user_message_id,
-                        "selected_model_snapshot": {
-                            "provider": selected_model["provider"],
-                            "model": selected_model["model"],
-                        },
+                        "selected_model_snapshot": dict(selected_model),
                     }
                 source_request_raw = approval_resume_payload.get("source_request")
                 source_request = (
@@ -1111,7 +1108,7 @@ async def handle_ui_chat_send(
                 await hub.get_session_artifacts(session_id) if lane == "chat" else []
             )
             current_decision = await hub.get_session_decision(session_id)
-            current_model = await hub.get_session_model(session_id)
+            current_model = await hub.get_session_model(session_id) or dict(selected_model)
             current_workflow = await hub.get_session_workflow(session_id)
             response_payload_blocking_decision: dict[str, JSONValue] = {
                 "session_id": session_id,
@@ -1233,7 +1230,7 @@ async def handle_ui_chat_send(
         files_payload = await hub.get_session_files(session_id)
         artifacts_payload = await hub.get_session_artifacts(session_id) if lane == "chat" else []
         current_decision = await hub.get_session_decision(session_id)
-        current_model = await hub.get_session_model(session_id)
+        current_model = await hub.get_session_model(session_id) or dict(selected_model)
         current_workflow = await hub.get_session_workflow(session_id)
         response_payload_final: dict[str, JSONValue] = {
             "session_id": session_id,
