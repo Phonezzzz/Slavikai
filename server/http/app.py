@@ -17,9 +17,14 @@ from config.http_server_config import (
     resolve_http_auth_config,
     resolve_http_server_config,
 )
+from config.model_store import load_model_configs
 from server import http_api as api
 from server.http.common.idempotency import IdempotencyStore
 from server.http.common.runtime_contract import AgentProtocol, SessionApprovalStore
+from server.http.common.runtime_model_state import (
+    RuntimeModelResolver,
+    build_runtime_model_state_from_persisted,
+)
 from server.lazy_agent import LazyAgentProvider
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
@@ -86,6 +91,11 @@ def create_app(
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
     app["idempotency_store"] = IdempotencyStore()
+    runtime_model_state = build_runtime_model_state_from_persisted(
+        load_model_configs_fn=load_model_configs
+    )
+    app["runtime_model_state"] = runtime_model_state
+    app["runtime_model_resolver"] = RuntimeModelResolver(runtime_model_state)
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )
