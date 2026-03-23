@@ -674,15 +674,21 @@ def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent
 
 @pytest.mark.parametrize("provider", ["openrouter"])
 def test_agent_init_fails_when_model_not_whitelisted(monkeypatch, provider: str) -> None:
-    monkeypatch.setattr(
-        "core.agent.load_model_configs",
-        lambda: _forbidden_model_config(provider),
-    )
-
     with pytest.raises(ModelNotAllowedError):
         from core.agent import Agent
 
-        Agent(brain=DummyBrain("ok"))
+        Agent(
+            brain=DummyBrain("ok"),
+            main_config=_forbidden_model_config(provider),
+        )
+
+
+def test_agent_init_with_external_brain_does_not_resolve_file_main() -> None:
+    from core.agent import Agent
+
+    agent = Agent(brain=DummyBrain("ok"))
+
+    assert agent.main_config is None
 
 
 def test_trace_endpoint_returns_events(monkeypatch, tmp_path) -> None:

@@ -74,6 +74,11 @@ def create_app(
     app["auth_config"] = resolved_auth_config
     app["http_api_logger"] = logger
     app["settings_snapshot_builder"] = api._build_settings_payload
+    runtime_model_state = build_runtime_model_state_from_persisted(
+        load_model_configs_fn=load_model_configs
+    )
+    app["runtime_model_state"] = runtime_model_state
+    app["runtime_model_resolver"] = RuntimeModelResolver(runtime_model_state)
     if agent is None:
 
         def _factory() -> AgentProtocol:
@@ -81,7 +86,10 @@ def create_app(
             agent_factory = getattr(module, "Agent", None)
             if not callable(agent_factory):
                 raise RuntimeError("Agent class not found in core.agent")
-            return cast("AgentProtocol", agent_factory())
+            return cast(
+                "AgentProtocol",
+                agent_factory(main_config=runtime_model_state.peek_global_main()),
+            )
 
         app["agent"] = None
         app["agent_provider"] = LazyAgentProvider(factory=_factory)
@@ -91,11 +99,6 @@ def create_app(
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
     app["idempotency_store"] = IdempotencyStore()
-    runtime_model_state = build_runtime_model_state_from_persisted(
-        load_model_configs_fn=load_model_configs
-    )
-    app["runtime_model_state"] = runtime_model_state
-    app["runtime_model_resolver"] = RuntimeModelResolver(runtime_model_state)
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )

@@ -19,6 +19,9 @@ class RuntimeModelStateStore:
         self._session_overrides: dict[str, ModelConfig] = {}
         self._lock = asyncio.Lock()
 
+    def peek_global_main(self) -> ModelConfig | None:
+        return self._global_main
+
     async def get_global_main(self) -> ModelConfig | None:
         async with self._lock:
             return self._global_main
