@@ -13,7 +13,6 @@ import type {
 import type { CanvasMessage, CanvasSendPayload } from './canvas';
 import {
   findFirstFilePath,
-  policyLabel,
   terminalTimestamp,
   type WorkspaceNode,
   type WorkspaceTreeMeta,
@@ -57,6 +56,9 @@ type WorkspaceIdeProps = {
   sessionId: string | null;
   sessionHeader: string;
   modelLabel: string;
+  sessionPolicyLabel: string;
+  sessionYoloActive: boolean;
+  sessionSafeMode: boolean;
   messages: CanvasMessage[];
   sending: boolean;
   statusMessage?: string | null;
@@ -112,6 +114,9 @@ export function WorkspaceIde({
   sessionId,
   sessionHeader,
   modelLabel,
+  sessionPolicyLabel,
+  sessionYoloActive,
+  sessionSafeMode,
   messages,
   sending,
   statusMessage,
@@ -164,9 +169,6 @@ export function WorkspaceIde({
   const [includeTerminal, setIncludeTerminal] = useState(true);
 
   const [workspaceRoot, setWorkspaceRoot] = useState('');
-  const [sessionPolicyLabel, setSessionPolicyLabel] = useState('Sandbox');
-  const [sessionYoloActive, setSessionYoloActive] = useState(false);
-  const [sessionSafeMode, setSessionSafeMode] = useState(true);
   const [rootPickerOpen, setRootPickerOpen] = useState(false);
   const [rootInput, setRootInput] = useState('');
   const [rootBusy, setRootBusy] = useState(false);
@@ -485,24 +487,13 @@ export function WorkspaceIde({
   const loadWorkspaceRoot = async (): Promise<void> => {
     if (!sessionId) {
       setWorkspaceRoot('');
-      setSessionPolicyLabel('Sandbox');
-      setSessionYoloActive(false);
-      setSessionSafeMode(true);
+      setRootInput('');
       return;
     }
     try {
-      const { rootPath, policy } = await fetchWorkspaceRoot(requestHeaders);
+      const { rootPath } = await fetchWorkspaceRoot(requestHeaders);
       setWorkspaceRoot(rootPath);
       setRootInput(rootPath);
-      if (policy) {
-        setSessionPolicyLabel(policyLabel(policy.profile));
-        setSessionYoloActive(policy.yolo_armed === true);
-        setSessionSafeMode(policy.safe_mode_effective !== false);
-      } else {
-        setSessionPolicyLabel('Sandbox');
-        setSessionYoloActive(false);
-        setSessionSafeMode(true);
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load workspace root.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);

@@ -18,6 +18,7 @@ import {
 import { SearchModal } from './components/search-modal';
 import { SessionControlShell } from './components/session-control-shell';
 import { WorkspaceIde } from './components/workspace-ide';
+import { policyLabel as formatPolicyLabel } from '../features/workspace/workspace-helpers';
 import { isSessionMode } from './types';
 import type {
   AutoState,
@@ -88,9 +89,21 @@ type ComposerUiSettings = {
   longPasteThresholdChars: number;
 };
 
+type SessionSecuritySummary = {
+  policyLabel: string;
+  yoloActive: boolean;
+  safeMode: boolean;
+};
+
 const DEFAULT_COMPOSER_SETTINGS: ComposerUiSettings = {
   longPasteToFileEnabled: true,
   longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
+};
+
+const DEFAULT_SESSION_SECURITY_SUMMARY: SessionSecuritySummary = {
+  policyLabel: 'Sandbox',
+  yoloActive: false,
+  safeMode: true,
 };
 
 const parseChatAttachments = (value: unknown): ChatAttachment[] => {
@@ -217,6 +230,38 @@ const parseSelectedModel = (value: unknown): SelectedModel | null => {
     return null;
   }
   return { provider: candidate.provider, model: candidate.model };
+};
+
+const parseSessionSecuritySummary = (value: unknown): SessionSecuritySummary => {
+  if (!value || typeof value !== 'object') {
+    return DEFAULT_SESSION_SECURITY_SUMMARY;
+  }
+  const policyRaw = (value as { policy?: unknown }).policy;
+  const toolsStateRaw = (value as { tools_state?: unknown }).tools_state;
+
+  let nextPolicyLabel = DEFAULT_SESSION_SECURITY_SUMMARY.policyLabel;
+  let nextYoloActive = DEFAULT_SESSION_SECURITY_SUMMARY.yoloActive;
+  let nextSafeMode = DEFAULT_SESSION_SECURITY_SUMMARY.safeMode;
+
+  if (policyRaw && typeof policyRaw === 'object') {
+    const profile = (policyRaw as { profile?: unknown }).profile;
+    const yoloArmed = (policyRaw as { yolo_armed?: unknown }).yolo_armed;
+    nextPolicyLabel = formatPolicyLabel(profile);
+    nextYoloActive = yoloArmed === true;
+  }
+
+  if (toolsStateRaw && typeof toolsStateRaw === 'object') {
+    const safeModeRaw = (toolsStateRaw as { safe_mode?: unknown }).safe_mode;
+    if (typeof safeModeRaw === 'boolean') {
+      nextSafeMode = safeModeRaw;
+    }
+  }
+
+  return {
+    policyLabel: nextPolicyLabel,
+    yoloActive: nextYoloActive,
+    safeMode: nextSafeMode,
+  };
 };
 
 const parseProviderModels = (value: unknown): ProviderModels[] => {
@@ -1140,6 +1185,9 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionDrawerOpen, setSessionDrawerOpen] = useState(false);
   const [repositoryPanelOpen, setRepositoryPanelOpen] = useState(false);
+  const [sessionSecuritySummary, setSessionSecuritySummary] = useState<SessionSecuritySummary>(
+    DEFAULT_SESSION_SECURITY_SUMMARY,
+  );
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
@@ -1608,6 +1656,23 @@ export default function App() {
     return parsed;
   };
 
+  const loadSessionSecuritySummary = async (
+    sessionId: string,
+  ): Promise<SessionSecuritySummary> => {
+    const response = await fetch('/ui/api/session/security', {
+      headers: {
+        [SESSION_HEADER]: sessionId,
+      },
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to load session controls.'));
+    }
+    const parsed = parseSessionSecuritySummary(payload);
+    setSessionSecuritySummary(parsed);
+    return parsed;
+  };
+
   const setSessionModel = async (
     sessionId: string,
     provider: string,
@@ -1863,6 +1928,11 @@ export default function App() {
     setSessionArtifacts(
       parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
     );
+    try {
+      await loadSessionSecuritySummary(sessionId);
+    } catch {
+      setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
+    }
     setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
     setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
     setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
@@ -2220,6 +2290,13 @@ export default function App() {
       setChatStreamingState(null);
       setWorkspaceStreamingState(null);
     };
+  }, [selectedConversation]);
+
+  useEffect(() => {
+    if (selectedConversation) {
+      return;
+    }
+    setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
   }, [selectedConversation]);
 
   const handleSelectConversation = async (sessionId: string) => {
@@ -3104,6 +3181,9 @@ export default function App() {
             sessionId={selectedConversation}
             sessionHeader={SESSION_HEADER}
             modelLabel={modelLabel}
+            sessionPolicyLabel={sessionSecuritySummary.policyLabel}
+            sessionYoloActive={sessionSecuritySummary.yoloActive}
+            sessionSafeMode={sessionSecuritySummary.safeMode}
             messages={workspaceMessages}
             sending={sending}
             statusMessage={statusMessage}
@@ -3223,6 +3303,13 @@ export default function App() {
         onClose={() => setSessionDrawerOpen(false)}
         onSaved={() => {
           setStatusMessage('Session controls updated.');
+          if (!selectedConversation) {
+            setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
+            return;
+          }
+          void loadSessionSecuritySummary(selectedConversation).catch(() => {
+            setStatusMessage('Session controls updated, but session summary refresh failed.');
+          });
         }}
         sessionId={selectedConversation}
         sessionHeader={SESSION_HEADER}

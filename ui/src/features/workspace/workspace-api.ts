@@ -1,4 +1,4 @@
-import { getNumber, getRecord, getString, isRecord } from '../../codecs/guards';
+import { getNumber, getString, isRecord } from '../../codecs/guards';
 import {
   explainWorkspaceFailure,
   extractApiError,
@@ -34,14 +34,13 @@ const throwWorkspaceError = (payload: unknown, fallback: string): never => {
 
 export const fetchWorkspaceRoot = async (
   headers: Record<string, string>,
-): Promise<{ rootPath: string; policy: Record<string, unknown> | null }> => {
+): Promise<{ rootPath: string }> => {
   const { response, payload } = await fetchJson('/ui/api/workspace/root', { headers });
   if (!response.ok) {
     throwWorkspaceError(payload, 'Failed to load workspace root.');
   }
   return {
     rootPath: getString(payload, 'root_path') ?? '',
-    policy: getRecord(payload, 'policy'),
   };
 };
 
