@@ -67,7 +67,7 @@ type WorkspaceIdeProps = {
   sending: boolean;
   statusMessage?: string | null;
   onBackToChat: () => void;
-  onOpenWorkspaceSettings: () => void;
+  onOpenRepositoryPanel: () => void;
   onSendAgentMessage: (payload: CanvasSendPayload) => Promise<boolean>;
   onSendFeedback?: (interactionId: string, rating: 'good' | 'bad') => Promise<boolean>;
   mode: SessionMode;
@@ -126,7 +126,7 @@ export function WorkspaceIde({
   sending,
   statusMessage,
   onBackToChat,
-  onOpenWorkspaceSettings,
+  onOpenRepositoryPanel,
   onSendAgentMessage,
   onSendFeedback,
   mode,
@@ -1337,7 +1337,7 @@ export function WorkspaceIde({
         onRefreshGitDiff={() => {
           void loadGitDiff();
         }}
-        onOpenWorkspaceSettings={onOpenWorkspaceSettings}
+        onOpenRepositoryPanel={onOpenRepositoryPanel}
         onOpenQuickOpen={openQuickOpen}
         onRootInputChange={setRootInput}
         onApplyRoot={() => {

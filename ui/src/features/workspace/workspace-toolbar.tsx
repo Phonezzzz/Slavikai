@@ -1,4 +1,4 @@
-import { ArrowLeft, RefreshCcw, Settings } from 'lucide-react';
+import { ArrowLeft, FolderGit2, RefreshCcw } from 'lucide-react';
 
 import { compactPath } from './workspace-helpers';
 
@@ -17,7 +17,7 @@ type WorkspaceToolbarProps = {
   onToggleRootPicker: () => void;
   onReindex: () => void;
   onRefreshGitDiff: () => void;
-  onOpenWorkspaceSettings: () => void;
+  onOpenRepositoryPanel: () => void;
   onOpenQuickOpen: () => void;
   onRootInputChange: (value: string) => void;
   onApplyRoot: () => void;
@@ -39,7 +39,7 @@ export function WorkspaceToolbar({
   onToggleRootPicker,
   onReindex,
   onRefreshGitDiff,
-  onOpenWorkspaceSettings,
+  onOpenRepositoryPanel,
   onOpenQuickOpen,
   onRootInputChange,
   onApplyRoot,
@@ -116,11 +116,11 @@ export function WorkspaceToolbar({
             <RefreshCcw className="h-3.5 w-3.5" />
           </button>
           <button
-            onClick={onOpenWorkspaceSettings}
+            onClick={onOpenRepositoryPanel}
             className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2 py-1 text-[12px] text-[#bdbdc6] hover:bg-[#181820]"
           >
-            <Settings className="h-3.5 w-3.5" />
-            Settings
+            <FolderGit2 className="h-3.5 w-3.5" />
+            Repository
           </button>
         </div>
       </div>

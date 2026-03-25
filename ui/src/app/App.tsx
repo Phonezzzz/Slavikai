@@ -10,12 +10,12 @@ import {
 } from './components/canvas';
 import type { Artifact } from './components/artifacts-sidebar';
 import { HistorySidebar } from './components/history-sidebar';
+import {
+  RepositoryPanel,
+  type WorkspaceGithubImportResult,
+} from './components/repository-panel';
 import { SearchModal } from './components/search-modal';
 import { Settings } from './components/Settings';
-import {
-  WorkspaceSettingsModal,
-  type WorkspaceGithubImportResult,
-} from './components/workspace-settings-modal';
 import { WorkspaceIde } from './components/workspace-ide';
 import { isSessionMode } from './types';
 import type {
@@ -1137,7 +1137,7 @@ export default function App() {
   const [forceCanvasNext, setForceCanvasNext] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [workspaceSettingsOpen, setWorkspaceSettingsOpen] = useState(false);
+  const [repositoryPanelOpen, setRepositoryPanelOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
@@ -1483,10 +1483,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (activeView !== 'workspace' && workspaceSettingsOpen) {
-      setWorkspaceSettingsOpen(false);
+    if (activeView !== 'workspace' && repositoryPanelOpen) {
+      setRepositoryPanelOpen(false);
     }
-  }, [activeView, workspaceSettingsOpen]);
+  }, [activeView, repositoryPanelOpen]);
 
   useEffect(() => {
     saveWorkspaceExplorerVisible(workspaceExplorerVisible);
@@ -3113,10 +3113,10 @@ export default function App() {
             sending={sending}
             statusMessage={statusMessage}
             onBackToChat={() => {
-              setWorkspaceSettingsOpen(false);
+              setRepositoryPanelOpen(false);
               setView('chat');
             }}
-            onOpenWorkspaceSettings={() => setWorkspaceSettingsOpen(true)}
+            onOpenRepositoryPanel={() => setRepositoryPanelOpen(true)}
             onSendAgentMessage={(payload) => handleSend(payload, 'workspace')}
             mode={sessionMode}
             activePlan={activePlan}
@@ -3222,9 +3222,9 @@ export default function App() {
         }}
       />
 
-      <WorkspaceSettingsModal
-        isOpen={workspaceSettingsOpen}
-        onClose={() => setWorkspaceSettingsOpen(false)}
+      <RepositoryPanel
+        isOpen={repositoryPanelOpen}
+        onClose={() => setRepositoryPanelOpen(false)}
         pendingDecision={pendingDecision}
         onRunGithubImport={(repoUrl, branch) => handleWorkspaceGithubImport(repoUrl, branch)}
       />
