@@ -173,9 +173,9 @@ export function WorkspaceIde({
   const [includeTerminal, setIncludeTerminal] = useState(true);
 
   const [workspaceRoot, setWorkspaceRoot] = useState('');
-  const [workspacePolicy, setWorkspacePolicy] = useState('Sandbox');
-  const [workspaceYoloActive, setWorkspaceYoloActive] = useState(false);
-  const [workspaceSafeMode, setWorkspaceSafeMode] = useState(true);
+  const [sessionPolicyLabel, setSessionPolicyLabel] = useState('Sandbox');
+  const [sessionYoloActive, setSessionYoloActive] = useState(false);
+  const [sessionSafeMode, setSessionSafeMode] = useState(true);
   const [rootPickerOpen, setRootPickerOpen] = useState(false);
   const [rootInput, setRootInput] = useState('');
   const [rootBusy, setRootBusy] = useState(false);
@@ -494,9 +494,9 @@ export function WorkspaceIde({
   const loadWorkspaceRoot = async (): Promise<void> => {
     if (!sessionId) {
       setWorkspaceRoot('');
-      setWorkspacePolicy('Sandbox');
-      setWorkspaceYoloActive(false);
-      setWorkspaceSafeMode(true);
+      setSessionPolicyLabel('Sandbox');
+      setSessionYoloActive(false);
+      setSessionSafeMode(true);
       return;
     }
     try {
@@ -504,13 +504,13 @@ export function WorkspaceIde({
       setWorkspaceRoot(rootPath);
       setRootInput(rootPath);
       if (policy) {
-        setWorkspacePolicy(policyLabel(policy.profile));
-        setWorkspaceYoloActive(policy.yolo_armed === true);
-        setWorkspaceSafeMode(policy.safe_mode_effective !== false);
+        setSessionPolicyLabel(policyLabel(policy.profile));
+        setSessionYoloActive(policy.yolo_armed === true);
+        setSessionSafeMode(policy.safe_mode_effective !== false);
       } else {
-        setWorkspacePolicy('Sandbox');
-        setWorkspaceYoloActive(false);
-        setWorkspaceSafeMode(true);
+        setSessionPolicyLabel('Sandbox');
+        setSessionYoloActive(false);
+        setSessionSafeMode(true);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load workspace root.';
@@ -1322,9 +1322,9 @@ export function WorkspaceIde({
         modelLabel={modelLabel}
         indexing={indexing}
         workspaceRoot={workspaceRoot}
-        workspacePolicy={workspacePolicy}
-        workspaceYoloActive={workspaceYoloActive}
-        workspaceSafeMode={workspaceSafeMode}
+        sessionPolicyLabel={sessionPolicyLabel}
+        sessionYoloActive={sessionYoloActive}
+        sessionSafeMode={sessionSafeMode}
         rootPickerOpen={rootPickerOpen}
         rootInput={rootInput}
         rootBusy={rootBusy}

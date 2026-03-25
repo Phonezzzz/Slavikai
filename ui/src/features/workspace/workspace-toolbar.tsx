@@ -6,9 +6,9 @@ type WorkspaceToolbarProps = {
   modelLabel: string;
   indexing: boolean;
   workspaceRoot: string;
-  workspacePolicy: string;
-  workspaceYoloActive: boolean;
-  workspaceSafeMode: boolean;
+  sessionPolicyLabel: string;
+  sessionYoloActive: boolean;
+  sessionSafeMode: boolean;
   rootPickerOpen: boolean;
   rootInput: string;
   rootBusy: boolean;
@@ -28,9 +28,9 @@ export function WorkspaceToolbar({
   modelLabel,
   indexing,
   workspaceRoot,
-  workspacePolicy,
-  workspaceYoloActive,
-  workspaceSafeMode,
+  sessionPolicyLabel,
+  sessionYoloActive,
+  sessionSafeMode,
   rootPickerOpen,
   rootInput,
   rootBusy,
@@ -46,12 +46,12 @@ export function WorkspaceToolbar({
   onCancelRootPicker,
 }: WorkspaceToolbarProps) {
   const policyBadge =
-    workspacePolicy === 'YOLO'
-      ? `Policy: YOLO (${workspaceYoloActive ? 'armed' : 'disarmed'})`
-      : `Policy: ${workspacePolicy}`;
+    sessionPolicyLabel === 'YOLO'
+      ? `Session policy: YOLO (${sessionYoloActive ? 'armed' : 'disarmed'})`
+      : `Session policy: ${sessionPolicyLabel}`;
   const policyClass =
-    workspacePolicy === 'YOLO'
-      ? workspaceYoloActive
+    sessionPolicyLabel === 'YOLO'
+      ? sessionYoloActive
         ? 'text-red-300'
         : 'text-amber-300'
       : 'text-[#8f8f98]';
@@ -105,8 +105,8 @@ export function WorkspaceToolbar({
           <span className={`text-[11px] ${policyClass}`}>
             {policyBadge}
           </span>
-          <span className={`text-[11px] ${workspaceSafeMode ? 'text-amber-300' : 'text-emerald-300'}`}>
-            Safe mode: {workspaceSafeMode ? 'ON' : 'OFF'}
+          <span className={`text-[11px] ${sessionSafeMode ? 'text-amber-300' : 'text-emerald-300'}`}>
+            Session safe mode: {sessionSafeMode ? 'ON' : 'OFF'}
           </span>
           <button
             onClick={onRefreshGitDiff}
