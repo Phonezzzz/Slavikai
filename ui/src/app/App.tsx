@@ -9,14 +9,14 @@ import {
   type CanvasSendPayload,
 } from './components/canvas';
 import type { Artifact } from './components/artifacts-sidebar';
+import { GlobalSettingsShell } from './components/global-settings-shell';
 import { HistorySidebar } from './components/history-sidebar';
 import {
   RepositoryPanel,
   type WorkspaceGithubImportResult,
 } from './components/repository-panel';
 import { SearchModal } from './components/search-modal';
-import { SessionDrawer } from './components/session-drawer';
-import { Settings } from './components/Settings';
+import { SessionControlShell } from './components/session-control-shell';
 import { WorkspaceIde } from './components/workspace-ide';
 import { isSessionMode } from './types';
 import type {
@@ -3218,7 +3218,7 @@ export default function App() {
         onRunGithubImport={(repoUrl, branch) => handleWorkspaceGithubImport(repoUrl, branch)}
       />
 
-      <SessionDrawer
+      <SessionControlShell
         isOpen={sessionDrawerOpen}
         onClose={() => setSessionDrawerOpen(false)}
         onSaved={() => {
@@ -3239,7 +3239,7 @@ export default function App() {
         }}
       />
 
-      <Settings
+      <GlobalSettingsShell
         isOpen={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         onSaved={() => {
