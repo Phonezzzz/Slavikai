@@ -10,7 +10,6 @@ import {
 import {
   Bot,
   Check,
-  ChevronDown,
   Copy,
   Edit2,
   FileText,
@@ -26,7 +25,6 @@ import {
   X,
 } from 'lucide-react';
 
-import { SESSION_MODE_VALUES, isSessionMode } from '../../app/types';
 import type {
   AutoState,
   DecisionRespondChoice,
@@ -56,22 +54,9 @@ export type WorkspaceContextChip = {
   onToggle: () => void;
 };
 
-export type WorkspaceModelOption = {
-  value: string;
-  label: string;
-  provider: string;
-  model: string;
-  disabled?: boolean;
-};
-
 type WorkspaceAssistantPanelProps = {
   contextChips: WorkspaceContextChip[];
   mode: SessionMode;
-  modelOptions: WorkspaceModelOption[];
-  selectedModelValue: string | null;
-  modelsLoading: boolean;
-  savingModel: boolean;
-  onSelectModel: (provider: string, model: string) => void;
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
@@ -103,11 +88,6 @@ type WorkspaceAssistantPanelProps = {
 export function WorkspaceAssistantPanel({
   contextChips,
   mode,
-  modelOptions,
-  selectedModelValue,
-  modelsLoading,
-  savingModel,
-  onSelectModel,
   activePlan,
   activeTask,
   autoState,
@@ -635,12 +615,12 @@ export function WorkspaceAssistantPanel({
         autoState={autoState}
         busy={modeBusy}
         error={modeError}
+        showModeControls={false}
         onChangeMode={onChangeMode}
         onDraft={onPlanDraft}
         onApprove={onPlanApprove}
         onExecute={onPlanExecute}
         onCancel={onPlanCancel}
-        showModeControls={false}
       />
 
       <div className="flex-1 min-h-0 overflow-auto px-3 py-3 space-y-2" data-scrollbar="always">
@@ -778,56 +758,6 @@ export function WorkspaceAssistantPanel({
             {sttError}
           </div>
         ) : null}
-        <div className="grid grid-cols-2 gap-2">
-          <div className="relative">
-            <select
-              value={mode}
-              onChange={(event) => {
-                const nextMode = event.target.value;
-                if (isSessionMode(nextMode)) {
-                  void onChangeMode(nextMode);
-                }
-              }}
-              disabled={modeBusy || isDecisionBlocking}
-              className="w-full appearance-none rounded-md border border-[#252530] bg-[#111116] px-2.5 py-1.5 pr-8 text-[11px] uppercase tracking-wide text-[#d4d4db] outline-none"
-            >
-              {SESSION_MODE_VALUES.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#666]" />
-          </div>
-          <div className="relative">
-            <select
-              value={selectedModelValue ?? ''}
-              onChange={(event) => {
-                const next = modelOptions.find((option) => option.value === event.target.value);
-                if (next && !next.disabled && next.model.trim()) {
-                  onSelectModel(next.provider, next.model);
-                }
-              }}
-              disabled={modelsLoading || savingModel || isDecisionBlocking || modelOptions.length === 0}
-              className="w-full appearance-none rounded-md border border-[#252530] bg-[#111116] px-2.5 py-1.5 pr-8 text-[11px] text-[#d4d4db] outline-none"
-            >
-              <option value="" disabled>
-                Select model
-              </option>
-              {modelOptions.map((option) => (
-                <option
-                  key={option.value}
-                  value={option.value}
-                  disabled={option.disabled}
-                  className="bg-[#0b0b0d] text-[#ddd]"
-                >
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#666]" />
-          </div>
-        </div>
 
         {composerAttachments.length > 0 ? (
           <div className="flex flex-wrap gap-2">

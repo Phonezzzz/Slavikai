@@ -1,4 +1,4 @@
-import { ArrowLeft, FolderGit2, RefreshCcw } from 'lucide-react';
+import { ArrowLeft, FolderGit2, RefreshCcw, SlidersHorizontal } from 'lucide-react';
 
 import { compactPath } from './workspace-helpers';
 
@@ -14,6 +14,7 @@ type WorkspaceToolbarProps = {
   rootBusy: boolean;
   statusMessage: string | null | undefined;
   onBackToChat: () => void;
+  onOpenSessionDrawer: () => void;
   onToggleRootPicker: () => void;
   onReindex: () => void;
   onRefreshGitDiff: () => void;
@@ -36,6 +37,7 @@ export function WorkspaceToolbar({
   rootBusy,
   statusMessage,
   onBackToChat,
+  onOpenSessionDrawer,
   onToggleRootPicker,
   onReindex,
   onRefreshGitDiff,
@@ -65,6 +67,13 @@ export function WorkspaceToolbar({
           >
             <ArrowLeft className="h-3.5 w-3.5" />
             Chat
+          </button>
+          <button
+            onClick={onOpenSessionDrawer}
+            className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2 py-1 text-[12px] text-[#bdbdc6] hover:bg-[#181820]"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            Session
           </button>
           <span className="text-[11px] text-[#666]">{modelLabel}</span>
         </div>

@@ -24,7 +24,6 @@ import {
 } from '../../features/workspace/workspace-editor-pane';
 import {
   WorkspaceAssistantPanel,
-  type WorkspaceModelOption,
   type WorkspaceContextChip,
 } from '../../features/workspace/workspace-assistant-panel';
 import { WorkspaceExplorer } from '../../features/workspace/workspace-explorer';
@@ -58,15 +57,11 @@ type WorkspaceIdeProps = {
   sessionId: string | null;
   sessionHeader: string;
   modelLabel: string;
-  modelOptions: WorkspaceModelOption[];
-  selectedModelValue: string | null;
-  modelsLoading: boolean;
-  savingModel: boolean;
-  onSelectModel: (provider: string, model: string) => void;
   messages: CanvasMessage[];
   sending: boolean;
   statusMessage?: string | null;
   onBackToChat: () => void;
+  onOpenSessionDrawer: () => void;
   onOpenRepositoryPanel: () => void;
   onSendAgentMessage: (payload: CanvasSendPayload) => Promise<boolean>;
   onSendFeedback?: (interactionId: string, rating: 'good' | 'bad') => Promise<boolean>;
@@ -117,15 +112,11 @@ export function WorkspaceIde({
   sessionId,
   sessionHeader,
   modelLabel,
-  modelOptions,
-  selectedModelValue,
-  modelsLoading,
-  savingModel,
-  onSelectModel,
   messages,
   sending,
   statusMessage,
   onBackToChat,
+  onOpenSessionDrawer,
   onOpenRepositoryPanel,
   onSendAgentMessage,
   onSendFeedback,
@@ -1330,6 +1321,7 @@ export function WorkspaceIde({
         rootBusy={rootBusy}
         statusMessage={statusMessage}
         onBackToChat={onBackToChat}
+        onOpenSessionDrawer={onOpenSessionDrawer}
         onToggleRootPicker={() => setRootPickerOpen((prev) => !prev)}
         onReindex={() => {
           void handleReindex();
@@ -1407,12 +1399,7 @@ export function WorkspaceIde({
 
         <WorkspaceAssistantPanel
           contextChips={aiContextChips}
-        mode={mode}
-        modelOptions={modelOptions}
-        selectedModelValue={selectedModelValue}
-        modelsLoading={modelsLoading}
-        savingModel={savingModel}
-        onSelectModel={onSelectModel}
+          mode={mode}
         activePlan={activePlan}
         activeTask={activeTask}
         autoState={autoState}

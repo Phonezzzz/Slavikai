@@ -15,6 +15,7 @@ import {
   type WorkspaceGithubImportResult,
 } from './components/repository-panel';
 import { SearchModal } from './components/search-modal';
+import { SessionDrawer } from './components/session-drawer';
 import { Settings } from './components/Settings';
 import { WorkspaceIde } from './components/workspace-ide';
 import { isSessionMode } from './types';
@@ -1137,6 +1138,7 @@ export default function App() {
   const [forceCanvasNext, setForceCanvasNext] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sessionDrawerOpen, setSessionDrawerOpen] = useState(false);
   const [repositoryPanelOpen, setRepositoryPanelOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
@@ -3102,13 +3104,6 @@ export default function App() {
             sessionId={selectedConversation}
             sessionHeader={SESSION_HEADER}
             modelLabel={modelLabel}
-            modelOptions={modelOptions}
-            selectedModelValue={selectedModelValue}
-            modelsLoading={modelsLoading}
-            savingModel={savingModel}
-            onSelectModel={(provider, model) => {
-              void handleSetModel(provider, model);
-            }}
             messages={workspaceMessages}
             sending={sending}
             statusMessage={statusMessage}
@@ -3116,6 +3111,7 @@ export default function App() {
               setRepositoryPanelOpen(false);
               setView('chat');
             }}
+            onOpenSessionDrawer={() => setSessionDrawerOpen(true)}
             onOpenRepositoryPanel={() => setRepositoryPanelOpen(true)}
             onSendAgentMessage={(payload) => handleSend(payload, 'workspace')}
             mode={sessionMode}
@@ -3150,17 +3146,10 @@ export default function App() {
               onSendMessage={(payload) => handleSend(payload, 'chat')}
               onSendFeedback={(interactionId, rating) => handleSendFeedback(interactionId, rating)}
               modelName={modelLabel}
-              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenSessionDrawer={() => setSessionDrawerOpen(true)}
               statusMessage={statusMessage}
               longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
               longPasteThresholdChars={composerSettings.longPasteThresholdChars}
-              modelOptions={modelOptions}
-              selectedModelValue={selectedModelValue}
-              onSelectModel={(provider, model) => {
-                void handleSetModel(provider, model);
-              }}
-              modelsLoading={modelsLoading}
-              savingModel={savingModel}
               forceCanvasNext={forceCanvasNext}
               onToggleForceCanvasNext={() => {
                 setForceCanvasNext((prev) => !prev);
@@ -3227,6 +3216,27 @@ export default function App() {
         onClose={() => setRepositoryPanelOpen(false)}
         pendingDecision={pendingDecision}
         onRunGithubImport={(repoUrl, branch) => handleWorkspaceGithubImport(repoUrl, branch)}
+      />
+
+      <SessionDrawer
+        isOpen={sessionDrawerOpen}
+        onClose={() => setSessionDrawerOpen(false)}
+        onSaved={() => {
+          setStatusMessage('Session controls updated.');
+        }}
+        sessionId={selectedConversation}
+        sessionHeader={SESSION_HEADER}
+        mode={sessionMode}
+        modeBusy={modeBusy}
+        onChangeMode={handleChangeMode}
+        modelLabel={modelLabel}
+        modelOptions={modelOptions}
+        selectedModelValue={selectedModelValue}
+        modelsLoading={modelsLoading}
+        savingModel={savingModel}
+        onSelectModel={(provider, model) => {
+          void handleSetModel(provider, model);
+        }}
       />
 
       <Settings

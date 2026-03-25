@@ -16,11 +16,11 @@ import {
   Square,
   ThumbsUp,
   ThumbsDown,
-  ChevronDown,
   Paperclip,
   Mic,
   Check,
   PanelRight,
+  SlidersHorizontal,
   LoaderCircle,
   X,
   FileText,
@@ -74,19 +74,8 @@ interface CanvasProps {
   onSendFeedback?: (interactionId: string, rating: "good" | "bad") => Promise<boolean>;
   className?: string;
   modelName?: string;
-  onOpenSettings?: () => void;
+  onOpenSessionDrawer?: () => void;
   statusMessage?: string | null;
-  modelOptions?: Array<{
-    value: string;
-    label: string;
-    provider: string;
-    model: string;
-    disabled?: boolean;
-  }>;
-  selectedModelValue?: string | null;
-  onSelectModel?: (provider: string, model: string) => void;
-  modelsLoading?: boolean;
-  savingModel?: boolean;
   forceCanvasNext?: boolean;
   onToggleForceCanvasNext?: () => void;
   longPasteToFileEnabled?: boolean;
@@ -267,13 +256,8 @@ export function Canvas({
   onSendFeedback,
   className = "",
   modelName = "Model not selected",
-  onOpenSettings,
+  onOpenSessionDrawer,
   statusMessage = null,
-  modelOptions = [],
-  selectedModelValue = null,
-  onSelectModel,
-  modelsLoading = false,
-  savingModel = false,
   forceCanvasNext = false,
   onToggleForceCanvasNext,
   longPasteToFileEnabled = true,
@@ -816,45 +800,16 @@ export function Canvas({
     >
       {/* Model selector header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#141418]">
-        {modelOptions.length > 0 ? (
-          <div className="relative">
-            <select
-              value={selectedModelValue ?? ""}
-              onChange={(event) => {
-                const next = modelOptions.find((option) => option.value === event.target.value);
-                if (next && !next.disabled && next.model.trim()) {
-                  onSelectModel?.(next.provider, next.model);
-                }
-              }}
-              disabled={modelsLoading || savingModel}
-              className="appearance-none bg-[#141418] text-[#aaa] text-[13px] px-3 py-1.5 rounded-lg border border-[#1f1f24] hover:border-[#2a2a30] transition-colors cursor-pointer pr-8"
-            >
-              <option value="" disabled>
-                Select model
-              </option>
-              {modelOptions.map((option) => (
-                <option
-                  key={option.value}
-                  value={option.value}
-                  disabled={option.disabled}
-                  className="bg-[#0b0b0d] text-[#ddd]"
-                >
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#666]" />
-          </div>
-        ) : (
+        <div className="flex items-center gap-3">
           <button
-            onClick={onOpenSettings}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-[#141418] transition-colors cursor-pointer"
+            onClick={onOpenSessionDrawer}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#1f1f24] bg-[#141418] hover:border-[#2a2a30] transition-colors cursor-pointer"
           >
-            <div className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span className="text-[13px] text-[#aaa]">{modelName}</span>
-            <ChevronDown className="w-3.5 h-3.5 text-[#666]" />
+            <SlidersHorizontal className="w-3.5 h-3.5 text-[#888]" />
+            <span className="text-[13px] text-[#d0d0d6]">Session</span>
           </button>
-        )}
+          <span className="text-[13px] text-[#8f8f95]">{modelName}</span>
+        </div>
         <button
           onClick={onToggleForceCanvasNext}
           className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[12px] transition-colors cursor-pointer ${
