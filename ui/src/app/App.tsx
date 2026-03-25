@@ -2779,7 +2779,7 @@ export default function App() {
 
   const handleSettingsSaved = async () => {
     try {
-      await Promise.all([loadModels(), loadComposerSettings()]);
+      await Promise.all([loadModels(), loadComposerSettings(), loadSessions()]);
       setStatusMessage('Settings saved.');
     } catch (error) {
       const message =
@@ -3245,8 +3245,6 @@ export default function App() {
         onSaved={() => {
           void handleSettingsSaved();
         }}
-        sessionId={selectedConversation}
-        sessionHeader={SESSION_HEADER}
       />
     </div>
   );
