@@ -48,7 +48,7 @@ colorama==0.4.6
     # via -r requirements.in
 coverage==7.13.4
     # via pytest-cov
-cryptography==46.0.5
+cryptography==46.0.6
     # via -r requirements.in
 cuda-bindings==12.9.4
     # via torch
