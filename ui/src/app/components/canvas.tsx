@@ -30,6 +30,7 @@ import BrainLogo from "../../assets/brain.png";
 import { MessageRenderer } from "../../features/messages";
 import type { RenderableMessage } from "../../features/messages";
 import type { DecisionRespondChoice, MessageRuntimeMeta, UiDecision } from "../types";
+import { getDecisionDisplayState } from "../decision-display";
 import { DecisionPanel } from "./decision-panel";
 import {
   MAX_COMPOSER_ATTACHMENTS,
@@ -358,7 +359,8 @@ export function Canvas({
       : 12000;
     return Math.max(1000, Math.min(80000, normalized));
   }, [longPasteThresholdChars]);
-  const composerBlocked = decision?.status === "pending" && decision.blocking;
+  const decisionState = getDecisionDisplayState(decision, decisionBusy, decisionError);
+  const composerBlocked = decisionState.isBlocking;
 
   const toComposerAttachments = (
     items: Array<{ name: string; mime: string; content: string }> | undefined,
@@ -870,11 +872,11 @@ export function Canvas({
         </div>
       </div>
 
-      {decision && decision.status === "pending" ? (
+      {decisionState.shouldRender && decisionState.decision ? (
         <DecisionPanel
-          decision={decision}
-          busy={decisionBusy}
-          error={decisionError}
+          decision={decisionState.decision}
+          busy={decisionState.busy}
+          error={decisionState.error}
           onRespond={(choice, editedAction) => {
             if (!onDecisionRespond) {
               return;

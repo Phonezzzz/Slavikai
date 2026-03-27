@@ -1,1151 +1,46 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { PanelRight } from 'lucide-react';
 
-import { ArtifactPanel } from './components/artifact-panel';
-import {
-  Canvas,
-  type CanvasComposerAttachment,
-  type CanvasMessage,
-  type CanvasSendPayload,
-} from './components/canvas';
 import type { Artifact } from './components/artifacts-sidebar';
+import { ChatSessionScreen } from './components/chat-session-screen';
 import { GlobalSettingsShell } from './components/global-settings-shell';
 import { HistorySidebar } from './components/history-sidebar';
-import {
-  RepositoryPanel,
-  type WorkspaceGithubImportResult,
-} from './components/repository-panel';
+import { RepositoryPanel } from './components/repository-panel';
 import { SearchModal } from './components/search-modal';
 import { SessionControlShell } from './components/session-control-shell';
-import { WorkspaceIde } from './components/workspace-ide';
-import { policyLabel as formatPolicyLabel } from '../features/workspace/workspace-helpers';
-import { isSessionMode } from './types';
-import type {
-  AutoState,
-  ChatAttachment,
-  ChatMessage,
-  DecisionRespondChoice,
-  FolderSummary,
-  MessageLane,
-  MessageRuntimeMeta,
-  MwvReportUi,
-  PlanEnvelope,
-  PlanStepStatus,
-  ProviderModels,
-  SessionMode,
-  SelectedModel,
-  SessionSummary,
-  TaskExecutionState,
-  UiDecision,
-} from './types';
+import { WorkspaceSessionScreen } from './components/workspace-session-screen';
+import type { SessionTransportBridge } from './session-bridges';
+import {
+  compactProviderError,
+  DEFAULT_COMPOSER_SETTINGS,
+  extractErrorMessage,
+  extractFilenameFromDisposition,
+  groupSessionByDate,
+  parseComposerSettings,
+  parseFolders,
+  parseProviderModels,
+  parseSessions,
+  sortSessionsByUpdated,
+  triggerBrowserDownload,
+  type ComposerUiSettings,
+} from './session-payload';
+import {
+  loadWorkspaceExplorerVisible,
+  pathForView,
+  saveWorkspaceExplorerVisible,
+  viewFromPathname,
+  type AppView,
+} from './session-storage';
+import type { FolderSummary, ProviderModels, SessionSummary } from './types';
+import { useRepositoryActions } from './use-repository-actions';
+import { useSessionOverlays } from './use-session-overlays';
+import { useSessionRuntimeController } from './use-session-runtime-controller';
+import { useSessionTransport } from './use-session-transport';
 
 const SESSION_HEADER = 'X-Slavik-Session';
 const SCROLLBAR_REVEAL_DISTANCE_PX = 38;
-const LAST_SESSION_KEY = 'slavik.last.session';
-const WORKSPACE_EXPLORER_VISIBLE_KEY = 'slavik.workspace.explorer.visible';
-const WORKSPACE_PATHS = new Set(['/workspace', '/ui/workspace']);
-
-type SessionArtifactRecord = {
-  id: string;
-  kind: 'output';
-  title: string;
-  content: string;
-  createdAt: string | null;
-  displayTarget: 'chat' | 'canvas';
-  artifactKind: 'text' | 'file';
-  fileName: string | null;
-  fileExt: string | null;
-  language: string | null;
-  fileContent: string | null;
-};
-
-type DisplayDecision = {
-  target: 'chat' | 'canvas';
-  artifactId: string | null;
-  forced: boolean;
-};
-
-type ChatStreamState = {
-  streamId: string;
-  content: string;
-};
-
-type PendingUserMessage = {
-  content: string;
-  attachments: ChatAttachment[];
-  lane: MessageLane;
-};
-
-type AppView = 'chat' | 'workspace';
-type SessionPayloadApplyOptions = {
-  applyDisplay: boolean;
-};
-
-const toOutputArtifactUiId = (artifactId: string): string => `output-${artifactId}`;
-const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
-
-type ComposerUiSettings = {
-  longPasteToFileEnabled: boolean;
-  longPasteThresholdChars: number;
-};
-
-type SessionSecuritySummary = {
-  policyLabel: string;
-  yoloActive: boolean;
-  safeMode: boolean;
-};
-
-const DEFAULT_COMPOSER_SETTINGS: ComposerUiSettings = {
-  longPasteToFileEnabled: true,
-  longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
-};
-
-const DEFAULT_SESSION_SECURITY_SUMMARY: SessionSecuritySummary = {
-  policyLabel: 'Sandbox',
-  yoloActive: false,
-  safeMode: true,
-};
-
-const parseChatAttachments = (value: unknown): ChatAttachment[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const normalized: ChatAttachment[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-    const candidate = item as { name?: unknown; mime?: unknown; content?: unknown };
-    if (
-      typeof candidate.name !== 'string'
-      || !candidate.name.trim()
-      || typeof candidate.mime !== 'string'
-      || !candidate.mime.trim()
-      || typeof candidate.content !== 'string'
-    ) {
-      continue;
-    }
-    normalized.push({
-      name: candidate.name.trim(),
-      mime: candidate.mime.trim(),
-      content: candidate.content,
-    });
-  }
-  return normalized;
-};
-
-const isChatMessage = (value: unknown): value is ChatMessage => {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const candidate = value as {
-    message_id?: unknown;
-    role?: unknown;
-    lane?: unknown;
-    content?: unknown;
-    created_at?: unknown;
-    trace_id?: unknown;
-    parent_user_message_id?: unknown;
-    attachments?: unknown;
-  };
-  if (typeof candidate.message_id !== 'string' || !candidate.message_id.trim()) {
-    return false;
-  }
-  if (candidate.role !== 'user' && candidate.role !== 'assistant' && candidate.role !== 'system') {
-    return false;
-  }
-  if (candidate.lane !== undefined && candidate.lane !== 'chat' && candidate.lane !== 'workspace') {
-    return false;
-  }
-  if (typeof candidate.content !== 'string') {
-    return false;
-  }
-  if (typeof candidate.created_at !== 'string' || !candidate.created_at.trim()) {
-    return false;
-  }
-  if (candidate.trace_id !== null && typeof candidate.trace_id !== 'string') {
-    return false;
-  }
-  if (
-    candidate.parent_user_message_id !== null
-    && typeof candidate.parent_user_message_id !== 'string'
-  ) {
-    return false;
-  }
-  if (candidate.attachments !== undefined && !Array.isArray(candidate.attachments)) {
-    return false;
-  }
-  return true;
-};
-
-const parseMessages = (value: unknown): ChatMessage[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter(isChatMessage).map((message) => ({
-    ...message,
-    lane: (message as { lane?: unknown }).lane === 'workspace' ? 'workspace' : 'chat',
-    attachments: parseChatAttachments((message as { attachments?: unknown }).attachments),
-  }));
-};
-
-const parseComposerSettings = (value: unknown): ComposerUiSettings => {
-  if (!value || typeof value !== 'object') {
-    return DEFAULT_COMPOSER_SETTINGS;
-  }
-  const settings = (value as { settings?: unknown }).settings;
-  if (!settings || typeof settings !== 'object') {
-    return DEFAULT_COMPOSER_SETTINGS;
-  }
-  const composer = (settings as { composer?: unknown }).composer;
-  if (!composer || typeof composer !== 'object') {
-    return DEFAULT_COMPOSER_SETTINGS;
-  }
-  const candidate = composer as {
-    long_paste_to_file_enabled?: unknown;
-    long_paste_threshold_chars?: unknown;
-  };
-  const enabled =
-    typeof candidate.long_paste_to_file_enabled === 'boolean'
-      ? candidate.long_paste_to_file_enabled
-      : DEFAULT_COMPOSER_SETTINGS.longPasteToFileEnabled;
-  const threshold =
-    typeof candidate.long_paste_threshold_chars === 'number'
-      && Number.isFinite(candidate.long_paste_threshold_chars)
-      && candidate.long_paste_threshold_chars > 0
-      ? Math.floor(candidate.long_paste_threshold_chars)
-      : DEFAULT_COMPOSER_SETTINGS.longPasteThresholdChars;
-  return {
-    longPasteToFileEnabled: enabled,
-    longPasteThresholdChars: threshold,
-  };
-};
-
-const parseSelectedModel = (value: unknown): SelectedModel | null => {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const candidate = value as { provider?: unknown; model?: unknown };
-  if (typeof candidate.provider !== 'string' || typeof candidate.model !== 'string') {
-    return null;
-  }
-  return { provider: candidate.provider, model: candidate.model };
-};
-
-const parseSessionSecuritySummary = (value: unknown): SessionSecuritySummary => {
-  if (!value || typeof value !== 'object') {
-    return DEFAULT_SESSION_SECURITY_SUMMARY;
-  }
-  const policyRaw = (value as { policy?: unknown }).policy;
-  const toolsStateRaw = (value as { tools_state?: unknown }).tools_state;
-
-  let nextPolicyLabel = DEFAULT_SESSION_SECURITY_SUMMARY.policyLabel;
-  let nextYoloActive = DEFAULT_SESSION_SECURITY_SUMMARY.yoloActive;
-  let nextSafeMode = DEFAULT_SESSION_SECURITY_SUMMARY.safeMode;
-
-  if (policyRaw && typeof policyRaw === 'object') {
-    const profile = (policyRaw as { profile?: unknown }).profile;
-    const yoloArmed = (policyRaw as { yolo_armed?: unknown }).yolo_armed;
-    nextPolicyLabel = formatPolicyLabel(profile);
-    nextYoloActive = yoloArmed === true;
-  }
-
-  if (toolsStateRaw && typeof toolsStateRaw === 'object') {
-    const safeModeRaw = (toolsStateRaw as { safe_mode?: unknown }).safe_mode;
-    if (typeof safeModeRaw === 'boolean') {
-      nextSafeMode = safeModeRaw;
-    }
-  }
-
-  return {
-    policyLabel: nextPolicyLabel,
-    yoloActive: nextYoloActive,
-    safeMode: nextSafeMode,
-  };
-};
-
-const parseProviderModels = (value: unknown): ProviderModels[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const providers: ProviderModels[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-    const candidate = item as { provider?: unknown; models?: unknown; error?: unknown };
-    if (typeof candidate.provider !== 'string' || !Array.isArray(candidate.models)) {
-      continue;
-    }
-    providers.push({
-      provider: candidate.provider,
-      models: candidate.models.filter((entry): entry is string => typeof entry === 'string'),
-      error:
-        typeof candidate.error === 'string' || candidate.error === null ? candidate.error : null,
-    });
-  }
-  return providers;
-};
-
-const loadLastSessionId = (): string | null => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  const raw = window.localStorage.getItem(LAST_SESSION_KEY);
-  if (!raw || !raw.trim()) {
-    return null;
-  }
-  return raw.trim();
-};
-
-const saveLastSessionId = (sessionId: string | null) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-  if (!sessionId) {
-    window.localStorage.removeItem(LAST_SESSION_KEY);
-    return;
-  }
-  window.localStorage.setItem(LAST_SESSION_KEY, sessionId);
-};
-
-const loadWorkspaceExplorerVisible = (): boolean => {
-  if (typeof window === 'undefined') {
-    return true;
-  }
-  const raw = window.localStorage.getItem(WORKSPACE_EXPLORER_VISIBLE_KEY);
-  if (raw === 'false') {
-    return false;
-  }
-  return true;
-};
-
-const saveWorkspaceExplorerVisible = (visible: boolean): void => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-  window.localStorage.setItem(WORKSPACE_EXPLORER_VISIBLE_KEY, visible ? 'true' : 'false');
-};
-
-const viewFromPathname = (pathname: string): AppView => {
-  if (WORKSPACE_PATHS.has(pathname)) {
-    return 'workspace';
-  }
-  return 'chat';
-};
-
-const pathForView = (view: AppView): string => {
-  if (view === 'workspace') {
-    return '/workspace';
-  }
-  return '/ui/';
-};
-
-const sortSessionsByUpdated = (value: SessionSummary[]): SessionSummary[] => {
-  return [...value].sort((a, b) => {
-    const aTime = Date.parse(a.updated_at);
-    const bTime = Date.parse(b.updated_at);
-    const aValue = Number.isNaN(aTime) ? 0 : aTime;
-    const bValue = Number.isNaN(bTime) ? 0 : bTime;
-    return bValue - aValue;
-  });
-};
-
-const parseSessions = (value: unknown): SessionSummary[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const sessions: SessionSummary[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-    const candidate = item as {
-      session_id?: unknown;
-      title?: unknown;
-      created_at?: unknown;
-      updated_at?: unknown;
-      message_count?: unknown;
-      chat_message_count?: unknown;
-      workspace_message_count?: unknown;
-      last_message_lane?: unknown;
-      title_override?: unknown;
-      folder_id?: unknown;
-    };
-    if (
-      typeof candidate.session_id !== 'string' ||
-      typeof candidate.created_at !== 'string' ||
-      typeof candidate.updated_at !== 'string' ||
-      typeof candidate.message_count !== 'number'
-    ) {
-      continue;
-    }
-    const title =
-      typeof candidate.title === 'string' && candidate.title.trim()
-        ? candidate.title.trim()
-        : candidate.session_id.slice(0, 8);
-    sessions.push({
-      session_id: candidate.session_id,
-      title,
-      created_at: candidate.created_at,
-      updated_at: candidate.updated_at,
-      message_count: candidate.message_count,
-      chat_message_count:
-        typeof candidate.chat_message_count === 'number'
-          ? candidate.chat_message_count
-          : candidate.message_count,
-      workspace_message_count:
-        typeof candidate.workspace_message_count === 'number'
-          ? candidate.workspace_message_count
-          : 0,
-      last_message_lane:
-        candidate.last_message_lane === 'workspace' || candidate.last_message_lane === 'chat'
-          ? candidate.last_message_lane
-          : null,
-      title_override: typeof candidate.title_override === 'string' ? candidate.title_override : null,
-      folder_id: typeof candidate.folder_id === 'string' ? candidate.folder_id : null,
-    });
-  }
-  return sessions;
-};
-
-const parseFolders = (value: unknown): FolderSummary[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const folders: FolderSummary[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-    const candidate = item as {
-      folder_id?: unknown;
-      name?: unknown;
-      created_at?: unknown;
-      updated_at?: unknown;
-    };
-    if (
-      typeof candidate.folder_id !== 'string' ||
-      typeof candidate.name !== 'string' ||
-      typeof candidate.created_at !== 'string' ||
-      typeof candidate.updated_at !== 'string'
-    ) {
-      continue;
-    }
-    folders.push({
-      folder_id: candidate.folder_id,
-      name: candidate.name,
-      created_at: candidate.created_at,
-      updated_at: candidate.updated_at,
-    });
-  }
-  return folders;
-};
-
-const parseSessionOutput = (value: unknown): { content: string | null; updatedAt: string | null } => {
-  if (!value || typeof value !== 'object') {
-    return { content: null, updatedAt: null };
-  }
-  const candidate = value as { content?: unknown; updated_at?: unknown };
-  const content = typeof candidate.content === 'string' ? candidate.content : null;
-  const updatedAt = typeof candidate.updated_at === 'string' ? candidate.updated_at : null;
-  return { content, updatedAt };
-};
-
-const parseSessionFiles = (value: unknown): string[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
-};
-
-const parseSessionArtifacts = (value: unknown): SessionArtifactRecord[] => {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const artifacts: SessionArtifactRecord[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-    const candidate = item as {
-      id?: unknown;
-      kind?: unknown;
-      title?: unknown;
-      content?: unknown;
-      created_at?: unknown;
-      display_target?: unknown;
-      artifact_kind?: unknown;
-      file_name?: unknown;
-      file_ext?: unknown;
-      language?: unknown;
-      file_content?: unknown;
-    };
-    if (typeof candidate.id !== 'string' || !candidate.id.trim()) {
-      continue;
-    }
-    if (candidate.kind !== 'output') {
-      continue;
-    }
-    if (typeof candidate.content !== 'string' || !candidate.content.trim()) {
-      continue;
-    }
-    const title =
-      typeof candidate.title === 'string' && candidate.title.trim()
-        ? candidate.title.trim()
-        : candidate.content.split('\n').find((line) => line.trim())?.trim().slice(0, 80) || 'Result';
-    artifacts.push({
-      id: candidate.id.trim(),
-      kind: 'output',
-      title,
-      content: candidate.content,
-      createdAt: typeof candidate.created_at === 'string' ? candidate.created_at : null,
-      displayTarget: candidate.display_target === 'canvas' ? 'canvas' : 'chat',
-      artifactKind: candidate.artifact_kind === 'file' ? 'file' : 'text',
-      fileName: typeof candidate.file_name === 'string' ? candidate.file_name : null,
-      fileExt: typeof candidate.file_ext === 'string' ? candidate.file_ext : null,
-      language: typeof candidate.language === 'string' ? candidate.language : null,
-      fileContent: typeof candidate.file_content === 'string' ? candidate.file_content : null,
-    });
-  }
-  return artifacts;
-};
-
-const parseDisplayDecision = (value: unknown): DisplayDecision | null => {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const candidate = value as { target?: unknown; artifact_id?: unknown; forced?: unknown };
-  if (candidate.target !== 'chat' && candidate.target !== 'canvas') {
-    return null;
-  }
-  return {
-    target: candidate.target,
-    artifactId: typeof candidate.artifact_id === 'string' ? candidate.artifact_id : null,
-    forced: candidate.forced === true,
-  };
-};
-
-const parseUiDecision = (value: unknown): UiDecision | null => {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const candidate = value as {
-    id?: unknown;
-    kind?: unknown;
-    decision_type?: unknown;
-    status?: unknown;
-    blocking?: unknown;
-    reason?: unknown;
-    summary?: unknown;
-    proposed_action?: unknown;
-    options?: unknown;
-    default_option_id?: unknown;
-    context?: unknown;
-    created_at?: unknown;
-    updated_at?: unknown;
-    resolved_at?: unknown;
-  };
-  if (typeof candidate.id !== 'string' || !candidate.id.trim()) {
-    return null;
-  }
-  if (candidate.kind !== 'approval' && candidate.kind !== 'decision') {
-    return null;
-  }
-  if (
-    candidate.status !== 'pending'
-    && candidate.status !== 'approved'
-    && candidate.status !== 'rejected'
-    && candidate.status !== 'executing'
-    && candidate.status !== 'resolved'
-  ) {
-    return null;
-  }
-  if (typeof candidate.reason !== 'string' || typeof candidate.summary !== 'string') {
-    return null;
-  }
-  if (typeof candidate.created_at !== 'string' || typeof candidate.updated_at !== 'string') {
-    return null;
-  }
-  const optionsRaw = candidate.options;
-  const options = Array.isArray(optionsRaw)
-    ? optionsRaw
-        .filter((item): item is { id: string; title: string; action: string; payload?: unknown; risk?: unknown } => {
-          return (
-            !!item
-            && typeof item === 'object'
-            && typeof (item as { id?: unknown }).id === 'string'
-            && typeof (item as { title?: unknown }).title === 'string'
-            && typeof (item as { action?: unknown }).action === 'string'
-          );
-        })
-        .map((item) => ({
-          id: item.id,
-          title: item.title,
-          action: item.action,
-          payload: item.payload && typeof item.payload === 'object' ? (item.payload as Record<string, unknown>) : {},
-          risk: typeof item.risk === 'string' ? item.risk : 'low',
-        }))
-    : [];
-  const proposedAction =
-    candidate.proposed_action && typeof candidate.proposed_action === 'object'
-      ? (candidate.proposed_action as Record<string, unknown>)
-      : {};
-  const context =
-    candidate.context && typeof candidate.context === 'object'
-      ? (candidate.context as Record<string, unknown>)
-      : {};
-  return {
-    id: candidate.id.trim(),
-    kind: candidate.kind,
-    decision_type:
-      candidate.decision_type === 'tool_approval'
-      || candidate.decision_type === 'plan_execute'
-      || candidate.decision_type === 'agent_decision'
-        ? candidate.decision_type
-        : null,
-    status: candidate.status,
-    blocking: candidate.blocking === true,
-    reason: candidate.reason,
-    summary: candidate.summary,
-    proposed_action: proposedAction,
-    options,
-    default_option_id:
-      typeof candidate.default_option_id === 'string' ? candidate.default_option_id : null,
-    context,
-    created_at: candidate.created_at,
-    updated_at: candidate.updated_at,
-    resolved_at: typeof candidate.resolved_at === 'string' ? candidate.resolved_at : null,
-  };
-};
-
-const parseSessionMode = (value: unknown): SessionMode => {
-  if (isSessionMode(value)) {
-    return value;
-  }
-  return 'ask';
-};
-
-const parseAutoState = (value: unknown): AutoState | null => {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const candidate = value as {
-    run_id?: unknown;
-    status?: unknown;
-    goal?: unknown;
-    pool_size?: unknown;
-    started_at?: unknown;
-    updated_at?: unknown;
-    planner?: unknown;
-    plan?: unknown;
-    coders?: unknown;
-    merge?: unknown;
-    verifier?: unknown;
-    approval?: unknown;
-    error?: unknown;
-  };
-  if (
-    typeof candidate.run_id !== 'string'
-    || typeof candidate.status !== 'string'
-    || typeof candidate.goal !== 'string'
-    || typeof candidate.started_at !== 'string'
-    || typeof candidate.updated_at !== 'string'
-  ) {
-    return null;
-  }
-  const status = candidate.status;
-  const isKnownStatus =
-    status === 'idle'
-    || status === 'planning'
-    || status === 'coding'
-    || status === 'merging'
-    || status === 'verifying'
-    || status === 'waiting_approval'
-    || status === 'completed'
-    || status === 'failed_conflict'
-    || status === 'failed_verifier'
-    || status === 'failed_worker'
-    || status === 'failed_internal'
-    || status === 'cancelled';
-  if (!isKnownStatus) {
-    return null;
-  }
-  const poolSize = typeof candidate.pool_size === 'number' && Number.isFinite(candidate.pool_size)
-    ? Math.max(1, Math.floor(candidate.pool_size))
-    : 1;
-  return {
-    run_id: candidate.run_id,
-    status,
-    goal: candidate.goal,
-    pool_size: poolSize,
-    started_at: candidate.started_at,
-    updated_at: candidate.updated_at,
-    planner: candidate.planner && typeof candidate.planner === 'object'
-      ? (candidate.planner as Record<string, unknown>)
-      : {},
-    plan: candidate.plan && typeof candidate.plan === 'object'
-      ? (candidate.plan as Record<string, unknown>)
-      : null,
-    coders: Array.isArray(candidate.coders)
-      ? candidate.coders.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
-      : [],
-    merge: candidate.merge && typeof candidate.merge === 'object'
-      ? (candidate.merge as Record<string, unknown>)
-      : {},
-    verifier: candidate.verifier && typeof candidate.verifier === 'object'
-      ? (candidate.verifier as Record<string, unknown>)
-      : null,
-    approval: candidate.approval && typeof candidate.approval === 'object'
-      ? (candidate.approval as Record<string, unknown>)
-      : null,
-    error: typeof candidate.error === 'string' ? candidate.error : null,
-  };
-};
-
-const parsePlanEnvelope = (value: unknown): PlanEnvelope | null => {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const candidate = value as {
-    plan_id?: unknown;
-    plan_hash?: unknown;
-    plan_revision?: unknown;
-    status?: unknown;
-    goal?: unknown;
-    scope_in?: unknown;
-    scope_out?: unknown;
-    assumptions?: unknown;
-    inputs_needed?: unknown;
-    audit_log?: unknown;
-    steps?: unknown;
-    exit_criteria?: unknown;
-    created_at?: unknown;
-    updated_at?: unknown;
-    approved_at?: unknown;
-    approved_by?: unknown;
-  };
-  if (
-    typeof candidate.plan_id !== 'string'
-    || typeof candidate.plan_hash !== 'string'
-    || typeof candidate.goal !== 'string'
-    || typeof candidate.created_at !== 'string'
-    || typeof candidate.updated_at !== 'string'
-  ) {
-    return null;
-  }
-  const status =
-    candidate.status === 'draft'
-    || candidate.status === 'approved'
-    || candidate.status === 'running'
-    || candidate.status === 'completed'
-    || candidate.status === 'failed'
-    || candidate.status === 'cancelled'
-      ? candidate.status
-      : 'draft';
-  const planRevision =
-    typeof candidate.plan_revision === 'number'
-    && Number.isFinite(candidate.plan_revision)
-    && candidate.plan_revision > 0
-      ? Math.floor(candidate.plan_revision)
-      : 1;
-  const normalizeStringList = (input: unknown): string[] =>
-    Array.isArray(input)
-      ? input.filter((item): item is string => typeof item === 'string')
-      : [];
-  const stepsRaw = Array.isArray(candidate.steps) ? candidate.steps : [];
-  const steps = stepsRaw
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
-    .map((step) => {
-      const rawStatus = step.status;
-      const stepStatus: PlanStepStatus =
-        rawStatus === 'todo'
-        || rawStatus === 'doing'
-        || rawStatus === 'waiting_approval'
-        || rawStatus === 'blocked'
-        || rawStatus === 'done'
-        || rawStatus === 'failed'
-          ? rawStatus
-          : 'todo';
-      return {
-        step_id: typeof step.step_id === 'string' ? step.step_id : '',
-        title: typeof step.title === 'string' ? step.title : '',
-        description: typeof step.description === 'string' ? step.description : '',
-        allowed_tool_kinds: normalizeStringList(step.allowed_tool_kinds),
-        acceptance_checks: normalizeStringList(step.acceptance_checks),
-        status: stepStatus,
-        details: typeof step.details === 'string' ? step.details : null,
-      };
-    })
-    .filter((step) => step.step_id.trim().length > 0);
-  return {
-    plan_id: candidate.plan_id,
-    plan_hash: candidate.plan_hash,
-    plan_revision: planRevision,
-    status,
-    goal: candidate.goal,
-    scope_in: normalizeStringList(candidate.scope_in),
-    scope_out: normalizeStringList(candidate.scope_out),
-    assumptions: normalizeStringList(candidate.assumptions),
-    inputs_needed: normalizeStringList(candidate.inputs_needed),
-    audit_log: Array.isArray(candidate.audit_log) ? candidate.audit_log : [],
-    steps,
-    exit_criteria: normalizeStringList(candidate.exit_criteria),
-    created_at: candidate.created_at,
-    updated_at: candidate.updated_at,
-    approved_at: typeof candidate.approved_at === 'string' ? candidate.approved_at : null,
-    approved_by: typeof candidate.approved_by === 'string' ? candidate.approved_by : null,
-  };
-};
-
-const parseTaskExecution = (value: unknown): TaskExecutionState | null => {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const candidate = value as {
-    task_id?: unknown;
-    plan_id?: unknown;
-    plan_hash?: unknown;
-    current_step_id?: unknown;
-    status?: unknown;
-    started_at?: unknown;
-    updated_at?: unknown;
-  };
-  if (
-    typeof candidate.task_id !== 'string'
-    || typeof candidate.plan_id !== 'string'
-    || typeof candidate.plan_hash !== 'string'
-    || typeof candidate.started_at !== 'string'
-    || typeof candidate.updated_at !== 'string'
-  ) {
-    return null;
-  }
-  const status =
-    candidate.status === 'running'
-    || candidate.status === 'completed'
-    || candidate.status === 'failed'
-    || candidate.status === 'cancelled'
-      ? candidate.status
-      : 'running';
-  return {
-    task_id: candidate.task_id,
-    plan_id: candidate.plan_id,
-    plan_hash: candidate.plan_hash,
-    current_step_id: typeof candidate.current_step_id === 'string' ? candidate.current_step_id : null,
-    status,
-    started_at: candidate.started_at,
-    updated_at: candidate.updated_at,
-  };
-};
-
-const parseTraceId = (value: unknown): string | null => {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const normalized = value.trim();
-  return normalized || null;
-};
-
-const parseMwvReport = (value: unknown): MwvReportUi | null => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  const report = value as Record<string, unknown>;
-  const normalized: MwvReportUi = {};
-
-  if (typeof report.route === 'string') {
-    normalized.route = report.route;
-  }
-  if (report.trace_id === null || typeof report.trace_id === 'string') {
-    normalized.trace_id = report.trace_id;
-  }
-  if (typeof report.stop_reason_code === 'string') {
-    normalized.stop_reason_code = report.stop_reason_code;
-  }
-  if (typeof report.plan_summary === 'string') {
-    normalized.plan_summary = report.plan_summary;
-  }
-  if (typeof report.execution_summary === 'string') {
-    normalized.execution_summary = report.execution_summary;
-  }
-  if (report.attempts && typeof report.attempts === 'object' && !Array.isArray(report.attempts)) {
-    const attempts = report.attempts as { current?: unknown; max?: unknown };
-    normalized.attempts = {
-      current: typeof attempts.current === 'number' ? attempts.current : undefined,
-      max: typeof attempts.max === 'number' ? attempts.max : undefined,
-    };
-  }
-  if (report.verifier && typeof report.verifier === 'object' && !Array.isArray(report.verifier)) {
-    normalized.verifier = report.verifier as { status?: string; duration_ms?: number | null; [k: string]: unknown };
-  }
-
-  for (const [key, entry] of Object.entries(report)) {
-    if (!(key in normalized)) {
-      normalized[key] = entry;
-    }
-  }
-  return normalized;
-};
-
-const toMessageRuntimeMeta = (
-  message: ChatMessage,
-  lane: MessageLane,
-  previous: MessageRuntimeMeta | null,
-): MessageRuntimeMeta => {
-  return {
-    messageId: message.message_id,
-    lane,
-    traceId: previous?.traceId ?? message.trace_id ?? null,
-    isFinal: true,
-    mwvReport: previous?.mwvReport ?? null,
-  };
-};
-
-const groupSessionByDate = (value: string): 'today' | 'yesterday' | 'older' => {
-  const parsed = Date.parse(value);
-  if (Number.isNaN(parsed)) {
-    return 'older';
-  }
-  const date = new Date(parsed);
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const startOfYesterday = new Date(startOfToday);
-  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
-  if (date >= startOfToday) {
-    return 'today';
-  }
-  if (date >= startOfYesterday) {
-    return 'yesterday';
-  }
-  return 'older';
-};
-
-const buildCanvasMessages = (
-  messages: ChatMessage[],
-  lane: MessageLane,
-  runtimeMetaByMessageId: Record<string, MessageRuntimeMeta>,
-): CanvasMessage[] => {
-  return messages
-    .filter(
-      (message): message is ChatMessage & { role: 'user' | 'assistant' } =>
-        message.role === 'user' || message.role === 'assistant',
-    )
-    .map((message) => ({
-      id: message.message_id,
-      messageId: message.message_id,
-      role: message.role,
-      content: message.content,
-      createdAt: message.created_at,
-      traceId: message.trace_id,
-      parentUserMessageId: message.parent_user_message_id,
-      attachments: message.attachments,
-      transient: false,
-      runtimeMeta: runtimeMetaByMessageId[message.message_id]
-        ?? toMessageRuntimeMeta(message, lane, null),
-    }));
-};
-
-const inferArtifactType = (content: string): Artifact['type'] => {
-  if (content.includes('```')) {
-    const match = content.match(/```\s*([a-zA-Z0-9_-]+)/);
-    const lang = match ? match[1].toLowerCase() : '';
-    if (lang === 'python' || lang === 'py') return 'PY';
-    if (lang === 'javascript' || lang === 'js') return 'JS';
-    if (lang === 'typescript' || lang === 'ts') return 'TS';
-    if (lang === 'json') return 'JSON';
-    if (lang === 'html') return 'HTML';
-    if (lang === 'css') return 'CSS';
-    if (lang === 'sh' || lang === 'shell' || lang === 'bash') return 'SH';
-    return 'MD';
-  }
-  return 'TXT';
-};
-
-const inferArtifactTypeFromPath = (path: string): Artifact['type'] => {
-  const normalized = path.trim().toLowerCase();
-  if (normalized.endsWith('.py')) return 'PY';
-  if (normalized.endsWith('.ts') || normalized.endsWith('.tsx')) return 'TS';
-  if (normalized.endsWith('.js') || normalized.endsWith('.jsx')) return 'JS';
-  if (normalized.endsWith('.json')) return 'JSON';
-  if (normalized.endsWith('.html')) return 'HTML';
-  if (normalized.endsWith('.css')) return 'CSS';
-  if (normalized.endsWith('.sh')) return 'SH';
-  if (normalized.endsWith('.md') || normalized.endsWith('.markdown')) return 'MD';
-  return 'TXT';
-};
-
-const inferArtifactTypeFromLanguage = (languageRaw: string): Artifact['type'] => {
-  const language = languageRaw.trim().toLowerCase();
-  if (!language) {
-    return 'TXT';
-  }
-  if (language === 'python' || language === 'py') return 'PY';
-  if (language === 'typescript' || language === 'ts' || language === 'tsx') return 'TS';
-  if (language === 'javascript' || language === 'js' || language === 'jsx') return 'JS';
-  if (language === 'json') return 'JSON';
-  if (language === 'html') return 'HTML';
-  if (language === 'css') return 'CSS';
-  if (language === 'shell' || language === 'bash' || language === 'sh') return 'SH';
-  if (language === 'md' || language === 'markdown') return 'MD';
-  return 'TXT';
-};
-
-const inferArtifactCategory = (type: Artifact['type']): Artifact['category'] => {
-  if (type === 'TXT' || type === 'MD') return 'Document';
-  if (type === 'JSON') return 'Config';
-  if (type === 'SH') return 'Script';
-  return 'Code';
-};
-
-const buildArtifactsFromSources = (
-  artifactsHistory: SessionArtifactRecord[],
-  files: string[],
-  streamingContentByArtifactId: Record<string, string>,
-): Artifact[] => {
-  const artifacts: Artifact[] = [];
-  const seen = new Set<string>();
-  const seenFileNames = new Set<string>();
-
-  for (const item of artifactsHistory) {
-    if (!item.content.trim()) {
-      continue;
-    }
-    const id = `output-${item.id}`;
-    const hasStreamOverride = Object.prototype.hasOwnProperty.call(streamingContentByArtifactId, id);
-    const content = hasStreamOverride ? streamingContentByArtifactId[id] : item.content;
-    let type: Artifact['type'];
-    if (item.fileExt) {
-      type = inferArtifactTypeFromPath(`file.${item.fileExt}`);
-    } else if (item.fileName) {
-      type = inferArtifactTypeFromPath(item.fileName);
-    } else if (item.language) {
-      type = inferArtifactTypeFromLanguage(item.language);
-    } else {
-      type = inferArtifactType(item.content);
-    }
-    if (seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    const normalizedFileName = item.fileName?.trim().toLowerCase() ?? '';
-    if (normalizedFileName) {
-      seenFileNames.add(normalizedFileName);
-    }
-    artifacts.push({
-      id,
-      name: item.fileName || item.title,
-      type,
-      category: inferArtifactCategory(type),
-      content,
-      artifactKind: item.artifactKind,
-      sourceArtifactId: item.id,
-      fileName: item.fileName,
-      fileExt: item.fileExt,
-      language: item.language,
-      fileContent: item.fileContent,
-    });
-  }
-
-  for (const rawPath of files) {
-    const path = rawPath.trim();
-    const fileId = `file-${path}`;
-    if (!path || seen.has(fileId)) {
-      continue;
-    }
-    const pathBaseName = path.split('/').pop()?.toLowerCase() ?? '';
-    if (pathBaseName && seenFileNames.has(pathBaseName)) {
-      continue;
-    }
-    seen.add(fileId);
-    const type = inferArtifactTypeFromPath(path);
-    artifacts.push({
-      id: fileId,
-      name: path,
-      type,
-      category: inferArtifactCategory(type),
-      content: `File path: ${path}`,
-      artifactKind: 'file',
-      sessionFilePath: path,
-      fileName: path.split('/').pop() ?? path,
-    });
-  }
-
-  return artifacts;
-};
-
-const extractFilenameFromDisposition = (
-  disposition: string | null,
-  fallbackName: string,
-): string => {
-  if (!disposition) {
-    return fallbackName;
-  }
-  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-  if (utf8Match && utf8Match[1]) {
-    try {
-      const decoded = decodeURIComponent(utf8Match[1].trim());
-      return decoded || fallbackName;
-    } catch {
-      return utf8Match[1].trim() || fallbackName;
-    }
-  }
-  const basicMatch = disposition.match(/filename="?([^";]+)"?/i);
-  if (basicMatch && basicMatch[1]) {
-    return basicMatch[1].trim() || fallbackName;
-  }
-  return fallbackName;
-};
-
-const triggerBrowserDownload = (blob: Blob, filename: string) => {
-  const url = window.URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.URL.revokeObjectURL(url);
-};
-
-const extractSessionIdFromPayload = (payload: unknown): string | null => {
-  if (!payload || typeof payload !== 'object') {
-    return null;
-  }
-  const maybeSession = payload as {
-    session_id?: unknown;
-    session?: { session_id?: unknown };
-  };
-  if (typeof maybeSession.session_id === 'string' && maybeSession.session_id.trim()) {
-    return maybeSession.session_id.trim();
-  }
-  const nested = maybeSession.session;
-  if (nested && typeof nested === 'object' && typeof nested.session_id === 'string') {
-    return nested.session_id.trim() || null;
-  }
-  return null;
-};
-
-const extractErrorMessage = (payload: unknown, fallback: string): string => {
-  if (!payload || typeof payload !== 'object') {
-    return fallback;
-  }
-  const body = payload as { error?: { message?: unknown } };
-  if (body.error && typeof body.error.message === 'string' && body.error.message.trim()) {
-    return body.error.message;
-  }
-  return fallback;
-};
-
-const compactProviderError = (value: string): string => {
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= 64) {
-    return normalized;
-  }
-  return `${normalized.slice(0, 61)}...`;
-};
 
 export default function App() {
-  const resyncFetchInFlightRef = useRef(false);
+  const transportRef = useRef<SessionTransportBridge | null>(null);
   const [activeView, setActiveView] = useState<AppView>(() => {
     if (typeof window === 'undefined') {
       return 'chat';
@@ -1155,222 +50,109 @@ export default function App() {
   const [workspaceExplorerVisible, setWorkspaceExplorerVisible] = useState<boolean>(() =>
     loadWorkspaceExplorerVisible(),
   );
-  const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
-  const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
-  const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [workspaceMessagesState, setWorkspaceMessagesState] = useState<ChatMessage[]>([]);
-  const [messageRuntimeMetaById, setMessageRuntimeMetaById] = useState<
-    Record<string, MessageRuntimeMeta>
-  >({});
-  const [, setSessionOutput] = useState<string | null>(null);
-  const [sessionFiles, setSessionFiles] = useState<string[]>([]);
-  const [sessionArtifacts, setSessionArtifacts] = useState<SessionArtifactRecord[]>([]);
-  const [streamingContentByArtifactId, setStreamingContentByArtifactId] = useState<Record<string, string>>({});
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [folders, setFolders] = useState<FolderSummary[]>([]);
-
-  const [, setSessionsLoading] = useState(false);
+  const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
-  const [savingModel, setSavingModel] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
-  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
-  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
-
-  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
-  const [artifactViewerArtifactId, setArtifactViewerArtifactId] = useState<string | null>(null);
-  const [forceCanvasNext, setForceCanvasNext] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [sessionDrawerOpen, setSessionDrawerOpen] = useState(false);
-  const [repositoryPanelOpen, setRepositoryPanelOpen] = useState(false);
-  const [sessionSecuritySummary, setSessionSecuritySummary] = useState<SessionSecuritySummary>(
-    DEFAULT_SESSION_SECURITY_SUMMARY,
-  );
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [lastModelApplied, setLastModelApplied] = useState(false);
-  const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
-  const [workspaceStreamingState, setWorkspaceStreamingState] = useState<ChatStreamState | null>(
-    null,
-  );
-  const [awaitingFirstAssistantChunk, setAwaitingFirstAssistantChunk] = useState(false);
   const [composerSettings, setComposerSettings] = useState<ComposerUiSettings>(
     DEFAULT_COMPOSER_SETTINGS,
   );
-  const [pendingDecision, setPendingDecision] = useState<UiDecision | null>(null);
-  const [decisionBusy, setDecisionBusy] = useState(false);
-  const [decisionError, setDecisionError] = useState<string | null>(null);
-  const [sessionMode, setSessionMode] = useState<SessionMode>('ask');
-  const [activePlan, setActivePlan] = useState<PlanEnvelope | null>(null);
-  const [activeTask, setActiveTask] = useState<TaskExecutionState | null>(null);
-  const [autoState, setAutoState] = useState<AutoState | null>(null);
-  const [modeBusy, setModeBusy] = useState(false);
-  const [modeError, setModeError] = useState<string | null>(null);
-  const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  const pendingForChat =
-    pendingSessionId === selectedConversation && pendingUserMessage?.lane === 'chat'
-      ? pendingUserMessage
-      : null;
-  const pendingForWorkspace =
-    pendingSessionId === selectedConversation && pendingUserMessage?.lane === 'workspace'
-      ? pendingUserMessage
-      : null;
-  const canvasMessages = useMemo(
-    () => buildCanvasMessages(chatMessages, 'chat', messageRuntimeMetaById),
-    [chatMessages, messageRuntimeMetaById],
-  );
-  const pendingCanvasMessage = useMemo(() => {
-    if (!pendingForChat) {
-      return null;
+  const overlays = useSessionOverlays({ activeView });
+
+  const loadSessions = async (): Promise<SessionSummary[]> => {
+    const response = await fetch('/ui/api/sessions');
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to load chat list.'));
     }
-    const pendingId = `pending-${Date.now()}-${pendingForChat.content.length}-${pendingForChat.attachments.length}`;
-    return {
-      id: pendingId,
-      messageId: pendingId,
-      role: 'user' as const,
-      content: pendingForChat.content,
-      createdAt: new Date().toISOString(),
-      traceId: null,
-      parentUserMessageId: null,
-      attachments: pendingForChat.attachments,
-      transient: true,
-      runtimeMeta: {
-        messageId: pendingId,
-        lane: 'chat' as MessageLane,
-        traceId: null,
-        isFinal: false,
-        mwvReport: null,
-      },
-    };
-  }, [pendingForChat]);
-  const streamingAssistantCanvasMessage = useMemo(() => {
-    if (!chatStreamingState || !chatStreamingState.content.trim()) {
-      return null;
+    const parsed = sortSessionsByUpdated(
+      parseSessions((payload as { sessions?: unknown }).sessions),
+    );
+    setSessions(parsed);
+    return parsed;
+  };
+
+  const loadFolders = async (): Promise<FolderSummary[]> => {
+    const response = await fetch('/ui/api/folders');
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to load folders.'));
     }
-    return {
-      id: `stream-${chatStreamingState.streamId}`,
-      messageId: `stream-${chatStreamingState.streamId}`,
-      role: 'assistant' as const,
-      content: chatStreamingState.content,
-      createdAt: new Date().toISOString(),
-      traceId: null,
-      parentUserMessageId: null,
-      attachments: [],
-      transient: true,
-      runtimeMeta: {
-        messageId: `stream-${chatStreamingState.streamId}`,
-        lane: 'chat' as MessageLane,
-        traceId: null,
-        isFinal: false,
-        mwvReport: null,
-      },
-    };
-  }, [chatStreamingState]);
-  const workspaceCanvasMessages = useMemo(
-    () => buildCanvasMessages(workspaceMessagesState, 'workspace', messageRuntimeMetaById),
-    [messageRuntimeMetaById, workspaceMessagesState],
-  );
-  const pendingWorkspaceCanvasMessage = useMemo(() => {
-    if (!pendingForWorkspace) {
-      return null;
+    const parsed = parseFolders((payload as { folders?: unknown }).folders);
+    setFolders(parsed);
+    return parsed;
+  };
+
+  const loadModels = async (): Promise<ProviderModels[]> => {
+    setModelsLoading(true);
+    try {
+      const response = await fetch('/ui/api/models');
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to load models.'));
+      }
+      const parsed = parseProviderModels((payload as { providers?: unknown }).providers);
+      setProviderModels(parsed);
+      return parsed;
+    } finally {
+      setModelsLoading(false);
     }
-    const pendingId = `pending-ws-${Date.now()}-${pendingForWorkspace.content.length}-${pendingForWorkspace.attachments.length}`;
-    return {
-      id: pendingId,
-      messageId: pendingId,
-      role: 'user' as const,
-      content: pendingForWorkspace.content,
-      createdAt: new Date().toISOString(),
-      traceId: null,
-      parentUserMessageId: null,
-      attachments: pendingForWorkspace.attachments,
-      transient: true,
-      runtimeMeta: {
-        messageId: pendingId,
-        lane: 'workspace' as MessageLane,
-        traceId: null,
-        isFinal: false,
-        mwvReport: null,
-      },
-    };
-  }, [pendingForWorkspace]);
-  const streamingWorkspaceAssistantMessage = useMemo(() => {
-    if (!workspaceStreamingState || !workspaceStreamingState.content.trim()) {
-      return null;
+  };
+
+  const loadComposerSettings = async (): Promise<ComposerUiSettings> => {
+    const response = await fetch('/ui/api/settings');
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to load composer settings.'));
     }
-    return {
-      id: `stream-ws-${workspaceStreamingState.streamId}`,
-      messageId: `stream-ws-${workspaceStreamingState.streamId}`,
-      role: 'assistant' as const,
-      content: workspaceStreamingState.content,
-      createdAt: new Date().toISOString(),
-      traceId: null,
-      parentUserMessageId: null,
-      attachments: [],
-      transient: true,
-      runtimeMeta: {
-        messageId: `stream-ws-${workspaceStreamingState.streamId}`,
-        lane: 'workspace' as MessageLane,
-        traceId: null,
-        isFinal: false,
-        mwvReport: null,
-      },
-    };
-  }, [workspaceStreamingState]);
-  const workspaceMessages = useMemo(() => {
-    const next = [...workspaceCanvasMessages];
-    if (pendingWorkspaceCanvasMessage) {
-      next.push(pendingWorkspaceCanvasMessage);
-    }
-    if (streamingWorkspaceAssistantMessage) {
-      next.push(streamingWorkspaceAssistantMessage);
-    }
-    return next;
-  }, [workspaceCanvasMessages, pendingWorkspaceCanvasMessage, streamingWorkspaceAssistantMessage]);
-  const showAssistantLoading = useMemo(
-    () =>
-      sending &&
-      awaitingFirstAssistantChunk &&
-      (!chatStreamingState || !chatStreamingState.content.trim()),
-    [awaitingFirstAssistantChunk, chatStreamingState, sending],
-  );
-  const historyChats = useMemo(
-    () =>
-      sessions.map((session) => ({
-        id: session.session_id,
-        title: session.title,
-        messageCount: session.message_count,
-        chatMessageCount: session.chat_message_count,
-        workspaceMessageCount: session.workspace_message_count,
-        date: session.updated_at,
-        group: groupSessionByDate(session.updated_at),
-      })),
-    [sessions],
-  );
-  const searchChats = useMemo(
-    () =>
-      sessions.map((session) => ({
-        id: session.session_id,
-        title: session.title,
-        date: session.updated_at,
-        messageCount: session.message_count,
-        preview: '',
-      })),
-    [sessions],
-  );
-  const artifacts = useMemo(
-    () =>
-      buildArtifactsFromSources(
-        sessionArtifacts,
-        sessionFiles,
-        streamingContentByArtifactId,
-      ),
-    [sessionArtifacts, sessionFiles, streamingContentByArtifactId],
-  );
-  const modelLabel = selectedModel
-    ? `${selectedModel.provider}/${selectedModel.model}`
+    const parsed = parseComposerSettings(payload);
+    setComposerSettings(parsed);
+    return parsed;
+  };
+
+  const runtime = useSessionRuntimeController({
+    sessionHeader: SESSION_HEADER,
+    providerModels,
+    loadSessions,
+    loadModels,
+    loadComposerSettings,
+    onStatusMessage: setStatusMessage,
+    transportRef,
+  });
+
+  const transport = useSessionTransport({
+    sessionHeader: SESSION_HEADER,
+    selectedConversation: runtime.selectedConversation,
+    onSessionIdChange: async (sessionId) => {
+      overlays.resetSessionSurfaceState();
+      await runtime.handleSelectConversation(sessionId);
+    },
+    onStatusMessage: setStatusMessage,
+    onRuntimePayload: runtime.applyRuntimePayload,
+    onOpenStreamedArtifact: overlays.openStreamedArtifact,
+    setArtifactViewerArtifactId: overlays.setArtifactViewerArtifactId,
+    loadSessions,
+  });
+  transportRef.current = transport.bridge;
+
+  const repositoryActions = useRepositoryActions({
+    sessionId: runtime.selectedConversation,
+    sessionHeader: SESSION_HEADER,
+    pendingDecision: runtime.pendingDecision,
+    transportRef,
+    applyRuntimePayload: runtime.applyRuntimePayload,
+    loadSessions,
+    onSessionIdChange: async (sessionId) => {
+      overlays.resetSessionSurfaceState();
+      await runtime.handleSelectConversation(sessionId);
+    },
+    onStatusMessage: setStatusMessage,
+  });
+
+  const modelLabel = runtime.selectedModel
+    ? `${runtime.selectedModel.provider}/${runtime.selectedModel.model}`
     : 'Model not selected';
   const modelOptions = useMemo(
     () =>
@@ -1399,10 +181,33 @@ export default function App() {
       }),
     [providerModels],
   );
-  const selectedModelValue = selectedModel
-    ? `${selectedModel.provider}::${selectedModel.model}`
+  const selectedModelValue = runtime.selectedModel
+    ? `${runtime.selectedModel.provider}::${runtime.selectedModel.model}`
     : null;
-
+  const historyChats = useMemo(
+    () =>
+      sessions.map((session) => ({
+        id: session.session_id,
+        title: session.title,
+        messageCount: session.message_count,
+        chatMessageCount: session.chat_message_count,
+        workspaceMessageCount: session.workspace_message_count,
+        date: session.updated_at,
+        group: groupSessionByDate(session.updated_at),
+      })),
+    [sessions],
+  );
+  const searchChats = useMemo(
+    () =>
+      sessions.map((session) => ({
+        id: session.session_id,
+        title: session.title,
+        date: session.updated_at,
+        messageCount: session.message_count,
+        preview: '',
+      })),
+    [sessions],
+  );
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -1459,41 +264,23 @@ export default function App() {
     };
   }, []);
 
-  const loadLastModel = (): SelectedModel | null => {
+  useEffect(() => {
     if (typeof window === 'undefined') {
-      return null;
+      return undefined;
     }
-    const raw = window.localStorage.getItem('slavik.last.model');
-    if (!raw) {
-      return null;
-    }
-    try {
-      const parsed = JSON.parse(raw) as { provider?: unknown; model?: unknown };
-      if (typeof parsed.provider === 'string' && typeof parsed.model === 'string') {
-        return { provider: parsed.provider, model: parsed.model };
-      }
-    } catch {
-      return null;
-    }
-    return null;
-  };
+    const syncViewFromLocation = () => {
+      setActiveView(viewFromPathname(window.location.pathname));
+    };
+    syncViewFromLocation();
+    window.addEventListener('popstate', syncViewFromLocation);
+    return () => {
+      window.removeEventListener('popstate', syncViewFromLocation);
+    };
+  }, []);
 
-  const saveLastModel = (model: SelectedModel | null) => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    if (!model) {
-      return;
-    }
-    window.localStorage.setItem('slavik.last.model', JSON.stringify(model));
-  };
-
-  const syncViewFromLocation = () => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    setActiveView(viewFromPathname(window.location.pathname));
-  };
+  useEffect(() => {
+    saveWorkspaceExplorerVisible(workspaceExplorerVisible);
+  }, [workspaceExplorerVisible]);
 
   const setView = (view: AppView) => {
     setActiveView(view);
@@ -1513,69 +300,6 @@ export default function App() {
       return;
     }
     setWorkspaceExplorerVisible((prev) => !prev);
-  };
-
-  const isModelAvailable = (model: SelectedModel, providers: ProviderModels[]) =>
-    providers.some((provider) => provider.provider === model.provider && provider.models.includes(model.model));
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return undefined;
-    }
-    syncViewFromLocation();
-    const handlePopState = () => {
-      syncViewFromLocation();
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => {
-      window.removeEventListener('popstate', handlePopState);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (activeView !== 'workspace' && repositoryPanelOpen) {
-      setRepositoryPanelOpen(false);
-    }
-  }, [activeView, repositoryPanelOpen]);
-
-  useEffect(() => {
-    saveWorkspaceExplorerVisible(workspaceExplorerVisible);
-  }, [workspaceExplorerVisible]);
-
-  const extractErrorFromResponse = async (
-    response: Response,
-    fallback: string,
-  ): Promise<string> => {
-    try {
-      const payload: unknown = await response.json();
-      return extractErrorMessage(payload, fallback);
-    } catch {
-      return fallback;
-    }
-  };
-
-  const loadSessions = async (): Promise<SessionSummary[]> => {
-    const response = await fetch('/ui/api/sessions');
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to load chat list.'));
-    }
-    const parsed = sortSessionsByUpdated(
-      parseSessions((payload as { sessions?: unknown }).sessions),
-    );
-    setSessions(parsed);
-    return parsed;
-  };
-
-  const loadFolders = async (): Promise<FolderSummary[]> => {
-    const response = await fetch('/ui/api/folders');
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to load folders.'));
-    }
-    const parsed = parseFolders((payload as { folders?: unknown }).folders);
-    setFolders(parsed);
-    return parsed;
   };
 
   const createFolder = async (name: string): Promise<FolderSummary> => {
@@ -1629,698 +353,6 @@ export default function App() {
     }
   };
 
-  const loadModels = async (): Promise<ProviderModels[]> => {
-    setModelsLoading(true);
-    try {
-      const response = await fetch('/ui/api/models');
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, 'Failed to load models.'));
-      }
-      const parsed = parseProviderModels((payload as { providers?: unknown }).providers);
-      setProviderModels(parsed);
-      return parsed;
-    } finally {
-      setModelsLoading(false);
-    }
-  };
-
-  const loadComposerSettings = async (): Promise<ComposerUiSettings> => {
-    const response = await fetch('/ui/api/settings');
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to load composer settings.'));
-    }
-    const parsed = parseComposerSettings(payload);
-    setComposerSettings(parsed);
-    return parsed;
-  };
-
-  const loadSessionSecuritySummary = async (
-    sessionId: string,
-  ): Promise<SessionSecuritySummary> => {
-    const response = await fetch('/ui/api/session/security', {
-      headers: {
-        [SESSION_HEADER]: sessionId,
-      },
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to load session controls.'));
-    }
-    const parsed = parseSessionSecuritySummary(payload);
-    setSessionSecuritySummary(parsed);
-    return parsed;
-  };
-
-  const setSessionModel = async (
-    sessionId: string,
-    provider: string,
-    model: string,
-  ): Promise<SelectedModel | null> => {
-    const response = await fetch('/ui/api/session-model', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        [SESSION_HEADER]: sessionId,
-      },
-      body: JSON.stringify({ provider, model }),
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to set model.'));
-    }
-    const parsed = parseSelectedModel((payload as { selected_model?: unknown }).selected_model);
-    return parsed || { provider, model };
-  };
-
-  const setSessionModeRemote = async (
-    sessionId: string,
-    mode: SessionMode,
-  ): Promise<{
-    mode: SessionMode;
-    activePlan: PlanEnvelope | null;
-    activeTask: TaskExecutionState | null;
-    autoState: AutoState | null;
-  }> => {
-    const response = await fetch('/ui/api/mode', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        [SESSION_HEADER]: sessionId,
-      },
-      body: JSON.stringify({
-        mode,
-        confirm: mode === 'act',
-      }),
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to set mode.'));
-    }
-    return {
-      mode: parseSessionMode((payload as { mode?: unknown }).mode),
-      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
-      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
-    };
-  };
-
-  const draftPlanRemote = async (
-    sessionId: string,
-    goal: string,
-  ): Promise<{
-    mode: SessionMode;
-    activePlan: PlanEnvelope | null;
-    activeTask: TaskExecutionState | null;
-    autoState: AutoState | null;
-  }> => {
-    const response = await fetch('/ui/api/plan/draft', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        [SESSION_HEADER]: sessionId,
-      },
-      body: JSON.stringify({ goal }),
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to draft plan.'));
-    }
-    return {
-      mode: parseSessionMode((payload as { mode?: unknown }).mode),
-      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
-      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
-    };
-  };
-
-  const approvePlanRemote = async (
-    sessionId: string,
-  ): Promise<{
-    mode: SessionMode;
-    activePlan: PlanEnvelope | null;
-    activeTask: TaskExecutionState | null;
-    autoState: AutoState | null;
-  }> => {
-    const response = await fetch('/ui/api/plan/approve', {
-      method: 'POST',
-      headers: {
-        [SESSION_HEADER]: sessionId,
-      },
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to approve plan.'));
-    }
-    return {
-      mode: parseSessionMode((payload as { mode?: unknown }).mode),
-      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
-      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
-    };
-  };
-
-  const executePlanRemote = async (
-    sessionId: string,
-  ): Promise<{
-    mode: SessionMode;
-    activePlan: PlanEnvelope | null;
-    activeTask: TaskExecutionState | null;
-    autoState: AutoState | null;
-    decision: UiDecision | null;
-  }> => {
-    const response = await fetch('/ui/api/plan/execute', {
-      method: 'POST',
-      headers: {
-        [SESSION_HEADER]: sessionId,
-      },
-      body: JSON.stringify({}),
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      const error = (payload as { error?: { code?: unknown } }).error;
-      const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : null;
-      if (code !== 'switch_to_act_required') {
-        throw new Error(extractErrorMessage(payload, 'Failed to execute plan.'));
-      }
-    }
-    return {
-      mode: parseSessionMode((payload as { mode?: unknown }).mode),
-      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
-      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
-      decision: parseUiDecision((payload as { decision?: unknown }).decision),
-    };
-  };
-
-  const cancelPlanRemote = async (
-    sessionId: string,
-  ): Promise<{
-    mode: SessionMode;
-    activePlan: PlanEnvelope | null;
-    activeTask: TaskExecutionState | null;
-    autoState: AutoState | null;
-  }> => {
-    const response = await fetch('/ui/api/plan/cancel', {
-      method: 'POST',
-      headers: {
-        [SESSION_HEADER]: sessionId,
-      },
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to cancel plan.'));
-    }
-    return {
-      mode: parseSessionMode((payload as { mode?: unknown }).mode),
-      activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
-      activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-      autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
-    };
-  };
-
-  const loadConversation = async (sessionId: string): Promise<SelectedModel | null> => {
-    const [sessionResponse, historyResponse, workspaceHistoryResponse, outputResponse, filesResponse] =
-      await Promise.all([
-      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
-        headers: {
-          [SESSION_HEADER]: sessionId,
-        },
-      }),
-      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/history`, {
-        headers: {
-          [SESSION_HEADER]: sessionId,
-        },
-      }),
-      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/history?lane=workspace`, {
-        headers: {
-          [SESSION_HEADER]: sessionId,
-        },
-      }),
-      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/output`, {
-        headers: {
-          [SESSION_HEADER]: sessionId,
-        },
-      }),
-      fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/files`, {
-        headers: {
-          [SESSION_HEADER]: sessionId,
-        },
-      }),
-    ]);
-
-    const [sessionPayload, historyPayload, workspaceHistoryPayload, outputPayload, filesPayload]: unknown[] =
-      await Promise.all([
-        sessionResponse.json(),
-        historyResponse.json(),
-        workspaceHistoryResponse.json(),
-        outputResponse.json(),
-        filesResponse.json(),
-      ]);
-
-    if (!sessionResponse.ok) {
-      throw new Error(extractErrorMessage(sessionPayload, 'Failed to load chat session.'));
-    }
-    if (!historyResponse.ok) {
-      throw new Error(extractErrorMessage(historyPayload, 'Failed to load chat history.'));
-    }
-    if (!workspaceHistoryResponse.ok) {
-      throw new Error(
-        extractErrorMessage(workspaceHistoryPayload, 'Failed to load workspace history.'),
-      );
-    }
-    if (!outputResponse.ok) {
-      throw new Error(extractErrorMessage(outputPayload, 'Failed to load canvas output.'));
-    }
-    if (!filesResponse.ok) {
-      throw new Error(extractErrorMessage(filesPayload, 'Failed to load session files.'));
-    }
-
-    const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
-    const parsedChatMessages = parseMessages((historyPayload as { messages?: unknown }).messages);
-    const parsedWorkspaceMessages = parseMessages(
-      (workspaceHistoryPayload as { messages?: unknown }).messages,
-    );
-    setChatMessages(parsedChatMessages);
-    setWorkspaceMessagesState(parsedWorkspaceMessages);
-    setMessageRuntimeMetaById(() => {
-      const next: Record<string, MessageRuntimeMeta> = {};
-      parsedChatMessages.forEach((message) => {
-        if (message.role === 'assistant' || message.role === 'user') {
-          next[message.message_id] = toMessageRuntimeMeta(message, 'chat', null);
-        }
-      });
-      parsedWorkspaceMessages.forEach((message) => {
-        if (message.role === 'assistant' || message.role === 'user') {
-          next[message.message_id] = toMessageRuntimeMeta(message, 'workspace', null);
-        }
-      });
-      return next;
-    });
-    setChatStreamingState(null);
-    setWorkspaceStreamingState(null);
-    setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
-    setDecisionError(null);
-    const parsedOutput = parseSessionOutput((outputPayload as { output?: unknown }).output);
-    setSessionOutput(parsedOutput.content);
-    setSessionFiles(parseSessionFiles((filesPayload as { files?: unknown }).files));
-    setSessionArtifacts(
-      parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
-    );
-    try {
-      await loadSessionSecuritySummary(sessionId);
-    } catch {
-      setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
-    }
-    setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
-    setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
-    setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
-    setAutoState(parseAutoState((session as { auto_state?: unknown } | undefined)?.auto_state));
-    const parsedSelectedModel = parseSelectedModel(session?.selected_model);
-    setSelectedModel(parsedSelectedModel);
-    return parsedSelectedModel;
-  };
-
-  const createConversation = async (): Promise<{
-    sessionId: string | null;
-    selectedModel: SelectedModel | null;
-  }> => {
-    const response = await fetch('/ui/api/sessions', {
-      method: 'POST',
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to create chat.'));
-    }
-    const headerSession = response.headers.get(SESSION_HEADER);
-    const payloadSession = extractSessionIdFromPayload(payload);
-    const nextSession = (headerSession && headerSession.trim()) || payloadSession || null;
-    const session = (
-      payload as {
-        session?: { messages?: unknown; workspace_messages?: unknown; selected_model?: unknown };
-      }
-    ).session;
-    const sessionModel = parseSelectedModel(session?.selected_model);
-    const parsedChatMessages = parseMessages(session?.messages);
-    const parsedWorkspaceMessages = parseMessages(
-      (session as { workspace_messages?: unknown } | undefined)?.workspace_messages,
-    );
-    setChatMessages(parsedChatMessages);
-    setWorkspaceMessagesState(parsedWorkspaceMessages);
-    setMessageRuntimeMetaById(() => {
-      const next: Record<string, MessageRuntimeMeta> = {};
-      parsedChatMessages.forEach((message) => {
-        if (message.role === 'assistant' || message.role === 'user') {
-          next[message.message_id] = toMessageRuntimeMeta(message, 'chat', null);
-        }
-      });
-      parsedWorkspaceMessages.forEach((message) => {
-        if (message.role === 'assistant' || message.role === 'user') {
-          next[message.message_id] = toMessageRuntimeMeta(message, 'workspace', null);
-        }
-      });
-      return next;
-    });
-    setChatStreamingState(null);
-    setWorkspaceStreamingState(null);
-    setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
-    setDecisionError(null);
-    const parsedOutput = parseSessionOutput(
-      (session as { output?: unknown } | undefined)?.output,
-    );
-    setSessionOutput(parsedOutput.content);
-    setSessionFiles(
-      parseSessionFiles((session as { files?: unknown } | undefined)?.files),
-    );
-    setSessionArtifacts(
-      parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
-    );
-    setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
-    setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
-    setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
-    setAutoState(parseAutoState((session as { auto_state?: unknown } | undefined)?.auto_state));
-    setSelectedModel(sessionModel);
-    return { sessionId: nextSession, selectedModel: sessionModel };
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const bootstrap = async () => {
-      setSessionsLoading(true);
-      try {
-        const modelsPromise = loadModels();
-        const foldersPromise = loadFolders();
-        const composerPromise = loadComposerSettings().catch(() => DEFAULT_COMPOSER_SETTINGS);
-        const listedSessions = await loadSessions();
-
-        const storedSession = loadLastSessionId();
-        const storedExists =
-          storedSession && listedSessions.some((session) => session.session_id === storedSession);
-        let nextSession = storedExists ? storedSession : null;
-        if (!nextSession && listedSessions.length > 0) {
-          nextSession = listedSessions[0].session_id;
-        }
-        if (!nextSession) {
-          const created = await createConversation();
-          nextSession = created.sessionId;
-        }
-
-        if (!cancelled) {
-          let selectedFromSession: SelectedModel | null = null;
-          if (nextSession) {
-            setSelectedConversation(nextSession);
-            selectedFromSession = await loadConversation(nextSession);
-            saveLastSessionId(nextSession);
-          }
-          const models = await modelsPromise;
-          await foldersPromise;
-          await composerPromise;
-          if (nextSession && !selectedFromSession && !lastModelApplied) {
-            const lastModel = loadLastModel();
-            if (lastModel && isModelAvailable(lastModel, models)) {
-              try {
-                const applied = await setSessionModel(
-                  nextSession,
-                  lastModel.provider,
-                  lastModel.model,
-                );
-                setSelectedModel(applied);
-                saveLastModel(applied);
-                setLastModelApplied(true);
-              } catch (error) {
-                const message =
-                  error instanceof Error ? error.message : 'Failed to restore last model.';
-                setStatusMessage(message);
-              }
-            }
-          }
-          setStatusMessage(null);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          const message = error instanceof Error ? error.message : 'Failed to initialize chat.';
-          setStatusMessage(message);
-        }
-      } finally {
-        if (!cancelled) {
-          setSessionsLoading(false);
-        }
-      }
-    };
-
-    void bootstrap();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (selectedModel) {
-      saveLastModel(selectedModel);
-    }
-  }, [selectedModel]);
-
-  useEffect(() => {
-    if (!sending) {
-      setAwaitingFirstAssistantChunk(false);
-    }
-  }, [sending]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !selectedConversation) {
-      return;
-    }
-    const activeSessionId = selectedConversation;
-    const refreshWorkflowSnapshot = async () => {
-      if (resyncFetchInFlightRef.current) {
-        return;
-      }
-      resyncFetchInFlightRef.current = true;
-      try {
-        const stateResponse = await fetch('/ui/api/state', {
-          headers: {
-            [SESSION_HEADER]: activeSessionId,
-          },
-        });
-        const statePayload: unknown = await stateResponse.json();
-        if (!stateResponse.ok) {
-          return;
-        }
-        const snapshot = statePayload as {
-          mode?: unknown;
-          active_plan?: unknown;
-          active_task?: unknown;
-          auto_state?: unknown;
-          pending_decision?: unknown;
-        };
-        setSessionMode(parseSessionMode(snapshot.mode));
-        setActivePlan(parsePlanEnvelope(snapshot.active_plan));
-        setActiveTask(parseTaskExecution(snapshot.active_task));
-        setAutoState(parseAutoState(snapshot.auto_state));
-        setPendingDecision(parseUiDecision(snapshot.pending_decision));
-        setDecisionError(null);
-      } catch {
-        // Keep live stream running; next event or manual action will recover UI state.
-      } finally {
-        resyncFetchInFlightRef.current = false;
-      }
-    };
-    setChatStreamingState(null);
-    setWorkspaceStreamingState(null);
-    const streamUrl = `/ui/api/events/stream?session_id=${encodeURIComponent(selectedConversation)}`;
-    const eventSource = new EventSource(streamUrl);
-    eventSource.onmessage = (event) => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(event.data) as unknown;
-      } catch {
-        return;
-      }
-      if (!parsed || typeof parsed !== 'object') {
-        return;
-      }
-      const envelope = parsed as { type?: unknown; payload?: unknown };
-      if (typeof envelope.type !== 'string' || !envelope.payload || typeof envelope.payload !== 'object') {
-        return;
-      }
-      const payload = envelope.payload as {
-        artifact_id?: unknown;
-        stream_id?: unknown;
-        delta?: unknown;
-        mode?: unknown;
-        lane?: unknown;
-        decision?: unknown;
-        workflow?: unknown;
-      };
-      const lane: MessageLane = payload.lane === 'workspace' ? 'workspace' : 'chat';
-      if (envelope.type === 'chat.stream.start') {
-        const streamId =
-          typeof payload.stream_id === 'string' ? payload.stream_id.trim() : '';
-        if (!streamId) {
-          return;
-        }
-        setAwaitingFirstAssistantChunk(false);
-        if (lane === 'workspace') {
-          setWorkspaceStreamingState({ streamId, content: '' });
-        } else {
-          setChatStreamingState({ streamId, content: '' });
-        }
-        return;
-      }
-      if (envelope.type === 'chat.stream.delta') {
-        const streamId =
-          typeof payload.stream_id === 'string' ? payload.stream_id.trim() : '';
-        const delta = typeof payload.delta === 'string' ? payload.delta : '';
-        const mode = payload.mode === 'replace' ? 'replace' : 'append';
-        if (!streamId || !delta) {
-          return;
-        }
-        setAwaitingFirstAssistantChunk(false);
-        if (lane === 'workspace') {
-          setWorkspaceStreamingState((prev) => {
-            if (!prev || prev.streamId !== streamId) {
-              return { streamId, content: delta };
-            }
-            if (mode === 'replace') {
-              return { streamId, content: delta };
-            }
-            return { streamId, content: `${prev.content}${delta}` };
-          });
-        } else {
-          setChatStreamingState((prev) => {
-            if (!prev || prev.streamId !== streamId) {
-              return { streamId, content: delta };
-            }
-            if (mode === 'replace') {
-              return { streamId, content: delta };
-            }
-            return { streamId, content: `${prev.content}${delta}` };
-          });
-        }
-        return;
-      }
-      if (envelope.type === 'chat.stream.done') {
-        if (lane === 'workspace') {
-          setWorkspaceStreamingState(null);
-        } else {
-          setChatStreamingState(null);
-        }
-        return;
-      }
-      if (envelope.type === 'decision.packet') {
-        setPendingDecision(parseUiDecision(payload.decision));
-        setDecisionError(null);
-        if (payload.workflow && typeof payload.workflow === 'object') {
-          const workflow = payload.workflow as {
-            mode?: unknown;
-            active_plan?: unknown;
-            active_task?: unknown;
-            auto_state?: unknown;
-          };
-          setSessionMode(parseSessionMode(workflow.mode));
-          setActivePlan(parsePlanEnvelope(workflow.active_plan));
-          setActiveTask(parseTaskExecution(workflow.active_task));
-          setAutoState(parseAutoState(workflow.auto_state));
-        }
-        return;
-      }
-      if (envelope.type === 'session.workflow') {
-        const workflow = payload as {
-          mode?: unknown;
-          active_plan?: unknown;
-          active_task?: unknown;
-          auto_state?: unknown;
-        };
-        setSessionMode(parseSessionMode(workflow.mode));
-        setActivePlan(parsePlanEnvelope(workflow.active_plan));
-        setActiveTask(parseTaskExecution(workflow.active_task));
-        setAutoState(parseAutoState(workflow.auto_state));
-        return;
-      }
-      if (envelope.type === 'auto.progress') {
-        const progress = payload as {
-          auto_state?: unknown;
-        };
-        setAutoState(parseAutoState(progress.auto_state));
-        return;
-      }
-      if (envelope.type === 'session.resync_required') {
-        void refreshWorkflowSnapshot();
-        return;
-      }
-      const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id.trim() : '';
-      if (!artifactId) {
-        return;
-      }
-      const uiArtifactId = toOutputArtifactUiId(artifactId);
-      if (envelope.type === 'canvas.stream.start') {
-        setAwaitingFirstAssistantChunk(false);
-        setArtifactPanelOpen(true);
-        setArtifactViewerArtifactId(uiArtifactId);
-        setStreamingContentByArtifactId((prev) => ({ ...prev, [uiArtifactId]: '' }));
-        return;
-      }
-      if (envelope.type === 'canvas.stream.delta') {
-        const delta = typeof payload.delta === 'string' ? payload.delta : '';
-        if (!delta) {
-          return;
-        }
-        setAwaitingFirstAssistantChunk(false);
-        setStreamingContentByArtifactId((prev) => {
-          const nextChunk = `${prev[uiArtifactId] ?? ''}${delta}`;
-          return { ...prev, [uiArtifactId]: nextChunk };
-        });
-        return;
-      }
-      if (envelope.type === 'canvas.stream.done') {
-        setStreamingContentByArtifactId((prev) => {
-          const next = { ...prev };
-          delete next[uiArtifactId];
-          return next;
-        });
-      }
-    };
-    eventSource.onerror = () => {};
-    return () => {
-      resyncFetchInFlightRef.current = false;
-      eventSource.close();
-      setChatStreamingState(null);
-      setWorkspaceStreamingState(null);
-    };
-  }, [selectedConversation]);
-
-  useEffect(() => {
-    if (selectedConversation) {
-      return;
-    }
-    setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
-  }, [selectedConversation]);
-
-  const handleSelectConversation = async (sessionId: string) => {
-    if (!sessionId || sessionId === selectedConversation) {
-      return;
-    }
-    setView('chat');
-    setSelectedConversation(sessionId);
-    setArtifactViewerArtifactId(null);
-    setStreamingContentByArtifactId({});
-    setChatStreamingState(null);
-    setWorkspaceStreamingState(null);
-    setPendingDecision(null);
-    setDecisionError(null);
-    try {
-      await loadConversation(sessionId);
-      saveLastSessionId(sessionId);
-      setStatusMessage(null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load selected chat.';
-      setStatusMessage(message);
-    }
-  };
-
   const handleCreateFolder = async () => {
     if (typeof window === 'undefined') {
       return;
@@ -2371,375 +403,47 @@ export default function App() {
     }
   };
 
-  const handleCreateConversation = async () => {
+  const handleSettingsSaved = async () => {
     try {
-      const created = await createConversation();
-      const nextSession = created.sessionId;
-      if (!nextSession) {
-        setStatusMessage('Failed to create chat.');
-        return;
-      }
-      setSelectedConversation(nextSession);
-    setArtifactViewerArtifactId(null);
-    setStreamingContentByArtifactId({});
-    setChatStreamingState(null);
-    setPendingDecision(null);
-    setDecisionError(null);
-      saveLastSessionId(nextSession);
-      await loadSessions();
-      if (!created.selectedModel && providerModels.length > 0) {
-        const lastModel = loadLastModel();
-        if (lastModel && isModelAvailable(lastModel, providerModels)) {
-          try {
-            const applied = await setSessionModel(
-              nextSession,
-              lastModel.provider,
-              lastModel.model,
-            );
-            setSelectedModel(applied);
-            saveLastModel(applied);
-            setLastModelApplied(true);
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : 'Failed to restore last model.';
-            setStatusMessage(message);
-          }
-        }
-      }
-      setStatusMessage(null);
+      await Promise.all([loadModels(), loadComposerSettings(), loadSessions()]);
+      setStatusMessage('Settings saved.');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to create chat.';
+      const message =
+        error instanceof Error ? error.message : 'Settings saved, but models refresh failed.';
       setStatusMessage(message);
     }
   };
 
-  const handleDeleteConversation = async (sessionId: string) => {
-    if (!sessionId || deletingSessionId === sessionId) {
-      return;
-    }
-    setDeletingSessionId(sessionId);
+  const extractErrorFromResponse = async (
+    response: Response,
+    fallback: string,
+  ): Promise<string> => {
     try {
-      const response = await fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
-        method: 'DELETE',
-      });
       const payload: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, 'Failed to delete chat.'));
-      }
-
-      const updatedSessions = await loadSessions();
-
-      if (selectedConversation === sessionId) {
-        if (updatedSessions.length > 0) {
-          const nextSession = updatedSessions[0].session_id;
-          setSelectedConversation(nextSession);
-          await loadConversation(nextSession);
-          saveLastSessionId(nextSession);
-        } else {
-          const created = await createConversation();
-          if (created.sessionId) {
-            setSelectedConversation(created.sessionId);
-            await loadSessions();
-            saveLastSessionId(created.sessionId);
-          } else {
-            setSelectedConversation(null);
-            setChatMessages([]);
-            setWorkspaceMessagesState([]);
-            setMessageRuntimeMetaById({});
-            setSessionOutput(null);
-            setSessionFiles([]);
-            setSessionArtifacts([]);
-            setStreamingContentByArtifactId({});
-            setChatStreamingState(null);
-            setWorkspaceStreamingState(null);
-            setSelectedModel(null);
-            saveLastSessionId(null);
-          }
-        }
-      }
-
-      setStatusMessage(null);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to delete chat.';
-      setStatusMessage(message);
-    } finally {
-      setDeletingSessionId(null);
-    }
-  };
-
-  const handleSetModel = async (provider: string, model: string): Promise<boolean> => {
-    if (!selectedConversation || savingModel) {
-      return false;
-    }
-    setSavingModel(true);
-    try {
-      const nextModel = await setSessionModel(selectedConversation, provider, model);
-      setSelectedModel(nextModel);
-      saveLastModel(nextModel);
-      setStatusMessage(null);
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to set model.';
-      setStatusMessage(message);
-      return false;
-    } finally {
-      setSavingModel(false);
-    }
-  };
-
-  const normalizeComposerAttachments = (
-    attachments: CanvasComposerAttachment[],
-  ): ChatAttachment[] => {
-    return attachments
-      .map((item) => ({
-        name: item.name.trim(),
-        mime: item.mime.trim(),
-        content: item.content,
-      }))
-      .filter(
-        (item) =>
-          item.name.length > 0
-          && item.mime.length > 0
-          && typeof item.content === 'string',
-      );
-  };
-
-  const applySessionPayload = (
-    payload: unknown,
-    options: SessionPayloadApplyOptions,
-  ): { decision: UiDecision | null; lane: MessageLane } => {
-    const body = payload as {
-      messages?: unknown;
-      workspace_messages?: unknown;
-      lane?: unknown;
-      decision?: unknown;
-      output?: unknown;
-      files?: unknown;
-      artifacts?: unknown;
-      selected_model?: unknown;
-      display?: unknown;
-      mode?: unknown;
-      active_plan?: unknown;
-      active_task?: unknown;
-      auto_state?: unknown;
-      trace_id?: unknown;
-      mwv_report?: unknown;
-    };
-
-    const parsedChatMessages = body.messages !== undefined ? parseMessages(body.messages) : null;
-    const parsedWorkspaceMessages =
-      body.workspace_messages !== undefined ? parseMessages(body.workspace_messages) : null;
-    if (parsedChatMessages !== null) {
-      setChatMessages(parsedChatMessages);
-    }
-    if (parsedWorkspaceMessages !== null) {
-      setWorkspaceMessagesState(parsedWorkspaceMessages);
-    }
-
-    const lane: MessageLane = body.lane === 'workspace' ? 'workspace' : 'chat';
-    const traceIdFromPayload = parseTraceId(body.trace_id);
-    const mwvReportFromPayload = parseMwvReport(body.mwv_report);
-
-    const parsedDecision = parseUiDecision(body.decision);
-    if (body.decision !== undefined) {
-      setPendingDecision(parsedDecision);
-      setDecisionError(null);
-    }
-
-    if (body.output !== undefined) {
-      const parsedOutput = parseSessionOutput(body.output);
-      setSessionOutput(parsedOutput.content);
-    }
-
-    if (body.files !== undefined) {
-      setSessionFiles(parseSessionFiles(body.files));
-    }
-
-    if (body.artifacts !== undefined) {
-      setSessionArtifacts(parseSessionArtifacts(body.artifacts));
-    }
-
-    const parsedModel = parseSelectedModel(body.selected_model);
-    if (parsedModel) {
-      setSelectedModel(parsedModel);
-      saveLastModel(parsedModel);
-    }
-    if (body.mode !== undefined) {
-      setSessionMode(parseSessionMode(body.mode));
-    }
-    if (body.active_plan !== undefined) {
-      setActivePlan(parsePlanEnvelope(body.active_plan));
-    }
-    if (body.active_task !== undefined) {
-      setActiveTask(parseTaskExecution(body.active_task));
-    }
-    if (body.auto_state !== undefined) {
-      setAutoState(parseAutoState(body.auto_state));
-    }
-    setMessageRuntimeMetaById((previous) => {
-      const next = { ...previous };
-      const upsertForLane = (
-        list: ChatMessage[] | null,
-        listLane: MessageLane,
-      ) => {
-        if (!list) {
-          return;
-        }
-        list.forEach((message) => {
-          if (message.role !== 'assistant' && message.role !== 'user') {
-            return;
-          }
-          next[message.message_id] = toMessageRuntimeMeta(
-            message,
-            listLane,
-            previous[message.message_id] ?? null,
-          );
-        });
-      };
-
-      upsertForLane(parsedChatMessages, 'chat');
-      upsertForLane(parsedWorkspaceMessages, 'workspace');
-
-      const laneMessages = lane === 'workspace'
-        ? parsedWorkspaceMessages ?? workspaceMessagesState
-        : parsedChatMessages ?? chatMessages;
-      const lastAssistant = [...laneMessages]
-        .reverse()
-        .find((message) => message.role === 'assistant');
-      if (lastAssistant) {
-        const previousMeta = next[lastAssistant.message_id] ?? null;
-        next[lastAssistant.message_id] = {
-          messageId: lastAssistant.message_id,
-          lane,
-          traceId: traceIdFromPayload ?? previousMeta?.traceId ?? lastAssistant.trace_id ?? null,
-          isFinal: true,
-          mwvReport: mwvReportFromPayload ?? previousMeta?.mwvReport ?? null,
-        };
-      }
-
-      return next;
-    });
-
-    if (options.applyDisplay) {
-      const displayDecision = parseDisplayDecision(body.display);
-      if (displayDecision?.target === 'canvas') {
-        setArtifactPanelOpen(true);
-        if (displayDecision.artifactId) {
-          setArtifactViewerArtifactId(`output-${displayDecision.artifactId}`);
-        }
-      } else {
-        setArtifactViewerArtifactId(null);
-      }
-    }
-
-    return { decision: parsedDecision, lane };
-  };
-
-  const handleSend = async (
-    payload: CanvasSendPayload,
-    lane: MessageLane = 'chat',
-  ): Promise<boolean> => {
-    if (!selectedConversation || sending) {
-      return false;
-    }
-    const trimmed = payload.content.trim();
-    const normalizedAttachments = normalizeComposerAttachments(payload.attachments ?? []);
-    if (!trimmed && normalizedAttachments.length === 0) {
-      return false;
-    }
-    setPendingUserMessage({ content: trimmed, attachments: normalizedAttachments, lane });
-    setPendingSessionId(selectedConversation);
-    if (lane === 'workspace') {
-      setWorkspaceStreamingState(null);
-    } else {
-      setChatStreamingState(null);
-    }
-    setAwaitingFirstAssistantChunk(true);
-    const forceCanvasForRequest = lane === 'chat' ? forceCanvasNext : false;
-    if (lane === 'chat' && forceCanvasForRequest) {
-      setForceCanvasNext(false);
-    }
-    setSending(true);
-    try {
-      const response = await fetch('/ui/api/chat/send', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          [SESSION_HEADER]: selectedConversation,
-        },
-        body: JSON.stringify({
-          content: trimmed,
-          lane,
-          force_canvas: forceCanvasForRequest,
-          attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
-        }),
-      });
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, 'Failed to send message.'));
-      }
-
-      const headerSession = response.headers.get(SESSION_HEADER);
-      const payloadSession = extractSessionIdFromPayload(payload);
-      const nextSession =
-        (headerSession && headerSession.trim()) || payloadSession || selectedConversation;
-      if (nextSession !== selectedConversation) {
-        setSelectedConversation(nextSession);
-      }
-      saveLastSessionId(nextSession);
-
-      setPendingUserMessage(null);
-      setPendingSessionId(null);
-      if (lane === 'workspace') {
-        setWorkspaceStreamingState(null);
-      } else {
-        setChatStreamingState(null);
-      }
-      applySessionPayload(payload, { applyDisplay: true });
-      await loadSessions();
-      setStatusMessage(null);
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to send message.';
-      setStatusMessage(message);
-      setPendingUserMessage(null);
-      setPendingSessionId(null);
-      if (lane === 'workspace') {
-        setWorkspaceStreamingState(null);
-      } else {
-        setChatStreamingState(null);
-      }
-      if (lane === 'chat' && forceCanvasForRequest) {
-        setForceCanvasNext(true);
-      }
-      return false;
-    } finally {
-      setSending(false);
+      return extractErrorMessage(payload, fallback);
+    } catch {
+      return fallback;
     }
   };
 
   const handleDownloadArtifact = async (artifact: Artifact) => {
-    if (!selectedConversation) {
+    if (!runtime.selectedConversation) {
       return;
     }
     try {
       if (artifact.sourceArtifactId) {
         const response = await fetch(
-          `/ui/api/sessions/${encodeURIComponent(selectedConversation)}/artifacts/${encodeURIComponent(
+          `/ui/api/sessions/${encodeURIComponent(runtime.selectedConversation)}/artifacts/${encodeURIComponent(
             artifact.sourceArtifactId,
           )}/download`,
           {
             headers: {
-              [SESSION_HEADER]: selectedConversation,
+              [SESSION_HEADER]: runtime.selectedConversation,
             },
           },
         );
         if (!response.ok) {
-          const errorMessage = await extractErrorFromResponse(
-            response,
-            'Failed to download artifact.',
-          );
-          throw new Error(errorMessage);
+          throw new Error(await extractErrorFromResponse(response, 'Failed to download artifact.'));
         }
         const blob = await response.blob();
         const fallbackName = artifact.fileName?.trim() || `${artifact.name}.${artifact.type.toLowerCase()}`;
@@ -2753,21 +457,17 @@ export default function App() {
       }
       if (artifact.sessionFilePath) {
         const response = await fetch(
-          `/ui/api/sessions/${encodeURIComponent(selectedConversation)}/files/download?path=${encodeURIComponent(
+          `/ui/api/sessions/${encodeURIComponent(runtime.selectedConversation)}/files/download?path=${encodeURIComponent(
             artifact.sessionFilePath,
           )}`,
           {
             headers: {
-              [SESSION_HEADER]: selectedConversation,
+              [SESSION_HEADER]: runtime.selectedConversation,
             },
           },
         );
         if (!response.ok) {
-          const errorMessage = await extractErrorFromResponse(
-            response,
-            'Failed to download file.',
-          );
-          throw new Error(errorMessage);
+          throw new Error(await extractErrorFromResponse(response, 'Failed to download file.'));
         }
         const blob = await response.blob();
         const fallbackName = artifact.sessionFilePath.split('/').pop() || artifact.name;
@@ -2792,24 +492,20 @@ export default function App() {
   };
 
   const handleDownloadAllArtifacts = async () => {
-    if (!selectedConversation) {
+    if (!runtime.selectedConversation) {
       return;
     }
     try {
       const response = await fetch(
-        `/ui/api/sessions/${encodeURIComponent(selectedConversation)}/artifacts/download-all`,
+        `/ui/api/sessions/${encodeURIComponent(runtime.selectedConversation)}/artifacts/download-all`,
         {
           headers: {
-            [SESSION_HEADER]: selectedConversation,
+            [SESSION_HEADER]: runtime.selectedConversation,
           },
         },
       );
       if (!response.ok) {
-        const message = await extractErrorFromResponse(
-          response,
-          'No downloadable file artifacts.',
-        );
-        throw new Error(message);
+        throw new Error(await extractErrorFromResponse(response, 'No downloadable file artifacts.'));
       }
       const blob = await response.blob();
       const fileName = extractFilenameFromDisposition(
@@ -2854,309 +550,24 @@ export default function App() {
     }
   };
 
-  const handleSettingsSaved = async () => {
-    try {
-      await Promise.all([loadModels(), loadComposerSettings(), loadSessions()]);
-      setStatusMessage('Settings saved.');
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Settings saved, but models refresh failed.';
-      setStatusMessage(message);
-    }
-  };
-
-  const handleChangeMode = async (mode: SessionMode): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      const updated = await setSessionModeRemote(selectedConversation, mode);
-      setSessionMode(updated.mode);
-      setActivePlan(updated.activePlan);
-      setActiveTask(updated.activeTask);
-      setAutoState(updated.autoState);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to change mode.';
-      setModeError(message);
-      setStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
-
-  const handlePlanDraft = async (goal: string): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      const updated = await draftPlanRemote(selectedConversation, goal);
-      setSessionMode(updated.mode);
-      setActivePlan(updated.activePlan);
-      setActiveTask(updated.activeTask);
-      setAutoState(updated.autoState);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to draft plan.';
-      setModeError(message);
-      setStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
-
-  const handlePlanApprove = async (): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      const updated = await approvePlanRemote(selectedConversation);
-      setSessionMode(updated.mode);
-      setActivePlan(updated.activePlan);
-      setActiveTask(updated.activeTask);
-      setAutoState(updated.autoState);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to approve plan.';
-      setModeError(message);
-      setStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
-
-  const handlePlanExecute = async (): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      const updated = await executePlanRemote(selectedConversation);
-      setSessionMode(updated.mode);
-      setActivePlan(updated.activePlan);
-      setActiveTask(updated.activeTask);
-      setAutoState(updated.autoState);
-      if (updated.decision) {
-        setPendingDecision(updated.decision);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to execute plan.';
-      setModeError(message);
-      setStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
-
-  const handlePlanCancel = async (): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      const updated = await cancelPlanRemote(selectedConversation);
-      setSessionMode(updated.mode);
-      setActivePlan(updated.activePlan);
-      setActiveTask(updated.activeTask);
-      setAutoState(updated.autoState);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to cancel plan.';
-      setModeError(message);
-      setStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
-
-  const handleWorkspaceGithubImport = async (
-    repoUrl: string,
-    branch?: string,
-  ): Promise<WorkspaceGithubImportResult> => {
-    if (!selectedConversation) {
-      throw new Error('No active session. Create chat first.');
-    }
-    const normalizedRepoUrl = repoUrl.trim();
-    if (!normalizedRepoUrl) {
-      throw new Error('Repository URL is required.');
-    }
-    const normalizedBranch = (branch ?? '').trim();
-    const args = normalizedBranch
-      ? `${normalizedRepoUrl} --branch ${normalizedBranch}`
-      : normalizedRepoUrl;
-
-    const response = await fetch('/ui/api/tools/project', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        [SESSION_HEADER]: selectedConversation,
-      },
-      body: JSON.stringify({
-        command: 'github_import',
-        args,
-      }),
-    });
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to run GitHub import.'));
-    }
-
-    const headerSession = response.headers.get(SESSION_HEADER);
-    const payloadSession = extractSessionIdFromPayload(payload);
-    const nextSession =
-      (headerSession && headerSession.trim()) || payloadSession || selectedConversation;
-    if (nextSession !== selectedConversation) {
-      setSelectedConversation(nextSession);
-    }
-    saveLastSessionId(nextSession);
-
-    const { decision } = applySessionPayload(payload, { applyDisplay: false });
-    await loadSessions();
-    const pending = decision?.status === 'pending' && decision.blocking === true;
-    if (pending) {
-      return {
-        status: 'pending',
-        message: 'Действие ожидает подтверждения в DecisionPanel (AI Assistant).',
-      };
-    }
-    setWorkspaceRefreshToken((value) => value + 1);
-    return {
-      status: 'done',
-      message: 'GitHub import completed.',
-    };
-  };
-
-  const handleDecisionRespond = async (
-    choice: DecisionRespondChoice,
-    editedPayload?: Record<string, unknown> | null,
-  ) => {
-    if (!selectedConversation || !pendingDecision) {
-      return;
-    }
-    setDecisionBusy(true);
-    setDecisionError(null);
-    try {
-      const response = await fetch('/ui/api/decision/respond', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          [SESSION_HEADER]: selectedConversation,
-        },
-        body: JSON.stringify({
-          session_id: selectedConversation,
-          decision_id: pendingDecision.id,
-          choice,
-          edited_action: choice === 'edit_and_approve' ? (editedPayload ?? {}) : null,
-          edited_plan: choice === 'edit_plan' ? (editedPayload ?? {}) : null,
-        }),
-      });
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, 'Failed to resolve decision.'));
-      }
-      applySessionPayload(payload, { applyDisplay: false });
-      const resumeRaw = (payload as { resume?: unknown }).resume;
-      if (resumeRaw && typeof resumeRaw === 'object') {
-        const resume = resumeRaw as {
-          ok?: unknown;
-          data?: unknown;
-          source_endpoint?: unknown;
-          tool_name?: unknown;
-          error?: unknown;
-        };
-        if (resume.source_endpoint === 'workspace.tool') {
-          const toolName = typeof resume.tool_name === 'string' ? resume.tool_name : 'workspace tool';
-          if (resume.ok === true) {
-            setStatusMessage(`Workspace: ${toolName} completed.`);
-          } else {
-            const errorText =
-              typeof resume.error === 'string' && resume.error.trim()
-                ? resume.error
-                : `Workspace: ${toolName} failed.`;
-            setStatusMessage(errorText);
-          }
-        } else if (resume.source_endpoint === 'project.command') {
-          const toolName = typeof resume.tool_name === 'string' ? resume.tool_name : 'project';
-          const data = resume.data && typeof resume.data === 'object'
-            ? (resume.data as { command?: unknown; output?: unknown })
-            : null;
-          const command = data && typeof data.command === 'string' ? data.command : null;
-          if (resume.ok === true) {
-            if (command === 'github_import') {
-              setWorkspaceRefreshToken((value) => value + 1);
-            }
-            const outputPreview =
-              data && typeof data.output === 'string' && data.output.trim()
-                ? data.output.trim()
-                : null;
-            setStatusMessage(
-              outputPreview
-                ? outputPreview
-                : `Project command (${toolName}) completed.`,
-            );
-          } else {
-            const errorText =
-              typeof resume.error === 'string' && resume.error.trim()
-                ? resume.error
-                : `Project command (${toolName}) failed.`;
-            setStatusMessage(errorText);
-          }
-        } else if (resume.source_endpoint === 'auto.run') {
-          const data = resume.data && typeof resume.data === 'object'
-            ? (resume.data as { output?: unknown; status?: unknown })
-            : null;
-          const statusRaw = data && typeof data.status === 'string' ? data.status : null;
-          const outputRaw = data && typeof data.output === 'string' ? data.output : null;
-          if (resume.ok === true) {
-            if (outputRaw && outputRaw.trim()) {
-              setStatusMessage(outputRaw.trim());
-            } else if (statusRaw) {
-              setStatusMessage(`Auto run: ${statusRaw}`);
-            } else {
-              setStatusMessage('Auto run resumed.');
-            }
-          } else {
-            const errorText =
-              typeof resume.error === 'string' && resume.error.trim()
-                ? resume.error
-                : 'Auto run failed.';
-            setStatusMessage(errorText);
-          }
-        } else {
-          setStatusMessage(null);
-        }
-      } else {
-        setStatusMessage(null);
-      }
-      await loadSessions();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to resolve decision.';
-      setDecisionError(message);
-    } finally {
-      setDecisionBusy(false);
-    }
-  };
-
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-950 text-foreground">
       <HistorySidebar
         chats={historyChats}
         folders={folders.map((folder) => ({ id: folder.folder_id, name: folder.name }))}
-        activeChatId={selectedConversation}
+        activeChatId={runtime.selectedConversation}
         onSelectChat={(sessionId) => {
           setView('chat');
-          void handleSelectConversation(sessionId);
+          overlays.resetSessionSurfaceState();
+          void runtime.handleSelectConversation(sessionId);
         }}
         onNewChat={() => {
           setView('chat');
-          void handleCreateConversation();
+          overlays.resetSessionSurfaceState();
+          void runtime.handleCreateConversation();
         }}
         onDeleteChat={(sessionId) => {
-          void handleDeleteConversation(sessionId);
+          void runtime.handleDeleteConversation(sessionId);
         }}
         onRenameChat={(sessionId) => {
           void handleRenameChat(sessionId);
@@ -3164,9 +575,9 @@ export default function App() {
         onMoveChatToFolder={(sessionId, folderId) => {
           void handleMoveChatToFolder(sessionId, folderId);
         }}
-        onOpenSearch={() => setSearchOpen(true)}
+        onOpenSearch={() => overlays.setSearchOpen(true)}
         onOpenWorkspace={handleWorkspaceSidebarAction}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => overlays.setSettingsOpen(true)}
         onCreateFolder={() => {
           void handleCreateFolder();
         }}
@@ -3177,158 +588,141 @@ export default function App() {
 
       <div className="flex-1 min-w-0 relative">
         {activeView === 'workspace' ? (
-          <WorkspaceIde
-            sessionId={selectedConversation}
+          <WorkspaceSessionScreen
+            sessionId={runtime.selectedConversation}
             sessionHeader={SESSION_HEADER}
             modelLabel={modelLabel}
-            sessionPolicyLabel={sessionSecuritySummary.policyLabel}
-            sessionYoloActive={sessionSecuritySummary.yoloActive}
-            sessionSafeMode={sessionSecuritySummary.safeMode}
-            messages={workspaceMessages}
-            sending={sending}
+            sessionPolicyLabel={runtime.sessionSecuritySummary.policyLabel}
+            sessionYoloActive={runtime.sessionSecuritySummary.yoloActive}
+            sessionSafeMode={runtime.sessionSecuritySummary.safeMode}
+            messages={transport.workspaceMessages}
+            sending={transport.sending}
             statusMessage={statusMessage}
             onBackToChat={() => {
-              setRepositoryPanelOpen(false);
+              overlays.setRepositoryPanelOpen(false);
               setView('chat');
             }}
-            onOpenSessionDrawer={() => setSessionDrawerOpen(true)}
-            onOpenRepositoryPanel={() => setRepositoryPanelOpen(true)}
-            onSendAgentMessage={(payload) => handleSend(payload, 'workspace')}
-            mode={sessionMode}
-            activePlan={activePlan}
-            activeTask={activeTask}
-            autoState={autoState}
-            modeBusy={modeBusy}
-            modeError={modeError}
-            onChangeMode={handleChangeMode}
-            onPlanDraft={handlePlanDraft}
-            onPlanApprove={handlePlanApprove}
-            onPlanExecute={handlePlanExecute}
-            onPlanCancel={handlePlanCancel}
-            decision={pendingDecision}
-            decisionBusy={decisionBusy}
-            decisionError={decisionError}
+            onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
+            onOpenRepositoryPanel={() => overlays.setRepositoryPanelOpen(true)}
+            onSendAgentMessage={(payload) => transport.handleSend(payload, 'workspace')}
+            mode={runtime.sessionMode}
+            activePlan={runtime.activePlan}
+            activeTask={runtime.activeTask}
+            autoState={runtime.autoState}
+            modeBusy={runtime.modeBusy}
+            modeError={runtime.modeError}
+            onChangeMode={runtime.handleChangeMode}
+            onPlanDraft={runtime.handlePlanDraft}
+            onPlanApprove={runtime.handlePlanApprove}
+            onPlanExecute={runtime.handlePlanExecute}
+            onPlanCancel={runtime.handlePlanCancel}
+            decision={runtime.pendingDecision}
+            decisionBusy={runtime.decisionBusy}
+            decisionError={runtime.decisionError}
             onDecisionRespond={(choice, editedAction) => {
-              void handleDecisionRespond(choice, editedAction);
+              void runtime.handleDecisionRespond(
+                choice,
+                editedAction,
+                repositoryActions.handleDecisionResume,
+              );
             }}
-            refreshToken={workspaceRefreshToken}
+            refreshToken={repositoryActions.workspaceRefreshToken}
             explorerVisible={workspaceExplorerVisible}
           />
         ) : (
-          <>
-            <Canvas
-              className="h-full"
-              messages={canvasMessages}
-              pendingMessage={pendingCanvasMessage}
-              streamingAssistantMessage={streamingAssistantCanvasMessage}
-              showAssistantLoading={showAssistantLoading}
-              sending={sending}
-              onSendMessage={(payload) => handleSend(payload, 'chat')}
-              onSendFeedback={(interactionId, rating) => handleSendFeedback(interactionId, rating)}
-              modelName={modelLabel}
-              onOpenSessionDrawer={() => setSessionDrawerOpen(true)}
-              statusMessage={statusMessage}
-              longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
-              longPasteThresholdChars={composerSettings.longPasteThresholdChars}
-              forceCanvasNext={forceCanvasNext}
-              onToggleForceCanvasNext={() => {
-                setForceCanvasNext((prev) => !prev);
-              }}
-              decision={pendingDecision}
-              decisionBusy={decisionBusy}
-              decisionError={decisionError}
-              onDecisionRespond={(choice, editedAction) => {
-                void handleDecisionRespond(choice, editedAction);
-              }}
-            />
-
-            {!artifactPanelOpen ? (
-              <button
-                onClick={() => {
-                  setArtifactViewerArtifactId(null);
-                  setArtifactPanelOpen(true);
-                }}
-                className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#141418] border border-[#1f1f24] hover:border-[#2a2a30] hover:bg-[#1b1b20] flex items-center justify-center transition-all cursor-pointer shadow-lg shadow-black/30"
-                title="Open Artifacts"
-              >
-                <PanelRight className="w-4.5 h-4.5 text-[#888]" />
-              </button>
-            ) : null}
-          </>
+          <ChatSessionScreen
+            messages={transport.canvasMessages}
+            pendingMessage={transport.pendingCanvasMessage}
+            streamingAssistantMessage={transport.streamingAssistantCanvasMessage}
+            showAssistantLoading={transport.showAssistantLoading}
+            sending={transport.sending}
+            modelLabel={modelLabel}
+            statusMessage={statusMessage}
+            longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
+            longPasteThresholdChars={composerSettings.longPasteThresholdChars}
+            forceCanvasNext={overlays.forceCanvasNext}
+            artifactPanelOpen={overlays.artifactPanelOpen}
+            artifactViewerArtifactId={overlays.artifactViewerArtifactId}
+            artifacts={transport.artifacts}
+            decision={runtime.pendingDecision}
+            decisionBusy={runtime.decisionBusy}
+            decisionError={runtime.decisionError}
+            onSendMessage={(payload) => transport.handleSend(payload, 'chat')}
+            onSendFeedback={handleSendFeedback}
+            onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
+            onToggleForceCanvasNext={() => overlays.setForceCanvasNext((prev) => !prev)}
+            onDecisionRespond={(choice, editedAction) => {
+              void runtime.handleDecisionRespond(
+                choice,
+                editedAction,
+                repositoryActions.handleDecisionResume,
+              );
+            }}
+            onOpenArtifactPanel={() => {
+              overlays.setArtifactViewerArtifactId(null);
+              overlays.setArtifactPanelOpen(true);
+            }}
+            onCloseArtifactPanel={() => {
+              overlays.setArtifactPanelOpen(false);
+              overlays.setArtifactViewerArtifactId(null);
+            }}
+            onDownloadArtifact={handleDownloadArtifact}
+            onDownloadAll={handleDownloadAllArtifacts}
+          />
         )}
       </div>
 
-      {activeView === 'chat' ? (
-        <ArtifactPanel
-          isOpen={artifactPanelOpen}
-          onClose={() => {
-            setArtifactPanelOpen(false);
-            setArtifactViewerArtifactId(null);
-          }}
-          artifacts={artifacts}
-          autoOpenArtifactId={artifactViewerArtifactId}
-          onDownloadArtifact={(artifact) => {
-            void handleDownloadArtifact(artifact);
-          }}
-          onDownloadAll={() => {
-            void handleDownloadAllArtifacts();
-          }}
-        />
-      ) : null}
-
       <SearchModal
-        isOpen={searchOpen}
-        onClose={() => setSearchOpen(false)}
+        isOpen={overlays.searchOpen}
+        onClose={() => overlays.setSearchOpen(false)}
         chats={searchChats}
         onSelectChat={(sessionId) => {
           setView('chat');
-          void handleSelectConversation(sessionId);
-          setSearchOpen(false);
+          overlays.resetSessionSurfaceState();
+          void runtime.handleSelectConversation(sessionId);
+          overlays.setSearchOpen(false);
         }}
         onNewChat={() => {
           setView('chat');
-          void handleCreateConversation();
+          overlays.resetSessionSurfaceState();
+          void runtime.handleCreateConversation();
         }}
       />
 
       <RepositoryPanel
-        isOpen={repositoryPanelOpen}
-        onClose={() => setRepositoryPanelOpen(false)}
-        pendingDecision={pendingDecision}
-        onRunGithubImport={(repoUrl, branch) => handleWorkspaceGithubImport(repoUrl, branch)}
+        isOpen={overlays.repositoryPanelOpen}
+        onClose={() => overlays.setRepositoryPanelOpen(false)}
+        pendingDecision={runtime.pendingDecision}
+        onRunGithubImport={(repoUrl, branch) => repositoryActions.handleWorkspaceGithubImport(repoUrl, branch)}
       />
 
       <SessionControlShell
-        isOpen={sessionDrawerOpen}
-        onClose={() => setSessionDrawerOpen(false)}
+        isOpen={overlays.sessionDrawerOpen}
+        onClose={() => overlays.setSessionDrawerOpen(false)}
         onSaved={() => {
           setStatusMessage('Session controls updated.');
-          if (!selectedConversation) {
-            setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
-            return;
-          }
-          void loadSessionSecuritySummary(selectedConversation).catch(() => {
+          void runtime.refreshSessionSecuritySummary().catch(() => {
             setStatusMessage('Session controls updated, but session summary refresh failed.');
           });
         }}
-        sessionId={selectedConversation}
+        sessionId={runtime.selectedConversation}
         sessionHeader={SESSION_HEADER}
-        mode={sessionMode}
-        modeBusy={modeBusy}
-        onChangeMode={handleChangeMode}
+        mode={runtime.sessionMode}
+        modeBusy={runtime.modeBusy}
+        onChangeMode={runtime.handleChangeMode}
         modelLabel={modelLabel}
         modelOptions={modelOptions}
         selectedModelValue={selectedModelValue}
         modelsLoading={modelsLoading}
-        savingModel={savingModel}
+        savingModel={runtime.savingModel}
         onSelectModel={(provider, model) => {
-          void handleSetModel(provider, model);
+          void runtime.handleSetModel(provider, model);
         }}
       />
 
       <GlobalSettingsShell
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        isOpen={overlays.settingsOpen}
+        onClose={() => overlays.setSettingsOpen(false)}
         onSaved={() => {
           void handleSettingsSaved();
         }}

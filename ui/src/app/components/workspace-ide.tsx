@@ -10,6 +10,7 @@ import type {
   TaskExecutionState,
   UiDecision,
 } from '../types';
+import { getDecisionDisplayState } from '../decision-display';
 import type { CanvasMessage, CanvasSendPayload } from './canvas';
 import {
   findFirstFilePath,
@@ -226,7 +227,8 @@ export function WorkspaceIde({
     [activeFileId, openFiles],
   );
   const hasUnsavedChanges = Boolean(activeTab && activeTab.content !== activeTab.savedContent);
-  const isDecisionBlocking = decision?.status === 'pending' && decision.blocking === true;
+  const decisionState = getDecisionDisplayState(decision, decisionBusy, decisionError);
+  const isDecisionBlocking = decisionState.isBlocking;
 
   const requestHeaders = useMemo(() => {
     if (!sessionId) {
