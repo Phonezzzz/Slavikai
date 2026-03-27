@@ -21,6 +21,7 @@ export type SessionOverlaysResult = {
   setSessionDrawerOpen: (value: boolean) => void;
   setRepositoryPanelOpen: (value: boolean) => void;
   setForceCanvasNext: Dispatch<SetStateAction<boolean>>;
+  consumeForceCanvasNext: () => void;
   openStreamedArtifact: (artifactId: string) => void;
   resetSessionSurfaceState: () => void;
 };
@@ -49,8 +50,13 @@ export function useSessionOverlays({
     setArtifactViewerArtifactId(artifactId);
   };
 
+  const consumeForceCanvasNext = () => {
+    setForceCanvasNext(false);
+  };
+
   const resetSessionSurfaceState = () => {
     setArtifactViewerArtifactId(null);
+    setForceCanvasNext(false);
   };
 
   return {
@@ -68,6 +74,7 @@ export function useSessionOverlays({
     setSessionDrawerOpen,
     setRepositoryPanelOpen,
     setForceCanvasNext,
+    consumeForceCanvasNext,
     openStreamedArtifact,
     resetSessionSurfaceState,
   };

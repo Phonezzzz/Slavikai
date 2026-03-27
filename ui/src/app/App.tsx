@@ -125,6 +125,8 @@ export default function App() {
   const transport = useSessionTransport({
     sessionHeader: SESSION_HEADER,
     selectedConversation: runtime.selectedConversation,
+    forceCanvasNext: overlays.forceCanvasNext,
+    consumeForceCanvasNext: overlays.consumeForceCanvasNext,
     onSessionIdChange: async (sessionId) => {
       overlays.resetSessionSurfaceState();
       await runtime.handleSelectConversation(sessionId);

@@ -35,6 +35,8 @@ import type {
 type UseSessionTransportOptions = {
   sessionHeader: string;
   selectedConversation: string | null;
+  forceCanvasNext: boolean;
+  consumeForceCanvasNext: () => void;
   onSessionIdChange: (sessionId: string) => void;
   onStatusMessage: (message: string | null) => void;
   onRuntimePayload: (payload: unknown) => void;
@@ -145,6 +147,8 @@ const createStreamingAssistantMessage = (
 export function useSessionTransport({
   sessionHeader,
   selectedConversation,
+  forceCanvasNext,
+  consumeForceCanvasNext,
   onSessionIdChange,
   onStatusMessage,
   onRuntimePayload,
@@ -507,6 +511,7 @@ export function useSessionTransport({
     } else {
       setChatStreamingState(null);
     }
+    const forceCanvasForRequest = lane === 'chat' ? forceCanvasNext : false;
     setAwaitingFirstAssistantChunk(true);
     setSending(true);
     try {
@@ -519,6 +524,7 @@ export function useSessionTransport({
         body: JSON.stringify({
           content: trimmed,
           lane,
+          force_canvas: forceCanvasForRequest,
           attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
         }),
       });
@@ -542,6 +548,9 @@ export function useSessionTransport({
         setWorkspaceStreamingState(null);
       } else {
         setChatStreamingState(null);
+      }
+      if (lane === 'chat' && forceCanvasForRequest) {
+        consumeForceCanvasNext();
       }
       applySessionPayload(responsePayload, { applyDisplay: true });
       await loadSessions();
