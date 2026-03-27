@@ -549,12 +549,12 @@ export function useSessionTransport({
       } else {
         setChatStreamingState(null);
       }
-      if (lane === 'chat' && forceCanvasForRequest) {
-        consumeForceCanvasNext();
-      }
       applySessionPayload(responsePayload, { applyDisplay: true });
       await loadSessions();
       onStatusMessage(null);
+      if (lane === 'chat' && forceCanvasForRequest) {
+        consumeForceCanvasNext();
+      }
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send message.';
