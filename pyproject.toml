@@ -32,3 +32,11 @@ exclude = ["venv", ".venv", "build", "dist", "tests", "vendor/openwebui"]
 addopts = "--cov=core --cov=llm --cov=tools --cov=memory --cov=shared --cov=config --cov-report=term-missing --cov-fail-under=80"
 testpaths = ["tests"]
 norecursedirs = ["vendor"]
+markers = [
+    "mwv: vocabulary marker for MWV/runtime/verifier test scope",
+    "auto: vocabulary marker for auto-runtime/orchestrator test scope",
+    "http_api: vocabulary marker for HTTP/server/API test scope",
+    "ui_api: vocabulary marker for UI API/session/events/workspace test scope",
+    "contract: vocabulary marker for user-visible contract and payload stability scope",
+    "e2e: vocabulary marker for end-to-end and cross-flow test scope",
+]
