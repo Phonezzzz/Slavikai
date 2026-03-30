@@ -18,7 +18,11 @@ from core.mwv.models import (
 )
 from core.mwv.single_attempt import MWVSingleAttemptResult, MWVSingleAttemptRuntime
 from core.mwv.verifier import VerifierRunner
-from core.mwv.verifier_runtime import VerifierRuntime
+from core.mwv.verifier_runtime import (
+    VerifierRuntime,
+    canonical_check_command,
+    has_canonical_repo_verifier,
+)
 from shared.models import JSONValue
 
 _TARGET_RE = re.compile(r"\b(?:file|\u0444\u0430\u0439\u043b)\b\s+([^\s]+)", re.IGNORECASE)
@@ -69,10 +73,9 @@ class CodingTaskRuntime:
     ) -> Callable[[Sequence[MWVMessage], RunContext], TaskPacket]:
         def _build(_messages: Sequence[MWVMessage], context: RunContext) -> TaskPacket:
             verifier: dict[str, JSONValue] = {}
-            script_path = self.workspace_root / "scripts" / "check.sh"
-            if script_path.exists() and script_path.is_file():
+            if has_canonical_repo_verifier(self.workspace_root):
                 verifier = {
-                    "command": ["bash", "scripts/check.sh"],
+                    "command": canonical_check_command(),
                     "cwd": ".",
                 }
             return TaskPacket(

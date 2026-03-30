@@ -76,14 +76,12 @@ def test_mwv_context_and_task_builder(tmp_path: Path) -> None:
     assert task.verifier == {}
 
 
-def test_mwv_context_uses_runtime_workspace_root_and_detects_verifier_script(
+def test_mwv_context_uses_runtime_workspace_root_and_detects_canonical_verifier(
     tmp_path: Path,
 ) -> None:
     agent = _make_agent(tmp_path)
     agent.apply_runtime_workspace_root(str(tmp_path))
-    scripts_dir = tmp_path / "scripts"
-    scripts_dir.mkdir()
-    (scripts_dir / "check.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (tmp_path / "Makefile").write_text(".PHONY: check\ncheck:\n\t@true\n", encoding="utf-8")
 
     context = agent._build_mwv_context(trace_id="trace-1")
     assert context.workspace_root == str(tmp_path)
@@ -92,7 +90,7 @@ def test_mwv_context_uses_runtime_workspace_root_and_detects_verifier_script(
     builder = agent._mwv_task_builder(decision)
     task = builder([MWVMessage(role="user", content="fix bug")], context)
     assert task.scope["workspace_root"] == str(tmp_path)
-    assert task.verifier == {"command": ["bash", "scripts/check.sh"], "cwd": "."}
+    assert task.verifier == {"command": ["make", "check"], "cwd": "."}
 
 
 def test_mwv_goal_and_changes(tmp_path: Path) -> None:

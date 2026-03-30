@@ -38,7 +38,7 @@ help:
 	@echo "  make type            mypy . (strict, tests excluded by config)"
 	@echo "  make ui-type         npm run typecheck (ui)"
 	@echo "  make test            pytest (coverage configured in pyproject.toml)"
-	@echo "  make check           lint + format-check + type + ui-type + test"
+	@echo "  make check           canonical project gate: UI guard + lint + format-check + type + ui-type + test"
 	@echo "  make ci              skills lint/manifest + pytest -q (temp candidates)"
 	@echo
 	@echo "Git:"

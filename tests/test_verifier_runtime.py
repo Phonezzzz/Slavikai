@@ -66,6 +66,38 @@ def test_verifier_runtime_fallback_pass_for_repo_like_workspace(
     assert calls == [["python", "-m", "ruff", "check", "."], ["python", "-m", "pytest", "-q"]]
 
 
+def test_verifier_runtime_default_fallback_uses_make_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "Makefile").write_text(".PHONY: check\ncheck:\n\t@true\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def _run(
+        command: list[str],
+        *,
+        cwd: Path,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        _ = (cwd, capture_output, text, timeout, check)
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    runtime = VerifierRuntime(project_root=tmp_path)
+
+    result = runtime.run(_task(tmp_path), _context(tmp_path))
+
+    assert result.status == VerificationStatus.PASSED
+    assert result.command == ["make", "check"]
+    assert result.verifier_profile == "fallback"
+    assert calls == [["make", "check"]]
+
+
 def test_verifier_runtime_fallback_fail_for_repo_like_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

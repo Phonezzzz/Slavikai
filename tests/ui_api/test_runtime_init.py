@@ -68,6 +68,7 @@ def test_ui_runtime_init_resets_workflow_to_ask() -> None:
             assert reset.get("reset_reason") == "test_reset"
             readiness = init_payload.get("readiness")
             assert isinstance(readiness, dict)
+            assert readiness.get("verifier_available") is True
             assert isinstance(readiness.get("workspace_root_valid"), bool)
             assert isinstance(readiness.get("tool_registry_integrity"), bool)
         finally:

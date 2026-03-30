@@ -5,6 +5,7 @@ from pathlib import Path
 from aiohttp import web
 
 from config.model_whitelist import ModelNotAllowedError
+from core.mwv.verifier_runtime import has_canonical_repo_verifier
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     SESSION_MODES,
@@ -230,7 +231,7 @@ def _runtime_readiness(
             elif isinstance(tools, list):
                 registered_tools = len(tools)
                 tool_registry_integrity = registered_tools > 0
-    verifier_available = Path("scripts/check.sh").exists()
+    verifier_available = has_canonical_repo_verifier(Path.cwd())
     workspace_root_valid = workspace_root.exists() and workspace_root.is_dir()
     return {
         "model_available": model_available,

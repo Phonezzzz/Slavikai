@@ -27,7 +27,12 @@ from core.mwv.models import (
     with_task_packet_hash,
 )
 from core.mwv.routing import RouteDecision
-from core.mwv.verifier_runtime import NON_REPO_VERIFIER_REQUIRED_ERROR, VerifierRuntime
+from core.mwv.verifier_runtime import (
+    NON_REPO_VERIFIER_REQUIRED_ERROR,
+    VerifierRuntime,
+    canonical_check_command,
+    has_canonical_repo_verifier,
+)
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.mwv.worker import WorkerRuntime
 from llm.brain_base import Brain
@@ -955,10 +960,9 @@ class AgentMWVMixin:
 
     def _build_packet_verifier_config(self, workspace_root: str) -> dict[str, JSONValue]:
         root = Path(workspace_root).resolve()
-        script_path = root / "scripts" / "check.sh"
-        if script_path.exists() and script_path.is_file():
+        if has_canonical_repo_verifier(root):
             return {
-                "command": ["bash", "scripts/check.sh"],
+                "command": canonical_check_command(),
                 "cwd": ".",
             }
         return {}

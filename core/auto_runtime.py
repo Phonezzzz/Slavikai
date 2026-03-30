@@ -21,7 +21,7 @@ from core.mwv.models import (
     VerificationResult,
     VerificationStatus,
 )
-from core.mwv.verifier_runtime import VerifierRuntime
+from core.mwv.verifier_runtime import VerifierRuntime, canonical_check_command
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.planner import Planner
 from shared.auto_models import (
@@ -381,7 +381,7 @@ class AutoOrchestrator:
                 trace_id=context.trace_id,
                 goal=goal,
                 scope={"workspace_root": str(run_root)},
-                verifier={"command": "scripts/check.sh", "cwd": str(run_root)},
+                verifier={"command": canonical_check_command(), "cwd": str(run_root)},
             )
             verifier_run: Any = verifier.run
             try:

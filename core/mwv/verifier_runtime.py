@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import shlex
+import shutil
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,23 +21,26 @@ def _default_runner() -> VerifierRunnerProtocol:
     return VerifierRunner()
 
 
-_PYTHON_EXECUTABLE = sys.executable or "python"
 _DEFAULT_TIMEOUT_SECONDS = 60 * 30
+CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "check")
 
-DEFAULT_FALLBACK_COMMANDS: tuple[tuple[str, ...], ...] = (
-    (_PYTHON_EXECUTABLE, "-m", "ruff", "check", "."),
-    (_PYTHON_EXECUTABLE, "-m", "ruff", "format", "--check", "."),
-    (_PYTHON_EXECUTABLE, "skills/tools/lint_skills.py"),
-    (_PYTHON_EXECUTABLE, "skills/tools/build_manifest.py", "--check"),
-    (_PYTHON_EXECUTABLE, "-m", "mypy", "."),
-    (_PYTHON_EXECUTABLE, "-m", "pytest", "--cov", "--cov-fail-under=80"),
-)
+DEFAULT_FALLBACK_COMMANDS: tuple[tuple[str, ...], ...] = (CANONICAL_CHECK_COMMAND,)
 SCRIPT_NOT_FOUND_PREFIX = "Verifier script not found:"
 NON_REPO_VERIFIER_REQUIRED_ERROR = "verifier_command_required_for_non_repo_workspace"
 
 
 def _default_project_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def canonical_check_command() -> list[str]:
+    return list(CANONICAL_CHECK_COMMAND)
+
+
+def has_canonical_repo_verifier(project_root: Path) -> bool:
+    return (project_root / "Makefile").is_file() and (
+        shutil.which(CANONICAL_CHECK_COMMAND[0]) is not None
+    )
 
 
 @dataclass(frozen=True)

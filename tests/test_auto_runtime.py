@@ -68,6 +68,26 @@ class _PassingVerifierRuntime:
         )
 
 
+class _CapturingVerifierRuntime:
+    captured_tasks = []
+
+    def __init__(self, project_root):  # noqa: ANN001
+        del project_root
+
+    def run(self, task, context):  # noqa: ANN001
+        del context
+        self.__class__.captured_tasks.append(task)
+        return VerificationResult(
+            status=VerificationStatus.PASSED,
+            command=["make", "check"],
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            duration_seconds=0.1,
+            error=None,
+        )
+
+
 def _completed_result(shard_id: str, coder_id: str) -> auto_runtime.CoderResult:
     return auto_runtime.CoderResult(
         coder_id=coder_id,
@@ -154,6 +174,32 @@ def test_auto_runtime_planner_fallback_and_complete(monkeypatch, tmp_path) -> No
     shards_raw = plan_raw.get("shards")
     assert isinstance(shards_raw, list)
     assert len(shards_raw) == 1
+
+
+def test_auto_runtime_uses_canonical_make_check_verifier(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    tmp_path.mkdir(exist_ok=True)
+    agent = _FakeAgent(brain_text="not-json")
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_coder_pool",
+        lambda **kwargs: [_completed_result("shard-1", "coder-1")],
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_apply_patch_bundles",
+        lambda results, **kwargs: [],
+    )
+    _CapturingVerifierRuntime.captured_tasks = []
+    monkeypatch.setattr(auto_runtime, "VerifierRuntime", _CapturingVerifierRuntime)
+
+    outcome = orchestrator.run("Сделать задачу")
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert len(_CapturingVerifierRuntime.captured_tasks) == 1
+    verifier_task = _CapturingVerifierRuntime.captured_tasks[0]
+    assert verifier_task.verifier == {"command": ["make", "check"], "cwd": str(tmp_path)}
 
 
 def test_auto_runtime_waiting_approval_and_resume(monkeypatch, tmp_path) -> None:  # noqa: ANN001

@@ -11,6 +11,10 @@ def _make_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "scripts").mkdir()
+    (repo / "Makefile").write_text(
+        ".PHONY: check\ncheck:\n\tbash scripts/check.sh\n",
+        encoding="utf-8",
+    )
     return repo
 
 
@@ -55,7 +59,7 @@ def test_single_attempt_coding_fail_with_diagnostics(tmp_path: Path) -> None:
     assert result.work_result.status == WorkStatus.FAILURE
     assert result.verification_result.status == VerificationStatus.FAILED
     assert result.report.diagnostics is not None
-    assert result.report.diagnostics.command[-1].endswith("check.sh")
+    assert result.report.diagnostics.command == ["make", "check"]
     assert result.report.diagnostics.summary
     assert "Verifier: FAIL" in result.report_text
     assert "Diagnostics:" in result.report_text

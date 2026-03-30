@@ -87,7 +87,7 @@ def test_ux_contract_present_in_mwv_response(tmp_path: Path) -> None:
         ),
         verification_result=VerificationResult(
             status=VerificationStatus.PASSED,
-            command=["scripts/check.sh"],
+            command=["make", "check"],
             exit_code=0,
             stdout="ok",
             stderr="",
