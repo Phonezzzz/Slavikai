@@ -127,6 +127,10 @@ PYTEST_ARGS ?=
 test: venv
 	"$(VENV_PY)" -m pytest $(PYTEST_ARGS)
 
+.PHONY: test-behavior
+test-behavior: venv
+	"$(VENV_PY)" -m pytest --no-cov -m behavior
+
 .PHONY: check
 check: check-no-legacy-ui lint format-check type ui-type test
 

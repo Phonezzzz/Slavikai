@@ -202,6 +202,7 @@ def test_auto_runtime_uses_canonical_make_check_verifier(monkeypatch, tmp_path) 
     assert verifier_task.verifier == {"command": ["make", "check"], "cwd": str(tmp_path)}
 
 
+@pytest.mark.behavior
 def test_auto_runtime_waiting_approval_and_resume(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     planner_payload = '{"plan_id":"p","goal":"g","shards":[{"shard_id":"s1","goal":"g1"}]}'
     runtime_root = tmp_path / "runtime"

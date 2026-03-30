@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
+
 from core.mwv.manager import ManagerRuntime
 from core.mwv.models import (
     ChangeType,
@@ -27,7 +29,7 @@ def _build_task(messages: Sequence[MWVMessage], context: RunContext) -> TaskPack
         messages=list(messages),
     )
 
-
+@pytest.mark.behavior
 def test_mwv_e2e_happy_path_with_workspace_change(tmp_path: Path) -> None:
     workspace = tmp_path / "sandbox" / "project"
     workspace.mkdir(parents=True)

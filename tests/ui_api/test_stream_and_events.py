@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: F403,F405
+import pytest
+
 from .fakes import *
 
 
@@ -561,6 +563,7 @@ def test_workspace_stream_supports_replace_mode_chunks() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.behavior
 def test_ui_hub_subscriber_queue_is_bounded_and_coalesces_deltas() -> None:
     async def run() -> None:
         hub = UIHub(subscriber_queue_maxsize=2, subscriber_drop_policy="coalesce_deltas")
@@ -730,6 +733,7 @@ def test_ui_hub_overflow_keeps_control_event_by_evicting_non_control() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.behavior
 def test_ui_events_stream_replays_buffer_by_last_event_id() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())

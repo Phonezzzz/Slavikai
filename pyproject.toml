@@ -39,4 +39,5 @@ markers = [
     "ui_api: vocabulary marker for UI API/session/events/workspace test scope",
     "contract: vocabulary marker for user-visible contract and payload stability scope",
     "e2e: vocabulary marker for end-to-end and cross-flow test scope",
+    "behavior: curated marker for minimal critical behavior scenarios",
 ]

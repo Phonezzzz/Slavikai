@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: F403,F405
+import pytest
+
 from .fakes import *
 
 
@@ -209,6 +211,7 @@ def test_ui_decision_respond_approve_once_does_not_persist_category() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.behavior
 def test_ui_decision_respond_approve_session_persists_category() -> None:
     async def run() -> None:
         agent = WorkspaceDecisionAgent()
@@ -706,6 +709,7 @@ def test_ui_decision_respond_agent_decision_supports_generic_choices() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.behavior
 def test_ui_decision_respond_agent_decision_retry_replays_source_request() -> None:
     class RetryDecisionAgent(DummyAgent):
         def __init__(self) -> None:
@@ -1205,6 +1209,7 @@ def test_ui_decision_respond_rejects_expired_packet() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.behavior
 def test_ui_chat_send_idempotency_key_matrix() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())

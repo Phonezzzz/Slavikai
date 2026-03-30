@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: F403,F405
+import pytest
+
 from core.agent_mwv import TaskPacketApprovalPending
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from server.http.common.workflow_runtime import compute_plan_completion_state
@@ -213,6 +215,7 @@ def test_ui_plan_lifecycle_endpoints() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.behavior
 def test_ui_plan_execute_waiting_approval_then_resume() -> None:
     class PlanApprovalAgent(DummyAgent):
         def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
