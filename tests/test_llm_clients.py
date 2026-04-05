@@ -147,7 +147,7 @@ def test_inception_generate_uses_reasoning_defaults(monkeypatch) -> None:
         )
 
     monkeypatch.setattr("llm.inception_brain.requests.post", fake_post)
-    config = ModelConfig(provider="inception", model="mercury")
+    config = ModelConfig(provider="inception", model="mercury-2")
     brain = InceptionBrain(api_key="inc-key", default_config=config)
     result = brain.generate([LLMMessage(role="user", content="ping")])
     assert result.text == "inception-ok"
@@ -156,7 +156,7 @@ def test_inception_generate_uses_reasoning_defaults(monkeypatch) -> None:
     assert calls["json"]["reasoning_effort"] == "instant"
     assert calls["json"]["reasoning_summary"] is True
     assert calls["json"]["reasoning_summary_wait"] is False
-    assert calls["json"]["model"] == "mercury"
+    assert calls["json"]["model"] == "mercury-2"
 
 
 def test_inception_stream_chunks_support_replace_mode(monkeypatch) -> None:
@@ -173,7 +173,7 @@ def test_inception_stream_chunks_support_replace_mode(monkeypatch) -> None:
         )
 
     monkeypatch.setattr("llm.inception_brain.requests.post", fake_post)
-    config = ModelConfig(provider="inception", model="mercury", diffusing=True)
+    config = ModelConfig(provider="inception", model="mercury-2", diffusing=True)
     brain = InceptionBrain(api_key="inc-key", default_config=config)
     chunks = list(brain.generate_stream_chunks([LLMMessage(role="user", content="ping")]))
     assert [chunk.text for chunk in chunks] == ["hel", "hello"]
@@ -182,7 +182,7 @@ def test_inception_stream_chunks_support_replace_mode(monkeypatch) -> None:
 
 def test_inception_without_key_raises(monkeypatch) -> None:
     monkeypatch.setenv("INCEPTION_API_KEY", "")
-    config = ModelConfig(provider="inception", model="mercury")
+    config = ModelConfig(provider="inception", model="mercury-2")
     brain = InceptionBrain(api_key=None, default_config=config)
     with pytest.raises(RuntimeError):
         brain.generate([LLMMessage(role="user", content="ping")])
@@ -192,7 +192,7 @@ def test_brain_factory_supports_all_known_providers() -> None:
     openrouter = create_brain(ModelConfig(provider="openrouter", model="or"))
     xai = create_brain(ModelConfig(provider="xai", model="xai"))
     local = create_brain(ModelConfig(provider="local", model="local"))
-    inception = create_brain(ModelConfig(provider="inception", model="mercury"))
+    inception = create_brain(ModelConfig(provider="inception", model="mercury-2"))
     assert isinstance(openrouter, OpenRouterBrain)
     assert isinstance(xai, XAiBrain)
     assert isinstance(local, LocalHttpBrain)

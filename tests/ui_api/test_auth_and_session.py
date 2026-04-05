@@ -32,7 +32,7 @@ def test_ui_api_requires_bearer_by_default() -> None:
     asyncio.run(run())
 
 
-def test_ui_models_inception_docs_fallback_when_api_unavailable(monkeypatch) -> None:
+def test_ui_models_inception_docs_fallback_returns_mercury_2(monkeypatch) -> None:
     monkeypatch.setenv("INCEPTION_API_KEY", "inc-test-key")
 
     def _fail_get(*args, **kwargs):  # noqa: ANN001
@@ -53,7 +53,7 @@ def test_ui_models_inception_docs_fallback_when_api_unavailable(monkeypatch) -> 
             item = providers[0]
             assert isinstance(item, dict)
             assert item.get("provider") == "inception"
-            assert item.get("models") == ["mercury", "mercury-coder"]
+            assert item.get("models") == ["mercury-2"]
             assert item.get("error") is None
         finally:
             await client.close()
@@ -61,13 +61,10 @@ def test_ui_models_inception_docs_fallback_when_api_unavailable(monkeypatch) -> 
     asyncio.run(run())
 
 
-def test_ui_session_model_accepts_inception_mercury(monkeypatch) -> None:
+def test_ui_session_model_accepts_inception_mercury_2(monkeypatch) -> None:
     monkeypatch.setattr(
         "server.http_api._fetch_provider_models",
-        lambda provider: (
-            ["mercury", "mercury-coder"],
-            None,
-        )
+        lambda provider: (["mercury-2"], None)
         if provider == "inception"
         else (["local-default"], None),
     )
@@ -82,14 +79,14 @@ def test_ui_session_model_accepts_inception_mercury(monkeypatch) -> None:
             response = await client.post(
                 "/ui/api/session-model",
                 headers={"X-Slavik-Session": session_id},
-                json={"provider": "inception", "model": "mercury"},
+                json={"provider": "inception", "model": "mercury-2"},
             )
             assert response.status == 200
             payload = await response.json()
             selected = payload.get("selected_model")
             assert isinstance(selected, dict)
             assert selected.get("provider") == "inception"
-            assert selected.get("model") == "mercury"
+            assert selected.get("model") == "mercury-2"
         finally:
             await client.close()
 
