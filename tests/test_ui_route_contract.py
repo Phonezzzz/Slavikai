@@ -9,10 +9,19 @@ ROUTE_REG_PATTERN = re.compile(
     r'add_(?:get|post|put|patch|delete)\(\s*"(?P<path>/ui/api/[^"]+)"',
 )
 
-LEGACY_FORBIDDEN_PATHS = {
-    "/ui/api/session/policy",
-    "/ui/api/workspace/settings",
-    "/ui/api/project/command",
+REQUIRED_CANONICAL_PATHS = {
+    "/ui/api/settings",
+    "/ui/api/tts/speak",
+    "/ui/api/stt/transcribe",
+}
+
+LEGACY_FORBIDDEN_PATTERNS = {
+    r"(?<!/ui)/api/config\b",
+    r"(?<!/ui)/api/tts/speak\b",
+    r"(?<!/ui)/api/stt/",
+    r"/ui/api/session/policy\b",
+    r"/ui/api/workspace/settings\b",
+    r"/ui/api/project/command\b",
 }
 
 
@@ -60,20 +69,32 @@ def test_ui_endpoints_are_registered_in_server_router() -> None:
     assert missing == [], f"UI uses unregistered API routes: {missing}"
 
 
-def test_legacy_ui_api_paths_are_not_used_in_ui_or_ui_tests() -> None:
+def test_canonical_audio_and_settings_routes_are_registered() -> None:
+    server_routes = _extract_server_routes()
+    missing = sorted(path for path in REQUIRED_CANONICAL_PATHS if path not in server_routes)
+    assert missing == [], f"Canonical UI API routes are missing in server router: {missing}"
+
+
+def test_legacy_ui_api_paths_are_not_used_in_tracked_sources() -> None:
     sources = [
         Path("ui/src"),
         Path("tests/ui_api"),
+        Path("server/http"),
+        Path("server/http_api.py"),
     ]
     found: dict[str, list[str]] = {}
     for root in sources:
-        for file_path in root.rglob("*"):
+        if root.is_file():
+            file_iter = [root]
+        else:
+            file_iter = root.rglob("*")
+        for file_path in file_iter:
             if not file_path.is_file():
                 continue
             if file_path.suffix not in {".ts", ".tsx", ".py"}:
                 continue
             text = file_path.read_text(encoding="utf-8")
-            for legacy_path in LEGACY_FORBIDDEN_PATHS:
-                if legacy_path in text:
-                    found.setdefault(legacy_path, []).append(str(file_path))
+            for legacy_pattern in LEGACY_FORBIDDEN_PATTERNS:
+                if re.search(legacy_pattern, text):
+                    found.setdefault(legacy_pattern, []).append(str(file_path))
     assert found == {}, f"Found forbidden legacy API paths: {found}"
