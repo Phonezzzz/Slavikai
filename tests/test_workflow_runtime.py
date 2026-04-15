@@ -9,11 +9,11 @@ from server.http.common import workflow_runtime
 class DummyHub:
     async def get_session_policy(self, session_id: str) -> dict[str, object]:
         assert session_id == "session-1"
-        return {"profile": "sandbox", "yolo_armed": False}
+        return {"profile": "sandbox"}
 
     async def get_session_tools_state(self, session_id: str) -> dict[str, bool] | None:
         assert session_id == "session-1"
-        return {"safe_mode": True}
+        return {"safe_mode": False, "shell": True}
 
     async def get_session_workflow(self, session_id: str) -> dict[str, object]:
         assert session_id == "session-1"
@@ -106,6 +106,61 @@ def test_apply_agent_runtime_state_propagates_workspace_root(tmp_path: Path) -> 
             "auto_state": {"status": "idle"},
             "enforce_plan_guard": True,
         }
+
+    asyncio.run(run())
+
+
+def test_load_effective_session_security_derives_safe_mode_from_profile() -> None:
+    async def run() -> None:
+        hub = DummyHub()
+
+        effective_tools, effective_policy = await workflow_runtime.load_effective_session_security(
+            hub=hub,
+            session_id="session-1",
+            normalize_policy_profile_fn=lambda value: str(value),
+            build_effective_tools_state_fn=lambda override: (
+                workflow_runtime.build_effective_tools_state(
+                    session_override=override,
+                    load_tools_state_fn=lambda: {"safe_mode": False, "shell": False},
+                    default_tools_state_keys={"safe_mode", "shell"},
+                )
+            ),
+        )
+
+        assert effective_tools == {"safe_mode": True, "shell": True}
+        assert effective_policy == {"profile": "sandbox"}
+
+    asyncio.run(run())
+
+
+def test_load_effective_session_security_for_yolo_forces_safe_mode_off() -> None:
+    class YoloHub(DummyHub):
+        async def get_session_policy(self, session_id: str) -> dict[str, object]:
+            assert session_id == "session-1"
+            return {"profile": "yolo"}
+
+        async def get_session_tools_state(self, session_id: str) -> dict[str, bool] | None:
+            assert session_id == "session-1"
+            return {"safe_mode": True, "shell": True}
+
+    async def run() -> None:
+        hub = YoloHub()
+
+        effective_tools, effective_policy = await workflow_runtime.load_effective_session_security(
+            hub=hub,
+            session_id="session-1",
+            normalize_policy_profile_fn=lambda value: str(value),
+            build_effective_tools_state_fn=lambda override: (
+                workflow_runtime.build_effective_tools_state(
+                    session_override=override,
+                    load_tools_state_fn=lambda: {"safe_mode": True, "shell": False},
+                    default_tools_state_keys={"safe_mode", "shell"},
+                )
+            ),
+        )
+
+        assert effective_tools == {"safe_mode": False, "shell": True}
+        assert effective_policy == {"profile": "yolo"}
 
     asyncio.run(run())
 

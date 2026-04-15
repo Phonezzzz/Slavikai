@@ -237,8 +237,6 @@ class _SessionState:
     folder_id: str | None = None
     workspace_root: str | None = None
     policy_profile: PolicyProfile = "sandbox"
-    yolo_armed: bool = False
-    yolo_armed_at: str | None = None
     tools_state: dict[str, bool] | None = None
     mode: SessionMode = "ask"
     active_plan: dict[str, JSONValue] | None = None
@@ -647,11 +645,7 @@ class UIHub:
                         artifacts=[dict(item) for item in state.artifacts],
                         workspace_root=state.workspace_root,
                         policy_profile=state.policy_profile,
-                        yolo_armed=state.yolo_armed,
-                        yolo_armed_at=state.yolo_armed_at,
-                        tools_state=(
-                            dict(state.tools_state) if isinstance(state.tools_state, dict) else None
-                        ),
+                        tools_state=self._normalize_tools_state(state.tools_state),
                         mode=state.mode,
                         active_plan=(
                             dict(state.active_plan) if state.active_plan is not None else None
@@ -718,11 +712,7 @@ class UIHub:
                     folder_id=item.folder_id,
                     workspace_root=item.workspace_root,
                     policy_profile=self._normalize_policy_profile(item.policy_profile),
-                    yolo_armed=bool(item.yolo_armed),
-                    yolo_armed_at=item.yolo_armed_at,
-                    tools_state=(
-                        dict(item.tools_state) if isinstance(item.tools_state, dict) else None
-                    ),
+                    tools_state=(self._normalize_tools_state(item.tools_state)),
                     mode=self._normalize_mode(item.mode),
                     active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
                     active_task=(dict(item.active_task) if item.active_task is not None else None),
@@ -769,14 +759,8 @@ class UIHub:
                 "title_override": state.title_override,
                 "folder_id": state.folder_id,
                 "workspace_root": state.workspace_root,
-                "policy": {
-                    "profile": state.policy_profile,
-                    "yolo_armed": state.yolo_armed,
-                    "yolo_armed_at": state.yolo_armed_at,
-                },
-                "tools_state": (
-                    dict(state.tools_state) if isinstance(state.tools_state, dict) else None
-                ),
+                "policy": {"profile": state.policy_profile},
+                "tools_state": self._normalize_tools_state(state.tools_state),
                 "mode": state.mode,
                 "active_plan": dict(state.active_plan) if state.active_plan is not None else None,
                 "active_task": dict(state.active_task) if state.active_task is not None else None,
@@ -815,20 +799,14 @@ class UIHub:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
-                return {"profile": "sandbox", "yolo_armed": False, "yolo_armed_at": None}
-            return {
-                "profile": state.policy_profile,
-                "yolo_armed": state.yolo_armed,
-                "yolo_armed_at": state.yolo_armed_at,
-            }
+                return {"profile": "sandbox"}
+            return {"profile": state.policy_profile}
 
     async def set_session_policy(
         self,
         session_id: str,
         *,
         profile: str | None = None,
-        yolo_armed: bool | None = None,
-        yolo_armed_at: str | None = None,
     ) -> dict[str, JSONValue]:
         async with self._lock:
             state = self._sessions.get(session_id)
@@ -841,45 +819,18 @@ class UIHub:
                 if state.policy_profile != normalized_profile:
                     state.policy_profile = normalized_profile
                     changed = True
-            if yolo_armed is not None and state.yolo_armed != yolo_armed:
-                state.yolo_armed = yolo_armed
-                changed = True
-            if yolo_armed is not None:
-                next_armed_at = yolo_armed_at if yolo_armed else None
-                if state.yolo_armed_at != next_armed_at:
-                    state.yolo_armed_at = next_armed_at
-                    changed = True
-            elif yolo_armed_at is not None and state.yolo_armed_at != yolo_armed_at:
-                state.yolo_armed_at = yolo_armed_at
-                changed = True
             if changed:
                 state.updated_at = _utc_iso_now()
                 self._persist_session_locked(session_id)
                 self._prune_sessions_locked(keep_session_id=session_id)
-            return {
-                "profile": state.policy_profile,
-                "yolo_armed": state.yolo_armed,
-                "yolo_armed_at": state.yolo_armed_at,
-            }
-
-    async def consume_yolo_once(self, session_id: str) -> bool:
-        async with self._lock:
-            state = self._sessions.get(session_id)
-            if state is None or not state.yolo_armed:
-                return False
-            state.yolo_armed = False
-            state.yolo_armed_at = None
-            state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
-            self._prune_sessions_locked(keep_session_id=session_id)
-            return True
+            return {"profile": state.policy_profile}
 
     async def get_session_tools_state(self, session_id: str) -> dict[str, bool] | None:
         async with self._lock:
             state = self._sessions.get(session_id)
             if state is None or not isinstance(state.tools_state, dict):
                 return None
-            return dict(state.tools_state)
+            return self._normalize_tools_state(state.tools_state)
 
     async def set_session_tools_state(
         self,
@@ -894,7 +845,7 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
-            current = dict(state.tools_state) if isinstance(state.tools_state, dict) else {}
+            current = self._normalize_tools_state(state.tools_state) or {}
             next_value: dict[str, bool] | None
             if normalized is None:
                 next_value = None if not merge else (current or None)
@@ -910,7 +861,7 @@ class UIHub:
             state.updated_at = _utc_iso_now()
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
-            return dict(state.tools_state) if isinstance(state.tools_state, dict) else None
+            return self._normalize_tools_state(state.tools_state)
 
     async def set_session_model(self, session_id: str, provider: str, model_id: str) -> None:
         event: dict[str, JSONValue] | None = None
@@ -1475,6 +1426,8 @@ class UIHub:
         normalized: dict[str, bool] = {}
         for key, item in value.items():
             if isinstance(key, str) and isinstance(item, bool):
+                if key == "safe_mode":
+                    continue
                 normalized[key] = item
         return normalized or None
 
@@ -1728,11 +1681,7 @@ class UIHub:
                 folder_id=item.folder_id,
                 workspace_root=item.workspace_root,
                 policy_profile=self._normalize_policy_profile(item.policy_profile),
-                yolo_armed=bool(item.yolo_armed),
-                yolo_armed_at=item.yolo_armed_at,
-                tools_state=(
-                    dict(item.tools_state) if isinstance(item.tools_state, dict) else None
-                ),
+                tools_state=(self._normalize_tools_state(item.tools_state)),
                 mode=self._normalize_mode(item.mode),
                 active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
                 active_task=(dict(item.active_task) if item.active_task is not None else None),
@@ -1774,11 +1723,7 @@ class UIHub:
                 artifacts=[dict(entry) for entry in state.artifacts],
                 workspace_root=state.workspace_root,
                 policy_profile=state.policy_profile,
-                yolo_armed=state.yolo_armed,
-                yolo_armed_at=state.yolo_armed_at,
-                tools_state=(
-                    dict(state.tools_state) if isinstance(state.tools_state, dict) else None
-                ),
+                tools_state=self._normalize_tools_state(state.tools_state),
                 mode=state.mode,
                 active_plan=(dict(state.active_plan) if state.active_plan is not None else None),
                 active_task=(dict(state.active_task) if state.active_task is not None else None),

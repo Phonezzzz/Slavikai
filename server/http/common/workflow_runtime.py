@@ -88,6 +88,10 @@ def build_effective_tools_state(
     return effective
 
 
+def derive_safe_mode_from_policy_profile(profile: str) -> bool:
+    return profile != "yolo"
+
+
 async def load_effective_session_security(
     *,
     hub: WorkflowHubProtocol,
@@ -100,21 +104,9 @@ async def load_effective_session_security(
     profile = normalize_policy_profile_fn(profile_raw)
     session_tools_override = await hub.get_session_tools_state(session_id)
     effective_tools = build_effective_tools_state_fn(session_tools_override)
-    yolo_armed = policy.get("yolo_armed") is True
-    yolo_armed_at_raw = policy.get("yolo_armed_at")
-    yolo_armed_at = (
-        yolo_armed_at_raw.strip()
-        if isinstance(yolo_armed_at_raw, str) and yolo_armed_at_raw.strip()
-        else None
-    )
-    if not yolo_armed:
-        yolo_armed_at = None
-    safe_mode_effective = bool(effective_tools.get("safe_mode", False))
+    effective_tools["safe_mode"] = derive_safe_mode_from_policy_profile(profile)
     effective_policy: dict[str, JSONValue] = {
         "profile": profile,
-        "yolo_armed": yolo_armed,
-        "yolo_armed_at": yolo_armed_at,
-        "safe_mode_effective": safe_mode_effective,
     }
     return effective_tools, effective_policy
 
@@ -778,15 +770,16 @@ async def run_plan_runner(
         _session_id: str,
     ) -> tuple[dict[str, bool], dict[str, JSONValue]]:
         policy = await _hub.get_session_policy(_session_id)
+        profile = str(policy.get("profile") or "sandbox")
         effective_tools = dict(getattr(agent, "tools_enabled", {}))
         session_override = await _hub.get_session_tools_state(_session_id)
         if isinstance(session_override, dict):
             for key, value in session_override.items():
                 if isinstance(key, str) and isinstance(value, bool):
                     effective_tools[key] = value
+        effective_tools["safe_mode"] = derive_safe_mode_from_policy_profile(profile)
         return effective_tools, {
-            "profile": str(policy.get("profile") or "default"),
-            "safe_mode_effective": bool(effective_tools.get("safe_mode", False)),
+            "profile": profile,
         }
 
     async def _workspace_root_loader(

@@ -177,11 +177,15 @@ def test_ui_session_policy_set_updates_session_state() -> None:
             policy = payload.get("policy")
             assert isinstance(policy, dict)
             assert policy.get("profile") == "yolo"
-            assert policy.get("yolo_armed") is True
+            assert "yolo_armed" not in policy
+            assert "safe_mode_effective" not in policy
+            tools_state = payload.get("tools_state")
+            assert isinstance(tools_state, dict)
+            assert tools_state.get("safe_mode") is False
 
             hub: UIHub = client.server.app["ui_hub"]
             stored_policy = await hub.get_session_policy(session_id)
-            assert stored_policy.get("profile") == "yolo"
+            assert stored_policy == {"profile": "yolo"}
         finally:
             await client.close()
 
@@ -214,11 +218,12 @@ def test_ui_session_security_get_and_post_updates_state() -> None:
             assert isinstance(tools_state, dict)
             assert tools_state.get("shell") is True
             assert tools_state.get("web") is True
+            assert tools_state.get("safe_mode") is True
             policy = update_payload.get("policy")
             assert isinstance(policy, dict)
             assert policy.get("profile") == "sandbox"
-            assert policy.get("yolo_armed") is False
-            assert policy.get("safe_mode_effective") is True
+            assert "yolo_armed" not in policy
+            assert "safe_mode_effective" not in policy
 
             get_resp = await client.get(
                 "/ui/api/session/security",
@@ -230,11 +235,12 @@ def test_ui_session_security_get_and_post_updates_state() -> None:
             assert isinstance(get_tools, dict)
             assert get_tools.get("shell") is True
             assert get_tools.get("web") is True
+            assert get_tools.get("safe_mode") is True
             get_policy = get_payload.get("policy")
             assert isinstance(get_policy, dict)
             assert get_policy.get("profile") == "sandbox"
-            assert get_policy.get("yolo_armed") is False
-            assert get_policy.get("safe_mode_effective") is True
+            assert "yolo_armed" not in get_policy
+            assert "safe_mode_effective" not in get_policy
         finally:
             await client.close()
 
@@ -261,6 +267,62 @@ def test_ui_session_policy_requires_confirm_for_yolo() -> None:
             error = payload.get("error")
             assert isinstance(error, dict)
             assert error.get("code") == "yolo_confirmation_required"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_security_rejects_policy_yolo_armed_field() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            response = await client.post(
+                "/ui/api/session/security",
+                headers={"X-Slavik-Session": session_id},
+                json={"policy": {"profile": "sandbox", "yolo_armed": True}},
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_security_rejects_tools_safe_mode_field() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            create_resp = await client.post("/ui/api/sessions")
+            assert create_resp.status == 200
+            create_payload = await create_resp.json()
+            session_raw = create_payload.get("session")
+            assert isinstance(session_raw, dict)
+            session_id = session_raw.get("session_id")
+            assert isinstance(session_id, str)
+
+            response = await client.post(
+                "/ui/api/session/security",
+                headers={"X-Slavik-Session": session_id},
+                json={"tools": {"state": {"safe_mode": False, "web": True}}},
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
         finally:
             await client.close()
 
@@ -1498,7 +1560,7 @@ def test_ui_session_policy_persist_after_restart(tmp_path) -> None:
         try:
             hub: UIHub = client_after.server.app["ui_hub"]
             restored_policy = await hub.get_session_policy(session_id)
-            assert restored_policy.get("profile") == "yolo"
+            assert restored_policy == {"profile": "yolo"}
         finally:
             await client_after.close()
 

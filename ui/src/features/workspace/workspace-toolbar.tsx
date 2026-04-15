@@ -30,7 +30,6 @@ export function WorkspaceToolbar({
   indexing,
   workspaceRoot,
   sessionPolicyLabel,
-  sessionYoloActive,
   sessionSafeMode,
   rootPickerOpen,
   rootInput,
@@ -47,16 +46,8 @@ export function WorkspaceToolbar({
   onApplyRoot,
   onCancelRootPicker,
 }: WorkspaceToolbarProps) {
-  const policyBadge =
-    sessionPolicyLabel === 'YOLO'
-      ? `Session policy: YOLO (${sessionYoloActive ? 'armed' : 'disarmed'})`
-      : `Session policy: ${sessionPolicyLabel}`;
-  const policyClass =
-    sessionPolicyLabel === 'YOLO'
-      ? sessionYoloActive
-        ? 'text-red-300'
-        : 'text-amber-300'
-      : 'text-[#8f8f98]';
+  const policyBadge = `Session policy: ${sessionPolicyLabel}`;
+  const policyClass = sessionPolicyLabel === 'YOLO' ? 'text-red-300' : 'text-[#8f8f98]';
   return (
     <>
       <div className="h-12 border-b border-[#1f1f24] px-3 grid grid-cols-[1fr_auto_1fr] items-center gap-3">

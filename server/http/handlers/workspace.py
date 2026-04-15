@@ -28,7 +28,6 @@ from server.http_api import (
     _resolve_workspace_root_candidate,
     _session_forbidden_response,
     _set_current_plan_step_status,
-    _utc_now_iso,
     _workspace_git_diff,
     _workspace_root_for_session,
 )
@@ -1325,8 +1324,6 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                 code="invalid_request_error",
             )
         profile: str | None = None
-        yolo_armed: bool | None = None
-        yolo_armed_at: str | None = None
 
         if "profile" in policy_raw:
             profile_raw = policy_raw.get("profile")
@@ -1343,17 +1340,23 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
             profile = profile_raw.strip().lower()
 
         if "yolo_armed" in policy_raw:
-            yolo_armed_raw = policy_raw.get("yolo_armed")
-            if not isinstance(yolo_armed_raw, bool):
-                return error_response(
-                    status=400,
-                    message="policy.yolo_armed должен быть bool.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            yolo_armed = yolo_armed_raw
+            return error_response(
+                status=400,
+                message=(
+                    "policy.yolo_armed больше не поддерживается; используйте только policy.profile."
+                ),
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        if "yolo_armed_at" in policy_raw:
+            return error_response(
+                status=400,
+                message="policy.yolo_armed_at больше не поддерживается.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
 
-        if profile == "yolo" or yolo_armed is True:
+        if profile == "yolo":
             confirm_raw = policy_raw.get("yolo_confirm")
             confirm_text_raw = policy_raw.get("yolo_confirm_text")
             confirm_ok = (
@@ -1371,8 +1374,6 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                     error_type="invalid_request_error",
                     code="yolo_confirmation_required",
                 )
-            if yolo_armed is None:
-                yolo_armed = True
 
         workspace_root = await _workspace_root_for_session(hub, session_id)
         current_policy = await hub.get_session_policy(session_id)
@@ -1396,15 +1397,9 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                 },
             )
 
-        if yolo_armed is True:
-            yolo_armed_at = _utc_now_iso()
-        if yolo_armed is False:
-            yolo_armed_at = None
         await hub.set_session_policy(
             session_id,
             profile=profile,
-            yolo_armed=yolo_armed,
-            yolo_armed_at=yolo_armed_at,
         )
 
     if "tools" in payload:
@@ -1421,6 +1416,16 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
             return error_response(
                 status=400,
                 message="tools.state должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        if "safe_mode" in state_raw:
+            return error_response(
+                status=400,
+                message=(
+                    "tools.state.safe_mode больше не поддерживается; "
+                    "safe mode определяется через policy.profile."
+                ),
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )

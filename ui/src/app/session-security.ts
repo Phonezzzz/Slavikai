@@ -28,7 +28,6 @@ export const parseSessionSecuritySummary = (value: unknown): SessionSecuritySumm
     return DEFAULT_SESSION_SECURITY_SUMMARY;
   }
   const policyRaw = (value as { policy?: unknown }).policy;
-  const toolsStateRaw = (value as { tools_state?: unknown }).tools_state;
 
   let nextPolicyLabel = DEFAULT_SESSION_SECURITY_SUMMARY.policyLabel;
   let nextYoloActive = DEFAULT_SESSION_SECURITY_SUMMARY.yoloActive;
@@ -36,16 +35,9 @@ export const parseSessionSecuritySummary = (value: unknown): SessionSecuritySumm
 
   if (policyRaw && typeof policyRaw === 'object') {
     const profile = (policyRaw as { profile?: unknown }).profile;
-    const yoloArmed = (policyRaw as { yolo_armed?: unknown }).yolo_armed;
     nextPolicyLabel = formatPolicyLabel(profile);
-    nextYoloActive = yoloArmed === true;
-  }
-
-  if (toolsStateRaw && typeof toolsStateRaw === 'object') {
-    const safeModeRaw = (toolsStateRaw as { safe_mode?: unknown }).safe_mode;
-    if (typeof safeModeRaw === 'boolean') {
-      nextSafeMode = safeModeRaw;
-    }
+    nextYoloActive = profile === 'yolo';
+    nextSafeMode = profile !== 'yolo';
   }
 
   return {

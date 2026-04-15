@@ -1,10 +1,10 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { ChevronDown, Shield, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { SESSION_MODE_VALUES, type SessionMode } from '../types';
 
-type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt' | 'safe_mode';
+type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt';
 type PolicyProfile = 'sandbox' | 'index' | 'yolo';
 
 type SessionModelOption = {
@@ -35,8 +35,6 @@ type SessionDrawerProps = {
 type SessionSecurityState = {
   toolsState: Record<ToolKey, boolean>;
   policyProfile: PolicyProfile;
-  yoloArmed: boolean;
-  yoloArmedAt: string | null;
 };
 
 const DEFAULT_TOOLS_STATE: Record<ToolKey, boolean> = {
@@ -47,7 +45,6 @@ const DEFAULT_TOOLS_STATE: Record<ToolKey, boolean> = {
   img: false,
   tts: false,
   stt: false,
-  safe_mode: true,
 };
 
 const SAFE_MODE_BLOCKED_TOOLS = new Set<ToolKey>(['web', 'shell', 'project', 'tts', 'stt']);
@@ -60,7 +57,6 @@ const TOOL_LABELS: Record<ToolKey, string> = {
   img: 'Images',
   tts: 'Text to speech',
   stt: 'Speech to text',
-  safe_mode: 'Safe mode',
 };
 
 const POLICY_OPTIONS: Array<{
@@ -105,25 +101,10 @@ const isToolKey = (value: unknown): value is ToolKey =>
   || value === 'project'
   || value === 'img'
   || value === 'tts'
-  || value === 'stt'
-  || value === 'safe_mode';
+  || value === 'stt';
 
 const isPolicyProfile = (value: unknown): value is PolicyProfile =>
   value === 'sandbox' || value === 'index' || value === 'yolo';
-
-const normalizeToolsState = (
-  source: Record<ToolKey, boolean>,
-  safeMode: boolean,
-): Record<ToolKey, boolean> => {
-  const next = { ...source };
-  if (safeMode) {
-    for (const key of SAFE_MODE_BLOCKED_TOOLS) {
-      next[key] = false;
-    }
-  }
-  next.safe_mode = safeMode;
-  return next;
-};
 
 const buildSafetyPreset = (): Record<ToolKey, boolean> => ({
   fs: true,
@@ -133,15 +114,12 @@ const buildSafetyPreset = (): Record<ToolKey, boolean> => ({
   img: false,
   tts: false,
   stt: false,
-  safe_mode: true,
 });
 
 const parseSecurityPayload = (payload: unknown): SessionSecurityState => {
   const defaults: SessionSecurityState = {
     toolsState: { ...DEFAULT_TOOLS_STATE },
     policyProfile: 'sandbox',
-    yoloArmed: false,
-    yoloArmedAt: null,
   };
   if (!payload || typeof payload !== 'object') {
     return defaults;
@@ -158,28 +136,16 @@ const parseSecurityPayload = (payload: unknown): SessionSecurityState => {
   }
 
   let policyProfile: PolicyProfile = defaults.policyProfile;
-  let yoloArmed = defaults.yoloArmed;
-  let yoloArmedAt = defaults.yoloArmedAt;
   if (policyRaw && typeof policyRaw === 'object') {
     const profileRaw = (policyRaw as { profile?: unknown }).profile;
-    const yoloArmedRaw = (policyRaw as { yolo_armed?: unknown }).yolo_armed;
-    const yoloArmedAtRaw = (policyRaw as { yolo_armed_at?: unknown }).yolo_armed_at;
     if (isPolicyProfile(profileRaw)) {
       policyProfile = profileRaw;
-    }
-    if (typeof yoloArmedRaw === 'boolean') {
-      yoloArmed = yoloArmedRaw;
-    }
-    if (typeof yoloArmedAtRaw === 'string' && yoloArmedAtRaw.trim()) {
-      yoloArmedAt = yoloArmedAtRaw.trim();
     }
   }
 
   return {
-    toolsState: normalizeToolsState(nextToolsState, nextToolsState.safe_mode),
+    toolsState: nextToolsState,
     policyProfile,
-    yoloArmed,
-    yoloArmedAt,
   };
 };
 
@@ -233,25 +199,17 @@ export function SessionDrawer({
   const [status, setStatus] = useState<string | null>(null);
   const [toolsState, setToolsState] = useState<Record<ToolKey, boolean>>({ ...DEFAULT_TOOLS_STATE });
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('sandbox');
-  const [yoloArmed, setYoloArmed] = useState(false);
-  const [yoloArmedAt, setYoloArmedAt] = useState<string | null>(null);
   const [dangerConfirmText, setDangerConfirmText] = useState('');
   const [dangerConfirmed, setDangerConfirmed] = useState(false);
 
   const requestHeaders = sessionId ? { [sessionHeader]: sessionId } : {};
-  const safeModeEnabled = toolsState.safe_mode;
-  const normalizedToolsState = useMemo(
-    () => normalizeToolsState(toolsState, safeModeEnabled),
-    [safeModeEnabled, toolsState],
-  );
+  const safeModeEnabled = policyProfile !== 'yolo';
 
   const loadControls = async (): Promise<void> => {
     if (!sessionId) {
       setStatus('Select an active session to edit session controls.');
       setToolsState({ ...DEFAULT_TOOLS_STATE });
       setPolicyProfile('sandbox');
-      setYoloArmed(false);
-      setYoloArmedAt(null);
       return;
     }
     setLoading(true);
@@ -265,8 +223,6 @@ export function SessionDrawer({
       const parsed = parseSecurityPayload(payload);
       setToolsState(parsed.toolsState);
       setPolicyProfile(parsed.policyProfile);
-      setYoloArmed(parsed.yoloArmed);
-      setYoloArmedAt(parsed.yoloArmedAt);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load session controls.';
       setStatus(message);
@@ -300,13 +256,7 @@ export function SessionDrawer({
   }, [isOpen, onClose]);
 
   const handleToolToggle = (tool: ToolKey) => {
-    setToolsState((current) => {
-      const next = { ...current, [tool]: !current[tool] };
-      if (tool === 'safe_mode') {
-        return normalizeToolsState(next, !current.safe_mode);
-      }
-      return next;
-    });
+    setToolsState((current) => ({ ...current, [tool]: !current[tool] }));
   };
 
   const handleResetPreset = () => {
@@ -342,12 +292,11 @@ export function SessionDrawer({
         body: JSON.stringify({
           policy: {
             profile: policyProfile,
-            yolo_armed: wantsDangerousMode,
             yolo_confirm: wantsDangerousMode,
             yolo_confirm_text: wantsDangerousMode ? DANGER_CONFIRMATION_PHRASE : '',
           },
           tools: {
-            state: normalizedToolsState,
+            state: toolsState,
           },
         }),
       });
@@ -358,8 +307,6 @@ export function SessionDrawer({
       const parsed = parseSecurityPayload(payload);
       setToolsState(parsed.toolsState);
       setPolicyProfile(parsed.policyProfile);
-      setYoloArmed(parsed.yoloArmed);
-      setYoloArmedAt(parsed.yoloArmedAt);
       setStatus('Session controls updated.');
       onSaved?.();
     } catch (error) {
@@ -477,7 +424,7 @@ export function SessionDrawer({
                   <div className="text-[11px] uppercase tracking-[0.16em] text-zinc-500">Safety</div>
                   <div className="text-sm font-medium text-zinc-100">Session safety level</div>
                   <div className="text-xs text-zinc-400">
-                    Applies only to the current session. Safe mode can still override risky tool access.
+                    Applies only to the current session. Safe mode is derived from the selected profile.
                   </div>
                 </div>
 
@@ -520,9 +467,6 @@ export function SessionDrawer({
                       />
                       <span>I understand that this session may execute with fewer safety safeguards.</span>
                     </label>
-                    {yoloArmedAt ? (
-                      <div className="text-[11px] text-amber-200/80">Last armed at: {yoloArmedAt}</div>
-                    ) : null}
                   </div>
                 ) : null}
               </section>
@@ -533,7 +477,7 @@ export function SessionDrawer({
                     <div className="text-[11px] uppercase tracking-[0.16em] text-zinc-500">Tool access</div>
                     <div className="mt-1 text-sm font-medium text-zinc-100">Current session only</div>
                     <div className="mt-1 text-xs text-zinc-400">
-                      Safe mode is the master switch. When it is on, risky tools stay disabled even if their toggle is on.
+                      Safe mode is derived from the selected session profile. When it is on, risky tools stay disabled even if their toggle is on.
                     </div>
                   </div>
                   <button
@@ -545,19 +489,13 @@ export function SessionDrawer({
                   </button>
                 </div>
 
-                <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-3">
-                  <div>
-                    <div className="text-sm font-medium text-zinc-100">Safe mode</div>
-                    <div className="text-xs text-zinc-400">
-                      Blocks web, shell, project, TTS, and STT for this session.
-                    </div>
+                <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-3">
+                  <div className="text-sm font-medium text-zinc-100">Safe mode</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    {safeModeEnabled
+                      ? 'ON for sandbox/index profiles. Risky tools remain blocked.'
+                      : 'OFF for the YOLO profile.'}
                   </div>
-                  <ToggleSwitch
-                    checked={safeModeEnabled}
-                    disabled={saving || loading || !sessionId}
-                    label="Safe mode"
-                    onToggle={() => handleToolToggle('safe_mode')}
-                  />
                 </div>
 
                 <div className="space-y-2">
@@ -600,7 +538,11 @@ export function SessionDrawer({
               ) : null}
               <div className="flex items-center justify-between">
                 <div className="text-xs text-zinc-500">
-                  {loading ? 'Loading session controls...' : yoloArmed ? 'Unrestricted mode armed for current session.' : 'Session controls ready.'}
+                  {loading
+                    ? 'Loading session controls...'
+                    : policyProfile === 'yolo'
+                      ? 'Unrestricted session profile selected.'
+                      : 'Session controls ready.'}
                 </div>
                 <div className="flex items-center gap-2">
                   <button
