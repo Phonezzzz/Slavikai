@@ -297,7 +297,7 @@ types-pillow==10.2.0.20240822
     # via -r requirements.in
 types-pyyaml==6.0.12.20250915
     # via -r requirements.in
-types-requests==2.32.4.20260107
+types-requests==2.32.4.20260324
     # via -r requirements.in
 typing-extensions==4.15.0
     # via
