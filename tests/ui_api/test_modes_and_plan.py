@@ -11,6 +11,25 @@ from server.http_api import PLAN_AUDIT_MAX_READ_FILES
 from .fakes import *
 
 
+def _assert_mode_target(
+    payload: dict[str, object],
+    target: str,
+    *,
+    allowed: bool,
+    reason_code: str | None,
+    requires_confirm: bool = False,
+) -> None:
+    transitions = payload.get("mode_transitions")
+    assert isinstance(transitions, dict)
+    targets = transitions.get("targets")
+    assert isinstance(targets, dict)
+    entry = targets.get(target)
+    assert isinstance(entry, dict)
+    assert entry.get("allowed") is allowed
+    assert entry.get("reason_code") == reason_code
+    assert entry.get("requires_confirm") is requires_confirm
+
+
 async def _prepare_approved_plan(
     client,
     session_id: str,
@@ -72,6 +91,20 @@ def test_ui_state_and_mode_transitions() -> None:
             assert state_payload.get("active_task") is None
             assert state_payload.get("auto_state") is None
 
+            session_resp = await client.get(
+                f"/ui/api/sessions/{session_id}",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert session_resp.status == 200
+            session_payload = await session_resp.json()
+            session = session_payload.get("session")
+            assert isinstance(session, dict)
+            transitions = session.get("mode_transitions")
+            assert isinstance(transitions, dict)
+            assert transitions.get("current_mode") == "ask"
+            _assert_mode_target(session, "ask", allowed=False, reason_code="already_active")
+            _assert_mode_target(session, "plan", allowed=True, reason_code=None)
+
             to_auto = await client.post(
                 "/ui/api/mode",
                 headers={"X-Slavik-Session": session_id},
@@ -80,6 +113,12 @@ def test_ui_state_and_mode_transitions() -> None:
             assert to_auto.status == 200
             to_auto_payload = await to_auto.json()
             assert to_auto_payload.get("mode") == "auto"
+            _assert_mode_target(
+                to_auto_payload,
+                "act",
+                allowed=False,
+                reason_code="mode_transition_not_allowed",
+            )
 
             back_to_ask = await client.post(
                 "/ui/api/mode",
@@ -98,6 +137,12 @@ def test_ui_state_and_mode_transitions() -> None:
             assert to_plan.status == 200
             to_plan_payload = await to_plan.json()
             assert to_plan_payload.get("mode") == "plan"
+            _assert_mode_target(
+                to_plan_payload,
+                "act",
+                allowed=False,
+                reason_code="plan_not_approved",
+            )
 
             to_act = await client.post(
                 "/ui/api/mode",
@@ -141,6 +186,12 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             plan_raw = draft_payload.get("active_plan")
             assert isinstance(plan_raw, dict)
             assert plan_raw.get("status") == "draft"
+            _assert_mode_target(
+                draft_payload,
+                "act",
+                allowed=False,
+                reason_code="plan_not_approved",
+            )
             plan_revision = plan_raw.get("plan_revision")
             assert isinstance(plan_revision, int)
             assert plan_revision > 0
@@ -154,6 +205,13 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             approved_plan = approve_payload.get("active_plan")
             assert isinstance(approved_plan, dict)
             assert approved_plan.get("status") == "approved"
+            _assert_mode_target(
+                approve_payload,
+                "act",
+                allowed=True,
+                reason_code=None,
+                requires_confirm=True,
+            )
             approved_revision = approved_plan.get("plan_revision")
             assert isinstance(approved_revision, int)
 
@@ -168,6 +226,13 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             assert isinstance(decision, dict)
             decision_id = decision.get("id")
             assert isinstance(decision_id, str)
+            _assert_mode_target(
+                execute_payload,
+                "act",
+                allowed=True,
+                reason_code=None,
+                requires_confirm=True,
+            )
             decision_resp = await client.post(
                 "/ui/api/decision/respond",
                 headers={"X-Slavik-Session": session_id},
@@ -180,6 +245,12 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             assert decision_resp.status == 200
             decision_payload = await decision_resp.json()
             assert decision_payload.get("mode") == "act"
+            _assert_mode_target(
+                decision_payload,
+                "act",
+                allowed=False,
+                reason_code="already_active",
+            )
             task_raw = decision_payload.get("active_task")
             assert isinstance(task_raw, dict)
             assert task_raw.get("status") == "running"

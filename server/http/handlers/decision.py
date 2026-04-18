@@ -9,6 +9,7 @@ from aiohttp import web
 
 from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ApprovalRequired
+from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.handlers.ui_chat import handle_ui_chat_send
 from server.http_api import (
@@ -43,6 +44,19 @@ from server.http_api import (
 )
 from shared.models import JSONValue
 from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
+
+
+def _mode_transitions_payload(workflow: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    current_mode = _normalize_mode_value(workflow.get("mode"), default="ask")
+    active_plan = _normalize_plan_payload(workflow.get("active_plan"))
+    active_task = _normalize_task_payload(workflow.get("active_task"))
+    auto_state = _normalize_auto_state(workflow.get("auto_state"))
+    return build_mode_transitions(
+        current_mode=current_mode,
+        active_plan=active_plan,
+        active_task=active_task,
+        auto_state=auto_state,
+    )
 
 
 def _normalize_message_lane(value: object) -> str:
@@ -729,6 +743,16 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
         plan = _normalize_plan_payload(workflow.get("active_plan"))
         task = _normalize_task_payload(workflow.get("active_task"))
+        transitions = build_mode_transitions(
+            current_mode=mode,
+            active_plan=plan,
+            active_task=task,
+            auto_state=_normalize_auto_state(workflow.get("auto_state")),
+        )
+        transition_targets = transitions.get("targets")
+        act_transition = (
+            transition_targets.get("act") if isinstance(transition_targets, dict) else None
+        )
         if plan is None:
             return {"ok": False, "error": "plan_not_found"}
         if choice == "edit_plan":
@@ -772,10 +796,13 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "plan_revision": _plan_revision_value(updated_plan),
             }
 
-        if mode != "plan":
+        if not (isinstance(act_transition, dict) and act_transition.get("allowed") is True):
+            reason_code = (
+                act_transition.get("reason_code") if isinstance(act_transition, dict) else None
+            )
+            if reason_code == "plan_not_approved":
+                return {"ok": False, "error": "plan_not_approved"}
             return {"ok": False, "error": "switch_to_act_required"}
-        if plan.get("status") != "approved":
-            return {"ok": False, "error": "plan_not_approved"}
         decision_context_raw = current_decision.get("context")
         decision_context = decision_context_raw if isinstance(decision_context_raw, dict) else {}
         resume_payload_raw = decision_context.get("resume_payload")
@@ -886,6 +913,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
                 "active_task": _normalize_task_payload(workflow.get("active_task")),
                 "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+                "mode_transitions": _mode_transitions_payload(workflow),
             }
         )
 
@@ -1006,6 +1034,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
                 "active_task": _normalize_task_payload(workflow.get("active_task")),
                 "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+                "mode_transitions": _mode_transitions_payload(workflow),
             }
         )
 
@@ -1127,6 +1156,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
                 "active_task": _normalize_task_payload(workflow.get("active_task")),
                 "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+                "mode_transitions": _mode_transitions_payload(workflow),
             }
         )
 
@@ -1244,6 +1274,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
                     "active_task": _normalize_task_payload(workflow.get("active_task")),
                     "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+                    "mode_transitions": _mode_transitions_payload(workflow),
                 }
             )
         return _decision_mismatch_response(
@@ -1263,5 +1294,6 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
             "active_task": _normalize_task_payload(workflow.get("active_task")),
             "auto_state": _normalize_auto_state(workflow.get("auto_state")),
+            "mode_transitions": _mode_transitions_payload(workflow),
         }
     )

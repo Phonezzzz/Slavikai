@@ -3,6 +3,7 @@ import type { CanvasMessage, CanvasSendPayload } from './canvas';
 import type {
   AutoState,
   DecisionRespondChoice,
+  ModeTransitionsContract,
   PlanEnvelope,
   SessionMode,
   TaskExecutionState,
@@ -23,6 +24,7 @@ type WorkspaceSessionScreenProps = {
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
+  modeTransitions: ModeTransitionsContract | null;
   modeBusy: boolean;
   modeError: string | null;
   decision: UiDecision | null;
@@ -59,6 +61,7 @@ export function WorkspaceSessionScreen({
   activePlan,
   activeTask,
   autoState,
+  modeTransitions,
   modeBusy,
   modeError,
   decision,
@@ -96,6 +99,7 @@ export function WorkspaceSessionScreen({
       activePlan={activePlan}
       activeTask={activeTask}
       autoState={autoState}
+      modeTransitions={modeTransitions}
       modeBusy={modeBusy}
       modeError={modeError}
       onChangeMode={onChangeMode}

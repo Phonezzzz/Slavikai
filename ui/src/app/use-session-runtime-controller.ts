@@ -6,6 +6,7 @@ import {
   extractSessionIdFromPayload,
   parseAutoState,
   parseMessages,
+  parseModeTransitions,
   parsePlanEnvelope,
   parseSelectedModel,
   parseSessionArtifacts,
@@ -30,6 +31,7 @@ import type { SessionTransportBridge } from './session-bridges';
 import type {
   AutoState,
   DecisionRespondChoice,
+  ModeTransitionsContract,
   PlanEnvelope,
   ProviderModels,
   SelectedModel,
@@ -44,6 +46,7 @@ type WorkflowSnapshot = {
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
+  modeTransitions: ModeTransitionsContract | null;
 };
 
 type UseSessionRuntimeControllerOptions = {
@@ -64,6 +67,7 @@ export type SessionRuntimeControllerResult = {
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
+  modeTransitions: ModeTransitionsContract | null;
   pendingDecision: UiDecision | null;
   decisionBusy: boolean;
   decisionError: string | null;
@@ -138,6 +142,9 @@ const setSessionModeRemote = async (
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
     autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    modeTransitions: parseModeTransitions(
+      (payload as { mode_transitions?: unknown }).mode_transitions,
+    ),
   };
 };
 
@@ -163,6 +170,9 @@ const draftPlanRemote = async (
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
     autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    modeTransitions: parseModeTransitions(
+      (payload as { mode_transitions?: unknown }).mode_transitions,
+    ),
   };
 };
 
@@ -185,6 +195,9 @@ const approvePlanRemote = async (
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
     autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    modeTransitions: parseModeTransitions(
+      (payload as { mode_transitions?: unknown }).mode_transitions,
+    ),
   };
 };
 
@@ -212,6 +225,9 @@ const executePlanRemote = async (
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
     autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    modeTransitions: parseModeTransitions(
+      (payload as { mode_transitions?: unknown }).mode_transitions,
+    ),
     decision: parseUiDecision((payload as { decision?: unknown }).decision),
   };
 };
@@ -235,6 +251,9 @@ const cancelPlanRemote = async (
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
     autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    modeTransitions: parseModeTransitions(
+      (payload as { mode_transitions?: unknown }).mode_transitions,
+    ),
   };
 };
 
@@ -261,6 +280,7 @@ export function useSessionRuntimeController({
   const [activePlan, setActivePlan] = useState<PlanEnvelope | null>(null);
   const [activeTask, setActiveTask] = useState<TaskExecutionState | null>(null);
   const [autoState, setAutoState] = useState<AutoState | null>(null);
+  const [modeTransitions, setModeTransitions] = useState<ModeTransitionsContract | null>(null);
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
@@ -274,6 +294,7 @@ export function useSessionRuntimeController({
       active_plan?: unknown;
       active_task?: unknown;
       auto_state?: unknown;
+      mode_transitions?: unknown;
     };
     if (body.decision !== undefined) {
       setPendingDecision(parseUiDecision(body.decision));
@@ -295,6 +316,9 @@ export function useSessionRuntimeController({
     }
     if (body.auto_state !== undefined) {
       setAutoState(parseAutoState(body.auto_state));
+    }
+    if (body.mode_transitions !== undefined) {
+      setModeTransitions(parseModeTransitions(body.mode_transitions));
     }
   };
 
@@ -386,6 +410,9 @@ export function useSessionRuntimeController({
     setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
     setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
     setAutoState(parseAutoState((session as { auto_state?: unknown } | undefined)?.auto_state));
+    setModeTransitions(
+      parseModeTransitions((session as { mode_transitions?: unknown } | undefined)?.mode_transitions),
+    );
     const parsedSelectedModel = parseSelectedModel(session?.selected_model);
     setSelectedModel(parsedSelectedModel);
     return parsedSelectedModel;
@@ -426,6 +453,9 @@ export function useSessionRuntimeController({
     setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
     setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
     setAutoState(parseAutoState((session as { auto_state?: unknown } | undefined)?.auto_state));
+    setModeTransitions(
+      parseModeTransitions((session as { mode_transitions?: unknown } | undefined)?.mode_transitions),
+    );
     setSelectedModel(sessionModel);
     if (nextSession) {
       try {
@@ -509,6 +539,7 @@ export function useSessionRuntimeController({
   useEffect(() => {
     if (!selectedConversation) {
       setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
+      setModeTransitions(null);
     }
   }, [selectedConversation]);
 
@@ -541,6 +572,7 @@ export function useSessionRuntimeController({
       setSelectedConversation(nextSession);
       setPendingDecision(null);
       setDecisionError(null);
+      await loadConversation(nextSession);
       saveLastSessionId(nextSession);
       await loadSessions();
       if (!created.selectedModel && providerModels.length > 0) {
@@ -596,6 +628,7 @@ export function useSessionRuntimeController({
           const created = await createConversation();
           if (created.sessionId) {
             setSelectedConversation(created.sessionId);
+            await loadConversation(created.sessionId);
             await loadSessions();
             saveLastSessionId(created.sessionId);
           } else {
@@ -641,6 +674,7 @@ export function useSessionRuntimeController({
     setActivePlan(snapshot.activePlan);
     setActiveTask(snapshot.activeTask);
     setAutoState(snapshot.autoState);
+    setModeTransitions(snapshot.modeTransitions);
   };
 
   const handleChangeMode = async (mode: SessionMode): Promise<void> => {
@@ -825,6 +859,7 @@ export function useSessionRuntimeController({
     activePlan,
     activeTask,
     autoState,
+    modeTransitions,
     pendingDecision,
     decisionBusy,
     decisionError,

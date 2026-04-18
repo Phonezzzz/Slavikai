@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react';
 import { SESSION_MODE_VALUES } from '../types';
 import type {
   AutoState,
+  ModeTransitionsContract,
   PlanEnvelope,
   SessionMode,
   TaskExecutionState,
@@ -13,6 +14,7 @@ type PlanPanelProps = {
   plan: PlanEnvelope | null;
   task: TaskExecutionState | null;
   autoState?: AutoState | null;
+  modeTransitions?: ModeTransitionsContract | null;
   busy: boolean;
   error: string | null;
   showModeControls?: boolean;
@@ -28,6 +30,7 @@ export function PlanPanel({
   plan,
   task,
   autoState = null,
+  modeTransitions = null,
   busy,
   error,
   showModeControls = true,
@@ -58,23 +61,35 @@ export function PlanPanel({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           {showModeControls
-            ? SESSION_MODE_VALUES.map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  onClick={() => {
-                    void onChangeMode(item);
-                  }}
-                  disabled={busy || mode === item}
-                  className={`rounded-md border px-2 py-1 text-[11px] uppercase tracking-wide ${
-                    mode === item
-                      ? 'border-[#3a3a46] bg-[#1b1b22] text-[#e0e0e8]'
-                      : 'border-[#2a2a31] bg-[#121217] text-[#a4a4ad] hover:bg-[#181820]'
-                  } disabled:opacity-50`}
-                >
-                  {item}
-                </button>
-              ))
+            ? SESSION_MODE_VALUES.map((item) => {
+                  const transition = modeTransitions?.targets[item] ?? null;
+                  const blockedReason =
+                    transition && !transition.allowed
+                      ? transition.message ?? transition.reasonCode ?? 'blocked'
+                      : null;
+                  const title =
+                    blockedReason
+                      ?? (transition?.requiresConfirm ? 'Для перехода понадобится confirm.' : null)
+                      ?? undefined;
+                  return (
+                    <button
+                      key={item}
+                      type="button"
+                      title={title}
+                      onClick={() => {
+                        void onChangeMode(item);
+                      }}
+                      disabled={busy || !transition || !transition.allowed}
+                      className={`rounded-md border px-2 py-1 text-[11px] uppercase tracking-wide ${
+                        mode === item
+                          ? 'border-[#3a3a46] bg-[#1b1b22] text-[#e0e0e8]'
+                          : 'border-[#2a2a31] bg-[#121217] text-[#a4a4ad] hover:bg-[#181820]'
+                      } disabled:opacity-50`}
+                    >
+                      {item}
+                    </button>
+                  );
+                })
             : null}
         </div>
         <span className="text-[11px] text-[#8a8a94]">{statusText}</span>

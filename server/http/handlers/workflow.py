@@ -6,6 +6,7 @@ from aiohttp import web
 
 from config.model_whitelist import ModelNotAllowedError
 from core.mwv.verifier_runtime import has_canonical_repo_verifier
+from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     SESSION_MODES,
@@ -125,23 +126,32 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
     active_plan = _normalize_plan_payload(workflow.get("active_plan"))
     active_task = _normalize_task_payload(workflow.get("active_task"))
     auto_state = _normalize_auto_state(workflow.get("auto_state"))
-    auto_status_raw = auto_state.get("status") if isinstance(auto_state, dict) else None
-    auto_status = auto_status_raw if isinstance(auto_status_raw, str) else "idle"
-    auto_run_active = auto_status in {
-        "planning",
-        "coding",
-        "merging",
-        "verifying",
-        "waiting_approval",
-    }
-    if next_mode == "act" and current_mode != "plan":
+    mode_transitions = build_mode_transitions(
+        current_mode=current_mode,
+        active_plan=active_plan,
+        active_task=active_task,
+        auto_state=auto_state,
+    )
+    targets = mode_transitions.get("targets")
+    target = targets.get(next_mode) if isinstance(targets, dict) else None
+    target_allowed = bool(isinstance(target, dict) and target.get("allowed") is True)
+    target_message = target.get("message") if isinstance(target, dict) else None
+    target_reason = target.get("reason_code") if isinstance(target, dict) else None
+    target_requires_confirm = bool(
+        isinstance(target, dict) and target.get("requires_confirm") is True
+    )
+    if not target_allowed:
         return error_response(
             status=409,
-            message="В act можно перейти только из plan-режима.",
+            message=(
+                target_message
+                if isinstance(target_message, str) and target_message.strip()
+                else "Переход между режимами сейчас недоступен."
+            ),
             error_type="invalid_request_error",
-            code="mode_transition_not_allowed",
+            code=target_reason if isinstance(target_reason, str) else "mode_transition_not_allowed",
         )
-    if current_mode == "plan" and next_mode == "act":
+    if next_mode == "act" and target_requires_confirm:
         confirm = payload.get("confirm") is True
         if not confirm:
             return error_response(
@@ -150,35 +160,6 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="mode_confirm_required",
             )
-        if active_plan is None or active_plan.get("status") != "approved":
-            return error_response(
-                status=409,
-                message="Нужен approved план для перехода в act.",
-                error_type="invalid_request_error",
-                code="plan_not_approved",
-            )
-    if next_mode == "auto":
-        if current_mode in {"plan", "act"} and (active_plan is not None or active_task is not None):
-            return error_response(
-                status=409,
-                message="Нельзя перейти в auto при активном plan/act workflow.",
-                error_type="invalid_request_error",
-                code="mode_transition_not_allowed",
-            )
-    if current_mode == "auto" and next_mode == "ask" and auto_run_active:
-        return error_response(
-            status=409,
-            message="Нельзя выйти из auto: auto-run ещё активен.",
-            error_type="invalid_request_error",
-            code="auto_run_active",
-        )
-    if current_mode == "auto" and next_mode in {"plan", "act"}:
-        return error_response(
-            status=409,
-            message="Переход auto->plan|act запрещён до завершения auto-run.",
-            error_type="invalid_request_error",
-            code="mode_transition_not_allowed",
-        )
     if next_mode == "ask":
         await hub.set_session_workflow(
             session_id,
@@ -203,6 +184,12 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
             "active_plan": _normalize_plan_payload(updated.get("active_plan")),
             "active_task": _normalize_task_payload(updated.get("active_task")),
             "auto_state": _normalize_auto_state(updated.get("auto_state")),
+            "mode_transitions": build_mode_transitions(
+                current_mode=_normalize_mode_value(updated.get("mode"), default="ask"),
+                active_plan=_normalize_plan_payload(updated.get("active_plan")),
+                active_task=_normalize_task_payload(updated.get("active_task")),
+                auto_state=_normalize_auto_state(updated.get("auto_state")),
+            ),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id

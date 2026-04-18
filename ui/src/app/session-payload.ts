@@ -8,6 +8,8 @@ import type {
   FolderSummary,
   MessageLane,
   MessageRuntimeMeta,
+  ModeTransitionReasonCode,
+  ModeTransitionsContract,
   MwvReportUi,
   PlanEnvelope,
   PlanStepStatus,
@@ -513,6 +515,51 @@ export const parseSessionMode = (value: unknown): SessionMode => {
     return value;
   }
   return 'ask';
+};
+
+const isModeTransitionReasonCode = (value: unknown): value is ModeTransitionReasonCode =>
+  value === 'already_active'
+  || value === 'mode_transition_not_allowed'
+  || value === 'plan_not_approved'
+  || value === 'auto_run_active';
+
+export const parseModeTransitions = (value: unknown): ModeTransitionsContract | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as { current_mode?: unknown; targets?: unknown };
+  const currentMode = parseSessionMode(candidate.current_mode);
+  if (!candidate.targets || typeof candidate.targets !== 'object') {
+    return null;
+  }
+  const parsedTargets = {} as ModeTransitionsContract['targets'];
+  for (const mode of ['ask', 'plan', 'act', 'auto'] as const) {
+    const item = (candidate.targets as Record<string, unknown>)[mode];
+    if (!item || typeof item !== 'object') {
+      return null;
+    }
+    const target = item as {
+      allowed?: unknown;
+      reason_code?: unknown;
+      requires_confirm?: unknown;
+      message?: unknown;
+    };
+    if (typeof target.allowed !== 'boolean' || typeof target.requires_confirm !== 'boolean') {
+      return null;
+    }
+    const reasonCode = isModeTransitionReasonCode(target.reason_code) ? target.reason_code : null;
+    const message = typeof target.message === 'string' ? target.message : null;
+    parsedTargets[mode] = {
+      allowed: target.allowed,
+      reasonCode,
+      requiresConfirm: target.requires_confirm,
+      message,
+    };
+  }
+  return {
+    currentMode,
+    targets: parsedTargets,
+  };
 };
 
 export const parseAutoState = (value: unknown): AutoState | null => {

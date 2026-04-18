@@ -2,7 +2,11 @@ import { AnimatePresence, motion } from 'motion/react';
 import { ChevronDown, Shield, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
-import { SESSION_MODE_VALUES, type SessionMode } from '../types';
+import {
+  SESSION_MODE_VALUES,
+  type ModeTransitionsContract,
+  type SessionMode,
+} from '../types';
 
 type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt';
 type PolicyProfile = 'sandbox' | 'index' | 'yolo';
@@ -22,6 +26,7 @@ type SessionDrawerProps = {
   sessionId: string | null;
   sessionHeader: string;
   mode: SessionMode;
+  modeTransitions?: ModeTransitionsContract | null;
   modeBusy?: boolean;
   onChangeMode: (mode: SessionMode) => Promise<void>;
   modelLabel: string;
@@ -185,6 +190,7 @@ export function SessionDrawer({
   sessionId,
   sessionHeader,
   mode,
+  modeTransitions = null,
   modeBusy = false,
   onChangeMode,
   modelLabel,
@@ -366,23 +372,37 @@ export function SessionDrawer({
                 <div className="space-y-2">
                   <div className="text-xs font-medium text-zinc-300">Mode</div>
                   <div className="grid grid-cols-4 gap-2">
-                    {SESSION_MODE_VALUES.map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        onClick={() => {
-                          void onChangeMode(item);
-                        }}
-                        disabled={modeBusy || mode === item || !sessionId}
-                        className={`rounded-md border px-2 py-2 text-[11px] uppercase tracking-wide ${
-                          mode === item
-                            ? 'border-[#3a3a46] bg-[#1b1b22] text-[#e0e0e8]'
-                            : 'border-[#2a2a31] bg-[#121217] text-[#a4a4ad] hover:bg-[#181820]'
-                        } disabled:opacity-50`}
-                      >
-                        {item}
-                      </button>
-                    ))}
+                    {SESSION_MODE_VALUES.map((item) => {
+                        const transition = modeTransitions?.targets[item] ?? null;
+                        const blockedReason =
+                          transition && !transition.allowed
+                            ? transition.message ?? transition.reasonCode ?? 'blocked'
+                            : null;
+                        const buttonTitle =
+                          blockedReason
+                            ?? (transition?.requiresConfirm ? 'Для перехода понадобится confirm.' : null)
+                            ?? undefined;
+                        return (
+                          <button
+                            key={item}
+                            type="button"
+                            title={buttonTitle}
+                            onClick={() => {
+                              void onChangeMode(item);
+                            }}
+                            disabled={
+                              modeBusy || !sessionId || !transition || !transition.allowed
+                            }
+                            className={`rounded-md border px-2 py-2 text-[11px] uppercase tracking-wide ${
+                              mode === item
+                                ? 'border-[#3a3a46] bg-[#1b1b22] text-[#e0e0e8]'
+                                : 'border-[#2a2a31] bg-[#121217] text-[#a4a4ad] hover:bg-[#181820]'
+                            } disabled:opacity-50`}
+                          >
+                            {item}
+                          </button>
+                        );
+                    })}
                   </div>
                 </div>
 

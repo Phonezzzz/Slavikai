@@ -1,4 +1,4 @@
-import type { SessionMode } from '../types';
+import type { ModeTransitionsContract, SessionMode } from '../types';
 import { SessionDrawer } from './session-drawer';
 
 type SessionModelOption = {
@@ -16,6 +16,7 @@ type SessionControlShellProps = {
   sessionId: string | null;
   sessionHeader: string;
   mode: SessionMode;
+  modeTransitions: ModeTransitionsContract | null;
   modeBusy: boolean;
   onChangeMode: (mode: SessionMode) => Promise<void>;
   modelLabel: string;
@@ -33,6 +34,7 @@ export function SessionControlShell({
   sessionId,
   sessionHeader,
   mode,
+  modeTransitions,
   modeBusy,
   onChangeMode,
   modelLabel,
@@ -50,6 +52,7 @@ export function SessionControlShell({
       sessionId={sessionId}
       sessionHeader={sessionHeader}
       mode={mode}
+      modeTransitions={modeTransitions}
       modeBusy={modeBusy}
       onChangeMode={onChangeMode}
       modelLabel={modelLabel}

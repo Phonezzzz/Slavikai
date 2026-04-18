@@ -28,6 +28,7 @@ import {
 import type {
   AutoState,
   DecisionRespondChoice,
+  ModeTransitionsContract,
   PlanEnvelope,
   SessionMode,
   TaskExecutionState,
@@ -60,6 +61,7 @@ type WorkspaceAssistantPanelProps = {
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
+  modeTransitions: ModeTransitionsContract | null;
   modeBusy: boolean;
   modeError: string | null;
   onChangeMode: (mode: SessionMode) => Promise<void>;
@@ -91,6 +93,7 @@ export function WorkspaceAssistantPanel({
   activePlan,
   activeTask,
   autoState,
+  modeTransitions,
   modeBusy,
   modeError,
   onChangeMode,
@@ -613,6 +616,7 @@ export function WorkspaceAssistantPanel({
         plan={activePlan}
         task={activeTask}
         autoState={autoState}
+        modeTransitions={modeTransitions}
         busy={modeBusy}
         error={modeError}
         showModeControls={false}

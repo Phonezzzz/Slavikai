@@ -85,6 +85,24 @@ export type SessionMode = (typeof SESSION_MODE_VALUES)[number];
 export const isSessionMode = (value: unknown): value is SessionMode =>
   typeof value === 'string' && SESSION_MODE_VALUES.some((mode) => mode === value);
 
+export type ModeTransitionReasonCode =
+  | 'already_active'
+  | 'mode_transition_not_allowed'
+  | 'plan_not_approved'
+  | 'auto_run_active';
+
+export type ModeTransitionTarget = {
+  allowed: boolean;
+  reasonCode: ModeTransitionReasonCode | null;
+  requiresConfirm: boolean;
+  message: string | null;
+};
+
+export type ModeTransitionsContract = {
+  currentMode: SessionMode;
+  targets: Record<SessionMode, ModeTransitionTarget>;
+};
+
 export type AutoRunStatus =
   | 'idle'
   | 'planning'

@@ -7,6 +7,7 @@ from typing import Literal, cast
 from aiohttp import web
 
 from server import http_api as api
+from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import RuntimeModelStateProtocol
 from server.http_api import (
@@ -351,6 +352,16 @@ async def handle_ui_session_get(request: web.Request) -> web.Response:
         )
     raw_decision = session.get("decision")
     session["decision"] = _normalize_ui_decision(raw_decision, session_id=session_id)
+    current_mode = api._normalize_mode_value(session.get("mode"), default="ask")
+    active_plan = api._normalize_plan_payload(session.get("active_plan"))
+    active_task = api._normalize_task_payload(session.get("active_task"))
+    auto_state = api._normalize_auto_state(session.get("auto_state"))
+    session["mode_transitions"] = build_mode_transitions(
+        current_mode=current_mode,
+        active_plan=active_plan,
+        active_task=active_task,
+        auto_state=auto_state,
+    )
     response = json_response({"session": session})
     response.headers[UI_SESSION_HEADER] = session_id
     return response

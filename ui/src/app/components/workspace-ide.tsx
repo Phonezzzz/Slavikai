@@ -5,6 +5,7 @@ import type * as Monaco from 'monaco-editor';
 import type {
   AutoState,
   DecisionRespondChoice,
+  ModeTransitionsContract,
   PlanEnvelope,
   SessionMode,
   TaskExecutionState,
@@ -72,6 +73,7 @@ type WorkspaceIdeProps = {
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
+  modeTransitions: ModeTransitionsContract | null;
   modeBusy?: boolean;
   modeError?: string | null;
   onChangeMode: (mode: SessionMode) => Promise<void>;
@@ -130,6 +132,7 @@ export function WorkspaceIde({
   activePlan,
   activeTask,
   autoState,
+  modeTransitions,
   modeBusy = false,
   modeError = null,
   onChangeMode,
@@ -1392,10 +1395,11 @@ export function WorkspaceIde({
 
         <WorkspaceAssistantPanel
           contextChips={aiContextChips}
-          mode={mode}
+        mode={mode}
         activePlan={activePlan}
         activeTask={activeTask}
         autoState={autoState}
+        modeTransitions={modeTransitions}
         modeBusy={modeBusy}
           modeError={modeError}
           onChangeMode={onChangeMode}

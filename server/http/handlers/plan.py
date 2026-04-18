@@ -10,6 +10,7 @@ from server.http.common.idempotency import (
     fingerprint_json_payload,
     normalize_idempotency_key,
 )
+from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     UI_SESSION_HEADER,
@@ -35,6 +36,20 @@ from server.http_api import (
 )
 from server.ui_hub import UIHub
 from shared.models import JSONValue
+
+
+def _mode_transitions_payload(workflow: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    current_mode = _normalize_mode_value(workflow.get("mode"), default="ask")
+    active_plan = _normalize_plan_payload(workflow.get("active_plan"))
+    active_task = _normalize_task_payload(workflow.get("active_task"))
+    auto_state = workflow.get("auto_state")
+    normalized_auto_state = auto_state if isinstance(auto_state, dict) else None
+    return build_mode_transitions(
+        current_mode=current_mode,
+        active_plan=active_plan,
+        active_task=active_task,
+        auto_state=normalized_auto_state,
+    )
 
 
 async def handle_ui_plan_draft(request: web.Request) -> web.Response:
@@ -92,6 +107,7 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
             "active_plan": _normalize_plan_payload(updated.get("active_plan")),
             "active_task": _normalize_task_payload(updated.get("active_task")),
             "audit_usage": usage,
+            "mode_transitions": _mode_transitions_payload(updated),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -139,6 +155,7 @@ async def handle_ui_plan_approve(request: web.Request) -> web.Response:
             "mode": _normalize_mode_value(updated.get("mode"), default="plan"),
             "active_plan": _normalize_plan_payload(updated.get("active_plan")),
             "active_task": _normalize_task_payload(updated.get("active_task")),
+            "mode_transitions": _mode_transitions_payload(updated),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
@@ -344,7 +361,34 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             details={"expected_revision": expected_revision, "actual_revision": actual_revision},
         )
 
+    workflow_auto_state = workflow.get("auto_state")
+    transition_contract = build_mode_transitions(
+        current_mode=mode,
+        active_plan=plan,
+        active_task=active_task,
+        auto_state=workflow_auto_state if isinstance(workflow_auto_state, dict) else None,
+    )
+    transition_targets = transition_contract.get("targets")
+    act_transition = transition_targets.get("act") if isinstance(transition_targets, dict) else None
+
     if mode == "plan":
+        if not (isinstance(act_transition, dict) and act_transition.get("allowed") is True):
+            act_message = (
+                act_transition.get("message") if isinstance(act_transition, dict) else None
+            )
+            act_reason = (
+                act_transition.get("reason_code") if isinstance(act_transition, dict) else None
+            )
+            return error_response(
+                status=409,
+                message=(
+                    act_message
+                    if isinstance(act_message, str) and act_message.strip()
+                    else "Переход в act сейчас недоступен."
+                ),
+                error_type="invalid_request_error",
+                code=act_reason if isinstance(act_reason, str) else "mode_transition_not_allowed",
+            )
         plan_fingerprint: str | None = None
         if idempotency_key is not None:
             plan_fingerprint = fingerprint_json_payload(
@@ -405,6 +449,7 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             "mode": mode,
             "active_plan": plan,
             "active_task": active_task,
+            "mode_transitions": transition_contract,
         }
         if idempotency_key is not None and plan_fingerprint is not None:
             await idempotency_store.complete(
@@ -571,6 +616,7 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
         "mode": _normalize_mode_value(updated_workflow.get("mode"), default="act"),
         "active_plan": _normalize_plan_payload(updated_workflow.get("active_plan")),
         "active_task": _normalize_task_payload(updated_workflow.get("active_task")),
+        "mode_transitions": _mode_transitions_payload(updated_workflow),
     }
     if idempotency_key is not None and act_fingerprint is not None:
         await idempotency_store.complete(
@@ -609,6 +655,7 @@ async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
             "mode": _normalize_mode_value(updated.get("mode"), default="ask"),
             "active_plan": _normalize_plan_payload(updated.get("active_plan")),
             "active_task": _normalize_task_payload(updated.get("active_task")),
+            "mode_transitions": _mode_transitions_payload(updated),
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id

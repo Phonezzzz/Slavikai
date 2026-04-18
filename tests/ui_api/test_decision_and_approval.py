@@ -154,6 +154,15 @@ def test_ui_decision_respond_approve_once_executes_workspace_tool() -> None:
             assert approve_resp.status == 200
             approve_payload = await approve_resp.json()
             assert approve_payload.get("status") == "resolved"
+            transitions = approve_payload.get("mode_transitions")
+            assert isinstance(transitions, dict)
+            assert transitions.get("current_mode") == "ask"
+            targets = transitions.get("targets")
+            assert isinstance(targets, dict)
+            ask_target = targets.get("ask")
+            assert isinstance(ask_target, dict)
+            assert ask_target.get("allowed") is False
+            assert ask_target.get("reason_code") == "already_active"
             assert len(agent.tool_calls) == 1
         finally:
             await client.close()

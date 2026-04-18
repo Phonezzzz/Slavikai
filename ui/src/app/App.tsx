@@ -611,6 +611,7 @@ export default function App() {
             activePlan={runtime.activePlan}
             activeTask={runtime.activeTask}
             autoState={runtime.autoState}
+            modeTransitions={runtime.modeTransitions}
             modeBusy={runtime.modeBusy}
             modeError={runtime.modeError}
             onChangeMode={runtime.handleChangeMode}
@@ -710,6 +711,7 @@ export default function App() {
         sessionId={runtime.selectedConversation}
         sessionHeader={SESSION_HEADER}
         mode={runtime.sessionMode}
+        modeTransitions={runtime.modeTransitions}
         modeBusy={runtime.modeBusy}
         onChangeMode={runtime.handleChangeMode}
         modelLabel={modelLabel}
