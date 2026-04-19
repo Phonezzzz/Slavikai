@@ -37,7 +37,6 @@ import {
   deleteWorkspaceFile,
   fetchWorkspaceFile,
   fetchWorkspaceGitDiff,
-  fetchWorkspaceRoot,
   fetchWorkspaceTree,
   postWorkspaceFileCreate,
   postWorkspaceFileMove,
@@ -58,6 +57,7 @@ type WorkspaceIdeProps = {
   sessionId: string | null;
   sessionHeader: string;
   modelLabel: string;
+  workspaceRoot: string;
   sessionPolicyLabel: string;
   sessionYoloActive: boolean;
   sessionSafeMode: boolean;
@@ -68,6 +68,7 @@ type WorkspaceIdeProps = {
   onOpenSessionDrawer: () => void;
   onOpenRepositoryPanel: () => void;
   onSendAgentMessage: (payload: CanvasSendPayload) => Promise<boolean>;
+  onApplyWorkspaceRoot: (workspaceRoot: string) => void;
   onSendFeedback?: (interactionId: string, rating: 'good' | 'bad') => Promise<boolean>;
   mode: SessionMode;
   activePlan: PlanEnvelope | null;
@@ -117,6 +118,7 @@ export function WorkspaceIde({
   sessionId,
   sessionHeader,
   modelLabel,
+  workspaceRoot,
   sessionPolicyLabel,
   sessionYoloActive,
   sessionSafeMode,
@@ -127,6 +129,7 @@ export function WorkspaceIde({
   onOpenSessionDrawer,
   onOpenRepositoryPanel,
   onSendAgentMessage,
+  onApplyWorkspaceRoot,
   onSendFeedback,
   mode,
   activePlan,
@@ -172,7 +175,6 @@ export function WorkspaceIde({
   const [includeGitDiff, setIncludeGitDiff] = useState(true);
   const [includeTerminal, setIncludeTerminal] = useState(true);
 
-  const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [rootPickerOpen, setRootPickerOpen] = useState(false);
   const [rootInput, setRootInput] = useState('');
   const [rootBusy, setRootBusy] = useState(false);
@@ -368,6 +370,10 @@ export function WorkspaceIde({
   }, [sessionId]);
 
   useEffect(() => {
+    setRootInput(workspaceRoot);
+  }, [sessionId, workspaceRoot]);
+
+  useEffect(() => {
     const assistantMessages = messages.filter((item) => item.role === 'assistant');
     if (!assistantInitRef.current) {
       assistantMessages.forEach((message) => {
@@ -488,22 +494,6 @@ export function WorkspaceIde({
       window.removeEventListener('resize', syncAssistantWidth);
     };
   }, [explorerVisible, explorerWidth]);
-
-  const loadWorkspaceRoot = async (): Promise<void> => {
-    if (!sessionId) {
-      setWorkspaceRoot('');
-      setRootInput('');
-      return;
-    }
-    try {
-      const { rootPath } = await fetchWorkspaceRoot(requestHeaders);
-      setWorkspaceRoot(rootPath);
-      setRootInput(rootPath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load workspace root.';
-      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
-    }
-  };
 
   const replaceNodeChildren = (
     nodes: WorkspaceNode[],
@@ -713,7 +703,6 @@ export function WorkspaceIde({
   };
 
   useEffect(() => {
-    void loadWorkspaceRoot();
     requestTreeLoad(undefined, 'session_init');
     void loadGitDiff();
   }, [refreshToken, sessionId]);
@@ -1042,14 +1031,14 @@ export function WorkspaceIde({
         setRootPickerOpen(false);
         return;
       }
-      setWorkspaceRoot(nextRoot);
+      const appliedRoot = result.rootPath.trim() || nextRoot;
+      onApplyWorkspaceRoot(appliedRoot);
       setRootPickerOpen(false);
       setOpenFiles([]);
       setActiveFileId(null);
-      void loadWorkspaceRoot();
       requestTreeLoad(undefined, 'root_change');
       void loadGitDiff();
-      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] workspace root: ${nextRoot}`]);
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] workspace root: ${appliedRoot}`]);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to change workspace root.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);

@@ -932,6 +932,7 @@ def test_ui_sessions_api_create_send_get_history() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
+            expected_workspace_root = str((Path.cwd() / "sandbox" / "project").resolve())
             create_resp = await client.post("/ui/api/sessions")
             assert create_resp.status == 200
             create_payload = await create_resp.json()
@@ -940,6 +941,7 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             session_id = created.get("session_id")
             assert isinstance(session_id, str)
             assert session_id
+            assert created.get("workspace_root") == expected_workspace_root
             await _select_local_model(client, session_id)
 
             send_resp = await client.post(
@@ -954,6 +956,7 @@ def test_ui_sessions_api_create_send_get_history() -> None:
             get_payload = await get_resp.json()
             session = get_payload.get("session")
             assert isinstance(session, dict)
+            assert session.get("workspace_root") == expected_workspace_root
             messages = session.get("messages")
             workspace_messages = session.get("workspace_messages")
             lane_stats = session.get("lane_stats")

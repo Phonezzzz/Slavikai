@@ -14,6 +14,7 @@ type WorkspaceSessionScreenProps = {
   sessionId: string | null;
   sessionHeader: string;
   modelLabel: string;
+  workspaceRoot: string;
   sessionPolicyLabel: string;
   sessionYoloActive: boolean;
   sessionSafeMode: boolean;
@@ -36,6 +37,7 @@ type WorkspaceSessionScreenProps = {
   onOpenSessionDrawer: () => void;
   onOpenRepositoryPanel: () => void;
   onSendAgentMessage: (payload: CanvasSendPayload) => Promise<boolean>;
+  onApplyWorkspaceRoot: (workspaceRoot: string) => void;
   onChangeMode: (mode: SessionMode) => Promise<void>;
   onPlanDraft: (goal: string) => Promise<void>;
   onPlanApprove: () => Promise<void>;
@@ -51,6 +53,7 @@ export function WorkspaceSessionScreen({
   sessionId,
   sessionHeader,
   modelLabel,
+  workspaceRoot,
   sessionPolicyLabel,
   sessionYoloActive,
   sessionSafeMode,
@@ -73,6 +76,7 @@ export function WorkspaceSessionScreen({
   onOpenSessionDrawer,
   onOpenRepositoryPanel,
   onSendAgentMessage,
+  onApplyWorkspaceRoot,
   onChangeMode,
   onPlanDraft,
   onPlanApprove,
@@ -85,6 +89,7 @@ export function WorkspaceSessionScreen({
       sessionId={sessionId}
       sessionHeader={sessionHeader}
       modelLabel={modelLabel}
+      workspaceRoot={workspaceRoot}
       sessionPolicyLabel={sessionPolicyLabel}
       sessionYoloActive={sessionYoloActive}
       sessionSafeMode={sessionSafeMode}
@@ -95,6 +100,7 @@ export function WorkspaceSessionScreen({
       onOpenSessionDrawer={onOpenSessionDrawer}
       onOpenRepositoryPanel={onOpenRepositoryPanel}
       onSendAgentMessage={onSendAgentMessage}
+      onApplyWorkspaceRoot={onApplyWorkspaceRoot}
       mode={mode}
       activePlan={activePlan}
       activeTask={activeTask}

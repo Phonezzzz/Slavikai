@@ -28,6 +28,7 @@ from server.http_api import (
     _serialize_persisted_session,
     _session_forbidden_response,
     _utc_iso,
+    _workspace_root_for_session,
 )
 from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession
@@ -324,6 +325,7 @@ async def handle_ui_sessions_create(request: web.Request) -> web.Response:
             error_type="internal_error",
             code="session_create_failed",
         )
+    session["workspace_root"] = str(await _workspace_root_for_session(hub, session_id))
     response = json_response({"session": session})
     response.headers[UI_SESSION_HEADER] = session_id
     return response
@@ -350,6 +352,7 @@ async def handle_ui_session_get(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="session_not_found",
         )
+    session["workspace_root"] = str(await _workspace_root_for_session(hub, session_id))
     raw_decision = session.get("decision")
     session["decision"] = _normalize_ui_decision(raw_decision, session_id=session_id)
     current_mode = api._normalize_mode_value(session.get("mode"), default="ask")

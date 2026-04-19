@@ -333,7 +333,7 @@ export const postWorkspacePatch = async (
 export const postWorkspaceRootSelect = async (
   rootPath: string,
   headers: Record<string, string>,
-): Promise<{ pendingApproval: boolean }> => {
+): Promise<{ pendingApproval: boolean; rootPath: string }> => {
   const { response, payload } = await fetchJson('/ui/api/workspace/root/select', {
     method: 'POST',
     headers: {
@@ -343,12 +343,15 @@ export const postWorkspaceRootSelect = async (
     body: JSON.stringify({ root_path: rootPath }),
   });
   if (response.status === 202) {
-    return { pendingApproval: true };
+    return { pendingApproval: true, rootPath: '' };
   }
   if (!response.ok) {
     throwWorkspaceError(payload, 'Failed to change workspace root.');
   }
-  return { pendingApproval: false };
+  return {
+    pendingApproval: false,
+    rootPath: getString(payload, 'root_path') ?? '',
+  };
 };
 
 export const postWorkspaceIndex = async (

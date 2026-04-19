@@ -528,6 +528,66 @@ def test_ui_decision_respond_chat_run_missing_file_ack() -> None:
     asyncio.run(run())
 
 
+def test_ui_decision_respond_workspace_root_select_returns_root_path(tmp_path) -> None:  # noqa: ANN001
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub = client.server.app["ui_hub"]
+            target_root = Path.cwd() / "sandbox" / "project" / "approved-root"
+            target_root.mkdir(parents=True, exist_ok=True)
+            decision_payload = {
+                "id": "decision-workspace-root-1",
+                "kind": "approval",
+                "decision_type": "tool_approval",
+                "status": "pending",
+                "blocking": True,
+                "reason": "approval_required",
+                "summary": "workspace root change",
+                "proposed_action": {},
+                "options": [],
+                "default_option_id": None,
+                "context": {
+                    "session_id": session_id,
+                    "source_endpoint": "workspace.root_select",
+                    "resume_payload": {
+                        "root_path": str(target_root),
+                    },
+                },
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "resolved_at": None,
+            }
+            await hub.set_session_decision(session_id, decision_payload)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-workspace-root-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            payload = await respond.json()
+            assert payload.get("status") == "resolved"
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+            assert resume.get("source_endpoint") == "workspace.root_select"
+            data = resume.get("data")
+            assert isinstance(data, dict)
+            assert data.get("root_path") == str(target_root)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_decision_respond_ignores_client_control_fields_or_rejects() -> None:
     async def run() -> None:
         agent = WorkspaceDecisionAgent()

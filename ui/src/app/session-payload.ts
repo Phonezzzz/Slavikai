@@ -209,6 +209,32 @@ export const parseSelectedModel = (value: unknown): SelectedModel | null => {
   return { provider: candidate.provider, model: candidate.model };
 };
 
+export const parseWorkspaceRoot = (value: unknown): string => {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim();
+};
+
+export const parseDecisionResumeWorkspaceRoot = (value: unknown): string | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const candidate = value as {
+    source_endpoint?: unknown;
+    data?: unknown;
+  };
+  if (candidate.source_endpoint !== 'workspace.root_select') {
+    return null;
+  }
+  if (!candidate.data || typeof candidate.data !== 'object') {
+    return null;
+  }
+  const rootPath = (candidate.data as { root_path?: unknown }).root_path;
+  const normalized = parseWorkspaceRoot(rootPath);
+  return normalized || null;
+};
+
 export const parseProviderModels = (value: unknown): ProviderModels[] => {
   if (!Array.isArray(value)) {
     return [];

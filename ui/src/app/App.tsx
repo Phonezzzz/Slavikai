@@ -594,6 +594,7 @@ export default function App() {
             sessionId={runtime.selectedConversation}
             sessionHeader={SESSION_HEADER}
             modelLabel={modelLabel}
+            workspaceRoot={runtime.workspaceRoot}
             sessionPolicyLabel={runtime.sessionSecuritySummary.policyLabel}
             sessionYoloActive={runtime.sessionSecuritySummary.yoloActive}
             sessionSafeMode={runtime.sessionSecuritySummary.safeMode}
@@ -607,6 +608,7 @@ export default function App() {
             onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
             onOpenRepositoryPanel={() => overlays.setRepositoryPanelOpen(true)}
             onSendAgentMessage={(payload) => transport.handleSend(payload, 'workspace')}
+            onApplyWorkspaceRoot={runtime.applyWorkspaceRoot}
             mode={runtime.sessionMode}
             activePlan={runtime.activePlan}
             activeTask={runtime.activeTask}

@@ -5,6 +5,7 @@ import {
   extractErrorMessage,
   extractSessionIdFromPayload,
   parseAutoState,
+  parseDecisionResumeWorkspaceRoot,
   parseMessages,
   parseModeTransitions,
   parsePlanEnvelope,
@@ -15,6 +16,7 @@ import {
   parseSessionOutput,
   parseTaskExecution,
   parseUiDecision,
+  parseWorkspaceRoot,
 } from './session-payload';
 import {
   DEFAULT_SESSION_SECURITY_SUMMARY,
@@ -72,6 +74,7 @@ export type SessionRuntimeControllerResult = {
   decisionBusy: boolean;
   decisionError: string | null;
   sessionSecuritySummary: SessionSecuritySummary;
+  workspaceRoot: string;
   modeBusy: boolean;
   modeError: string | null;
   handleSelectConversation: (sessionId: string) => Promise<void>;
@@ -88,6 +91,7 @@ export type SessionRuntimeControllerResult = {
     editedPayload?: Record<string, unknown> | null,
     onResume?: (resume: unknown) => void,
   ) => Promise<void>;
+  applyWorkspaceRoot: (workspaceRoot: string) => void;
   refreshSessionSecuritySummary: () => Promise<void>;
   applyRuntimePayload: (payload: unknown) => void;
 };
@@ -276,6 +280,7 @@ export function useSessionRuntimeController({
   const [sessionSecuritySummary, setSessionSecuritySummary] = useState<SessionSecuritySummary>(
     DEFAULT_SESSION_SECURITY_SUMMARY,
   );
+  const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [sessionMode, setSessionMode] = useState<SessionMode>('ask');
   const [activePlan, setActivePlan] = useState<PlanEnvelope | null>(null);
   const [activeTask, setActiveTask] = useState<TaskExecutionState | null>(null);
@@ -406,6 +411,9 @@ export function useSessionRuntimeController({
     } catch {
       setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
     }
+    setWorkspaceRoot(
+      parseWorkspaceRoot((session as { workspace_root?: unknown } | undefined)?.workspace_root),
+    );
     setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
     setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
     setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
@@ -449,6 +457,9 @@ export function useSessionRuntimeController({
     const sessionModel = parseSelectedModel(session?.selected_model);
     setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
     setDecisionError(null);
+    setWorkspaceRoot(
+      parseWorkspaceRoot((session as { workspace_root?: unknown } | undefined)?.workspace_root),
+    );
     setSessionMode(parseSessionMode((session as { mode?: unknown } | undefined)?.mode));
     setActivePlan(parsePlanEnvelope((session as { active_plan?: unknown } | undefined)?.active_plan));
     setActiveTask(parseTaskExecution((session as { active_task?: unknown } | undefined)?.active_task));
@@ -539,6 +550,7 @@ export function useSessionRuntimeController({
   useEffect(() => {
     if (!selectedConversation) {
       setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
+      setWorkspaceRoot('');
       setModeTransitions(null);
     }
   }, [selectedConversation]);
@@ -795,6 +807,12 @@ export function useSessionRuntimeController({
       }
       transportRef.current?.applySessionPayload(payload, { applyDisplay: false });
       applyRuntimePayload(payload);
+      const resumedWorkspaceRoot = parseDecisionResumeWorkspaceRoot(
+        (payload as { resume?: unknown }).resume,
+      );
+      if (resumedWorkspaceRoot) {
+        setWorkspaceRoot(resumedWorkspaceRoot);
+      }
       onResume?.((payload as { resume?: unknown }).resume);
       await loadSessions();
     } catch (error) {
@@ -864,6 +882,7 @@ export function useSessionRuntimeController({
     decisionBusy,
     decisionError,
     sessionSecuritySummary,
+    workspaceRoot,
     modeBusy,
     modeError,
     handleSelectConversation,
@@ -876,6 +895,9 @@ export function useSessionRuntimeController({
     handlePlanExecute,
     handlePlanCancel,
     handleDecisionRespond,
+    applyWorkspaceRoot: (nextWorkspaceRoot: string) => {
+      setWorkspaceRoot(parseWorkspaceRoot(nextWorkspaceRoot));
+    },
     refreshSessionSecuritySummary,
     applyRuntimePayload,
   };
