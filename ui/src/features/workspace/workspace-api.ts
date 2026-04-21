@@ -175,7 +175,7 @@ export const postWorkspaceRun = async (
   };
 };
 
-export const postWorkspaceTerminalRun = async (
+export const postWorkspaceCommandRunnerRun = async (
   command: string,
   cwdMode: 'session_root' | 'sandbox',
   headers: Record<string, string>,
@@ -206,7 +206,7 @@ export const postWorkspaceTerminalRun = async (
     };
   }
   if (!response.ok) {
-    throwWorkspaceError(payload, 'Failed to run terminal command.');
+    throwWorkspaceError(payload, 'Failed to run command runner command.');
   }
   return {
     pendingApproval: false,

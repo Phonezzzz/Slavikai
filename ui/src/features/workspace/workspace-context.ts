@@ -131,7 +131,7 @@ export const buildWorkspaceContextAttachments = ({
   }
   if (includeTerminal && lastTerminalOutput.trim()) {
     pushAttachmentWithinBudget(attachments, budgetState, {
-      name: 'terminal-last.txt',
+      name: 'command-runner-last.txt',
       mime: 'text/plain',
       content: lastTerminalOutput,
     });
@@ -194,7 +194,7 @@ export const buildWorkspaceContextChips = ({
     },
     {
       key: 'terminal',
-      label: lastTerminalOutput.trim() ? 'Last terminal output' : 'Terminal output',
+      label: lastTerminalOutput.trim() ? 'Last command runner output' : 'Command runner output',
       enabled: includeTerminal,
       onToggle: onToggleTerminal,
       hidden: !lastTerminalOutput.trim(),

@@ -39,6 +39,7 @@ SlavikAI — серверный агент с тремя рабочими кон
 - Базовые: `fs`, `web`, `shell`, `project`.
 - Медиа: `image_analyze`, `image_generate`, `tts`, `stt`.
 - Workspace: `workspace_list`, `workspace_read`, `workspace_write`, `workspace_create`, `workspace_rename`, `workspace_move`, `workspace_delete`, `workspace_patch`, `workspace_run`, `workspace_terminal_run`.
+- `workspace_terminal_run` — restricted one-shot command runner, а не PTY terminal session.
 
 ## Sandbox и безопасность
 

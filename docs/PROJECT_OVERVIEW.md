@@ -16,6 +16,7 @@ SlavikAI — Python-агент с command lane, chat/MWV маршрутизац�
   - `slavik_meta.runtime_mode=plan|act` — `invalid_request_error` (с next_steps на UI workflow);
   - без `runtime_mode` — legacy-поведение текущего runtime.
 - Workspace-инструменты: list/read/write/create/rename/move/delete/patch/run/terminal_run.
+- `workspace_terminal_run` — restricted one-shot command runner, а не PTY terminal session.
 - Контракт `workspace_patch`: single-file hunk patch для одного `path` (без `diff --git`/`---`/`+++`).
 - Session-based выбор модели, security/tools state и approvals в UI.
 

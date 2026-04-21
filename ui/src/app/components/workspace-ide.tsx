@@ -44,7 +44,7 @@ import {
   postWorkspaceIndex,
   postWorkspaceRootSelect,
   postWorkspaceRun,
-  postWorkspaceTerminalRun,
+  postWorkspaceCommandRunnerRun,
   putWorkspaceFile,
 } from '../../features/workspace/workspace-api';
 import {
@@ -164,7 +164,7 @@ export function WorkspaceIde({
   const [selectionText, setSelectionText] = useState('');
 
   const [terminalLines, setTerminalLines] = useState<string[]>([
-    `[${terminalTimestamp()}] Workspace terminal ready.`,
+    `[${terminalTimestamp()}] Command runner ready.`,
   ]);
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalBusy, setTerminalBusy] = useState(false);
@@ -986,11 +986,11 @@ export function WorkspaceIde({
     setTerminalBusy(true);
     setTerminalLines((prev) => [...prev, `$ ${command}`]);
     try {
-      const result = await postWorkspaceTerminalRun(command, 'session_root', requestHeaders);
+      const result = await postWorkspaceCommandRunnerRun(command, 'session_root', requestHeaders);
       if (result.pendingApproval) {
         setTerminalLines((prev) => [
           ...prev,
-          `[${terminalTimestamp()}] pending approval: terminal ${command}`,
+          `[${terminalTimestamp()}] pending approval: command runner ${command}`,
         ]);
         return;
       }
@@ -1008,7 +1008,8 @@ export function WorkspaceIde({
         return next;
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to run terminal command.';
+      const message =
+        error instanceof Error ? error.message : 'Failed to run command runner command.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
     } finally {
       setTerminalBusy(false);

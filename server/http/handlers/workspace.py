@@ -1212,7 +1212,7 @@ async def handle_ui_workspace_terminal_run(request: web.Request) -> web.Response
     if not tool_result.ok:
         return error_response(
             status=400,
-            message=tool_result.error or "Не удалось выполнить команду терминала.",
+            message=tool_result.error or "Не удалось выполнить команду command runner.",
             error_type="invalid_request_error",
             code="workspace_terminal_run_failed",
         )

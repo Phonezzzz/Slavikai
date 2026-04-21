@@ -1,5 +1,5 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
-import { Play, Save, Terminal, X } from 'lucide-react';
+import { Play, Save, SquareTerminal, X } from 'lucide-react';
 import type { RefObject } from 'react';
 
 import { monacoLanguageFromPath } from './workspace-helpers';
@@ -147,14 +147,14 @@ export function WorkspaceEditorPane({
       <button
         onMouseDown={onTerminalResizeStart}
         className="h-1.5 cursor-row-resize bg-[#121218] hover:bg-[#1b1b23]"
-        aria-label="Resize terminal"
-        title="Resize terminal"
+        aria-label="Resize command runner"
+        title="Resize command runner"
       />
 
       <div className="border-t border-[#1f1f24] bg-[#09090c] flex flex-col" style={{ height: `${terminalHeight}px` }}>
         <div className="h-8 border-b border-[#1f1f24] px-3 flex items-center gap-2 text-[12px] text-[#8f8f98]">
-          <Terminal className="h-3.5 w-3.5" />
-          Terminal
+          <SquareTerminal className="h-3.5 w-3.5" />
+          Command Runner
         </div>
         <div className="flex-1 min-h-0 overflow-auto px-3 py-2 font-mono text-[12px] text-[#c4c4cd]" data-scrollbar="always">
           {terminalLines.map((line, index) => (
@@ -175,7 +175,7 @@ export function WorkspaceEditorPane({
                 onTerminalSubmit();
               }
             }}
-            placeholder="Type shell command"
+            placeholder="Run one-shot command"
             className="flex-1 bg-transparent border-0 outline-none text-[12px] text-[#d0d0d8]"
             disabled={terminalInputDisabled}
           />
