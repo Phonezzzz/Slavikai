@@ -23,13 +23,6 @@ def build_tool_fail_packet(
     summary = f"Инструмент {tool_name} не выполняется стабильно ({count}/{threshold})."
     options = [
         DecisionOption(
-            id="retry",
-            title="Повторить с тем же инструментом",
-            action=DecisionAction.RETRY,
-            payload={"tool": tool_name, "attempt": count, "threshold": threshold},
-            risk="medium",
-        ),
-        DecisionOption(
             id="adjust_threshold",
             title="Временно увеличить порог ошибок",
             action=DecisionAction.ADJUST_THRESHOLD,

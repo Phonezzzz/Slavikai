@@ -45,6 +45,6 @@ def test_decision_packet_tool_fail_threshold(tmp_path: Path, monkeypatch) -> Non
 
     payload = json.loads(response)
     assert payload["reason"] == "tool_fail"
-    assert 3 <= len(payload["options"]) <= 5
-    assert any(option["action"] == "retry" for option in payload["options"])
+    option_actions = [option["action"] for option in payload["options"]]
+    assert option_actions == ["adjust_threshold", "create_candidate", "abort"]
     assert agent.brain.calls == 0
