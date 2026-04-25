@@ -21,7 +21,7 @@
 
 ## Обязательный workflow
 
-Смотри `docs/dev_workflow.md` и `docs/merge_process.md`.
+Смотри `docs/dev_workflow.md`.
 Коротко:
 
 1. `git checkout main`
