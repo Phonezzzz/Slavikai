@@ -54,6 +54,36 @@ SlavikAI — серверный агент с тремя рабочими кон
 - Служебные endpoints: `/slavik/trace/{trace_id}`, `/slavik/tool-calls/{trace_id}`, `/slavik/feedback`, `/slavik/approve-session`.
 - UI API и workflow endpoints регистрируются в `server/http/routes.py`.
 
+## Backend PTY Terminal API
+
+Реализован в `server/terminal_manager.py` и `server/http/handlers/terminal.py`.
+
+Один PTY-терминал на сессию. Доступен только при `policy.profile = yolo`.
+
+### Endpoints
+
+| Метод | Путь | Доступ |
+|---|---|---|
+| `POST` | `/ui/api/terminal` | yolo only |
+| `GET` | `/ui/api/terminal` | владелец сессии |
+| `POST` | `/ui/api/terminal/input` | yolo only |
+| `POST` | `/ui/api/terminal/resize` | yolo only |
+| `POST` | `/ui/api/terminal/close` | владелец сессии |
+| `GET` | `/ui/api/terminal/stream` | владелец сессии (SSE) |
+
+### Правила
+
+- `create` / `input` / `resize` требуют `policy.profile = yolo`. Иначе `403 terminal_yolo_required`.
+- `get` / `close` / `stream` доступны владельцу сессии без yolo-gate.
+- `stream` поддерживает `Last-Event-ID` для replay событий из ring-буфера (256 событий).
+- `TerminalManager` регистрируется в `app["terminal_manager"]` при старте; shutdown — через `app.on_cleanup`.
+- При удалении сессии (`DELETE /ui/api/sessions/{id}`) PTY-терминал закрывается автоматически.
+
+### Разграничение с workspace_terminal_run
+
+- `workspace_terminal_run` — restricted one-shot command runner: одна команда, без PTY, через tool gateway с approvals.
+- `/ui/api/terminal/*` — полноценная PTY-сессия с интерактивным вводом, resize и SSE-стримом.
+
 ## Наблюдаемость
 
 - Trace: `logs/trace.log`.
