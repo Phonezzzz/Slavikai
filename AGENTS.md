@@ -27,8 +27,7 @@
 - `docs/PROJECT_OVERVIEW.md`
 - `docs/COMMANDS.md`
 - `docs/CONTRIBUTING.md`
-- `docs/MWV_CANONICAL_FLOW.md`
-- `docs/RUNTIME_MWV_FLOW.md`
+- `docs/MWV_FLOW.md`
 - `docs/archive/README.md` (если нужен исторический контекст)
 
 ## Rules + Context Snapshot (формат)
