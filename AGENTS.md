@@ -24,7 +24,6 @@
 ## Contextual references (читать по релевантности)
 
 - `docs/Architecture.md`
-- `docs/PROJECT_OVERVIEW.md`
 - `docs/COMMANDS.md`
 - `docs/CONTRIBUTING.md`
 - `docs/MWV_FLOW.md`
