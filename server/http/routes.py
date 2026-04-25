@@ -15,6 +15,7 @@ def register_routes(app: web.Application) -> None:
         sessions,
         settings,
         slavik,
+        terminal,
         ui_chat,
         workflow,
         workspace,
@@ -118,6 +119,12 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post(
         "/ui/api/workspace/terminal/run", workspace.handle_ui_workspace_terminal_run
     )
+    app.router.add_post("/ui/api/terminal", terminal.handle_ui_terminal_create)
+    app.router.add_get("/ui/api/terminal", terminal.handle_ui_terminal_get)
+    app.router.add_get("/ui/api/terminal/stream", terminal.handle_ui_terminal_stream)
+    app.router.add_post("/ui/api/terminal/input", terminal.handle_ui_terminal_input)
+    app.router.add_post("/ui/api/terminal/resize", terminal.handle_ui_terminal_resize)
+    app.router.add_post("/ui/api/terminal/close", terminal.handle_ui_terminal_close)
     app.router.add_post("/ui/api/chat/send", ui_chat.handle_ui_chat_send)
     app.router.add_post("/ui/api/tools/project", project.handle_ui_project_command)
     app.router.add_get("/ui/api/events/stream", events.handle_ui_events_stream)

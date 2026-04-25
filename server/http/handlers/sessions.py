@@ -30,6 +30,7 @@ from server.http_api import (
     _utc_iso,
     _workspace_root_for_session,
 )
+from server.terminal_manager import TerminalManager
 from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession
 from shared.models import JSONValue
@@ -764,6 +765,8 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
+    terminal_manager = cast(TerminalManager, request.app["terminal_manager"])
+    await terminal_manager.delete_session(session_id)
     deleted = await hub.delete_session(session_id)
     if not deleted:
         return error_response(
