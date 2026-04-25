@@ -19,9 +19,7 @@
 - Для актуальных правил и фактического поведения смотри:
   - `../DevRules.md`
   - `../Architecture.md`
-  - `../PROJECT_OVERVIEW.md`
   - `../COMMANDS.md`
   - `../CONTRIBUTING.md`
-  - `../MWV_CANONICAL_FLOW.md`
-  - `../RUNTIME_MWV_FLOW.md`
+  - `../MWV_FLOW.md`
 - Документы из `docs/archive/` читать только как исторический контекст.
