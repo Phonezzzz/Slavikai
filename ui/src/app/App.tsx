@@ -588,7 +588,7 @@ export default function App() {
         workspaceExplorerVisible={workspaceExplorerVisible}
       />
 
-      <div className="flex-1 min-w-0 relative">
+      <div className="relative h-full min-h-0 min-w-0 flex-1 overflow-hidden">
         {activeView === 'workspace' ? (
           <WorkspaceSessionScreen
             sessionId={runtime.selectedConversation}
@@ -639,7 +639,6 @@ export default function App() {
             messages={transport.canvasMessages}
             pendingMessage={transport.pendingCanvasMessage}
             streamingAssistantMessage={transport.streamingAssistantCanvasMessage}
-            showAssistantLoading={transport.showAssistantLoading}
             sending={transport.sending}
             modelLabel={modelLabel}
             statusMessage={statusMessage}

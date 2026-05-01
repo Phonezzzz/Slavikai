@@ -9,7 +9,6 @@ type ChatSessionScreenProps = {
   messages: CanvasMessage[];
   pendingMessage: CanvasMessage | null;
   streamingAssistantMessage: CanvasMessage | null;
-  showAssistantLoading: boolean;
   sending: boolean;
   modelLabel: string;
   statusMessage: string | null;
@@ -40,7 +39,6 @@ export function ChatSessionScreen({
   messages,
   pendingMessage,
   streamingAssistantMessage,
-  showAssistantLoading,
   sending,
   modelLabel,
   statusMessage,
@@ -64,33 +62,34 @@ export function ChatSessionScreen({
   onDownloadAll,
 }: ChatSessionScreenProps) {
   return (
-    <>
-      <Canvas
-        className="h-full"
-        messages={messages}
-        pendingMessage={pendingMessage}
-        streamingAssistantMessage={streamingAssistantMessage}
-        showAssistantLoading={showAssistantLoading}
-        sending={sending}
-        onSendMessage={onSendMessage}
-        onSendFeedback={onSendFeedback}
-        modelName={modelLabel}
-        onOpenSessionDrawer={onOpenSessionDrawer}
-        statusMessage={statusMessage}
-        longPasteToFileEnabled={longPasteToFileEnabled}
-        longPasteThresholdChars={longPasteThresholdChars}
-        forceCanvasNext={forceCanvasNext}
-        onToggleForceCanvasNext={onToggleForceCanvasNext}
-        decision={decision}
-        decisionBusy={decisionBusy}
-        decisionError={decisionError}
-        onDecisionRespond={onDecisionRespond}
-      />
+    <div className="relative flex h-full min-h-0 w-full overflow-hidden">
+      <div className="h-full min-h-0 min-w-0 flex-1">
+        <Canvas
+          className="h-full min-h-0"
+          messages={messages}
+          pendingMessage={pendingMessage}
+          streamingAssistantMessage={streamingAssistantMessage}
+          sending={sending}
+          onSendMessage={onSendMessage}
+          onSendFeedback={onSendFeedback}
+          modelName={modelLabel}
+          onOpenSessionDrawer={onOpenSessionDrawer}
+          statusMessage={statusMessage}
+          longPasteToFileEnabled={longPasteToFileEnabled}
+          longPasteThresholdChars={longPasteThresholdChars}
+          forceCanvasNext={forceCanvasNext}
+          onToggleForceCanvasNext={onToggleForceCanvasNext}
+          decision={decision}
+          decisionBusy={decisionBusy}
+          decisionError={decisionError}
+          onDecisionRespond={onDecisionRespond}
+        />
+      </div>
 
       {!artifactPanelOpen ? (
         <button
           onClick={onOpenArtifactPanel}
-          className="absolute right-4 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-[#141418] border border-[#1f1f24] hover:border-[#2a2a30] hover:bg-[#1b1b20] flex items-center justify-center transition-all cursor-pointer shadow-lg shadow-black/30"
+          className="absolute right-4 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-[#1f1f24] bg-[#141418] shadow-lg shadow-black/30 transition-all hover:border-[#2a2a30] hover:bg-[#1b1b20]"
           title="Open Artifacts"
         >
           <PanelRight className="w-4.5 h-4.5 text-[#888]" />
@@ -105,6 +104,6 @@ export function ChatSessionScreen({
         onDownloadArtifact={onDownloadArtifact}
         onDownloadAll={onDownloadAll}
       />
-    </>
+    </div>
   );
 }

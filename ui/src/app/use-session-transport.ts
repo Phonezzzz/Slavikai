@@ -56,13 +56,11 @@ export type SessionTransportResult = {
   pendingSessionId: string | null;
   chatStreamingState: ChatStreamState | null;
   workspaceStreamingState: ChatStreamState | null;
-  awaitingFirstAssistantChunk: boolean;
   canvasMessages: CanvasMessage[];
   pendingCanvasMessage: CanvasMessage | null;
   streamingAssistantCanvasMessage: CanvasMessage | null;
   workspaceMessages: CanvasMessage[];
   artifacts: Artifact[];
-  showAssistantLoading: boolean;
   handleSend: (payload: CanvasSendPayload, lane?: MessageLane) => Promise<boolean>;
   bridge: SessionTransportBridge;
 };
@@ -169,7 +167,6 @@ export function useSessionTransport({
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
   const [workspaceStreamingState, setWorkspaceStreamingState] = useState<ChatStreamState | null>(null);
-  const [awaitingFirstAssistantChunk, setAwaitingFirstAssistantChunk] = useState(false);
 
   const clearConversationState = () => {
     setChatMessages([]);
@@ -182,7 +179,6 @@ export function useSessionTransport({
     setPendingSessionId(null);
     setChatStreamingState(null);
     setWorkspaceStreamingState(null);
-    setAwaitingFirstAssistantChunk(false);
   };
 
   const applyLoadedConversation = (snapshot: {
@@ -201,7 +197,6 @@ export function useSessionTransport({
     setPendingSessionId(null);
     setChatStreamingState(null);
     setWorkspaceStreamingState(null);
-    setAwaitingFirstAssistantChunk(false);
     setMessageRuntimeMetaById(() => {
       const next: Record<string, MessageRuntimeMeta> = {};
       snapshot.chatMessages.forEach((message) => {
@@ -317,12 +312,6 @@ export function useSessionTransport({
   };
 
   useEffect(() => {
-    if (!sending) {
-      setAwaitingFirstAssistantChunk(false);
-    }
-  }, [sending]);
-
-  useEffect(() => {
     if (typeof window === 'undefined' || !selectedConversation) {
       return;
     }
@@ -380,7 +369,6 @@ export function useSessionTransport({
         if (!streamId) {
           return;
         }
-        setAwaitingFirstAssistantChunk(false);
         if (lane === 'workspace') {
           setWorkspaceStreamingState({ streamId, content: '' });
         } else {
@@ -396,7 +384,6 @@ export function useSessionTransport({
         if (!streamId || !delta) {
           return;
         }
-        setAwaitingFirstAssistantChunk(false);
         if (lane === 'workspace') {
           setWorkspaceStreamingState((prev) => {
             if (!prev || prev.streamId !== streamId) {
@@ -459,7 +446,6 @@ export function useSessionTransport({
       }
       const uiArtifactId = toOutputArtifactUiId(artifactId);
       if (envelope.type === 'canvas.stream.start') {
-        setAwaitingFirstAssistantChunk(false);
         onOpenStreamedArtifact(uiArtifactId);
         setStreamingContentByArtifactId((prev) => ({ ...prev, [uiArtifactId]: '' }));
         return;
@@ -469,7 +455,6 @@ export function useSessionTransport({
         if (!delta) {
           return;
         }
-        setAwaitingFirstAssistantChunk(false);
         setStreamingContentByArtifactId((prev) => ({
           ...prev,
           [uiArtifactId]: `${prev[uiArtifactId] ?? ''}${delta}`,
@@ -512,7 +497,6 @@ export function useSessionTransport({
       setChatStreamingState(null);
     }
     const forceCanvasForRequest = lane === 'chat' ? forceCanvasNext : false;
-    setAwaitingFirstAssistantChunk(true);
     setSending(true);
     try {
       const response = await fetch('/ui/api/chat/send', {
@@ -615,13 +599,6 @@ export function useSessionTransport({
     }
     return next;
   }, [workspaceCanvasMessages, pendingWorkspaceCanvasMessage, streamingWorkspaceAssistantMessage]);
-  const showAssistantLoading = useMemo(
-    () =>
-      sending &&
-      awaitingFirstAssistantChunk &&
-      (!chatStreamingState || !chatStreamingState.content.trim()),
-    [awaitingFirstAssistantChunk, chatStreamingState, sending],
-  );
   const artifacts = useMemo(
     () => buildArtifactsFromSources(sessionArtifacts, sessionFiles, streamingContentByArtifactId),
     [sessionArtifacts, sessionFiles, streamingContentByArtifactId],
@@ -638,13 +615,11 @@ export function useSessionTransport({
     pendingSessionId,
     chatStreamingState,
     workspaceStreamingState,
-    awaitingFirstAssistantChunk,
     canvasMessages,
     pendingCanvasMessage,
     streamingAssistantCanvasMessage,
     workspaceMessages,
     artifacts,
-    showAssistantLoading,
     handleSend,
     bridge: {
       applyLoadedConversation,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
 from typing import Literal, Protocol
 
 from shared.models import JSONValue
@@ -21,50 +20,6 @@ def _split_chat_stream_chunks(content: str) -> list[str]:
         content[idx : idx + CHAT_STREAM_CHUNK_SIZE]
         for idx in range(0, len(content), CHAT_STREAM_CHUNK_SIZE)
     ]
-
-
-def _stream_preview_indicates_canvas(
-    preview_text: str,
-    *,
-    canvas_char_threshold: int,
-    canvas_code_line_threshold: int,
-    extract_named_files_from_output_fn: Callable[[str], Sequence[object]],
-    extract_named_file_markers_fn: Callable[[str], list[str]],
-    auto_detector: Callable[[str], dict[str, str] | None] | None = None,
-) -> bool:
-    """Определяет по превью, должен ли стрим идти в Canvas.
-
-    Улучшенная версия с поддержкой AutoCanvasDetector.
-
-    Args:
-        preview_text: Текущий буфер текста
-        canvas_char_threshold: Порог по символам
-        canvas_code_line_threshold: Порог по строкам кода
-        extract_named_files_from_output_fn: Функция извлечения файлов
-        extract_named_file_markers_fn: Функция извлечения имён файлов
-        auto_detector: Опциональная функция-детектор (chunk -> decision | None)
-    """
-    normalized = preview_text.strip()
-    if not normalized:
-        return False
-
-    # Если есть auto_detector, используем его
-    if auto_detector is not None:
-        result = auto_detector(normalized)
-        if result is not None:
-            return result.get("action") == "promote_to_canvas"
-
-    # Fallback на размер
-    if len(normalized) >= canvas_char_threshold:
-        return True
-    if len(normalized.splitlines()) >= canvas_code_line_threshold:
-        return True
-    if extract_named_files_from_output_fn(normalized):
-        return True
-    tail = normalized[-320:]
-    if "```" in tail and extract_named_file_markers_fn(tail):
-        return True
-    return False
 
 
 def _stream_preview_ready_for_chat(preview_text: str, *, chat_stream_warmup_chars: int) -> bool:

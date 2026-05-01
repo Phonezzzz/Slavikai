@@ -6,7 +6,7 @@ import pytest
 from .fakes import *
 
 
-def test_ui_chat_send_canvas_stream_emits_chat_status_and_canvas_stream() -> None:
+def test_ui_chat_send_canvas_stream_keeps_full_answer_in_chat() -> None:
     async def run() -> None:
         client = await _create_client(StreamNamedFileArtifactsAgent())
         try:
@@ -64,7 +64,7 @@ def test_ui_chat_send_canvas_stream_emits_chat_status_and_canvas_stream() -> Non
                     chat_deltas.append(delta)
             assert chat_deltas
             assert chat_lanes == {"chat"}
-            assert all("import time" not in delta for delta in chat_deltas)
+            assert any("import time" in delta for delta in chat_deltas)
             stream_resp.close()
         finally:
             await client.close()
@@ -72,7 +72,7 @@ def test_ui_chat_send_canvas_stream_emits_chat_status_and_canvas_stream() -> Non
     asyncio.run(run())
 
 
-def test_ui_chat_send_canvas_keeps_status_when_stream_started_before_canvas_detection() -> None:
+def test_ui_chat_send_canvas_keeps_full_answer_when_file_appears_late() -> None:
     async def run() -> None:
         client = await _create_client(LateNamedFileStreamAgent())
         try:
@@ -100,8 +100,8 @@ def test_ui_chat_send_canvas_keeps_status_when_stream_started_before_canvas_dete
             assert isinstance(last_message, dict)
             assistant_text = last_message.get("content")
             assert isinstance(assistant_text, str)
-            assert assistant_text.startswith("Статус: результат сформирован в Canvas")
-            assert "import time" not in assistant_text
+            assert assistant_text.startswith("Это подготовка результата")
+            assert "import time" in assistant_text
             artifacts = send_payload.get("artifacts")
             assert isinstance(artifacts, list)
             assert artifacts
@@ -179,7 +179,7 @@ def test_ui_events_stream_includes_agent_activity() -> None:
     asyncio.run(run())
 
 
-def test_ui_events_stream_includes_canvas_stream_events() -> None:
+def test_ui_events_stream_long_text_output_stays_in_chat() -> None:
     async def run() -> None:
         client = await _create_client(LongCodeAgent())
         try:
@@ -205,9 +205,12 @@ def test_ui_events_stream_includes_canvas_stream_events() -> None:
             assert send_resp.status == 200
 
             event_types = await _read_sse_event_types(stream_resp, max_events=64)
-            assert "canvas.stream.start" in event_types
-            assert "canvas.stream.delta" in event_types
-            assert "canvas.stream.done" in event_types
+            assert "chat.stream.start" in event_types
+            assert "chat.stream.delta" in event_types
+            assert "chat.stream.done" in event_types
+            assert "canvas.stream.start" not in event_types
+            assert "canvas.stream.delta" not in event_types
+            assert "canvas.stream.done" not in event_types
             stream_resp.close()
         finally:
             await client.close()

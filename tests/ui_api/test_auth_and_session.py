@@ -614,7 +614,7 @@ def test_ui_chat_send_strips_mwv_report_block() -> None:
     asyncio.run(run())
 
 
-def test_ui_chat_send_auto_routes_long_output_to_canvas() -> None:
+def test_ui_chat_send_long_code_stays_in_chat_without_artifact() -> None:
     async def run() -> None:
         client = await _create_client(LongCodeAgent())
         try:
@@ -638,10 +638,10 @@ def test_ui_chat_send_auto_routes_long_output_to_canvas() -> None:
             assert isinstance(last, dict)
             last_content = last.get("content")
             assert isinstance(last_content, str)
-            assert last_content == "Статус: результат сформирован в Canvas."
+            assert last_content.startswith("```python")
             display = payload.get("display")
             assert isinstance(display, dict)
-            assert display.get("target") == "canvas"
+            assert display.get("target") == "chat"
             assert display.get("forced") is False
             output_payload = payload.get("output")
             assert isinstance(output_payload, dict)
@@ -650,7 +650,7 @@ def test_ui_chat_send_auto_routes_long_output_to_canvas() -> None:
             assert output_content.startswith("```python")
             artifacts = payload.get("artifacts")
             assert isinstance(artifacts, list)
-            assert artifacts
+            assert artifacts == []
         finally:
             await client.close()
 
@@ -739,7 +739,9 @@ def test_ui_chat_send_named_files_create_file_artifacts_and_canvas() -> None:
             assert isinstance(last_message, dict)
             assistant_text = last_message.get("content")
             assert isinstance(assistant_text, str)
-            assert assistant_text.startswith("Статус: результат сформирован в Canvas")
+            assert assistant_text.startswith("Код (`clock.py`):")
+            assert "import time" in assistant_text
+            assert "Скрипт (`clock.sh`):" in assistant_text
 
             download_resp = await client.get(
                 f"/ui/api/sessions/{session_id}/artifacts/{artifact_ids[0]}/download",

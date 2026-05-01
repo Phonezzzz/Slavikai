@@ -26,12 +26,10 @@ from server.http.common.idempotency import (
 )
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
-    CANVAS_STATUS_CHARS_STEP,
     MAX_CONTENT_CHARS,
     MAX_TOTAL_PAYLOAD_CHARS,
     UI_SESSION_HEADER,
     _apply_agent_runtime_state,
-    _build_canvas_chat_summary,
     _build_output_artifacts,
     _build_ui_approval_decision,
     _decision_is_pending_blocking,
@@ -50,7 +48,6 @@ from server.http_api import (
     _publish_chat_stream_done,
     _publish_chat_stream_from_text,
     _publish_chat_stream_start,
-    _request_likely_canvas,
     _resolve_agent_for_ui_session,
     _resolve_provider_api_key,
     _resolve_ui_session_id_for_principal,
@@ -60,7 +57,6 @@ from server.http_api import (
     _set_current_plan_step_status,
     _should_render_result_in_canvas,
     _split_chat_stream_chunks,
-    _stream_preview_indicates_canvas,
     _stream_preview_ready_for_chat,
     _sync_session_runtime_override,
     _tool_calls_for_trace_id,
@@ -769,21 +765,13 @@ async def handle_ui_chat_send(
                 phase="agent.respond.start",
                 detail="chat",
             )
-            request_prefers_canvas = lane == "chat" and (
-                force_canvas or _request_likely_canvas(content_raw)
-            )
             response_raw: str
             respond_stream_method = getattr(agent, "respond_stream", None)
             if callable(respond_stream_method):
                 stream_text = ""
                 pending_chat_chunks: list[str] = []
-                chat_stream_mode: Literal["pending", "chat", "canvas"] = (
-                    "canvas" if request_prefers_canvas else "pending"
-                )
+                chat_stream_mode: Literal["pending", "chat"] = "pending"
                 chat_content_stream_open = False
-                canvas_status_stream_open = False
-                canvas_status_chars = 0
-                next_canvas_status_at = CANVAS_STATUS_CHARS_STEP
                 try:
                     for stream_item in respond_stream_method(llm_messages):
                         delta = ""
@@ -807,39 +795,6 @@ async def handle_ui_chat_send(
                             stream_text = delta
                         else:
                             stream_text = f"{stream_text}{delta}"
-                        if chat_stream_mode == "canvas":
-                            if delta_mode == "replace":
-                                canvas_status_chars = len(delta)
-                            else:
-                                canvas_status_chars += len(delta)
-                            if not canvas_status_stream_open:
-                                await _publish_chat_stream_start(
-                                    hub,
-                                    session_id=session_id,
-                                    stream_id=chat_stream_id,
-                                    lane=lane,
-                                )
-                                await _publish_chat_stream_delta(
-                                    hub,
-                                    session_id=session_id,
-                                    stream_id=chat_stream_id,
-                                    delta="Статус: формирую результат в Canvas...",
-                                    lane=lane,
-                                )
-                                live_stream_sent = True
-                                canvas_status_stream_open = True
-                                continue
-                            if canvas_status_chars >= next_canvas_status_at:
-                                await _publish_chat_stream_delta(
-                                    hub,
-                                    session_id=session_id,
-                                    stream_id=chat_stream_id,
-                                    delta="\nСтатус: обновляю содержимое Canvas...",
-                                    lane=lane,
-                                )
-                                live_stream_sent = True
-                                next_canvas_status_at += CANVAS_STATUS_CHARS_STEP
-                            continue
                         if chat_stream_mode == "chat":
                             if delta_mode == "replace":
                                 await _publish_chat_stream_delta(
@@ -889,9 +844,6 @@ async def handle_ui_chat_send(
                         else:
                             pending_chat_chunks.append(delta)
                             pending_preview = "".join(pending_chat_chunks)
-                        if lane == "chat" and _stream_preview_indicates_canvas(pending_preview):
-                            chat_stream_mode = "canvas"
-                            continue
                         if not _stream_preview_ready_for_chat(pending_preview):
                             continue
                         chat_stream_mode = "chat"
@@ -925,6 +877,28 @@ async def handle_ui_chat_send(
                                 live_stream_sent = True
                                 await asyncio.sleep(0.005)
                         pending_chat_chunks = []
+                    pending_preview = "".join(pending_chat_chunks).strip()
+                    if pending_preview and not chat_content_stream_open:
+                        chat_stream_mode = "chat"
+                        await _publish_chat_stream_start(
+                            hub,
+                            session_id=session_id,
+                            stream_id=chat_stream_id,
+                            lane=lane,
+                        )
+                        chat_content_stream_open = True
+                        for chunk in _split_chat_stream_chunks(pending_preview):
+                            await _publish_chat_stream_delta(
+                                hub,
+                                session_id=session_id,
+                                stream_id=chat_stream_id,
+                                delta=chunk,
+                                mode="append",
+                                lane=lane,
+                            )
+                            live_stream_sent = True
+                            await asyncio.sleep(0.005)
+                        pending_chat_chunks = []
                     if chat_content_stream_open:
                         await _publish_chat_stream_done(
                             hub,
@@ -933,14 +907,6 @@ async def handle_ui_chat_send(
                             lane=lane,
                         )
                         chat_content_stream_open = False
-                    if canvas_status_stream_open:
-                        await _publish_chat_stream_done(
-                            hub,
-                            session_id=session_id,
-                            stream_id=chat_stream_id,
-                            lane=lane,
-                        )
-                        canvas_status_stream_open = False
                     response_raw_candidate = getattr(agent, "last_stream_response_raw", None)
                     if isinstance(response_raw_candidate, str) and response_raw_candidate.strip():
                         response_raw = response_raw_candidate
@@ -960,14 +926,6 @@ async def handle_ui_chat_send(
                             lane=lane,
                         )
                         chat_content_stream_open = False
-                    if canvas_status_stream_open:
-                        await _publish_chat_stream_done(
-                            hub,
-                            session_id=session_id,
-                            stream_id=chat_stream_id,
-                            lane=lane,
-                        )
-                        canvas_status_stream_open = False
                     response_raw = agent.respond(llm_messages)
             else:
                 response_raw = agent.respond(llm_messages)
@@ -1166,6 +1124,7 @@ async def handle_ui_chat_send(
                     files_from_tools=files_from_tools,
                     named_files_count=named_files_count,
                     force_canvas=force_canvas,
+                    user_input=content_raw,
                 )
                 else "chat"
             )
@@ -1205,14 +1164,7 @@ async def handle_ui_chat_send(
                 lane=lane,
             )
         if lane == "chat":
-            chat_summary = (
-                response_text
-                if approval_request is not None or display_target == "chat" or force_canvas
-                else _build_canvas_chat_summary(
-                    artifact_title=None,
-                    content_preview=None,
-                )
-            )
+            chat_summary = response_text
         else:
             chat_summary = response_text
         assistant_message = hub.create_message(

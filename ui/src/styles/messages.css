@@ -24,11 +24,8 @@
 .message-card {
   max-width: min(100%, 960px);
   width: fit-content;
-  border: 1px solid rgba(76, 78, 90, 0.35);
-  border-radius: 12px;
-  background: rgba(17, 18, 24, 0.86);
   color: #d7d9e3;
-  padding: 10px 12px;
+  padding: 0;
 }
 
 .message-renderer--chat .message-card {
@@ -39,15 +36,13 @@
 .message-renderer--workspace .message-card {
   width: 100%;
   max-width: 100%;
-  border-radius: 10px;
-  padding: 8px 10px;
+  padding: 0;
   margin-top: 2px;
   margin-bottom: 2px;
 }
 
 .message-renderer--user .message-card {
-  background: rgba(28, 29, 38, 0.88);
-  border-color: rgba(102, 104, 122, 0.45);
+  color: #d7d9e3;
 }
 
 .message-markdown {

@@ -19,9 +19,6 @@ from config.tools_config import (
 )
 from core.approval_policy import ApprovalCategory
 from server.http.common import (
-    canvas_detector as _canvas_detector,
-)
-from server.http.common import (
     chat_payload as _chat_payload,
 )
 from server.http.common import (
@@ -175,11 +172,6 @@ DEFAULT_LONG_PASTE_THRESHOLD_CHARS: Final[int] = _ui_settings.DEFAULT_LONG_PASTE
 MIN_LONG_PASTE_THRESHOLD_CHARS: Final[int] = _ui_settings.MIN_LONG_PASTE_THRESHOLD_CHARS
 MAX_LONG_PASTE_THRESHOLD_CHARS: Final[int] = _ui_settings.MAX_LONG_PASTE_THRESHOLD_CHARS
 UI_GITHUB_REQUIRED_CATEGORIES: Final[list[ApprovalCategory]] = ["NETWORK_RISK", "EXEC_ARBITRARY"]
-CANVAS_LINE_THRESHOLD: Final[int] = _ui_artifacts.CANVAS_LINE_THRESHOLD
-CANVAS_CHAR_THRESHOLD: Final[int] = _ui_artifacts.CANVAS_CHAR_THRESHOLD
-CANVAS_CODE_LINE_THRESHOLD: Final[int] = _ui_artifacts.CANVAS_CODE_LINE_THRESHOLD
-CANVAS_DOCUMENT_LINE_THRESHOLD: Final[int] = _ui_artifacts.CANVAS_DOCUMENT_LINE_THRESHOLD
-CANVAS_STATUS_CHARS_STEP: Final[int] = _ui_artifacts.CANVAS_STATUS_CHARS_STEP
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT: Final[Path] = DEFAULT_WORKSPACE_ROOT
 MAX_DOWNLOAD_BYTES: Final[int] = 5_000_000
@@ -415,7 +407,6 @@ def _decision_mismatch_response(
     )
 
 
-_is_document_like_output = _ui_artifacts._is_document_like_output
 _request_likely_canvas = _ui_artifacts._request_likely_canvas
 
 _should_render_result_in_canvas = _ui_artifacts._should_render_result_in_canvas
@@ -428,18 +419,6 @@ _extract_named_file_markers = _ui_artifacts._extract_named_file_markers
 _normalize_code_fence_content = _ui_artifacts._normalize_code_fence_content
 _extract_named_files_from_output = _ui_artifacts._extract_named_files_from_output
 _build_output_artifacts = _ui_artifacts._build_output_artifacts
-_build_canvas_chat_summary = _ui_artifacts._build_canvas_chat_summary
-_canvas_summary_title_from_artifact = _ui_artifacts._canvas_summary_title_from_artifact
-_stream_preview_indicates_canvas = _ui_artifacts._stream_preview_indicates_canvas
-
-# Canvas detector exports
-AutoCanvasDetector = _canvas_detector.AutoCanvasDetector
-SmartRouter = _canvas_detector.SmartRouter
-CANVAS_THRESHOLDS = _canvas_detector.CANVAS_THRESHOLDS
-CODE_LANGUAGES = _canvas_detector.CODE_LANGUAGES
-handle_edge_cases = _canvas_detector.handle_edge_cases
-get_threshold_for_lang = _canvas_detector.get_threshold_for_lang
-is_code_language = _canvas_detector.is_code_language
 
 
 _stream_preview_ready_for_chat = _ui_runtime._stream_preview_ready_for_chat

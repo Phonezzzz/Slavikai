@@ -5,19 +5,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Final, Literal
 
-from server.http.common import streaming as _streaming
-from server.http.common.canvas_detector import (
-    CANVAS_THRESHOLDS,
-    CODE_LANGUAGES,
-)
 from shared.models import JSONValue
 
-# Увеличенные пороги для fallback
-CANVAS_LINE_THRESHOLD: Final[int] = 60
-CANVAS_CHAR_THRESHOLD: Final[int] = 3000
-CANVAS_CODE_LINE_THRESHOLD: Final[int] = 28  # Порог для кода
-CANVAS_DOCUMENT_LINE_THRESHOLD: Final[int] = 40  # Было 24, теперь 40 для документов
-CANVAS_STATUS_CHARS_STEP: Final[int] = 640
 _REQUEST_FILENAME_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?P<name>[A-Za-z0-9._/\-]+\.[A-Za-z0-9]{1,12})"
 )
@@ -83,24 +72,8 @@ _EXT_TO_MIME: Final[dict[str, str]] = {
 }
 
 
-def _is_document_like_output(normalized: str) -> bool:
-    """Проверяет, является ли вывод документом (не кодом)."""
-    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
-    if len(lines) < CANVAS_DOCUMENT_LINE_THRESHOLD:
-        return False
-    heading_like = sum(
-        1
-        for line in lines[: min(len(lines), 20)]
-        if line.startswith("#") or line.lower().startswith(("section ", "chapter ", "## "))
-    )
-    return heading_like >= 2
-
-
 def _request_likely_canvas(user_input: str) -> bool:
-    """Проверяет, указывает ли запрос на использование Canvas.
-
-    Учитывает более специфичные ключевые слова, чем раньше.
-    """
+    """Проверяет явный запрос на Canvas/file artifact."""
     normalized = user_input.strip().lower()
     if not normalized:
         return False
@@ -109,64 +82,13 @@ def _request_likely_canvas(user_input: str) -> bool:
     if re.search(r"\b\d+\s*(files?|файл(а|ов)?)\b", normalized):
         return True
 
-    # Более специфичные ключевые слова (убрали общие "скрипт", "script")
     keywords = (
-        # Явные запросы на файлы
-        "файл",
-        "files",
-        "readme",
-        "документ",
-        "module",
-        "класс",
-        "config",
-        "конфиг",
-        "целиком",
-        "полностью",
-        "mini app",
-        "mini ap",
-        "мини приложение",
-        "напиши файл",
-        "создай файл",
-        "сгенерируй файл",
-        "prilozhen",
-        "fail",
-        "celikom",
-        "polnost",
-        # Кодовые слова
-        "project",
-        "модуль",
-        "рефактор",
-        "refactor",
+        "canvas",
+        "канвас",
+        "артефакт",
+        "artifact",
     )
     return any(token in normalized for token in keywords)
-
-
-def _analyze_code_blocks(response_text: str) -> list[dict[str, int | str | bool]]:
-    """Анализирует блоки кода в ответе.
-
-    Returns:
-        Список словарей с info о каждом блоке: lang, lines, is_code
-    """
-    blocks = []
-    for match in _CODE_FENCE_PATTERN.finditer(response_text):
-        lang = match.group("lang").strip().lower() if match.group("lang") else "text"
-        code = match.group("code")
-        lines = code.count("\n")
-        is_code = lang in CODE_LANGUAGES
-
-        # Получаем порог для этого языка
-        threshold = CANVAS_THRESHOLDS.get(lang, CANVAS_THRESHOLDS["text"])
-
-        blocks.append(
-            {
-                "lang": lang,
-                "lines": lines,
-                "is_code": is_code,
-                "threshold": threshold,
-                "exceeds_threshold": lines >= threshold if is_code else lines >= 30,
-            }
-        )
-    return blocks
 
 
 def _should_render_result_in_canvas(
@@ -177,52 +99,14 @@ def _should_render_result_in_canvas(
     force_canvas: bool,
     user_input: str = "",
 ) -> bool:
-    """Определяет, должен ли результат отображаться в Canvas.
-
-    Улучшенная версия с учётом языка кода и контекста.
-    """
+    """Определяет, должен ли результат отображаться в Canvas."""
     if force_canvas:
+        return True
+    if _request_likely_canvas(user_input):
         return True
     if named_files_count > 0:
         return True
-    if len(files_from_tools) >= 2:
-        return True
-
-    normalized = response_text.strip()
-    if not normalized:
-        return False
-
-    # Анализируем блоки кода
-    code_blocks = _analyze_code_blocks(response_text)
-
-    # Если есть блоки кода, проверяем их по порогам
-    if code_blocks:
-        # Любой кодовый блок превышает порог -> Canvas
-        for block in code_blocks:
-            if block["is_code"] and block["exceeds_threshold"]:
-                return True
-        # Много блоков кода подряд (библиотека + пример)
-        if len(code_blocks) > 1 and sum(int(b["lines"]) for b in code_blocks) > 30:
-            return True
-
-    # Fallback на размер
-    lines = normalized.splitlines()
-    line_count = len(lines)
-    char_count = len(normalized)
-
-    if line_count >= CANVAS_LINE_THRESHOLD:
-        return True
-    if char_count >= CANVAS_CHAR_THRESHOLD:
-        return True
-
-    has_code_block = "```" in normalized
-    if len(files_from_tools) == 1 and has_code_block and line_count >= 12:
-        return True
-    if has_code_block and line_count >= CANVAS_CODE_LINE_THRESHOLD:
-        return True
-    if _is_document_like_output(normalized):
-        return True
-
+    del response_text, files_from_tools
     return False
 
 
@@ -415,71 +299,3 @@ def _build_output_artifacts(
         )
 
     return artifacts
-
-
-def _build_canvas_chat_summary(
-    *,
-    artifact_title: str | None,
-    content_preview: str | None = None,
-    user_input: str = "",
-) -> str:
-    """Возвращает summary для сообщения в chat-ленте, когда результат показан в Canvas."""
-    if isinstance(artifact_title, str):
-        normalized = artifact_title.strip()
-        if normalized:
-            # Добавляем контекст из запроса пользователя
-            context = ""
-            if content_preview:
-                preview = content_preview[:200].replace("\n", " ").strip()
-                if len(content_preview) > 200:
-                    preview += "..."
-                if preview:
-                    context = f" — {preview}"
-
-            # Для файлов с расширениями - показываем тип
-            if "." in normalized:
-                ext = normalized.rsplit(".", 1)[-1].lower()
-                if ext in CODE_LANGUAGES:
-                    return f"📄 {normalized}{context}"
-
-            return f"📄 {normalized}{context}"
-
-    # Fallback: более информативное сообщение
-    if "например" in user_input.lower():
-        return "Пример кода (см. Canvas):"
-
-    return "Статус: результат сформирован в Canvas."
-
-
-def _canvas_summary_title_from_artifact(
-    artifact: dict[str, JSONValue] | None,
-) -> str | None:
-    if artifact is None:
-        return None
-    artifact_kind = artifact.get("artifact_kind")
-    if artifact_kind != "file":
-        return None
-    file_name_raw = artifact.get("file_name")
-    if isinstance(file_name_raw, str) and file_name_raw.strip():
-        return _sanitize_download_filename(file_name_raw)
-    title_raw = artifact.get("title")
-    if not isinstance(title_raw, str):
-        return None
-    normalized = " ".join(title_raw.replace("`", " ").split())
-    if not normalized:
-        return None
-    return normalized[:80]
-
-
-def _stream_preview_indicates_canvas(preview_text: str) -> bool:
-    """Определяет по превью, должен ли стрим идти в Canvas.
-
-    Улучшенная версия с использованием AutoCanvasDetector.
-    """
-    return _streaming._stream_preview_indicates_canvas(
-        preview_text,
-        canvas_char_threshold=CANVAS_CHAR_THRESHOLD,
-        canvas_code_line_threshold=CANVAS_CODE_LINE_THRESHOLD,
-        extract_named_files_from_output_fn=_extract_named_files_from_output,
-        extract_named_file_markers_fn=_extract_named_file_markers,
-    )

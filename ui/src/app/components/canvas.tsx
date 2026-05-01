@@ -69,7 +69,6 @@ interface CanvasProps {
   messages?: CanvasMessage[];
   pendingMessage?: CanvasMessage | null;
   streamingAssistantMessage?: CanvasMessage | null;
-  showAssistantLoading?: boolean;
   sending?: boolean;
   onSendMessage?: (payload: CanvasSendPayload) => Promise<boolean> | boolean | void;
   onSendFeedback?: (interactionId: string, rating: "good" | "bad") => Promise<boolean>;
@@ -225,33 +224,12 @@ function MessageActions({
   );
 }
 
-function LoadingBubble() {
-  return (
-    <div className="flex gap-3">
-      <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center bg-[#2a2a30] border border-[#3a3a42]">
-        <img
-          src={BrainLogo}
-          alt="SlavikAI"
-          className="w-4 h-4 object-contain"
-        />
-      </div>
-      <div className="flex-1 max-w-[calc(100%-50px)]">
-        <div className="inline-flex items-center gap-2 rounded-lg border border-[#1f1f24] bg-[#111115] px-3 py-2">
-          <LoaderCircle className="h-4 w-4 animate-spin text-[#8a8a90]" />
-          <span className="text-[13px] text-[#b8b8be]">Подключаюсь к модели...</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ====== Main Canvas Component ======
 
 export function Canvas({
   messages = [],
   pendingMessage = null,
   streamingAssistantMessage = null,
-  showAssistantLoading = false,
   sending = false,
   onSendMessage,
   onSendFeedback,
@@ -361,6 +339,11 @@ export function Canvas({
   }, [longPasteThresholdChars]);
   const decisionState = getDecisionDisplayState(decision, decisionBusy, decisionError);
   const composerBlocked = decisionState.isBlocking;
+  const isCanvasStatus =
+    typeof statusMessage === "string"
+    && /canvas/i.test(statusMessage)
+    && /(result|результат|сформирован|открыт)/i.test(statusMessage);
+  const visibleStatusMessage = isCanvasStatus ? null : statusMessage;
 
   const toComposerAttachments = (
     items: Array<{ name: string; mime: string; content: string }> | undefined,
@@ -798,7 +781,7 @@ export function Canvas({
 
   return (
     <div
-      className={`flex flex-col h-full bg-transparent ${className}`}
+      className={`flex h-full min-h-0 flex-col bg-transparent ${className}`}
     >
       {/* Model selector header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#141418]">
@@ -827,7 +810,7 @@ export function Canvas({
       </div>
 
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto" data-scrollbar="auto">
+      <div className="min-h-0 flex-1 overflow-y-auto" data-scrollbar="auto">
         <div className="max-w-3xl mx-auto px-6 py-6 space-y-8">
           {displayMessages.map((msg) => {
             const isSavedMessage = !msg.transient;
@@ -867,7 +850,6 @@ export function Canvas({
               </div>
             );
           })}
-          {showAssistantLoading ? <LoadingBubble /> : null}
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -889,9 +871,9 @@ export function Canvas({
       {/* Input area */}
       <div className="border-t border-[#141418] px-4 py-3">
         <div className="max-w-3xl mx-auto">
-          {statusMessage ? (
+          {visibleStatusMessage ? (
             <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
-              {statusMessage}
+              {visibleStatusMessage}
             </div>
           ) : null}
           {sttError ? (
