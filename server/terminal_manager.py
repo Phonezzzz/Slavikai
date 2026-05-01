@@ -122,7 +122,14 @@ class TerminalManager:
             master_fd = state.master_fd
             if master_fd is None:
                 raise RuntimeError("terminal PTY is unavailable")
+            terminal_id = state.terminal_id
+            initial_output = state.output
         await asyncio.to_thread(os.write, master_fd, encoded)
+        await self._wait_for_output_quiet(
+            session_id=session_id,
+            terminal_id=terminal_id,
+            initial_output=initial_output,
+        )
         return await self.require_snapshot(session_id)
 
     async def resize(
@@ -260,6 +267,33 @@ class TerminalManager:
         if snapshot is None:
             raise KeyError("terminal not started")
         return snapshot
+
+    async def _wait_for_output_quiet(
+        self,
+        *,
+        session_id: str,
+        terminal_id: str,
+        initial_output: str,
+        timeout_seconds: float = 1.0,
+        quiet_seconds: float = 0.08,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        last_output = initial_output
+        last_change_at: float | None = None
+        while loop.time() < deadline:
+            async with self._lock:
+                state = self._states.get(session_id)
+                if state is None or state.terminal_id != terminal_id or state.status != "running":
+                    return
+                current_output = state.output
+            now = loop.time()
+            if current_output != last_output:
+                last_output = current_output
+                last_change_at = now
+            if last_change_at is not None and now - last_change_at >= quiet_seconds:
+                return
+            await asyncio.sleep(0.01)
 
     def _spawn_state(
         self,
