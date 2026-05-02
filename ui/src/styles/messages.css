@@ -148,19 +148,21 @@
 .message-markdown-inline-code {
   font-family: var(--messages-code-font-family);
   font-size: 0.8rem;
-  border: 1px solid rgba(120, 124, 145, 0.45);
-  background: rgba(18, 20, 29, 0.95);
-  color: #dce5ff;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #070707;
+  color: #8fb9ff;
   border-radius: 6px;
   padding: 0.08rem 0.34rem;
 }
 
 .message-markdown-pre {
   overflow-x: auto;
-  border: 1px solid rgba(82, 86, 104, 0.44);
-  border-radius: 10px;
-  background: rgba(13, 15, 22, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: #050505;
+  color: #858585;
   padding: 0.6rem 0.75rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
 .message-markdown-table-wrap {
@@ -190,9 +192,10 @@
   position: relative;
   margin-top: 0.5rem;
   margin-bottom: 0.5rem;
-  border: 1px solid rgba(84, 88, 106, 0.52);
-  border-radius: 10px;
-  background: #0d0f16;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: #050505;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
   overflow: hidden;
 }
 
@@ -206,9 +209,9 @@
   width: 1.8rem;
   height: 1.8rem;
   border-radius: 6px;
-  border: 1px solid rgba(107, 111, 130, 0.45);
-  background: rgba(20, 22, 33, 0.88);
-  color: #c8ccdd;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(5, 5, 5, 0.86);
+  color: #8b8b8b;
   opacity: 0;
   transition: opacity 140ms ease, color 140ms ease;
 }
@@ -219,7 +222,7 @@
 }
 
 .message-code-copy:hover {
-  color: #eef2ff;
+  color: #23d33c;
 }
 
 .message-code-html,
@@ -230,6 +233,7 @@
   font-family: var(--messages-code-font-family);
   font-size: 0.79rem;
   line-height: 1.45;
+  background: #050505;
 }
 
 .message-code-content {
@@ -242,8 +246,12 @@
   background: transparent !important;
 }
 
+.message-code-html pre.shiki span {
+  background: transparent !important;
+}
+
 .message-code-plain {
-  color: #d4d9ec;
+  color: #858585;
 }
 
 .message-diagnostic {
