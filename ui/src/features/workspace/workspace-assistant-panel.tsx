@@ -16,9 +16,9 @@ import {
   LoaderCircle,
   Mic,
   Paperclip,
+  Pause,
   RefreshCcw,
   Send,
-  Square,
   ThumbsDown,
   ThumbsUp,
   Volume2,
@@ -41,6 +41,7 @@ import type {
 } from '../../app/components/canvas';
 import { MessageRenderer } from '../messages';
 import type { RenderableMessage } from '../messages';
+import { TtsAudioPlayer, useTtsAudioPlayer } from '../audio';
 import { PlanPanel } from '../../app/components/plan-panel';
 import {
   MAX_COMPOSER_ATTACHMENTS,
@@ -119,7 +120,6 @@ export function WorkspaceAssistantPanel({
     Array<CanvasComposerAttachment & { id: string }>
   >([]);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, 'good' | 'bad'>>({});
   const [feedbackBusyMessageId, setFeedbackBusyMessageId] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
@@ -130,8 +130,7 @@ export function WorkspaceAssistantPanel({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
+  const ttsPlayer = useTtsAudioPlayer();
 
   const visibleMessages = useMemo(() => messages.slice(-24), [messages]);
   const renderItems = useMemo<RenderableMessage[]>(() => {
@@ -176,15 +175,6 @@ export function WorkspaceAssistantPanel({
 
   useEffect(() => {
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = '';
-        audioRef.current = null;
-      }
-      if (audioUrlRef.current) {
-        URL.revokeObjectURL(audioUrlRef.current);
-        audioUrlRef.current = null;
-      }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       }
@@ -203,19 +193,6 @@ export function WorkspaceAssistantPanel({
       return body.error.message;
     }
     return fallback;
-  };
-
-  const stopPlayback = () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = '';
-      audioRef.current = null;
-    }
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
-    }
-    setSpeakingMessageId(null);
   };
 
   const pushComposerAttachments = (attachments: CanvasComposerAttachment[]): boolean => {
@@ -353,55 +330,6 @@ export function WorkspaceAssistantPanel({
       content: source.content.trim(),
       attachments: source.attachments ?? [],
     });
-  };
-
-  const handleListenToggle = async (message: CanvasMessage) => {
-    if (!message.content.trim()) {
-      return;
-    }
-    if (speakingMessageId === message.messageId) {
-      stopPlayback();
-      return;
-    }
-
-    stopPlayback();
-    setSttError(null);
-    try {
-      const response = await fetch('/ui/api/tts/speak', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ text: message.content }),
-      });
-      if (!response.ok) {
-        let payload: unknown = null;
-        try {
-          payload = await response.json();
-        } catch {
-          payload = null;
-        }
-        throw new Error(extractErrorMessage(payload, 'TTS request failed.'));
-      }
-      const audioBlob = await response.blob();
-      if (audioBlob.size === 0) {
-        throw new Error('TTS returned empty audio.');
-      }
-      const objectUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(objectUrl);
-      audioRef.current = audio;
-      audioUrlRef.current = objectUrl;
-      audio.onended = () => stopPlayback();
-      audio.onerror = () => {
-        stopPlayback();
-        setSttError('Не удалось воспроизвести аудио от TTS сервиса.');
-      };
-      setSpeakingMessageId(message.messageId);
-      await audio.play();
-    } catch (error) {
-      stopPlayback();
-      setSttError(error instanceof Error ? error.message : 'TTS failed.');
-    }
   };
 
   const handleFeedback = async (message: CanvasMessage, rating: 'good' | 'bad') => {
@@ -708,13 +636,26 @@ export function WorkspaceAssistantPanel({
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleListenToggle(message)}
+                          onClick={() => {
+                            void ttsPlayer.toggle(message.messageId, message.content);
+                          }}
                           className={controlButtonClass}
-                          title={speakingMessageId === message.messageId ? 'Stop listen' : 'Listen'}
-                          aria-label={speakingMessageId === message.messageId ? 'Stop listen' : 'Listen'}
+                          title={
+                            ttsPlayer.state.activeMessageId === message.messageId
+                            && ttsPlayer.state.status === 'playing'
+                              ? 'Pause listen'
+                              : 'Listen'
+                          }
+                          aria-label={
+                            ttsPlayer.state.activeMessageId === message.messageId
+                            && ttsPlayer.state.status === 'playing'
+                              ? 'Pause listen'
+                              : 'Listen'
+                          }
                         >
-                          {speakingMessageId === message.messageId ? (
-                            <Square className="h-3.5 w-3.5" />
+                          {ttsPlayer.state.activeMessageId === message.messageId
+                          && ttsPlayer.state.status === 'playing' ? (
+                            <Pause className="h-3.5 w-3.5" />
                           ) : (
                             <Volume2 className="h-3.5 w-3.5" />
                           )}
@@ -746,6 +687,16 @@ export function WorkspaceAssistantPanel({
                       </>
                     )}
                   </div>
+                ) : null}
+                {message.role === 'assistant' && ttsPlayer.state.activeMessageId === message.messageId ? (
+                  <TtsAudioPlayer
+                    playback={ttsPlayer.state}
+                    onPlayPause={() => {
+                      void ttsPlayer.toggle(message.messageId, message.content);
+                    }}
+                    onSeek={ttsPlayer.seek}
+                    onStop={ttsPlayer.stop}
+                  />
                 ) : null}
               </div>
             );

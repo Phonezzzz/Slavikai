@@ -13,7 +13,7 @@ import {
   Edit2,
   RefreshCcw,
   Volume2,
-  Square,
+  Pause,
   ThumbsUp,
   ThumbsDown,
   Paperclip,
@@ -29,6 +29,7 @@ import {
 import BrainLogo from "../../assets/brain.png";
 import { MessageRenderer } from "../../features/messages";
 import type { RenderableMessage } from "../../features/messages";
+import { TtsAudioPlayer, useTtsAudioPlayer } from "../../features/audio";
 import type { DecisionRespondChoice, MessageRuntimeMeta, UiDecision } from "../types";
 import { getDecisionDisplayState } from "../decision-display";
 import { DecisionPanel } from "./decision-panel";
@@ -193,10 +194,10 @@ function MessageActions({
             type="button"
             onClick={onListenToggle}
             className={baseClass}
-            title={speaking ? "Stop listen" : "Listen"}
-            aria-label={speaking ? "Stop listen" : "Listen"}
+            title={speaking ? "Pause listen" : "Listen"}
+            aria-label={speaking ? "Pause listen" : "Listen"}
           >
-            {speaking ? <Square className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
+            {speaking ? <Pause className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
           </button>
           <button
             type="button"
@@ -255,7 +256,6 @@ export function Canvas({
     originalText: string;
   } | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, "good" | "bad">>(
     {},
   );
@@ -269,9 +269,8 @@ export function Canvas({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
   const caretSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  const ttsPlayer = useTtsAudioPlayer();
   const displayMessages = useMemo(() => {
     const items = [...messages];
     if (pendingMessage) {
@@ -289,15 +288,6 @@ export function Canvas({
 
   useEffect(() => {
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-        audioRef.current = null;
-      }
-      if (audioUrlRef.current) {
-        URL.revokeObjectURL(audioUrlRef.current);
-        audioUrlRef.current = null;
-      }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.stop();
       }
@@ -426,19 +416,6 @@ export function Canvas({
     return fallback;
   };
 
-  const stopPlayback = () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = "";
-      audioRef.current = null;
-    }
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
-    }
-    setSpeakingMessageId(null);
-  };
-
   const pushComposerAttachments = (attachments: CanvasComposerAttachment[]): boolean => {
     if (attachments.length === 0) {
       return true;
@@ -560,55 +537,6 @@ export function Canvas({
       content: source.content.trim(),
       attachments: source.attachments ?? [],
     });
-  };
-
-  const handleListenToggle = async (message: CanvasMessage) => {
-    if (!message.content.trim()) {
-      return;
-    }
-    if (speakingMessageId === message.messageId) {
-      stopPlayback();
-      return;
-    }
-
-    stopPlayback();
-    setSttError(null);
-    try {
-      const response = await fetch("/ui/api/tts/speak", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text: message.content }),
-      });
-      if (!response.ok) {
-        let payload: unknown = null;
-        try {
-          payload = await response.json();
-        } catch {
-          payload = null;
-        }
-        throw new Error(extractErrorMessage(payload, "TTS request failed."));
-      }
-      const audioBlob = await response.blob();
-      if (audioBlob.size === 0) {
-        throw new Error("TTS returned empty audio.");
-      }
-      const objectUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(objectUrl);
-      audioRef.current = audio;
-      audioUrlRef.current = objectUrl;
-      audio.onended = () => stopPlayback();
-      audio.onerror = () => {
-        stopPlayback();
-        setSttError("Не удалось воспроизвести аудио от TTS сервиса.");
-      };
-      setSpeakingMessageId(message.messageId);
-      await audio.play();
-    } catch (error) {
-      stopPlayback();
-      setSttError(error instanceof Error ? error.message : "TTS failed.");
-    }
   };
 
   const handleFeedback = async (message: CanvasMessage, rating: "good" | "bad") => {
@@ -827,7 +755,10 @@ export function Canvas({
                   <MessageActions
                     message={msg}
                     copied={copiedMessageId === msg.messageId}
-                    speaking={speakingMessageId === msg.messageId}
+                    speaking={
+                      ttsPlayer.state.activeMessageId === msg.messageId
+                      && ttsPlayer.state.status === "playing"
+                    }
                     feedbackRating={feedbackRating}
                     feedbackBusy={feedbackBusyMessageId === msg.messageId}
                     sending={sending}
@@ -838,13 +769,25 @@ export function Canvas({
                     }}
                     onEdit={() => handleEditMessage(msg)}
                     onRefresh={() => handleRefreshMessage(msg)}
-                    onListenToggle={() => handleListenToggle(msg)}
+                    onListenToggle={() => {
+                      void ttsPlayer.toggle(msg.messageId, msg.content);
+                    }}
                     onLike={() => {
                       void handleFeedback(msg, "good");
                     }}
                     onDislike={() => {
                       void handleFeedback(msg, "bad");
                     }}
+                  />
+                ) : null}
+                {msg.role === "assistant" && ttsPlayer.state.activeMessageId === msg.messageId ? (
+                  <TtsAudioPlayer
+                    playback={ttsPlayer.state}
+                    onPlayPause={() => {
+                      void ttsPlayer.toggle(msg.messageId, msg.content);
+                    }}
+                    onSeek={ttsPlayer.seek}
+                    onStop={ttsPlayer.stop}
                   />
                 ) : null}
               </div>
