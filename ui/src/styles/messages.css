@@ -24,6 +24,9 @@
 .message-card {
   max-width: min(100%, 960px);
   width: fit-content;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
   color: #d7d9e3;
   padding: 0;
 }
@@ -42,7 +45,10 @@
 }
 
 .message-renderer--user .message-card {
-  color: #d7d9e3;
+  background: rgba(255, 255, 255, 0.025);
+  color: #d9dbe4;
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
 }
 
 .message-markdown {
