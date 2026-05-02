@@ -23,6 +23,7 @@ class ModelConfig:
     reasoning_summary: bool | None = None
     reasoning_summary_wait: bool | None = None
     diffusing: bool | None = None
+    web_search_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -32,12 +33,25 @@ class LLMUsage:
     total_tokens: int
 
 
+@dataclass(frozen=True)
+class WebSearchEvidence:
+    requested: bool
+    executed: bool
+    provider: Literal["xai_native", "local", "none"]
+    tool_call_seen: bool = False
+    citations_count: int = 0
+    local_result_seen: bool = False
+    error: str | None = None
+
+
 @dataclass
 class LLMResult:
     text: str
     reasoning: str | None = None
     usage: LLMUsage | None = None
     raw: dict[str, JSONValue] | None = None
+    citations: list[JSONValue] | None = None
+    web_search_evidence: WebSearchEvidence | None = None
 
 
 @dataclass(frozen=True)

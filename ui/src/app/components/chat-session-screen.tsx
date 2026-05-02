@@ -11,6 +11,7 @@ type ChatSessionScreenProps = {
   streamingAssistantMessage: CanvasMessage | null;
   sending: boolean;
   modelLabel: string;
+  modelProvider: string | null;
   statusMessage: string | null;
   longPasteToFileEnabled: boolean;
   longPasteThresholdChars: number;
@@ -41,6 +42,7 @@ export function ChatSessionScreen({
   streamingAssistantMessage,
   sending,
   modelLabel,
+  modelProvider,
   statusMessage,
   longPasteToFileEnabled,
   longPasteThresholdChars,
@@ -73,6 +75,7 @@ export function ChatSessionScreen({
           onSendMessage={onSendMessage}
           onSendFeedback={onSendFeedback}
           modelName={modelLabel}
+          modelProvider={modelProvider}
           onOpenSessionDrawer={onOpenSessionDrawer}
           statusMessage={statusMessage}
           longPasteToFileEnabled={longPasteToFileEnabled}

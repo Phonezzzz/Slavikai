@@ -214,6 +214,7 @@ def _normalize_agent_decision(
     *,
     content: str,
     force_canvas: bool,
+    web_search: bool,
     lane: MessageLane,
     attachments: list[dict[str, str]],
     user_message_id: str | None,
@@ -238,6 +239,7 @@ def _normalize_agent_decision(
     source_request = dict(source_request_raw) if isinstance(source_request_raw, dict) else {}
     source_request["content"] = content
     source_request["force_canvas"] = force_canvas
+    source_request["web_search"] = web_search
     source_request["lane"] = lane
     source_request["attachments"] = attachments
     resume_payload["source_request"] = source_request
@@ -392,6 +394,18 @@ async def handle_ui_chat_send(
             )
         if lane == "workspace":
             force_canvas = False
+        web_search_raw = payload.get("web_search")
+        if web_search_raw is None:
+            web_search = False
+        elif isinstance(web_search_raw, bool):
+            web_search = web_search_raw and lane == "chat"
+        else:
+            return error_response(
+                status=400,
+                message="web_search должен быть boolean.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
         attachments_raw = payload.get("attachments")
         try:
             attachments, attachments_chars = _parse_ui_chat_attachments(attachments_raw)
@@ -442,6 +456,7 @@ async def handle_ui_chat_send(
                     "session_id": session_id,
                     "content": content_raw,
                     "force_canvas": force_canvas,
+                    "web_search": web_search,
                     "lane": lane,
                     "attachments": attachments,
                     "bypass_root_gate": bypass_root_gate,
@@ -547,6 +562,7 @@ async def handle_ui_chat_send(
                     "source_request": {
                         "content": content_raw,
                         "force_canvas": force_canvas,
+                        "web_search": web_search,
                         "lane": lane,
                         "attachments": attachments,
                     },
@@ -638,7 +654,7 @@ async def handle_ui_chat_send(
             else None
         )
 
-        if not attachments and _request_likely_web_intent(content_raw):
+        if not web_search and not attachments and _request_likely_web_intent(content_raw):
             guidance_text = (
                 "Для веб-поиска используй команду `/web <запрос>` в чате. "
                 "После этого подтвердите approval, если он потребуется."
@@ -727,6 +743,8 @@ async def handle_ui_chat_send(
             )
             try:
                 model_config = _inception_runtime_config_for_lane(selected_main_config, lane)
+                if web_search:
+                    model_config = replace(model_config, web_search_enabled=True)
                 api_key = _resolve_provider_api_key(selected_model["provider"])
                 agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
             except Exception as exc:  # noqa: BLE001
@@ -942,6 +960,7 @@ async def handle_ui_chat_send(
                     decision,
                     content=content_raw,
                     force_canvas=force_canvas,
+                    web_search=web_search,
                     lane=lane,
                     attachments=attachments,
                     user_message_id=user_message_id,
@@ -987,6 +1006,7 @@ async def handle_ui_chat_send(
                         "source_request": {
                             "content": content_raw,
                             "force_canvas": force_canvas,
+                            "web_search": web_search,
                             "lane": lane,
                             "attachments": attachments,
                         },
@@ -999,6 +1019,7 @@ async def handle_ui_chat_send(
                 )
                 source_request["content"] = content_raw
                 source_request["force_canvas"] = force_canvas
+                source_request["web_search"] = web_search
                 source_request["lane"] = lane
                 source_request["attachments"] = attachments
                 approval_resume_payload["source_request"] = source_request

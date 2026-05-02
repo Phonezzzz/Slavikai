@@ -501,6 +501,78 @@ def test_ui_chat_send_prefers_session_runtime_override_over_global_runtime(monke
     asyncio.run(run())
 
 
+def test_ui_chat_send_web_search_sets_transient_xai_model_flag(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["grok-test"], None) if provider == "xai" else ([], None),
+    )
+
+    async def run() -> None:
+        agent = CaptureConfigAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            select_resp = await client.post(
+                "/ui/api/session-model",
+                headers={"X-Slavik-Session": session_id},
+                json={"provider": "xai", "model": "grok-test"},
+            )
+            assert select_resp.status == 200
+
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "latest news", "web_search": True},
+            )
+            assert response.status == 200
+            assert agent.last_provider == "xai"
+            assert agent.last_model == "grok-test"
+            assert agent.last_web_search_enabled is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_web_search_sets_transient_non_xai_model_flag(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider: (["local-default"], None) if provider == "local" else ([], None),
+    )
+
+    async def run() -> None:
+        agent = CaptureConfigAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            runtime_model_state = client.server.app["runtime_model_state"]
+            await runtime_model_state.set_global_main(
+                ModelConfig(provider="local", model="local-default")
+            )
+
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session_id},
+                json={"content": "latest news", "web_search": True},
+            )
+            assert response.status == 200
+            assert agent.last_provider == "local"
+            assert agent.last_model == "local-default"
+            assert agent.last_web_search_enabled is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_project_command_uses_session_runtime_override_over_global_runtime(monkeypatch) -> None:
     monkeypatch.setattr(
         "server.http_api._fetch_provider_models",

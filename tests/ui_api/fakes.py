@@ -345,12 +345,14 @@ class CaptureConfigAgent(DummyAgent):
         self.last_provider: str | None = None
         self.last_model: str | None = None
         self.last_api_key: str | None = None
+        self.last_web_search_enabled: bool | None = None
 
     def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
         del persist
         self.last_provider = getattr(main_config, "provider", None)
         self.last_model = getattr(main_config, "model", None)
         self.last_api_key = main_api_key
+        self.last_web_search_enabled = getattr(main_config, "web_search_enabled", None)
 
 
 class ProjectCommandAgent(DummyAgent):

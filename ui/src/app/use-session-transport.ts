@@ -510,6 +510,7 @@ export function useSessionTransport({
           lane,
           force_canvas: forceCanvasForRequest,
           attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
+          web_search: lane === 'chat' && payload.webSearch === true ? true : undefined,
         }),
       });
       const responsePayload: unknown = await response.json();

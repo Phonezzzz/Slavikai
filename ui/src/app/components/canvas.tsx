@@ -18,6 +18,7 @@ import {
   ThumbsDown,
   Paperclip,
   Mic,
+  Globe2,
   Check,
   PanelRight,
   SlidersHorizontal,
@@ -64,6 +65,7 @@ export type CanvasComposerAttachment = {
 export type CanvasSendPayload = {
   content: string;
   attachments?: CanvasComposerAttachment[];
+  webSearch?: boolean;
 };
 
 interface CanvasProps {
@@ -75,6 +77,7 @@ interface CanvasProps {
   onSendFeedback?: (interactionId: string, rating: "good" | "bad") => Promise<boolean>;
   className?: string;
   modelName?: string;
+  modelProvider?: string | null;
   onOpenSessionDrawer?: () => void;
   statusMessage?: string | null;
   forceCanvasNext?: boolean;
@@ -236,6 +239,7 @@ export function Canvas({
   onSendFeedback,
   className = "",
   modelName = "Model not selected",
+  modelProvider = null,
   onOpenSessionDrawer,
   statusMessage = null,
   forceCanvasNext = false,
@@ -263,6 +267,7 @@ export function Canvas({
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [sttError, setSttError] = useState<string | null>(null);
+  const [webSearchNext, setWebSearchNext] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -329,6 +334,7 @@ export function Canvas({
   }, [longPasteThresholdChars]);
   const decisionState = getDecisionDisplayState(decision, decisionBusy, decisionError);
   const composerBlocked = decisionState.isBlocking;
+  const webSearchAvailable = modelProvider !== null && modelProvider.trim().length > 0;
   const isCanvasStatus =
     typeof statusMessage === "string"
     && /canvas/i.test(statusMessage)
@@ -477,19 +483,23 @@ export function Canvas({
     const previousInputValue = inputValue;
     const previousAttachments = composerAttachments;
     const previousPasteUndo = pasteUndo;
+    const previousWebSearchNext = webSearchNext;
     setInputValue("");
     setComposerAttachments([]);
     setPasteUndo(null);
     setSttError(null);
+    setWebSearchNext(false);
 
     const sent = await onSendMessage?.({
       content: trimmed,
       attachments: attachmentsPayload.length > 0 ? attachmentsPayload : undefined,
+      webSearch: previousWebSearchNext && webSearchAvailable ? true : undefined,
     });
     if (sent === false) {
       setInputValue((current) => (current.trim().length === 0 ? previousInputValue : current));
       setComposerAttachments((current) => (current.length === 0 ? previousAttachments : current));
       setPasteUndo((current) => current ?? previousPasteUndo);
+      setWebSearchNext(previousWebSearchNext);
       return;
     }
   };
@@ -928,6 +938,33 @@ export function Canvas({
               disabled={sending || isTranscribing || composerBlocked}
               data-scrollbar="always"
             />
+
+            {/* Web search button */}
+            <button
+              type="button"
+              onClick={() => setWebSearchNext((prev) => !prev)}
+              disabled={!webSearchAvailable || sending || isTranscribing || composerBlocked}
+              className={`rounded-md p-1 transition-colors pb-0.5 cursor-pointer disabled:cursor-not-allowed ${
+                webSearchNext && webSearchAvailable
+                  ? "bg-[#20301f] text-[#8edc7a]"
+                  : webSearchAvailable
+                    ? "text-[#555] hover:text-[#999]"
+                    : "text-[#444]"
+              }`}
+              title={
+                webSearchAvailable
+                  ? webSearchNext
+                    ? "Web Search enabled for next message"
+                    : modelProvider === "xai"
+                      ? "Enable xAI native Web Search for next message"
+                      : "Enable local Web Search for next message"
+                  : "Select a model to use Web Search"
+              }
+              aria-label="Toggle xAI Web Search for next message"
+              aria-pressed={webSearchNext && webSearchAvailable}
+            >
+              <Globe2 className="w-4.5 h-4.5" />
+            </button>
 
             {/* Mic button */}
             <button

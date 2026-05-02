@@ -121,6 +121,70 @@ def test_xai_generate(monkeypatch) -> None:
     assert calls["url"] == "https://api.x.ai/v1/chat/completions"
     assert calls["headers"]["Authorization"] == "Bearer xai-key"
     assert calls["json"]["model"] == "xai-model"
+    assert "tools" not in calls["json"]
+
+
+def test_xai_generate_web_search_uses_responses_api(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_post(url, json, headers, timeout):
+        calls["url"] = url
+        calls["json"] = json
+        calls["headers"] = headers
+        del timeout
+        return _mock_response(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "searched answer"},
+                        ],
+                    },
+                ],
+                "citations": [{"url": "https://example.test/source"}],
+                "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+            }
+        )
+
+    monkeypatch.setattr("llm.xai_brain.requests.post", fake_post)
+    config = ModelConfig(provider="xai", model="xai-model", web_search_enabled=True)
+    brain = XAiBrain(api_key="xai-key", default_config=config)
+
+    result = brain.generate([LLMMessage(role="user", content="latest news")])
+    assert result.text == "searched answer"
+    assert result.citations == [{"url": "https://example.test/source"}]
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == 4
+    assert calls["url"] == "https://api.x.ai/v1/responses"
+    assert calls["headers"]["Authorization"] == "Bearer xai-key"
+    assert calls["json"] == {
+        "model": "xai-model",
+        "input": [{"role": "user", "content": "latest news"}],
+        "tools": [{"type": "web_search"}],
+    }
+    assert "messages" not in calls["json"]
+    assert "search_parameters" not in calls["json"]
+
+
+def test_xai_stream_web_search_uses_responses_api(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_post(url, json, headers, timeout):
+        calls["url"] = url
+        calls["json"] = json
+        del headers, timeout
+        return _mock_response({"output_text": "streamed searched answer"})
+
+    monkeypatch.setattr("llm.xai_brain.requests.post", fake_post)
+    config = ModelConfig(provider="xai", model="xai-model", web_search_enabled=True)
+    brain = XAiBrain(api_key="xai-key", default_config=config)
+
+    chunks = list(brain.generate_stream([LLMMessage(role="user", content="latest")]))
+    assert "".join(chunks) == "streamed searched answer"
+    assert calls["url"] == "https://api.x.ai/v1/responses"
+    assert calls["json"]["tools"] == [{"type": "web_search"}]
+    assert "stream" not in calls["json"]
 
 
 def test_xai_without_key_raises(monkeypatch) -> None:

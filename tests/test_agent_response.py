@@ -4,18 +4,33 @@ from pathlib import Path
 
 from core.agent import Agent
 from llm.brain_base import Brain
-from llm.types import LLMResult, ModelConfig
-from shared.models import LLMMessage, PlanStep, PlanStepStatus, TaskPlan
+from llm.types import LLMResult, ModelConfig, WebSearchEvidence
+from shared.models import LLMMessage, PlanStep, PlanStepStatus, TaskPlan, ToolRequest, ToolResult
 
 
 class SimpleBrain(Brain):
     def __init__(self, text: str) -> None:
         self.text = text
         self.calls = 0
+        self.messages: list[LLMMessage] = []
+        self.evidence: WebSearchEvidence | None = None
 
     def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
         self.calls += 1
-        return LLMResult(text=self.text)
+        self.messages = list(messages)
+        return LLMResult(text=self.text, web_search_evidence=self.evidence)
+
+
+class FakeWebTool:
+    def __init__(self, result: ToolResult) -> None:
+        self.result = result
+        self.calls = 0
+
+    def handle(self, request: ToolRequest) -> ToolResult:
+        self.calls += 1
+        assert request.name == "web"
+        assert isinstance(request.args.get("query"), str)
+        return self.result
 
 
 class FakePlanner:
@@ -58,6 +73,90 @@ def test_agent_simple_response(tmp_path: Path) -> None:
     response = agent.respond([LLMMessage(role="user", content="привет")])
     assert "hello" in response
     assert brain.calls >= 1
+
+
+def test_agent_local_web_search_executes_before_non_xai_answer(tmp_path: Path) -> None:
+    brain = SimpleBrain("answer from verified search")
+    agent = Agent(
+        brain=brain,
+        main_config=ModelConfig(provider="local", model="local", web_search_enabled=True),
+        enable_tools={"web": True, "safe_mode": False},
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    web_tool = FakeWebTool(ToolResult.success({"output": "Source — https://example.test"}))
+    agent.tool_registry.register("web", web_tool.handle, enabled=True, capability="read")
+
+    response = agent.respond([LLMMessage(role="user", content="latest info")])
+
+    assert "answer from verified search" in response
+    assert web_tool.calls == 1
+    assert brain.calls == 1
+    assert any("Verified runtime web search evidence" in item.content for item in brain.messages)
+
+
+def test_agent_local_web_search_error_blocks_final_answer(tmp_path: Path) -> None:
+    brain = SimpleBrain("should not be emitted")
+    agent = Agent(
+        brain=brain,
+        main_config=ModelConfig(provider="local", model="local", web_search_enabled=True),
+        enable_tools={"web": True, "safe_mode": False},
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    web_tool = FakeWebTool(ToolResult.failure("SERPER_API_KEY missing"))
+    agent.tool_registry.register("web", web_tool.handle, enabled=True, capability="read")
+
+    response = agent.respond([LLMMessage(role="user", content="latest info")])
+
+    assert "web_search_not_executed: SERPER_API_KEY missing" in response
+    assert "should not be emitted" not in response
+    assert web_tool.calls == 1
+    assert brain.calls == 0
+
+
+def test_agent_xai_web_search_without_evidence_blocks_answer(tmp_path: Path) -> None:
+    brain = SimpleBrain("I checked the internet and found this.")
+    agent = Agent(
+        brain=brain,
+        main_config=ModelConfig(provider="xai", model="grok", web_search_enabled=True),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+
+    response = agent.respond([LLMMessage(role="user", content="latest info")])
+
+    assert "web_search_not_executed: xAI response contained no web search evidence" in response
+    assert "I checked the internet" not in response
+
+
+def test_agent_blocks_web_claim_without_runtime_evidence(tmp_path: Path) -> None:
+    brain = SimpleBrain("I checked the internet and found this.")
+    agent = Agent(
+        brain=brain,
+        main_config=ModelConfig(provider="local", model="local"),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+
+    response = agent.respond([LLMMessage(role="user", content="hello")])
+
+    assert (
+        "web_search_not_executed: assistant claimed web access without runtime evidence" in response
+    )
+    assert "I checked the internet" not in response
 
 
 def test_agent_plan_execution_path(tmp_path: Path) -> None:

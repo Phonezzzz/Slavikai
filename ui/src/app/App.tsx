@@ -641,6 +641,7 @@ export default function App() {
             streamingAssistantMessage={transport.streamingAssistantCanvasMessage}
             sending={transport.sending}
             modelLabel={modelLabel}
+            modelProvider={runtime.selectedModel?.provider ?? null}
             statusMessage={statusMessage}
             longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
             longPasteThresholdChars={composerSettings.longPasteThresholdChars}
