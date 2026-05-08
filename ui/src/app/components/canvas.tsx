@@ -759,7 +759,7 @@ export function Canvas({
 
       {/* Messages area */}
       <div className="min-h-0 flex-1 overflow-y-auto" data-scrollbar="auto">
-        <div className="max-w-3xl mx-auto px-6 py-6 space-y-8">
+        <div className="max-w-5xl mx-auto px-6 py-6 space-y-8">
           {displayMessages.map((msg) => {
             const isSavedMessage = !msg.transient;
             const canFeedback =
@@ -833,7 +833,7 @@ export function Canvas({
 
       {/* Input area */}
       <div className="border-t border-[#141418] px-4 py-3">
-        <div className="max-w-3xl mx-auto">
+        <div className="max-w-5xl mx-auto">
           {visibleStatusMessage ? (
             <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
               {visibleStatusMessage}
