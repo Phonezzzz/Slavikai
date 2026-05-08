@@ -19,6 +19,7 @@ import {
   Paperclip,
   Mic,
   Globe2,
+  Plus,
   Check,
   PanelRight,
   SlidersHorizontal,
@@ -268,6 +269,7 @@ export function Canvas({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [sttError, setSttError] = useState<string | null>(null);
   const [webSearchNext, setWebSearchNext] = useState(false);
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -335,6 +337,7 @@ export function Canvas({
   const decisionState = getDecisionDisplayState(decision, decisionBusy, decisionError);
   const composerBlocked = decisionState.isBlocking;
   const webSearchAvailable = modelProvider !== null && modelProvider.trim().length > 0;
+  const actionsDisabled = sending || isTranscribing || composerBlocked;
   const isCanvasStatus =
     typeof statusMessage === "string"
     && /canvas/i.test(statusMessage)
@@ -467,6 +470,24 @@ export function Canvas({
     await appendFilesToComposer(files);
   };
 
+  const handleOpenFilePicker = () => {
+    setActionsMenuOpen(false);
+    fileInputRef.current?.click();
+  };
+
+  const handleToggleWebSearch = () => {
+    if (!webSearchAvailable) {
+      return;
+    }
+    setWebSearchNext((prev) => !prev);
+    setActionsMenuOpen(false);
+  };
+
+  const handleToggleCanvasNext = () => {
+    onToggleForceCanvasNext?.();
+    setActionsMenuOpen(false);
+  };
+
   const handleSend = async () => {
     if (sending || isTranscribing) {
       return;
@@ -489,6 +510,7 @@ export function Canvas({
     setPasteUndo(null);
     setSttError(null);
     setWebSearchNext(false);
+    setActionsMenuOpen(false);
 
     const sent = await onSendMessage?.({
       content: trimmed,
@@ -733,18 +755,6 @@ export function Canvas({
           </button>
           <span className="text-[13px] text-[#8f8f95]">{modelName}</span>
         </div>
-        <button
-          onClick={onToggleForceCanvasNext}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[12px] transition-colors cursor-pointer ${
-            forceCanvasNext
-              ? "border-[#2f6a49] bg-[#173124] text-[#9fe3b8]"
-              : "border-[#1f1f24] bg-[#141418] text-[#8f8f95] hover:border-[#2a2a30] hover:text-[#c6c6cb]"
-          }`}
-          title="Принудительно открыть Canvas для следующего ответа"
-        >
-          <PanelRight className="h-3.5 w-3.5" />
-          {forceCanvasNext ? "Canvas: next ON" : "Canvas next"}
-        </button>
       </div>
 
       {/* Messages area */}
@@ -879,16 +889,62 @@ export function Canvas({
             }}
           />
           <div className="flex items-end gap-2 bg-[#141418] rounded-xl border border-[#1f1f24] focus-within:border-[#2a2a30] transition-colors px-4 py-3">
-            {/* Attachment button */}
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={sending || isTranscribing || composerBlocked}
-              className="text-[#555] hover:text-[#999] transition-colors pb-0.5 cursor-pointer disabled:cursor-not-allowed disabled:text-[#444]"
-              title="Attach file"
-            >
-              <Paperclip className="w-4.5 h-4.5" />
-            </button>
+            {/* Composer actions */}
+            <div className="relative flex-shrink-0 pb-0.5">
+              {actionsMenuOpen ? (
+                <div className="absolute bottom-8 left-0 z-20 min-w-[160px] rounded-lg border border-[#24242a] bg-[#101014] py-1 shadow-xl shadow-black/40">
+                  <button
+                    type="button"
+                    onClick={handleOpenFilePicker}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-[#d6d6db] transition-colors hover:bg-[#1a1a20]"
+                    title="Add file"
+                  >
+                    <Paperclip className="h-4 w-4 text-[#8f8f95]" />
+                    <span>Add file</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleToggleWebSearch}
+                    disabled={!webSearchAvailable}
+                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors disabled:cursor-not-allowed disabled:text-[#555] ${
+                      webSearchNext && webSearchAvailable
+                        ? "bg-[#173124] text-[#9fe3b8]"
+                        : "text-[#d6d6db] hover:bg-[#1a1a20]"
+                    }`}
+                    title="Web search"
+                    aria-pressed={webSearchNext && webSearchAvailable}
+                  >
+                    <Globe2 className="h-4 w-4 text-current" />
+                    <span>Web search</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleToggleCanvasNext}
+                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors ${
+                      forceCanvasNext
+                        ? "bg-[#173124] text-[#9fe3b8]"
+                        : "text-[#d6d6db] hover:bg-[#1a1a20]"
+                    }`}
+                    title="Canvas"
+                    aria-pressed={forceCanvasNext}
+                  >
+                    <PanelRight className="h-4 w-4 text-current" />
+                    <span>Canvas</span>
+                  </button>
+                </div>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setActionsMenuOpen((prev) => !prev)}
+                disabled={actionsDisabled}
+                className="flex h-6 w-6 items-center justify-center rounded-md text-[#666] transition-colors hover:bg-[#1b1b20] hover:text-[#aaa] cursor-pointer disabled:cursor-not-allowed disabled:text-[#444]"
+                title="Actions"
+                aria-label="Actions"
+                aria-expanded={actionsMenuOpen}
+              >
+                <Plus className="h-4.5 w-4.5" />
+              </button>
+            </div>
 
             {/* Textarea */}
             <textarea
@@ -938,33 +994,6 @@ export function Canvas({
               disabled={sending || isTranscribing || composerBlocked}
               data-scrollbar="always"
             />
-
-            {/* Web search button */}
-            <button
-              type="button"
-              onClick={() => setWebSearchNext((prev) => !prev)}
-              disabled={!webSearchAvailable || sending || isTranscribing || composerBlocked}
-              className={`rounded-md p-1 transition-colors pb-0.5 cursor-pointer disabled:cursor-not-allowed ${
-                webSearchNext && webSearchAvailable
-                  ? "bg-[#20301f] text-[#8edc7a]"
-                  : webSearchAvailable
-                    ? "text-[#555] hover:text-[#999]"
-                    : "text-[#444]"
-              }`}
-              title={
-                webSearchAvailable
-                  ? webSearchNext
-                    ? "Web Search enabled for next message"
-                    : modelProvider === "xai"
-                      ? "Enable xAI native Web Search for next message"
-                      : "Enable local Web Search for next message"
-                  : "Select a model to use Web Search"
-              }
-              aria-label="Toggle xAI Web Search for next message"
-              aria-pressed={webSearchNext && webSearchAvailable}
-            >
-              <Globe2 className="w-4.5 h-4.5" />
-            </button>
 
             {/* Mic button */}
             <button
