@@ -113,22 +113,153 @@ def _extract_citations(data: dict[str, JSONValue]) -> list[JSONValue] | None:
     return list(citations_raw)
 
 
-def _xai_web_search_tool_call_seen(data: dict[str, JSONValue]) -> bool:
+def _append_xai_citation_candidate(
+    citations: list[JSONValue],
+    candidate: JSONValue,
+) -> None:
+    if isinstance(candidate, str) and candidate.strip():
+        citations.append(candidate)
+        return
+    if not isinstance(candidate, dict):
+        return
+    direct_url = candidate.get("url")
+    if isinstance(direct_url, str) and direct_url.strip():
+        citations.append(candidate)
+        return
+    for key in ("web_citation", "x_citation", "source"):
+        nested = candidate.get(key)
+        if not isinstance(nested, dict):
+            continue
+        nested_url = nested.get("url")
+        if isinstance(nested_url, str) and nested_url.strip():
+            citations.append(nested)
+            return
+
+
+def _extract_xai_citation_urls(data: dict[str, JSONValue]) -> list[JSONValue]:
+    citations: list[JSONValue] = []
+    top_level_citations = data.get("citations")
+    if isinstance(top_level_citations, list):
+        for citation in top_level_citations:
+            _append_xai_citation_candidate(citations, citation)
+
     output_raw = data.get("output")
     if not isinstance(output_raw, list):
+        return citations
+    for item in output_raw:
+        if not isinstance(item, dict):
+            continue
+        action_raw = item.get("action")
+        if isinstance(action_raw, dict):
+            sources_raw = action_raw.get("sources")
+            if isinstance(sources_raw, list):
+                for source in sources_raw:
+                    _append_xai_citation_candidate(citations, source)
+        content_raw = item.get("content")
+        if not isinstance(content_raw, list):
+            continue
+        for block in content_raw:
+            if not isinstance(block, dict):
+                continue
+            annotations_raw = block.get("annotations")
+            if not isinstance(annotations_raw, list):
+                continue
+            for annotation in annotations_raw:
+                _append_xai_citation_candidate(citations, annotation)
+    return citations
+
+
+def _xai_tool_name_matches(value: JSONValue) -> bool:
+    return isinstance(value, str) and "web_search" in value.lower()
+
+
+def _xai_server_side_usage_seen(data: dict[str, JSONValue]) -> bool:
+    usage_raw = data.get("server_side_tool_usage")
+    if isinstance(usage_raw, dict):
+        for key, value in usage_raw.items():
+            if "web_search" not in key.lower():
+                continue
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int | float):
+                return value > 0
+            if isinstance(value, list):
+                return len(value) > 0
+            if isinstance(value, dict):
+                return len(value) > 0
+    if isinstance(usage_raw, list):
+        for item in usage_raw:
+            if isinstance(item, str) and "web_search" in item.lower():
+                return True
+            if not isinstance(item, dict):
+                continue
+            if _xai_tool_name_matches(item.get("type")) or _xai_tool_name_matches(item.get("name")):
+                return True
+    return False
+
+
+def _xai_tool_calls_seen(data: dict[str, JSONValue]) -> bool:
+    tool_calls_raw = data.get("tool_calls")
+    if not isinstance(tool_calls_raw, list):
         return False
+    for item in tool_calls_raw:
+        if not isinstance(item, dict):
+            continue
+        if _xai_tool_name_matches(item.get("type")) or _xai_tool_name_matches(item.get("name")):
+            return True
+        function_raw = item.get("function")
+        if isinstance(function_raw, dict) and _xai_tool_name_matches(function_raw.get("name")):
+            return True
+    return False
+
+
+def _xai_web_search_tool_call_seen(data: dict[str, JSONValue]) -> bool:
+    output_raw = data.get("output")
+    if isinstance(output_raw, list):
+        for item in output_raw:
+            if not isinstance(item, dict):
+                continue
+            if _xai_tool_name_matches(item.get("type")) or _xai_tool_name_matches(item.get("name")):
+                return True
+    if _xai_tool_calls_seen(data):
+        return True
+    return _xai_server_side_usage_seen(data)
+
+
+def _xai_output_item_types(data: dict[str, JSONValue]) -> list[str]:
+    output_raw = data.get("output")
+    if not isinstance(output_raw, list):
+        return []
+    item_types: list[str] = []
     for item in output_raw:
         if not isinstance(item, dict):
             continue
         type_raw = item.get("type")
         if isinstance(type_raw, str):
-            normalized = type_raw.lower()
-            if "web_search" in normalized or "search_call" in normalized:
-                return True
-        name_raw = item.get("name")
-        if isinstance(name_raw, str) and "web_search" in name_raw.lower():
-            return True
-    return False
+            item_types.append(type_raw)
+    return item_types
+
+
+def _has_server_side_tool_usage(data: dict[str, JSONValue]) -> bool:
+    usage_raw = data.get("server_side_tool_usage")
+    if isinstance(usage_raw, dict | list):
+        return len(usage_raw) > 0
+    return usage_raw is not None
+
+
+def _has_top_level_citations(data: dict[str, JSONValue]) -> bool:
+    citations_raw = data.get("citations")
+    if isinstance(citations_raw, list):
+        return len(citations_raw) > 0
+    return citations_raw is not None
+
+
+def _has_xai_web_search_evidence(
+    *,
+    tool_call_seen: bool,
+    citations_count: int,
+) -> bool:
+    return tool_call_seen or citations_count > 0
 
 
 class XAiBrain(Brain):
@@ -212,6 +343,7 @@ class XAiBrain(Brain):
             "model": cfg.model,
             "input": _responses_input(self._inject_system(messages, cfg)),
             "tools": [{"type": "web_search"}],
+            "include": ["web_search_call.action.sources"],
         }
         endpoint = _responses_endpoint_for(self.base_url)
         logger.debug(
@@ -240,18 +372,21 @@ class XAiBrain(Brain):
         if not content:
             raise RuntimeError("Пустой или некорректный ответ xAI Responses API.")
         citations = _extract_citations(data)
-        citations_count = len(citations or [])
+        evidence_citations = _extract_xai_citation_urls(data)
+        citations_count = len(evidence_citations)
         tool_call_seen = _xai_web_search_tool_call_seen(data)
+        evidence_seen = _has_xai_web_search_evidence(
+            tool_call_seen=tool_call_seen,
+            citations_count=citations_count,
+        )
         evidence = WebSearchEvidence(
             requested=True,
-            executed=tool_call_seen or citations_count > 0,
+            executed=evidence_seen,
             provider="xai_native",
             tool_call_seen=tool_call_seen,
             citations_count=citations_count,
             local_result_seen=False,
-            error=None
-            if tool_call_seen or citations_count > 0
-            else "xAI response contained no web search evidence",
+            error=None if evidence_seen else "xAI response contained no web search evidence",
         )
         logger.debug(
             "xai_web_search_response",
@@ -265,6 +400,10 @@ class XAiBrain(Brain):
                 "tool_call_seen": evidence.tool_call_seen,
                 "citations_count": evidence.citations_count,
                 "local_result_seen": evidence.local_result_seen,
+                "output_item_types": _xai_output_item_types(data),
+                "has_top_level_citations": _has_top_level_citations(data),
+                "has_server_side_tool_usage": _has_server_side_tool_usage(data),
+                "extracted_source_count": citations_count,
                 "error": evidence.error,
             },
         )

@@ -162,9 +162,142 @@ def test_xai_generate_web_search_uses_responses_api(monkeypatch) -> None:
         "model": "xai-model",
         "input": [{"role": "user", "content": "latest news"}],
         "tools": [{"type": "web_search"}],
+        "include": ["web_search_call.action.sources"],
     }
     assert "messages" not in calls["json"]
     assert "search_parameters" not in calls["json"]
+    assert result.web_search_evidence is not None
+    assert result.web_search_evidence.executed is True
+    assert result.web_search_evidence.citations_count == 1
+
+
+def test_xai_web_search_accepts_output_tool_call_evidence(monkeypatch) -> None:
+    def fake_post(url, json, headers, timeout):
+        del url, json, headers, timeout
+        return _mock_response(
+            {
+                "output": [
+                    {"type": "web_search_call", "name": "web_search"},
+                    {"type": "message", "content": [{"type": "output_text", "text": "answer"}]},
+                ],
+            }
+        )
+
+    monkeypatch.setattr("llm.xai_brain.requests.post", fake_post)
+    config = ModelConfig(provider="xai", model="xai-model", web_search_enabled=True)
+    brain = XAiBrain(api_key="xai-key", default_config=config)
+
+    result = brain.generate([LLMMessage(role="user", content="latest")])
+
+    assert result.text == "answer"
+    assert result.web_search_evidence is not None
+    assert result.web_search_evidence.executed is True
+    assert result.web_search_evidence.tool_call_seen is True
+
+
+def test_xai_web_search_accepts_action_sources_evidence(monkeypatch) -> None:
+    def fake_post(url, json, headers, timeout):
+        del url, json, headers, timeout
+        return _mock_response(
+            {
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "action": {
+                            "sources": [
+                                {"url": "https://example.test/source"},
+                                "https://example.test/other",
+                            ]
+                        },
+                    },
+                    {"type": "message", "content": [{"type": "output_text", "text": "answer"}]},
+                ],
+            }
+        )
+
+    monkeypatch.setattr("llm.xai_brain.requests.post", fake_post)
+    config = ModelConfig(provider="xai", model="xai-model", web_search_enabled=True)
+    brain = XAiBrain(api_key="xai-key", default_config=config)
+
+    result = brain.generate([LLMMessage(role="user", content="latest")])
+
+    assert result.web_search_evidence is not None
+    assert result.web_search_evidence.executed is True
+    assert result.web_search_evidence.citations_count == 2
+
+
+def test_xai_web_search_accepts_output_annotations_evidence(monkeypatch) -> None:
+    def fake_post(url, json, headers, timeout):
+        del url, json, headers, timeout
+        return _mock_response(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "answer [[1]](https://example.test/source)",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://example.test/source",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr("llm.xai_brain.requests.post", fake_post)
+    config = ModelConfig(provider="xai", model="xai-model", web_search_enabled=True)
+    brain = XAiBrain(api_key="xai-key", default_config=config)
+
+    result = brain.generate([LLMMessage(role="user", content="latest")])
+
+    assert result.web_search_evidence is not None
+    assert result.web_search_evidence.executed is True
+    assert result.web_search_evidence.citations_count == 1
+
+
+def test_xai_web_search_accepts_server_side_usage_evidence(monkeypatch) -> None:
+    def fake_post(url, json, headers, timeout):
+        del url, json, headers, timeout
+        return _mock_response(
+            {
+                "output_text": "answer",
+                "server_side_tool_usage": {"web_search_calls": 1},
+            }
+        )
+
+    monkeypatch.setattr("llm.xai_brain.requests.post", fake_post)
+    config = ModelConfig(provider="xai", model="xai-model", web_search_enabled=True)
+    brain = XAiBrain(api_key="xai-key", default_config=config)
+
+    result = brain.generate([LLMMessage(role="user", content="latest")])
+
+    assert result.web_search_evidence is not None
+    assert result.web_search_evidence.executed is True
+    assert result.web_search_evidence.tool_call_seen is True
+
+
+def test_xai_web_search_without_evidence_marks_not_executed(monkeypatch) -> None:
+    def fake_post(url, json, headers, timeout):
+        del url, json, headers, timeout
+        return _mock_response({"output_text": "plain answer"})
+
+    monkeypatch.setattr("llm.xai_brain.requests.post", fake_post)
+    config = ModelConfig(provider="xai", model="xai-model", web_search_enabled=True)
+    brain = XAiBrain(api_key="xai-key", default_config=config)
+
+    result = brain.generate([LLMMessage(role="user", content="latest")])
+
+    assert result.text == "plain answer"
+    assert result.web_search_evidence is not None
+    assert result.web_search_evidence.executed is False
+    assert result.web_search_evidence.error == "xAI response contained no web search evidence"
 
 
 def test_xai_stream_web_search_uses_responses_api(monkeypatch) -> None:
@@ -184,6 +317,7 @@ def test_xai_stream_web_search_uses_responses_api(monkeypatch) -> None:
     assert "".join(chunks) == "streamed searched answer"
     assert calls["url"] == "https://api.x.ai/v1/responses"
     assert calls["json"]["tools"] == [{"type": "web_search"}]
+    assert calls["json"]["include"] == ["web_search_call.action.sources"]
     assert "stream" not in calls["json"]
 
 

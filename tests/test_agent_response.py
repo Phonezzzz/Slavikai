@@ -139,6 +139,31 @@ def test_agent_xai_web_search_without_evidence_blocks_answer(tmp_path: Path) -> 
     assert "I checked the internet" not in response
 
 
+def test_agent_xai_web_search_with_evidence_allows_answer(tmp_path: Path) -> None:
+    brain = SimpleBrain("answer from xAI native web search")
+    brain.evidence = WebSearchEvidence(
+        requested=True,
+        executed=True,
+        provider="xai_native",
+        tool_call_seen=True,
+        citations_count=1,
+    )
+    agent = Agent(
+        brain=brain,
+        main_config=ModelConfig(provider="xai", model="grok", web_search_enabled=True),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+
+    response = agent.respond([LLMMessage(role="user", content="latest info")])
+
+    assert "answer from xAI native web search" in response
+    assert "web_search_not_executed" not in response
+
+
 def test_agent_blocks_web_claim_without_runtime_evidence(tmp_path: Path) -> None:
     brain = SimpleBrain("I checked the internet and found this.")
     agent = Agent(
