@@ -55,7 +55,9 @@ def test_unknown_request_writes_inbox(tmp_path: Path, monkeypatch) -> None:
     assert len(notes.items) == 0
 
 
-def test_tool_fail_threshold_writes_inbox_once(tmp_path: Path, monkeypatch) -> None:
+def test_disabled_command_lane_tool_does_not_write_tool_fail_inbox(
+    tmp_path: Path, monkeypatch
+) -> None:
     agent = _make_agent(tmp_path)
     monkeypatch.setenv("SKILLS_CANDIDATES_DIR", str(tmp_path / "candidates"))
     agent._memory_inbox_writer = MemoryInboxWriter(
@@ -77,4 +79,4 @@ def test_tool_fail_threshold_writes_inbox_once(tmp_path: Path, monkeypatch) -> N
         agent.respond([LLMMessage(role="user", content="/fs list")])
 
     inbox = agent._memory_inbox_store.list_items(MemoryCategory.INBOX, limit=10)
-    assert len(inbox.items) == 1
+    assert len(inbox.items) == 0

@@ -1,31 +1,21 @@
-# COMMANDS — команды агента
+# COMMANDS
 
-Команды начинаются с `/` и обрабатываются в command lane (без MWV).
-Ответы command lane помечаются строкой `Командный режим (без MWV)`.
+Current command lane is debug-only.
 
-## Доступные команды
+Supported slash commands:
 
-- `/fs list [path]` — список файлов в `sandbox/`.
-- `/fs read <path>` — чтение файла из `sandbox/`.
-- `/web <query>` — веб-запрос через `web` инструмент.
-- `/sh <command>` — запуск shell-команды с ограничениями.
-- `/project index [path]` — индексировать файлы из `sandbox/project/`.
-- `/project find <query>` — поиск по индексу `code/docs`.
-- `/plan <goal>` — построить план (transactional-only, без выполнения инструментов).
-- `/auto <goal>` — command-lane alias для one-shot auto запуска (без MWV).
-- `/imggen <prompt>` — генерация изображения.
-- `/imganalyze <path|base64|base64:...>` — анализ изображения.
-- `/trace` — последние записи trace.
-- `/end-session` — сохранить краткое резюме текущей сессии в canonical memory и закрыть short-term контекст.
+- `/trace` — show recent trace entries.
+- `/end-session` — save a short summary of the current session into canonical memory and clear short-term context.
 
-## Session mode `auto`
+Removed from command lane:
 
-- `auto` — отдельный runtime mode (к `ask|plan|act`) с контуром `planner -> N coder -> verifier`.
-- В mode-level `auto` запуск идёт через runtime orchestrator, а не через command lane.
-- `/auto ...` остаётся именно командой `/...` и всегда помечается `Командный режим (без MWV)`.
+- `/fs`
+- `/web`
+- `/sh`
+- `/project`
+- `/plan`
+- `/auto`
+- `/imggen`
+- `/imganalyze`
 
-## Важно
-
-- Команды не запускают MWV verifier.
-- Safe-mode и approvals применяются.
-- Если инструмент отключён или заблокирован, возвращается явная ошибка.
+Those capabilities must go through the normal Chat/Workspace runtime and native tool-calling/gateway path, not direct slash-command dispatch.

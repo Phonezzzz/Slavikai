@@ -95,8 +95,7 @@ def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
     agent.planner = stub  # type: ignore[assignment]
     agent.executor = executor  # type: ignore[assignment]
     result = agent.handle_tool_command("/plan goal")
-    assert "step-one" in result
-    assert "transactional-only" in result
+    assert "отключена" in result.lower()
     assert executor.run_called is False
 
 

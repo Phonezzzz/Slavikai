@@ -179,59 +179,6 @@ class AgentToolsMixin:
             return self._format_command_lane_response(response)
 
         try:
-            if cmd == "auto":
-                goal = " ".join(args)
-                result = self.handle_auto_command(goal, command_lane=True)
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
-            if cmd == "plan":
-                goal = " ".join(args)
-                plan = self.planner.build_plan(goal)
-                self.last_plan_original = plan
-                self.last_plan = plan
-                plan_preview = self._format_plan(plan)
-                result = (
-                    "Plan сформирован (transactional-only).\n"
-                    "Выполнение инструментов из /plan отключено.\n"
-                    "Что делать дальше:\n"
-                    "- Подтверди план в UI workflow.\n"
-                    "- Перейди в act-режим и запусти execute.\n"
-                    f"{plan_preview}"
-                )
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
-            if cmd == "fs":
-                operation = args[0] if args else "list"
-                path_arg = args[1] if len(args) > 1 else ""
-                req = ToolRequest(name="fs", args={"op": operation, "path": path_arg})
-                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
-                result = self._format_tool_result(tool_result)
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
-            if cmd == "web":
-                query = " ".join(args)
-                req = ToolRequest(name="web", args={"query": query})
-                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
-                result = self._format_tool_result(tool_result)
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
-            if cmd == "remember":
-                result = self.remember_explicit_text(
-                    " ".join(args),
-                    source_kind="command.remember",
-                )
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
             if cmd in {"end-session", "end_session"}:
                 summary = self.summarize_current_session()
                 if summary is None:
@@ -240,62 +187,6 @@ class AgentToolsMixin:
                     stable_key = summary.get("stable_key")
                     self.short_term.clear()
                     result = f"Сессия закрыта, резюме сохранено: {stable_key}"
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
-            if cmd == "sh":
-                req = ToolRequest(
-                    name="shell",
-                    args={
-                        "command": " ".join(args),
-                        "config_path": str(getattr(self, "shell_config_path", "")) or None,
-                    },
-                )
-                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
-                result = self._format_tool_result(tool_result)
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
-            if cmd == "project":
-                if not args:
-                    result = "[Нужно указать подкоманду: index|find]"
-                    response = _wrap(result)
-                    self._log_chat_interaction(raw_input=command, response_text=response)
-                    return response
-                req = ToolRequest(name="project", args={"cmd": args[0], "args": args[1:]})
-                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
-                result = self._format_tool_result(tool_result)
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
-            if cmd in {"imggen", "img_generate"}:
-                prompt = " ".join(args) or "image"
-                req = ToolRequest(name="image_generate", args={"prompt": prompt})
-                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
-                result = self._format_tool_result(tool_result)
-                response = _wrap(result)
-                self._log_chat_interaction(raw_input=command, response_text=response)
-                return response
-
-            if cmd in {"imganalyze", "img_analyze"}:
-                if not args:
-                    result = "[Нужно указать base64 или путь]"
-                    response = _wrap(result)
-                    self._log_chat_interaction(raw_input=command, response_text=response)
-                    return response
-                raw_value = args[0].strip()
-                if raw_value.startswith("base64:"):
-                    payload = raw_value.removeprefix("base64:").strip()
-                    req = ToolRequest(name="image_analyze", args={"base64": payload})
-                elif _looks_like_base64(raw_value):
-                    req = ToolRequest(name="image_analyze", args={"base64": raw_value})
-                else:
-                    req = ToolRequest(name="image_analyze", args={"path": raw_value})
-                tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
-                result = self._format_tool_result(tool_result)
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
                 return response
@@ -313,7 +204,10 @@ class AgentToolsMixin:
                 self._log_chat_interaction(raw_input=command, response_text=response)
                 return response
 
-            unknown = f"[Инструмент '{cmd}' неактивен или неизвестен]"
+            unknown = (
+                f"[Команда '/{cmd}' неактивна и отключена. Command lane поддерживает только "
+                "/trace и /end-session.]"
+            )
             self._log_tool_interaction(
                 raw_input=command,
                 request=ToolRequest(name=cmd, args={"args": args}),

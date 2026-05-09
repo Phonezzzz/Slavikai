@@ -33,10 +33,10 @@ def test_image_commands_success_and_error(tmp_path: Path) -> None:
     agent.tool_registry.register("image_analyze", lambda req: _dummy_tool(False), enabled=True)
 
     ok_resp = agent.handle_tool_command("/imggen prompt")
-    assert "img-ok" in ok_resp
+    assert "отключена" in ok_resp.lower()
 
     err_resp = agent.handle_tool_command("/imganalyze path")
-    assert "Ошибка инструмента" in err_resp
+    assert "отключена" in err_resp.lower()
 
 
 def test_tts_stt_error_paths(tmp_path: Path) -> None:

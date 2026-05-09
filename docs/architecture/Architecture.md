@@ -6,13 +6,13 @@
 
 ## Цель
 
-SlavikAI сейчас работает как серверный агент с тремя фактическими контурами выполнения: chat, MWV и auto. Система опирается на command lane, policy/approval контур, sandbox-ограничения и обязательный trace/tool logging.
+SlavikAI сейчас работает как серверный агент с тремя фактическими контурами выполнения: chat, MWV и auto. Система опирается на debug-only command lane, policy/approval контур, sandbox-ограничения и обязательный trace/tool logging.
 
 ## Основные слои
 
 - **Core** (`core/*`)
   - Оркестрация: `Agent` + mixins.
-  - Legacy планирование/исполнение: `Planner` + `Executor` через `ToolGateway`.
+  - Планирование/исполнение: native tool-call contracts + `ToolGateway`; `Planner`/`Executor` больше не извлекают tool args из prose.
   - Трассировка: `Tracer` (`logs/trace.log`).
 - **MWV runtime** (`core/mwv/*`)
   - Цикл `ManagerRuntime -> WorkerRuntime -> VerifierRuntime`.
@@ -33,7 +33,7 @@ SlavikAI сейчас работает как серверный агент с �
 ## Маршрутизация запроса (current legacy runtime)
 
 1. Сообщение, начинающееся с `/`, идёт в command lane (`handle_tool_command`) и не проходит через MWV.
-   - Команды: `/fs`, `/web`, `/sh`, `/project`, `/plan`, `/auto`, `/imggen`, `/imganalyze`, `/trace`. Подробнее — `docs/for-humans/COMMANDS.md`.
+   - Разрешены только debug-команды `/trace` и `/end-session`. Подробнее — `docs/for-humans/COMMANDS.md`.
 2. Для обычного текста:
    - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
    - `runtime_mode=auto` — выполняется классификация/skill-проверка, затем запуск auto-контура.

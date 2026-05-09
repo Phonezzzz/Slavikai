@@ -83,7 +83,7 @@ def test_command_lane_manual_mode_without_mwv(tmp_path: Path, monkeypatch) -> No
     response = agent.respond([LLMMessage(role="user", content="/plan goal")])
 
     assert "без MWV" in response
-    assert "step-one" in response
+    assert "отключена" in response.lower()
     assert brain.calls == 0
 
 

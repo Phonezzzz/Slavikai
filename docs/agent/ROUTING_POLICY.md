@@ -54,9 +54,8 @@
 
 ## Command lane
 
-См. `docs/agent/COMMAND_LANE_POLICY.md` — команды `/...` считаются ручным режимом и не входят в MWV.
-Это включает `/auto <goal>`: команда остаётся command lane alias и всегда помечается
-`Командный режим (без MWV)`.
+См. `docs/agent/COMMAND_LANE_POLICY.md` — command lane теперь debug-only.
+Разрешены только `/trace` и `/end-session`; tool-like команды больше не являются маршрутом выполнения.
 
 ## Stop responses
 

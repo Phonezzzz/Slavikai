@@ -72,7 +72,7 @@ def test_commandlane_logs_sandbox_violation(tmp_path: Path) -> None:
     store = MemoryCompanionStore(db_path)
     log = _get_tool_log(store, "fs")
     assert log.tool_status == ToolStatus.BLOCKED
-    assert log.blocked_reason == BlockedReason.APPROVAL_REQUIRED
+    assert log.blocked_reason == BlockedReason.TOOL_NOT_REGISTERED
 
 
 def test_commandlane_logs_validation_error(tmp_path: Path) -> None:
@@ -99,9 +99,9 @@ def test_commandlane_logs_validation_error(tmp_path: Path) -> None:
     _ = agent.handle_tool_command("/sh ls && whoami")
 
     store = MemoryCompanionStore(db_path)
-    log = _get_tool_log(store, "shell")
+    log = _get_tool_log(store, "sh")
     assert log.tool_status == ToolStatus.BLOCKED
-    assert log.blocked_reason == BlockedReason.APPROVAL_REQUIRED
+    assert log.blocked_reason == BlockedReason.TOOL_NOT_REGISTERED
 
 
 def test_commandlane_logs_safe_mode_blocked(tmp_path: Path) -> None:
@@ -128,9 +128,9 @@ def test_commandlane_logs_safe_mode_blocked(tmp_path: Path) -> None:
     _ = agent.handle_tool_command("/sh ls")
 
     store = MemoryCompanionStore(db_path)
-    log = _get_tool_log(store, "shell")
+    log = _get_tool_log(store, "sh")
     assert log.tool_status == ToolStatus.BLOCKED
-    assert log.blocked_reason == BlockedReason.APPROVAL_REQUIRED
+    assert log.blocked_reason == BlockedReason.TOOL_NOT_REGISTERED
 
 
 def test_commandlane_logs_tool_disabled(tmp_path: Path) -> None:
@@ -157,6 +157,6 @@ def test_commandlane_logs_tool_disabled(tmp_path: Path) -> None:
     _ = agent.handle_tool_command("/sh ls")
 
     store = MemoryCompanionStore(db_path)
-    log = _get_tool_log(store, "shell")
+    log = _get_tool_log(store, "sh")
     assert log.tool_status == ToolStatus.BLOCKED
-    assert log.blocked_reason == BlockedReason.APPROVAL_REQUIRED
+    assert log.blocked_reason == BlockedReason.TOOL_NOT_REGISTERED

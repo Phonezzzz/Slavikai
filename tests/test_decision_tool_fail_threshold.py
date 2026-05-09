@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from core.agent import SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD, Agent
@@ -30,7 +29,9 @@ def _make_agent(tmp_path: Path) -> Agent:
     return agent
 
 
-def test_decision_packet_tool_fail_threshold(tmp_path: Path, monkeypatch) -> None:
+def test_disabled_command_lane_tool_does_not_emit_tool_fail_decision(
+    tmp_path: Path, monkeypatch
+) -> None:
     agent = _make_agent(tmp_path)
 
     def _fail_call(_: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
@@ -43,8 +44,5 @@ def test_decision_packet_tool_fail_threshold(tmp_path: Path, monkeypatch) -> Non
     for _ in range(SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD):
         response = agent.respond([LLMMessage(role="user", content="/fs list")])
 
-    payload = json.loads(response)
-    assert payload["reason"] == "tool_fail"
-    option_actions = [option["action"] for option in payload["options"]]
-    assert option_actions == ["adjust_threshold", "create_candidate", "abort"]
+    assert "отключена" in response.lower()
     assert agent.brain.calls == 0

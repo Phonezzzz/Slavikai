@@ -24,7 +24,7 @@ def _make_agent(tmp_path: Path) -> Agent:
 
 def test_command_lane_safe_command_passes(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
-    response = agent.handle_tool_command("/fs list")
+    response = agent.handle_tool_command("/trace")
     assert "Командный режим (без MWV)" in response
     assert "Что случилось" not in response
     report = extract_report_block(response)
@@ -36,12 +36,12 @@ def test_command_lane_dangerous_requires_approval(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
     response = agent.handle_tool_command("/fs write project/demo.txt")
     lowered = response.lower()
-    assert "что случилось" in lowered
-    assert "подтверждение" in lowered
+    assert "отключена" in lowered
+    assert "/trace" in lowered
     assert "command_lane" in lowered
     report = extract_report_block(response)
     assert report["route"] == "command"
-    assert report["stop_reason_code"] == "APPROVAL_REQUIRED"
+    assert report["stop_reason_code"] == "COMMAND_LANE_NOTICE"
 
 
 def test_command_lane_dangerous_after_approve_passes(tmp_path: Path) -> None:
@@ -49,7 +49,7 @@ def test_command_lane_dangerous_after_approve_passes(tmp_path: Path) -> None:
     agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
     response = agent.handle_tool_command("/fs write project/demo.txt")
     assert "Командный режим (без MWV)" in response
-    assert "Файл записан" in response or "записан" in response.lower()
+    assert "отключена" in response.lower()
     report = extract_report_block(response)
     assert report["route"] == "command"
     assert report["stop_reason_code"] == "COMMAND_LANE_NOTICE"
@@ -60,6 +60,7 @@ def test_command_lane_auto_alias_has_command_label(tmp_path: Path) -> None:
     agent.handle_auto_command = lambda goal, command_lane=False: f"auto:{goal}"  # type: ignore[method-assign]
     response = agent.handle_tool_command("/auto собрать отчёт")
     assert "Командный режим (без MWV)" in response
+    assert "отключена" in response.lower()
     report = extract_report_block(response)
     assert report["route"] == "command"
     assert report["stop_reason_code"] == "COMMAND_LANE_NOTICE"
@@ -74,7 +75,7 @@ def test_command_lane_plan_does_not_execute_tools(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(agent.executor, "run", _executor_unreachable)
     response = agent.handle_tool_command("/plan подготовить план миграции")
     assert "Командный режим (без MWV)" in response
-    assert "transactional-only" in response
+    assert "отключена" in response.lower()
     report = extract_report_block(response)
     assert report["route"] == "command"
     assert report["stop_reason_code"] == "COMMAND_LANE_NOTICE"
