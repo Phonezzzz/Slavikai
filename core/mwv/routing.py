@@ -20,6 +20,8 @@ class RouteDecision:
     skill_decision: SkillMatchDecision | None = None
 
 
+# Legacy chat/MWV gate only. Do not add native tool/capability names here:
+# tool selection belongs to LLM tool_calls -> ToolGateway -> role="tool".
 _CODE_CHANGE_PATTERNS: Sequence[re.Pattern[str]] = (
     re.compile(
         r"\b(исправ\w*|почин\w*|поправ\w*|fix)\b.*\b(тест\w*|tests)\b",

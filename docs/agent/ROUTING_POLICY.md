@@ -13,6 +13,9 @@ keyword/classifier маршрутизация.
 
 Новые tool-capabilities не должны добавляться в этот keyword router. Целевой путь:
 LLM `tool_calls` -> `ToolGateway` -> `role="tool"` message.
+Regression-контракт: native tool names сами по себе (`workspace_read`,
+`workspace_write`, `image_generate`, `web` и т.п.) остаются `chat/no_triggers`;
+router не является tool planner.
 
 ## Правила (жёстко, без магии)
 

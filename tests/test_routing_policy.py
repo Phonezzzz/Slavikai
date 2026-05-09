@@ -72,6 +72,29 @@ def test_classify_request_tool_role_forces_mwv() -> None:
     assert "tools" in decision.risk_flags
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "use workspace_read",
+        "call workspace_write",
+        "run workspace_patch",
+        "invoke workspace_terminal_run",
+        "use image_generate",
+        "call image_analyze",
+        "use tts",
+        "use stt",
+        "use web",
+        "use project",
+    ],
+)
+def test_classify_request_does_not_route_by_tool_name_keywords(text: str) -> None:
+    decision = classify_request(messages=[], user_input=text, context=None)
+
+    assert decision.route == "chat"
+    assert decision.reason == "no_triggers"
+    assert decision.risk_flags == []
+
+
 def test_classify_request_empty_input_without_triggers() -> None:
     decision = classify_request(messages=[], user_input="", context=None)
     assert decision.route == "chat"
