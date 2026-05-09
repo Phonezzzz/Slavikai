@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -8,6 +9,8 @@ from memory.canonical_atom_store import CanonicalAtomStore
 from memory.vector_index import VectorIndex
 from shared.canonical_atom_models import AtomStatus, CanonicalAtom, ClaimType
 from shared.models import JSONValue
+
+logger = logging.getLogger("SlavikAI.MemoryRetrieval")
 
 
 @dataclass(frozen=True)
@@ -96,7 +99,11 @@ def rank_atoms(
             top_k=max(top_k * 3, top_k),
             allow_runtime_init=allow_vector_runtime_init,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Vector memory ranking failed; falling back to deterministic atom order: %s",
+            exc,
+        )
         semantic = []
 
     for result in semantic:

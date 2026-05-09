@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from memory.atom_embedding_index import AtomEmbeddingIndex
 from memory.canonical_atom_store import CanonicalAtomStore
@@ -12,6 +13,12 @@ from shared.canonical_atom_models import AtomStatus, ClaimType
 class DummyModel:
     def encode(self, texts):
         return np.array([[1.0, 0.0, 0.0] for _ in texts], dtype=np.float32)
+
+
+class FailingVectorIndex:
+    def search(self, *args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("vector unavailable")
 
 
 def test_retrieval_filter_rank_pack_excludes_conflicts(tmp_path, monkeypatch) -> None:
@@ -86,3 +93,46 @@ def test_retrieval_filter_rank_pack_excludes_conflicts(tmp_path, monkeypatch) ->
     text_raw = capsule.get("text")
     assert isinstance(text_raw, str)
     assert "preference:response_length" in text_raw
+
+
+def test_retrieval_logs_vector_failure_and_keeps_deterministic_fallback(
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = CanonicalAtomStore(str(tmp_path / "atoms.db"))
+    store.create_atom(
+        atom_id="a1",
+        stable_key="preference:response_length",
+        claim_type=ClaimType.PREFERENCE,
+        value_json={"value": "short"},
+        confidence=0.9,
+        support_count=3,
+        contradict_count=0,
+        last_seen_at="2026-01-02T00:00:00+00:00",
+        status=AtomStatus.ACTIVE,
+        summary_text="prefer short responses",
+    )
+
+    with caplog.at_level("WARNING", logger="SlavikAI.MemoryRetrieval"):
+        capsule = build_memory_capsule(
+            query="коротко",
+            store=store,
+            vector_index=FailingVectorIndex(),  # type: ignore[arg-type]
+            for_mwv=False,
+            config=RetrievalConfig(
+                min_confidence=0.5,
+                top_k=5,
+                max_context_chars=500,
+                recency_days=365,
+            ),
+            include_conflicts=False,
+            allow_vector_runtime_init=True,
+        )
+
+    assert "Vector memory ranking failed" in caplog.text
+    items_raw = capsule.get("items")
+    assert isinstance(items_raw, list)
+    assert len(items_raw) == 1
+    first = items_raw[0]
+    assert isinstance(first, dict)
+    assert first.get("stable_key") == "preference:response_length"

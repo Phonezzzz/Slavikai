@@ -941,7 +941,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
                 vector_index=self.vectors,
                 for_mwv=False,
                 config=retrieval_config,
-                allow_vector_runtime_init=False,
+                allow_vector_runtime_init=True,
             )
             capsule_text = memory_capsule.get("text")
             if isinstance(capsule_text, str) and capsule_text.strip():
@@ -962,13 +962,13 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
                 query,
                 namespace="code",
                 top_k=code_top_k,
-                allow_runtime_init=False,
+                allow_runtime_init=True,
             )
             vec_results_docs = self.vectors.search(
                 query,
                 namespace="docs",
                 top_k=docs_top_k,
-                allow_runtime_init=False,
+                allow_runtime_init=True,
             )
             if vec_results_code:
                 code_parts = ["Контекст проекта (code):"]
