@@ -5,6 +5,7 @@ from pathlib import Path
 from core.mwv.coding_skill import CodingSkill
 from core.mwv.models import VerificationStatus, WorkStatus
 from core.mwv.verifier import VerifierRunner
+from shared.models import ToolRequest
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -22,7 +23,16 @@ def test_coding_skill_happy_path(tmp_path: Path) -> None:
     target.write_text("print('hi')\n", encoding="utf-8")
 
     runner = VerifierRunner(script_path=script_path)
-    skill = CodingSkill(workspace_root=repo, verifier=runner)
+    skill = CodingSkill(
+        workspace_root=repo,
+        verifier=runner,
+        request_builder=lambda _task, _context: [
+            ToolRequest(
+                name="workspace_write",
+                args={"path": "sample.py", "content": "print('hi')\nprint('mwv')\n"},
+            )
+        ],
+    )
     result = skill.run("внеси маленькое изменение в файл sample.py")
 
     assert result.run_result.work_result.status == WorkStatus.SUCCESS
@@ -46,8 +56,17 @@ def test_coding_skill_fail_then_fix(tmp_path: Path) -> None:
     skill = CodingSkill(
         workspace_root=repo,
         verifier=runner,
-        change_text="BAD",
-        retry_text="GOOD",
+        request_builder=lambda _task, context: [
+            ToolRequest(
+                name="workspace_write",
+                args={
+                    "path": "sample.py",
+                    "content": "print('hi')\nBAD\n"
+                    if context.attempt <= 1
+                    else "print('hi')\nGOOD\n",
+                },
+            )
+        ],
     )
     result = skill.run("внеси маленькое изменение в файл sample.py")
 
@@ -66,7 +85,16 @@ def test_coding_skill_hard_fail(tmp_path: Path) -> None:
     target.write_text("print('hi')\n", encoding="utf-8")
 
     runner = VerifierRunner(script_path=script_path)
-    skill = CodingSkill(workspace_root=repo, verifier=runner)
+    skill = CodingSkill(
+        workspace_root=repo,
+        verifier=runner,
+        request_builder=lambda _task, _context: [
+            ToolRequest(
+                name="workspace_write",
+                args={"path": "sample.py", "content": "print('hi')\nprint('mwv')\n"},
+            )
+        ],
+    )
     result = skill.run("внеси маленькое изменение в файл sample.py")
 
     assert result.run_result.attempt == 3

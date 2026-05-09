@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
+from llm.types import ToolSpec
 from shared.models import JSONValue, ToolCallRecord, ToolRequest, ToolResult
 from tools.protocols import Tool
 from tools.tool_logger import ToolCallLogger
@@ -112,6 +113,17 @@ class ToolRegistry:
 
     def get_descriptor(self, name: str) -> ToolDescriptor | None:
         return self._tools.get(name)
+
+    def list_tool_specs(self) -> list[ToolSpec]:
+        return [
+            ToolSpec(
+                name=descriptor.name,
+                description=descriptor.description,
+                parameters_schema=dict(descriptor.parameters_schema),
+            )
+            for descriptor in self._tools.values()
+            if descriptor.enabled
+        ]
 
     def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
         descriptor = self._tools.get(request.name)

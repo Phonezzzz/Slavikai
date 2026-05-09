@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from core.planner import MAX_STEPS, MIN_STEPS, Planner
-from llm.types import LLMResult
+from llm.types import LLMResult, ToolCall
 
 
 class FakeBrain:
@@ -15,9 +15,7 @@ class FakeBrain:
 def test_classify_simple_vs_complex() -> None:
     planner = Planner()
     assert planner.classify_complexity("Привет, помоги").value == "simple"
-    assert (
-        planner.classify_complexity("Найди и проанализируй архитектуру проекта").value == "complex"
-    )
+    assert planner.classify_complexity(" ".join(["task"] * 17)).value == "complex"
 
 
 def test_plan_parsing_validation_limits() -> None:
@@ -27,6 +25,7 @@ def test_plan_parsing_validation_limits() -> None:
     parsed = planner._llm_plan("goal", brain, None)  # type: ignore[arg-type]
     assert parsed is not None
     assert MIN_STEPS <= len(parsed) <= MAX_STEPS
+    assert parsed[0].operation is None
 
     too_many = "\n".join([f"{i + 1}. step {i + 1}" for i in range(MAX_STEPS + 5)])
     brain_many = FakeBrain(too_many)
@@ -38,3 +37,26 @@ def test_build_plan_fallback_on_invalid_llm_plan() -> None:
     invalid_brain = FakeBrain("1. one\n")  # всего один шаг => будет отброшено
     plan = planner.build_plan("goal", brain=invalid_brain)  # type: ignore[arg-type]
     assert len(plan.steps) >= MIN_STEPS
+    assert all(step.operation is None for step in plan.steps)
+
+
+def test_build_plan_uses_native_tool_calls_without_regex_mapping() -> None:
+    class ToolBrain:
+        def generate(self, messages, config=None):  # type: ignore[override]
+            del messages, config
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-1",
+                        name="workspace_read",
+                        arguments={"path": "docs/readme.md"},
+                    )
+                ],
+            )
+
+    plan = Planner().build_plan("прочитай docs/readme.md", brain=ToolBrain())  # type: ignore[arg-type]
+
+    assert len(plan.steps) == 1
+    assert plan.steps[0].operation == "workspace_read"
+    assert plan.steps[0].tool_args == {"path": "docs/readme.md"}

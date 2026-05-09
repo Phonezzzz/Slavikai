@@ -352,8 +352,8 @@ def test_mwv_action_route_rejects_no_observable_action(tmp_path: Path) -> None:
                 step_id="step-1",
                 title="noop",
                 description="noop",
-                allowed_tool_kinds=["workspace_magic"],
-                inputs={"operation": "workspace_magic"},
+                allowed_tool_kinds=[],
+                inputs={},
             )
         ],
         context={"risk_flags": ["code_change"]},
@@ -377,8 +377,8 @@ def test_mwv_diagnostic_route_allows_no_observable_action(tmp_path: Path) -> Non
                 step_id="step-1",
                 title="noop",
                 description="noop",
-                allowed_tool_kinds=["workspace_magic"],
-                inputs={"operation": "workspace_magic"},
+                allowed_tool_kinds=[],
+                inputs={},
             )
         ],
         context={"risk_flags": ["tools"]},

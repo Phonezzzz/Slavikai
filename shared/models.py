@@ -65,6 +65,7 @@ class PlanStep:
     description: str
     status: PlanStepStatus = PlanStepStatus.PENDING
     operation: str | None = None
+    tool_args: dict[str, JSONValue] = field(default_factory=dict)
     result: str | None = None
 
 

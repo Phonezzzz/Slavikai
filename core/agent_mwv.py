@@ -383,6 +383,7 @@ class AgentMWVMixin:
                     allowed_tool_kinds=allowed,
                     inputs={
                         "operation": operation if operation else None,
+                        "tool_args": dict(step.tool_args),
                         "description": step.description,
                     },
                     expected_outputs=[],
@@ -539,7 +540,13 @@ class AgentMWVMixin:
                         step,
                         require_operation=require_operation,
                     )
-                    plan_step = PlanStep(description=step.description, operation=operation)
+                    tool_args_raw = step.inputs.get("tool_args")
+                    tool_args = tool_args_raw if isinstance(tool_args_raw, dict) else {}
+                    plan_step = PlanStep(
+                        description=step.description,
+                        operation=operation,
+                        tool_args=dict(tool_args),
+                    )
                     task_snapshot: dict[str, JSONValue] = {
                         "plan_id": task.task_id,
                         "plan_hash": task.packet_hash,
@@ -974,6 +981,8 @@ class AgentMWVMixin:
         if "plan_read_only_block" in normalized:
             return StopReasonCode.REPLAN_REQUIRED
         if "operation '" in normalized and "allowed_tool_kinds" in normalized:
+            return StopReasonCode.REPLAN_REQUIRED
+        if "не зарегистрирован" in normalized or "not registered" in normalized:
             return StopReasonCode.REPLAN_REQUIRED
         if "packet_hash mismatch" in normalized:
             return StopReasonCode.REPLAN_REQUIRED
