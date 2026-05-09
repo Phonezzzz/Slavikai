@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import tools.terminal_tool as terminal_tool_module
 import tools.workspace_tools as workspace_tools_module
 from config.shell_config import ShellConfig
 from shared.models import ToolRequest
@@ -219,7 +220,7 @@ def test_workspace_delete_rejects_root_and_allows_recursive_dir_delete() -> None
 
 def test_workspace_terminal_run_uses_workspace_root_cwd(monkeypatch) -> None:
     monkeypatch.setattr(
-        workspace_tools_module,
+        terminal_tool_module,
         "load_shell_config",
         lambda path: ShellConfig(
             allowed_commands=["echo"],

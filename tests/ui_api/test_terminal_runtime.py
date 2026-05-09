@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from server.terminal_manager import TerminalManager
 from server.ui_hub import UIHub
+from tools.terminal_tool import TerminalTool
 
 # ruff: noqa: F403,F405
 from .fakes import *
@@ -305,7 +305,7 @@ def test_ui_terminal_session_delete_cleans_terminal_state() -> None:
             assert delete_resp.status == 200
 
             manager = client.server.app["terminal_manager"]
-            assert isinstance(manager, TerminalManager)
+            assert isinstance(manager, TerminalTool)
             assert await manager.get_snapshot(session_id) is None
         finally:
             await client.close()

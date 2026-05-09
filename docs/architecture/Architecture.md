@@ -44,7 +44,7 @@ SlavikAI сейчас работает как серверный агент с �
 - Базовые: `fs`, `web`, `shell`, `project`.
 - Медиа: `image_analyze`, `image_generate`, `tts`, `stt`.
 - Workspace: `workspace_list`, `workspace_read`, `workspace_write`, `workspace_create`, `workspace_rename`, `workspace_move`, `workspace_delete`, `workspace_patch`, `workspace_run`, `workspace_terminal_run`.
-- `workspace_terminal_run` — restricted one-shot command runner, а не PTY terminal session.
+- `workspace_terminal_run` — restricted one-shot режим общего `TerminalTool`.
 - `workspace_patch` контракт: single-file hunk patch для одного `path` (без `diff --git` / `---` / `+++` заголовков).
 
 ## Sandbox и безопасность
@@ -78,7 +78,8 @@ SlavikAI сейчас работает как серверный агент с �
 
 ## Backend PTY Terminal API
 
-Реализован в `server/terminal_manager.py` и `server/http/handlers/terminal.py`.
+Реализован общим `tools/terminal_tool.py`; `server/http/handlers/terminal.py` —
+только HTTP-оболочка для PTY режима.
 
 Один PTY-терминал на сессию. Доступен только при `policy.profile = yolo`.
 
@@ -98,13 +99,13 @@ SlavikAI сейчас работает как серверный агент с �
 - `create` / `input` / `resize` требуют `policy.profile = yolo`. Иначе `403 terminal_yolo_required`.
 - `get` / `close` / `stream` доступны владельцу сессии без yolo-gate.
 - `stream` поддерживает `Last-Event-ID` для replay событий из ring-буфера (256 событий).
-- `TerminalManager` регистрируется в `app["terminal_manager"]` при старте; shutdown — через `app.on_cleanup`.
+- `TerminalTool` регистрируется в `app["terminal_manager"]` при старте; shutdown — через `app.on_cleanup`.
 - При удалении сессии (`DELETE /ui/api/sessions/{id}`) PTY-терминал закрывается автоматически.
 
-### Разграничение с workspace_terminal_run
+### Режимы TerminalTool
 
-- `workspace_terminal_run` — restricted one-shot command runner: одна команда, без PTY, через tool gateway с approvals.
-- `/ui/api/terminal/*` — полноценная PTY-сессия с интерактивным вводом, resize и SSE-стримом.
+- `oneshot` — одна команда, без PTY, через `workspace_terminal_run` и tool gateway approvals.
+- `pty` — интерактивная сессия через `/ui/api/terminal/*`, yolo-gate, resize и SSE-стрим.
 
 ## Проверки качества
 

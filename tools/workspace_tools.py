@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shlex
 import shutil
 import subprocess
 import sys
@@ -9,10 +8,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from config.shell_config import DEFAULT_SHELL_CONFIG_PATH, load_shell_config
 from shared.models import JSONValue, ToolRequest, ToolResult
-from tools.shell_tool import _is_unsafe as _is_unsafe_shell_command
-from tools.shell_tool import _validate_args as _validate_shell_args
+from tools.terminal_tool import TerminalTool
 
 SANDBOX_ROOT = Path("sandbox").resolve()
 WORKSPACE_ROOT = (SANDBOX_ROOT / "project").resolve()
@@ -590,64 +587,15 @@ class RunCodeTool:
 
 
 class WorkspaceTerminalRunTool:
+    def __init__(self, terminal_tool: TerminalTool | None = None) -> None:
+        self._terminal_tool = terminal_tool or TerminalTool()
+
     def handle(self, request: ToolRequest) -> ToolResult:
         command = str(request.args.get("command") or "").strip()
         cwd_mode = str(request.args.get("cwd_mode") or "session_root").strip().lower()
-        if not command:
-            return ToolResult.failure("Не указана команда.")
-        if _is_unsafe_shell_command(command):
-            return ToolResult.failure("🚫 Опасная команда заблокирована.")
-
-        try:
-            cfg = load_shell_config(DEFAULT_SHELL_CONFIG_PATH)
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult.failure(f"Ошибка загрузки shell config: {exc}")
-
-        try:
-            args = shlex.split(command)
-        except ValueError as exc:
-            return ToolResult.failure(f"Ошибка парсинга команды: {exc}")
-        validation_error = _validate_shell_args(args, set(cfg.allowed_commands))
-        if validation_error:
-            return ToolResult.failure(validation_error)
-
-        if cwd_mode == "session_root":
-            cwd = get_workspace_root()
-        elif cwd_mode == "sandbox":
-            cwd = SANDBOX_ROOT
-        else:
-            return ToolResult.failure("cwd_mode должен быть session_root|sandbox.")
-        if not cwd.exists() or not cwd.is_dir():
-            return ToolResult.failure("Рабочая директория для команды не найдена.")
-
-        try:
-            proc = subprocess.run(
-                args,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=cfg.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return ToolResult.failure(
-                f"⏳ Команда превысила лимит времени ({cfg.timeout_seconds}с)."
-            )
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult.failure(f"Ошибка запуска: {exc}")
-
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-        if len(stdout) > cfg.max_output_chars:
-            stdout = stdout[: cfg.max_output_chars] + "\n…[stdout truncated]"
-        if len(stderr) > cfg.max_output_chars:
-            stderr = stderr[: cfg.max_output_chars] + "\n…[stderr truncated]"
-        return ToolResult.success(
-            {
-                "output": stdout,
-                "stderr": stderr,
-                "exit_code": proc.returncode,
-                "cwd": str(cwd),
-                "cwd_mode": cwd_mode,
-            }
+        return self._terminal_tool.run_oneshot(
+            command=command,
+            cwd_mode=cwd_mode,
+            workspace_root=get_workspace_root(),
+            sandbox_root=SANDBOX_ROOT,
         )

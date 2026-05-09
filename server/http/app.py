@@ -26,9 +26,9 @@ from server.http.common.runtime_model_state import (
     build_runtime_model_state_from_persisted,
 )
 from server.lazy_agent import LazyAgentProvider
-from server.terminal_manager import TerminalManager
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
+from tools.terminal_tool import TerminalTool
 
 _load_dotenv: Callable[..., bool] | None
 try:
@@ -59,7 +59,7 @@ def _load_project_dotenv() -> None:
 
 
 async def _close_terminal_manager(app: web.Application) -> None:
-    manager: TerminalManager = app["terminal_manager"]
+    manager: TerminalTool = app["terminal_manager"]
     await manager.shutdown()
 
 
@@ -105,7 +105,7 @@ def create_app(
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
     app["idempotency_store"] = IdempotencyStore()
-    app["terminal_manager"] = TerminalManager()
+    app["terminal_manager"] = TerminalTool()
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )

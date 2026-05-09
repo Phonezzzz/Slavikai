@@ -14,9 +14,9 @@ from server.http_api import (
     _session_forbidden_response,
     _workspace_root_for_session,
 )
-from server.terminal_manager import TerminalManager
 from server.ui_hub import UIHub
 from shared.models import JSONValue
+from tools.terminal_tool import TerminalTool
 
 
 def _encode_sse_event(event: dict[str, JSONValue]) -> bytes:
@@ -40,8 +40,8 @@ async def _resolve_terminal_session_id(
     return session_id, None
 
 
-def _terminal_manager(request: web.Request) -> TerminalManager:
-    return cast(TerminalManager, request.app["terminal_manager"])
+def _terminal_manager(request: web.Request) -> TerminalTool:
+    return cast(TerminalTool, request.app["terminal_manager"])
 
 
 async def _require_terminal_yolo(request: web.Request, session_id: str) -> web.Response | None:

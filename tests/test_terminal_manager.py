@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from server.terminal_manager import TerminalManager
+from shared.models import ToolRequest
+from tools.terminal_tool import TerminalTool
 
 
 async def _wait_for_snapshot(
-    manager: TerminalManager,
+    manager: TerminalTool,
     session_id: str,
     *,
     predicate,
@@ -23,7 +24,7 @@ async def _wait_for_snapshot(
 
 def test_terminal_manager_reuses_running_terminal_and_uses_workspace_root(tmp_path: Path) -> None:
     async def run() -> None:
-        manager = TerminalManager()
+        manager = TerminalTool()
         session_id = "session-a"
         first = await manager.create_or_get(session_id, workspace_root=str(tmp_path))
         second = await manager.create_or_get(session_id, workspace_root=str(tmp_path))
@@ -45,7 +46,7 @@ def test_terminal_manager_reuses_running_terminal_and_uses_workspace_root(tmp_pa
 
 def test_terminal_manager_resize_close_and_new_terminal_id(tmp_path: Path) -> None:
     async def run() -> None:
-        manager = TerminalManager()
+        manager = TerminalTool()
         session_id = "session-b"
         first = await manager.create_or_get(session_id, workspace_root=str(tmp_path))
         resized = await manager.resize(session_id, rows=40, cols=120)
@@ -64,7 +65,7 @@ def test_terminal_manager_resize_close_and_new_terminal_id(tmp_path: Path) -> No
 
 def test_terminal_manager_tracks_exit_code_and_shutdown(tmp_path: Path) -> None:
     async def run() -> None:
-        manager = TerminalManager()
+        manager = TerminalTool()
         session_id = "session-c"
         await manager.create_or_get(session_id, workspace_root=str(tmp_path))
         await manager.write_input(session_id, "exit 7\n")
@@ -77,3 +78,22 @@ def test_terminal_manager_tracks_exit_code_and_shutdown(tmp_path: Path) -> None:
         await manager.shutdown()
 
     asyncio.run(run())
+
+
+def test_terminal_tool_handle_oneshot_uses_explicit_workspace_root(tmp_path: Path) -> None:
+    result = TerminalTool().handle(
+        ToolRequest(
+            name="terminal",
+            args={
+                "mode": "oneshot",
+                "command": "echo ok",
+                "cwd_mode": "session_root",
+                "workspace_root": str(tmp_path),
+                "sandbox_root": str(tmp_path),
+            },
+        )
+    )
+
+    assert result.ok
+    assert result.data["mode"] == "oneshot"
+    assert result.data["cwd"] == str(tmp_path)
