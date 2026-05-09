@@ -1,18 +1,24 @@
-# Architecture — SlavikAI current runtime inventory
+# Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы. Целевое поведение runtime
-определено в `docs/architecture/ARCH_CANON.md`. Если здесь описан legacy-путь, это не делает его
-целевой архитектурой.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-0..PR-7.
+Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
+Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
 ## Цель
 
-SlavikAI сейчас работает как серверный агент с тремя фактическими контурами выполнения: chat, MWV и auto. Система опирается на debug-only command lane, policy/approval контур, sandbox-ограничения и обязательный trace/tool logging.
+SlavikAI сейчас работает как single-user/server-side agent runtime с контурами chat,
+workspace/MWV и auto. После PR-0..PR-7 в коде есть честный tool-calling contract,
+минимальный `AgentToolLoop`, split chat/workspace API paths, debug-only command lane
+и единый terminal backend. Часть старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
 - **Core** (`core/*`)
   - Оркестрация: `Agent` + mixins.
-  - Планирование/исполнение: native tool-call contracts + `ToolGateway`; `Planner`/`Executor` больше не извлекают tool args из prose.
+  - Tool loop: `core/tool_loop.py` вызывает `Brain.generate(..., tools=...)`, исполняет
+    `tool_calls` через `ToolGateway` и добавляет `role="tool"` сообщения.
+  - Планирование/исполнение: `Planner`/`Executor` больше не извлекают tool args из prose;
+    они принимают только explicit `PlanStep.operation` + `PlanStep.tool_args`.
   - Трассировка: `Tracer` (`logs/trace.log`).
 - **MWV runtime** (`core/mwv/*`)
   - Цикл `ManagerRuntime -> WorkerRuntime -> VerifierRuntime`.
@@ -23,12 +29,20 @@ SlavikAI сейчас работает как серверный агент с �
   - Поддерживает паузу `waiting_approval` и resume.
 - **LLM слой** (`llm/*`)
   - Провайдеры: `xai`, `openrouter`, `local`, `inception`.
+  - Контракт: `LLMMessage.role` включает `tool`, `LLMResult.tool_calls`,
+    `Brain.generate(..., tools=None)`.
+  - Provider caveat: не каждый backend реально исполняет native provider tool calling;
+    unsupported providers обязаны явно игнорировать/ограничивать tools, а не имитировать их regex-парсингом.
   - `openai` используется только для STT endpoint/ключа в UI-настройках (не chat provider).
 - **Tools** (`tools/*`)
   - Реестр: `ToolRegistry`.
+  - Descriptor: `name`, `description`, `parameters_schema`, capability/risk classes.
   - Журнал вызовов: `logs/tool_calls.log`.
+  - Terminal: `tools/terminal_tool.py`, режимы `oneshot|pty`.
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
+  - UI sessions пока физически совместимые: `ui_messages.lane` остаётся storage detail,
+    но доменные views `ChatThread` / `WorkspaceSession` уже выделены в `shared/session_domain.py`.
 
 ## Маршрутизация запроса (current legacy runtime)
 
@@ -38,6 +52,11 @@ SlavikAI сейчас работает как серверный агент с �
    - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
    - `runtime_mode=auto` — выполняется классификация/skill-проверка, затем запуск auto-контура.
    - `runtime_mode=act|plan` — в legacy runtime используется `classify_request(...)` (`chat` или `mwv`).
+3. Целевой tool path:
+   - LLM получает `ToolSpec[]`.
+   - LLM возвращает `tool_calls`.
+   - Runtime вызывает `ToolGateway`.
+   - Результат возвращается в LLM как `LLMMessage(role="tool", tool_call_id=...)`.
 
 ## Инструменты (зарегистрированные имена)
 
@@ -73,8 +92,10 @@ SlavikAI сейчас работает как серверный агент с �
 
 - Sessions/folders: `/ui/api/folders`, `/ui/api/sessions`, `/ui/api/sessions/{session_id}`.
 - Workflow: `/ui/api/mode`, `/ui/api/plan/*`, `/ui/api/runtime/init`.
-- Chat/events: `/ui/api/chat/send`, `/ui/api/events/stream`.
-- Workspace: `/ui/api/workspace/*`.
+- Chat: `/ui/api/chat/send`, `/ui/api/chat/events/{session_id}`.
+- Workspace: `/ui/api/workspace/send`, `/ui/api/workspace/events/{session_id}`, `/ui/api/workspace/*`.
+- Legacy compatibility: `/ui/api/events/stream` ещё существует как общий stream, но новый код
+  должен использовать split chat/workspace endpoints.
 
 ## Backend PTY Terminal API
 
@@ -123,3 +144,14 @@ SlavikAI сейчас работает как серверный агент с �
 - Trace: `logs/trace.log`.
 - Tool calls: `logs/tool_calls.log`.
 - UI storage: `.run/ui_sessions.db`.
+
+## Legacy, который нельзя расширять
+
+- `core/agent*.py` остаются крупной mixin-обвязкой и должны постепенно сжиматься вокруг
+  `AgentToolLoop`/`ToolGateway`, а не получать новые ветки.
+- `classify_request(...)` всё ещё используется в legacy routing; новые tool-capabilities не
+  должны добавляться через keyword router.
+- `Planner`/`Executor` больше не делают regex extraction. Любое возвращение к парсингу prose
+  как source of truth запрещено.
+- Command lane не является способом вызова tools. Только `/trace` и `/end-session`.
+- `server/terminal_manager.py` — совместимый alias на `TerminalTool`, не отдельная реализация.

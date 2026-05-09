@@ -1,18 +1,20 @@
 # ARCH_CANON — runtime canon Ask/Plan/Act/Auto
 
-Этот документ — **source of truth** для целевой архитектуры runtime и rollout-границ.
-`docs/architecture/Architecture.md` описывает текущую legacy-инвентаризацию и не является
-источником целевого поведения, если расходится с этим документом.
+Этот документ — **source of truth** для runtime-архитектуры и rollout-границ.
+`docs/architecture/Architecture.md` описывает текущее фактическое устройство и обязано
+называть legacy-пути legacy, а не целевым поведением.
 
 ## 0) Статус канона
 
 - **Target runtime**: Ask / Plan / Act / Auto, описанные ниже.
-- **Current legacy runtime**: допускается только как временная реализация до PR-цепочки
-  native tool calling и разделения Chat/Workspace.
+- **Implemented baseline**: tool-calling типы, `AgentToolLoop`, explicit `PlanStep.tool_args`,
+  debug-only command lane, split chat/workspace send+SSE endpoints, единый `TerminalTool`.
+- **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, storage `lane`
+  и legacy UI endpoints ещё существуют как совместимость и не считаются целевой архитектурой.
 - **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
   `plan|act` через `/v1` отклоняются и должны идти через UI workflow.
-- **UI workflow**: может иметь endpoints `/ui/api/plan/*` и mode transitions, но их смысл
-  должен соответствовать этому канону: Plan не исполняет, Act исполняет только packet.
+- **UI workflow**: endpoints `/ui/api/plan/*` и mode transitions допустимы только если
+  соблюдают этот канон: Plan не исполняет, Act исполняет только packet.
 
 ## 1) Канонические роли режимов
 
@@ -30,7 +32,7 @@
   - `capture_memory_claims_from_text`
   - inbox/canonical writes
   - `vector_index.upsert/index/delete`
-- Запрещены tool calls из ask-ветки.
+- Запрещены write/exec tool calls из ask-ветки.
 - Разрешён только read-only контекст (memory/vector read path).
 - Если vector runtime не готов, ask делает soft-degrade (ответ без vector-контекста, без hidden init).
 
@@ -54,7 +56,7 @@
 
 ### Auto (FSM only)
 
-- Auto гоняет только детерминированный цикл: `Ask -> Plan -> Act`.
+- Целевой Auto гоняет только детерминированный цикл: `Ask -> Plan -> Act`.
 - В `runtime_mode=auto` запрещён chat-fallback.
 - Budgets обязательны: time/tool_calls/tokens/files/retries.
 - При fail/ambiguity/risk Auto останавливается в STOP и ждёт явного решения.
@@ -145,6 +147,22 @@ API:
 
 ## 8) Legacy debt boundary
 
-До завершения перехода текущие `Planner`/`Executor`, regex routing, command lane tools и общий
-Chat/Workspace session state считаются legacy debt. Новые фичи не должны расширять эти пути как
-целевую архитектуру.
+Новые фичи не должны расширять legacy-пути как целевую архитектуру.
+
+Legacy debt после PR-0..PR-7:
+
+- `core/agent.py`, `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`
+  остаются крупными mixin-модулями.
+- `classify_request(...)` ещё участвует в legacy `plan|act|auto` маршрутизации.
+- Storage ещё хранит `ui_messages.lane`; новые `ChatThread` / `WorkspaceSession` типы
+  существуют как domain views, а не как полностью отдельные таблицы.
+- Legacy `/ui/api/events/stream` и lane-multiplexed behavior внутри `/ui/api/chat/send`
+  ещё есть для совместимости; целевой путь — split chat/workspace endpoints.
+- Провайдеры приняли `tools` в контракте, но native tool calling реализован не во всех
+  provider backends.
+
+Уже не является допустимым legacy для расширения:
+
+- regex extraction tool args из prose в `Planner`/`Executor`;
+- slash-команды для обычных tools;
+- отдельная server-only реализация PTY терминала рядом с one-shot runner.

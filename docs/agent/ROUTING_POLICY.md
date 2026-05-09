@@ -1,14 +1,18 @@
-# ROUTING_POLICY — M2 (chat vs MWV)
+# ROUTING_POLICY — current legacy routing
 
-Документ фиксирует детерминированную маршрутизацию между режимами:
+Документ фиксирует текущую legacy-маршрутизацию между режимами:
 - `chat` — ответы без инструментов (объяснения/консультации).
 - `mwv` — задачи с изменениями/инструментами (Manager → Worker → Verifier).
 
-Политика применяется в runtime (`Agent.respond`) для режимов, где включена маршрутизация.
+Политика применяется в runtime (`Agent.respond`) для режимов, где ещё включена
+keyword/classifier маршрутизация.
 
 - `runtime_mode=ask`: классификатор не используется (прямой chat-ответ).
 - `runtime_mode=act|plan`: используется `chat|mwv` классификация.
 - `runtime_mode=auto`: выполняется та же классификация/skill-проверка, после чего запускается auto-runtime.
+
+Новые tool-capabilities не должны добавляться в этот keyword router. Целевой путь:
+LLM `tool_calls` -> `ToolGateway` -> `role="tool"` message.
 
 ## Правила (жёстко, без магии)
 
@@ -65,3 +69,4 @@
 
 - Политика **не** меняет смысл MWV/Verifier.
 - Командный режим остаётся ручным и явно помечается как «без MWV».
+- Policy не является tool planner и не извлекает аргументы tools из текста.

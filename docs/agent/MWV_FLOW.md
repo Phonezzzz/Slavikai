@@ -1,13 +1,14 @@
-# MWV_FLOW — current legacy Manager -> Worker -> Verifier
+# MWV_FLOW — current Manager -> Worker -> Verifier
 
 Нормативный источник инвариантов: `docs/architecture/ARCH_CANON.md`.
-Этот документ описывает текущий MWV-путь. Упоминание `Planner` + `Executor` ниже является
-legacy-инвентаризацией, а не целевой заменой native tool calling.
+Этот документ описывает текущий MWV-путь после PR-0..PR-7.
 
 ## Точка входа
 
-- `Agent.respond(...)` → `classify_request(...)`.
+- Legacy entry: `Agent.respond(...)` → `classify_request(...)`.
 - При `route="mwv"` вызывается `_run_mwv_flow(...)`.
+- Целевой entry для новых work execution paths — LLM tool calls через `AgentToolLoop`
+  и `ToolGateway`; keyword routing не должен расширяться.
 
 ## Маршрутизация
 
@@ -25,7 +26,8 @@ legacy-инвентаризацией, а не целевой заменой nat
 ## Канонический цикл
 
 1. `ManagerRuntime.run_flow(...)` строит `TaskPacket` (v2 execution contract).
-2. `WorkerRuntime` сейчас исполняет план через legacy `Planner` + `Executor` + tools.
+2. `WorkerRuntime` исполняет только explicit tool requests через gateway/tools.
+   `Planner`/`Executor` больше не извлекают аргументы инструментов из prose.
 3. `VerifierRuntime.run(...)` выполняет deterministic-проверку. При отсутствии `scripts/check.sh` используется fallback-последовательность (`ruff`, `lint_skills`, `build_manifest --check`, `mypy`, `pytest --cov`).
 4. Успех только если одновременно:
    - `work_result.status == success`
@@ -47,3 +49,5 @@ legacy-инвентаризацией, а не целевой заменой nat
 
 - Команды `/...` (command lane).
 - UI-операции выбора модели/сессии.
+- PTY terminal session: интерактивный терминал идёт через `TerminalTool` + yolo-gate,
+  не через MWV verifier.

@@ -1,13 +1,14 @@
 # COMMANDS
 
-Current command lane is debug-only.
+Текущий command lane — только для debug. Он не вызывает обычные инструменты и не заменяет
+Chat/Workspace runtime.
 
-Supported slash commands:
+Поддерживаемые slash-команды:
 
-- `/trace` — show recent trace entries.
-- `/end-session` — save a short summary of the current session into canonical memory and clear short-term context.
+- `/trace` — показать последние trace-записи.
+- `/end-session` — сохранить короткое резюме текущей сессии в canonical memory и очистить short-term context.
 
-Removed from command lane:
+Удалено из command lane:
 
 - `/fs`
 - `/web`
@@ -18,4 +19,5 @@ Removed from command lane:
 - `/imggen`
 - `/imganalyze`
 
-Those capabilities must go through the normal Chat/Workspace runtime and native tool-calling/gateway path, not direct slash-command dispatch.
+Эти возможности должны идти через обычный Chat/Workspace runtime и native
+tool-calling/gateway path, а не через прямой slash dispatch.
