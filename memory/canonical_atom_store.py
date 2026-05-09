@@ -85,13 +85,14 @@ class CanonicalAtomStore:
         *,
         statuses: set[AtomStatus] | None = None,
         claim_types: set[ClaimType] | None = None,
+        stable_key_prefix: str | None = None,
         limit: int = 200,
     ) -> list[CanonicalAtom]:
         if limit <= 0:
             raise ValueError("limit должен быть > 0")
         query = (
             "SELECT * FROM canonical_atom WHERE 1=1 "
-            "{status_clause} {type_clause} "
+            "{status_clause} {type_clause} {stable_key_clause} "
             "ORDER BY last_seen_at DESC, stable_key ASC LIMIT ?"
         )
         params: list[object] = []
@@ -107,9 +108,19 @@ class CanonicalAtomStore:
             placeholders = ",".join("?" for _ in type_values)
             type_clause = f"AND claim_type IN ({placeholders})"
             params.extend(type_values)
+        stable_key_clause = ""
+        if stable_key_prefix is not None:
+            normalized_prefix = stable_key_prefix.strip()
+            if normalized_prefix:
+                stable_key_clause = "AND stable_key LIKE ?"
+                params.append(f"{normalized_prefix}%")
         params.append(limit)
         rows = self.conn.execute(
-            query.format(status_clause=status_clause, type_clause=type_clause),
+            query.format(
+                status_clause=status_clause,
+                type_clause=type_clause,
+                stable_key_clause=stable_key_clause,
+            ),
             tuple(params),
         ).fetchall()
         return [self._row_to_atom(row) for row in rows]

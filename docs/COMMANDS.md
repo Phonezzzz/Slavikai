@@ -16,6 +16,7 @@
 - `/imggen <prompt>` — генерация изображения.
 - `/imganalyze <path|base64|base64:...>` — анализ изображения.
 - `/trace` — последние записи trace.
+- `/end-session` — сохранить краткое резюме текущей сессии в canonical memory и закрыть short-term контекст.
 
 ## Session mode `auto`
 

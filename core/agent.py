@@ -44,13 +44,20 @@ from memory.memory_retrieval import (
 from memory.memory_retrieval import (
     build_memory_capsule as build_memory_capsule_payload,
 )
+from memory.session_summarizer import SessionSummarizer
 from memory.vector_index import VectorIndex
 from shared.batch_review_models import (
     BatchReviewRun,
     CandidateStatus,
     PolicyRuleCandidate,
 )
-from shared.canonical_atom_models import CanonicalAtom, Claim, ClaimExtractionInput, ClaimType
+from shared.canonical_atom_models import (
+    AtomStatus,
+    CanonicalAtom,
+    Claim,
+    ClaimExtractionInput,
+    ClaimType,
+)
 from shared.memory_companion_models import (
     FeedbackEvent,
     FeedbackLabel,
@@ -203,6 +210,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         self._claim_extractor = ClaimExtractor()
         self._canonical_aggregator = CanonicalAggregator(self._canonical_store)
         self._atom_embedding_index = AtomEmbeddingIndex(self.vectors)
+        self._session_summarizer = SessionSummarizer(self.brain)
         self._retrieval_config = RetrievalConfig()
         self.skill_index = SkillIndex.load_default()
         self._skill_candidate_writer = SkillCandidateWriter()
@@ -793,6 +801,21 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         self.tracer.log("memory_atom_unpinned", stable_key, {"stable_key": stable_key})
         return self._atom_to_payload(atom)
 
+    def summarize_current_session(self) -> dict[str, JSONValue] | None:
+        summary = self._session_summarizer.summarize(self.short_term)
+        if summary is None:
+            self.tracer.log("session_summary_skipped", "No session messages to summarize")
+            return None
+
+        atom = self._canonical_aggregator.upsert_claim(summary.claim)
+        self._atom_embedding_index.sync_atom(atom)
+        self.tracer.log(
+            "session_summary_saved",
+            atom.stable_key,
+            {"stable_key": atom.stable_key, "chars": len(summary.text)},
+        )
+        return self._atom_to_payload(atom)
+
     def resolve_memory_conflict(
         self,
         *,
@@ -888,6 +911,28 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
                     f"- [{atom.claim_type.value}] {atom.stable_key}: {atom.summary_text}"
                 )
             _append_slot("pinned_atoms", "\n".join(pinned_parts), budget.pinned_atoms_chars)
+
+        session_atoms = self._canonical_store.list_atoms(
+            statuses={AtomStatus.ACTIVE},
+            claim_types={ClaimType.FACT},
+            stable_key_prefix="session:",
+            limit=3,
+        )
+        if session_atoms:
+            session_parts = ["Резюме прошлых сессий:"]
+            for atom in session_atoms:
+                summary_text = atom.summary_text
+                value = atom.value_json
+                if isinstance(value, dict):
+                    raw_text = value.get("text")
+                    if isinstance(raw_text, str) and raw_text.strip():
+                        summary_text = raw_text.strip()
+                session_parts.append(f"- {atom.stable_key}: {summary_text[:500]}")
+            _append_slot(
+                "session_summary",
+                "\n".join(session_parts),
+                budget.session_summary_chars,
+            )
 
         recent_notes = self.memory.get_recent(
             max(1, budget.legacy_notes_chars // 200),

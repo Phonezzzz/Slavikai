@@ -57,3 +57,43 @@ def test_agent_remember_command_uses_canonical_memory(tmp_path: Path) -> None:
         "raw": "i prefer markdown output",
         "value": "markdown output",
     }
+
+
+def test_agent_end_session_command_saves_canonical_summary(tmp_path: Path) -> None:
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    agent.short_term.extend(
+        [
+            LLMMessage(role="user", content="обсудили память"),
+            LLMMessage(role="assistant", content="сохраним summary"),
+        ]
+    )
+
+    response = agent.handle_tool_command("/end-session")
+
+    assert "command_lane" in response.lower()
+    assert "Сессия закрыта, резюме сохранено: session:" in response
+    atoms = agent._canonical_store.list_atoms(stable_key_prefix="session:")
+    assert len(atoms) == 1
+    assert atoms[0].value_json == {"text": "ok"}
+    assert atoms[0].summary_text.startswith("session summary ")
+    assert agent.short_term == []
+
+
+def test_agent_end_session_command_skips_empty_session(tmp_path: Path) -> None:
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+
+    response = agent.handle_tool_command("/end-session")
+
+    assert "command_lane" in response.lower()
+    assert "Сессия не содержит сообщений для резюме." in response
+    assert agent._canonical_store.list_atoms(stable_key_prefix="session:") == []

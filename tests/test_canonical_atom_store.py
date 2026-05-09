@@ -125,6 +125,35 @@ def test_canonical_atom_store_pinned_roundtrip_and_listing(tmp_path) -> None:
     assert store.list_pinned() == []
 
 
+def test_canonical_atom_store_list_atoms_filters_by_stable_key_prefix(tmp_path) -> None:
+    db_path = tmp_path / "canonical_atoms.db"
+    store = CanonicalAtomStore(str(db_path))
+
+    store.create_atom(
+        atom_id="atom-session",
+        stable_key="session:20260509_120000",
+        claim_type=ClaimType.FACT,
+        value_json={"text": "session summary"},
+        confidence=0.9,
+        summary_text="session summary 20260509_120000",
+    )
+    store.create_atom(
+        atom_id="atom-fact",
+        stable_key="fact:project_stack",
+        claim_type=ClaimType.FACT,
+        value_json={"text": "python"},
+        confidence=0.8,
+        summary_text="project stack",
+    )
+
+    session_atoms = store.list_atoms(
+        claim_types={ClaimType.FACT},
+        stable_key_prefix="session:",
+    )
+
+    assert [atom.stable_key for atom in session_atoms] == ["session:20260509_120000"]
+
+
 def test_canonical_atom_store_migrates_existing_db_with_pinned_column(tmp_path) -> None:
     db_path = tmp_path / "canonical_atoms.db"
     conn = sqlite3.connect(db_path)

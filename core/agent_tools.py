@@ -137,6 +137,7 @@ class AgentToolsMixin:
             source_id: str | None = None,
             lang_hint: str | None = None,
         ) -> str: ...
+        def summarize_current_session(self) -> dict[str, JSONValue] | None: ...
 
     main_config: ModelConfig | None
     main_api_key: str | None
@@ -227,6 +228,18 @@ class AgentToolsMixin:
                     " ".join(args),
                     source_kind="command.remember",
                 )
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
+
+            if cmd in {"end-session", "end_session"}:
+                summary = self.summarize_current_session()
+                if summary is None:
+                    result = "Сессия не содержит сообщений для резюме."
+                else:
+                    stable_key = summary.get("stable_key")
+                    self.short_term.clear()
+                    result = f"Сессия закрыта, резюме сохранено: {stable_key}"
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
                 return response

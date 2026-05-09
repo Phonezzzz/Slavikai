@@ -164,3 +164,27 @@ def test_agent_context_includes_pinned_atoms_before_canonical_memory(tmp_path, m
     assert agent.last_context_text.index("[[SLOT:pinned_atoms]]") < agent.last_context_text.index(
         "[[SLOT:canonical_memory]]"
     )
+
+
+def test_agent_context_includes_session_summary_slot(tmp_path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.short_term.extend(
+        [
+            LLMMessage(role="user", content="обсудили PR-05"),
+            LLMMessage(role="assistant", content="сделали session summary"),
+        ]
+    )
+
+    summary = agent.summarize_current_session()
+    assert summary is not None
+
+    context = agent._build_context_messages([LLMMessage(role="user", content="hi")], "memory")
+
+    assert context[0].role == "system"
+    assert agent.last_context_text is not None
+    assert "[[SLOT:session_summary]]" in agent.last_context_text
+    assert "session:" in agent.last_context_text
+    assert "ok" in agent.last_context_text
