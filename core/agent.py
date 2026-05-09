@@ -34,7 +34,7 @@ from memory.atom_embedding_index import AtomEmbeddingIndex
 from memory.canonical_aggregator import CanonicalAggregator
 from memory.canonical_atom_store import CanonicalAtomStore
 from memory.categorized_memory_store import CategorizedMemoryStore
-from memory.claim_extractor import ClaimExtractor
+from memory.claim_extractor import ClaimExtractor, ExtractorConfig
 from memory.memory_companion_store import MemoryCompanionStore
 from memory.memory_inbox_writer import MemoryInboxWriter
 from memory.memory_manager import MemoryManager
@@ -207,7 +207,10 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             if canonical_atoms_db_path
             else CanonicalAtomStore()
         )
-        self._claim_extractor = ClaimExtractor()
+        self._claim_extractor = ClaimExtractor(
+            config=ExtractorConfig(enable_llm_enrichment=True),
+            brain=self.brain,
+        )
         self._canonical_aggregator = CanonicalAggregator(self._canonical_store)
         self._atom_embedding_index = AtomEmbeddingIndex(self.vectors)
         self._session_summarizer = SessionSummarizer(self.brain)

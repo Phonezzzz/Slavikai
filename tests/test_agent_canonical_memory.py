@@ -22,6 +22,18 @@ class StaticBrain(Brain):
         return LLMResult(text="ok")
 
 
+class JsonMemoryBrain(Brain):
+    def generate(self, messages, config=None):
+        del messages, config
+        return LLMResult(
+            text=(
+                '[{"claim_type":"ENVIRONMENT","stable_key":"environment:editor",'
+                '"value_json":{"value":"neovim"},"summary_text":"user editor is neovim",'
+                '"confidence":0.82}]'
+            )
+        )
+
+
 def _build_agent(tmp_path, monkeypatch) -> Agent:
     monkeypatch.setattr(
         "memory.vector_index.VectorIndex._get_model",
@@ -109,6 +121,27 @@ def test_agent_explicit_remember_stream_persists_fallback_fact(tmp_path, monkeyp
     atom = agent._canonical_store.get_by_stable_key("fact:my_laptop_hostname_is_alpha")
     assert atom is not None
     assert atom.value_json == {"text": "my laptop hostname is alpha"}
+
+
+def test_agent_explicit_remember_uses_llm_enrichment(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "memory.vector_index.VectorIndex._get_model",
+        lambda _self, _name: DummyModel(),
+    )
+    agent = Agent(
+        brain=JsonMemoryBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "canonical.db"),
+    )
+    agent.runtime_mode = "ask"
+
+    response = agent.respond([LLMMessage(role="user", content="remember my editor is neovim")])
+
+    assert "environment:editor" in response
+    atom = agent._canonical_store.get_by_stable_key("environment:editor")
+    assert atom is not None
+    assert atom.value_json == {"value": "neovim"}
 
 
 def test_agent_context_budget_caps_workspace_and_keeps_system_first(
