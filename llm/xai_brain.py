@@ -10,7 +10,7 @@ import requests
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
-from llm.types import LLMResult, LLMUsage, ModelConfig, WebSearchEvidence
+from llm.types import LLMResult, LLMUsage, ModelConfig, ToolSpec, WebSearchEvidence
 from shared.models import JSONValue, LLMMessage
 
 XAI_ENDPOINT: Final[str] = "https://api.x.ai/v1/chat/completions"
@@ -285,7 +285,13 @@ class XAiBrain(Brain):
         headers.update(config.extra_headers)
         return headers
 
-    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+    def generate(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
+    ) -> LLMResult:
+        del tools
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         if cfg.web_search_enabled:
@@ -293,7 +299,9 @@ class XAiBrain(Brain):
 
         payload = {
             "model": cfg.model,
-            "messages": [message.__dict__ for message in self._inject_system(messages, cfg)],
+            "messages": [
+                message.to_provider_dict() for message in self._inject_system(messages, cfg)
+            ],
             "temperature": cfg.temperature,
         }
         if cfg.max_tokens is not None:
@@ -419,7 +427,9 @@ class XAiBrain(Brain):
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
     ) -> Iterator[str]:
+        del tools
         cfg = self._resolve_config(config)
         if cfg.web_search_enabled:
             result = self.generate(messages, config=cfg)
@@ -431,7 +441,9 @@ class XAiBrain(Brain):
         headers = self._build_headers(cfg)
         payload = {
             "model": cfg.model,
-            "messages": [message.__dict__ for message in self._inject_system(messages, cfg)],
+            "messages": [
+                message.to_provider_dict() for message in self._inject_system(messages, cfg)
+            ],
             "temperature": cfg.temperature,
             "stream": True,
         }

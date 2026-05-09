@@ -9,7 +9,7 @@ import requests
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
-from llm.types import LLMResult, LLMUsage, ModelConfig
+from llm.types import LLMResult, LLMUsage, ModelConfig, ToolSpec
 from shared.models import JSONValue, LLMMessage
 
 OPENROUTER_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/chat/completions"
@@ -63,12 +63,20 @@ class OpenRouterBrain(Brain):
         headers.update(config.extra_headers)
         return headers
 
-    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+    def generate(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
+    ) -> LLMResult:
+        del tools
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = {
             "model": cfg.model,
-            "messages": [message.__dict__ for message in self._inject_system(messages, cfg)],
+            "messages": [
+                message.to_provider_dict() for message in self._inject_system(messages, cfg)
+            ],
             "temperature": cfg.temperature,
         }
         if cfg.max_tokens is not None:
@@ -119,12 +127,16 @@ class OpenRouterBrain(Brain):
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
     ) -> Iterator[str]:
+        del tools
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = {
             "model": cfg.model,
-            "messages": [message.__dict__ for message in self._inject_system(messages, cfg)],
+            "messages": [
+                message.to_provider_dict() for message in self._inject_system(messages, cfg)
+            ],
             "temperature": cfg.temperature,
             "stream": True,
         }

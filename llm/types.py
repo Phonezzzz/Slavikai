@@ -45,6 +45,21 @@ class WebSearchEvidence:
 
 
 @dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, JSONValue] = field(default_factory=dict)
+    raw_arguments: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    description: str
+    parameters_schema: dict[str, JSONValue] = field(default_factory=dict)
+
+
+@dataclass
 class LLMResult:
     text: str
     reasoning: str | None = None
@@ -52,12 +67,14 @@ class LLMResult:
     raw: dict[str, JSONValue] | None = None
     citations: list[JSONValue] | None = None
     web_search_evidence: WebSearchEvidence | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class BrainRequest:
     messages: list[LLMMessage]
     config: ModelConfig
+    tools: list[ToolSpec] | None = None
 
 
 LLMStreamChunkMode = Literal["append", "replace"]

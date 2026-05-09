@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from shared.models import JSONValue, ToolCallRecord, ToolRequest, ToolResult
@@ -31,6 +31,8 @@ class ToolDescriptor:
     enabled: bool = True
     capability: ToolCapability = "exec"
     risk_classes: list[ToolRiskClass] | None = None
+    description: str = ""
+    parameters_schema: dict[str, JSONValue] = field(default_factory=dict)
 
 
 class ToolRegistry:
@@ -57,6 +59,8 @@ class ToolRegistry:
         enabled: bool = True,
         capability: ToolCapability = "exec",
         risk_classes: list[str] | None = None,
+        description: str = "",
+        parameters_schema: dict[str, JSONValue] | None = None,
     ) -> None:
         resolved: ToolHandler
         if isinstance(handler, Tool):
@@ -72,6 +76,8 @@ class ToolRegistry:
                 risk_classes,
                 capability=self._normalize_capability(capability),
             ),
+            description=description,
+            parameters_schema=parameters_schema or {},
         )
         self._logger.info(
             "tool_registered",
@@ -103,6 +109,9 @@ class ToolRegistry:
         if descriptor is None or descriptor.risk_classes is None:
             return []
         return list(descriptor.risk_classes)
+
+    def get_descriptor(self, name: str) -> ToolDescriptor | None:
+        return self._tools.get(name)
 
     def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
         descriptor = self._tools.get(request.name)

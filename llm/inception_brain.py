@@ -9,7 +9,14 @@ import requests
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
-from llm.types import LLMResult, LLMStreamChunk, LLMStreamChunkMode, LLMUsage, ModelConfig
+from llm.types import (
+    LLMResult,
+    LLMStreamChunk,
+    LLMStreamChunkMode,
+    LLMUsage,
+    ModelConfig,
+    ToolSpec,
+)
 from shared.models import JSONValue, LLMMessage
 
 DEFAULT_API_BASE: Final[str] = "https://api.inceptionlabs.ai/v1"
@@ -98,7 +105,9 @@ class InceptionBrain(Brain):
     ) -> dict[str, JSONValue]:
         payload: dict[str, JSONValue] = {
             "model": config.model,
-            "messages": [message.__dict__ for message in self._inject_system(messages, config)],
+            "messages": [
+                message.to_provider_dict() for message in self._inject_system(messages, config)
+            ],
             "temperature": config.temperature,
             "stream": stream,
             **self._build_reasoning_payload(config),
@@ -111,7 +120,13 @@ class InceptionBrain(Brain):
             payload["diffusing"] = bool(config.diffusing)
         return payload
 
-    def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
+    def generate(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
+    ) -> LLMResult:
+        del tools
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_payload(messages, cfg, stream=False)
@@ -157,7 +172,9 @@ class InceptionBrain(Brain):
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
     ) -> Iterator[LLMStreamChunk]:
+        del tools
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_payload(messages, cfg, stream=True)
@@ -195,8 +212,9 @@ class InceptionBrain(Brain):
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
     ) -> Iterator[str]:
-        for chunk in self.generate_stream_chunks(messages, config=config):
+        for chunk in self.generate_stream_chunks(messages, config=config, tools=tools):
             if chunk.text:
                 yield chunk.text
 
