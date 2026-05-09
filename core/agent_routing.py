@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Literal
 
 from core.approval_policy import ApprovalRequired
@@ -9,7 +9,8 @@ from core.decision.handler import DecisionContext, DecisionRequired
 from core.mwv.models import StopReasonCode
 from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
-from llm.types import LLMResult, LLMStreamChunk, WebSearchEvidence
+from core.tool_loop import AgentToolLoop
+from llm.types import LLMResult, LLMStreamChunk, ToolSpec, WebSearchEvidence
 from shared.models import LLMMessage, ToolRequest, ToolResult
 
 if TYPE_CHECKING:
@@ -22,10 +23,12 @@ if TYPE_CHECKING:
     from core.mwv.models import VerificationResult
     from core.rule_engine import PolicyApplication
     from core.skills.index import SkillIndex, SkillMatch
+    from core.tool_gateway import ToolGateway
     from core.tracer import Tracer
     from llm.brain_base import Brain
     from llm.types import ModelConfig
     from shared.models import JSONValue
+    from tools.tool_registry import ToolRegistry
 
 
 class AgentRoutingMixin:
@@ -33,6 +36,7 @@ class AgentRoutingMixin:
         tracer: Tracer
         logger: logging.Logger
         tools_enabled: dict[str, bool]
+        tool_registry: ToolRegistry
         skill_index: SkillIndex | None
         decision_handler: DecisionHandler
         memory_config: MemoryConfig
@@ -119,6 +123,13 @@ class AgentRoutingMixin:
             *,
             safe_mode_override: bool | None = None,
         ) -> ToolResult: ...
+        def _build_tool_gateway(
+            self,
+            *,
+            pre_call: Callable[[ToolRequest], object | None] | None = None,
+            post_call: Callable[[ToolRequest, ToolResult, object | None], None] | None = None,
+            safe_mode_override: bool | None = None,
+        ) -> ToolGateway: ...
         def _append_report_block(
             self,
             content: str,
@@ -426,6 +437,23 @@ class AgentRoutingMixin:
                     policy_application=policy_application,
                     response_text=self._web_search_not_executed(web_evidence),
                 )
+            tool_loop_result = self._run_chat_tool_loop_if_available(messages_with_context)
+            if tool_loop_result is not None:
+                reviewed = self._review_answer(tool_loop_result)
+                blocked = self._web_search_block_reason(reviewed, web_evidence)
+                if blocked is not None:
+                    reviewed = blocked
+                self.tracer.log(
+                    "reasoning_end",
+                    "Ответ получен через native tool loop",
+                    {"reply_preview": reviewed[:120]},
+                )
+                return self._finalize_chat_response(
+                    last_content=last_content,
+                    record_in_history=record_in_history,
+                    policy_application=policy_application,
+                    response_text=reviewed,
+                )
             reply = self._get_main_brain().generate(messages_with_context)
             web_evidence = self._merge_llm_web_search_evidence(web_evidence, reply)
             reviewed = self._review_answer(reply.text)
@@ -449,6 +477,52 @@ class AgentRoutingMixin:
             if record_in_history:
                 self._append_short_term([LLMMessage(role="assistant", content=error_text)])
             return error_text
+
+    def _run_chat_tool_loop_if_available(
+        self,
+        messages: list[LLMMessage],
+    ) -> str | None:
+        tool_specs = self._chat_read_tool_specs()
+        if not tool_specs:
+            return None
+        result = AgentToolLoop().run(
+            brain=self._get_main_brain(),
+            gateway=self._build_tool_gateway(safe_mode_override=None),
+            messages=messages,
+            tools=tool_specs,
+            config=self.main_config,
+        )
+        if not result.tool_calls:
+            return result.text
+        self.tracer.log(
+            "native_tool_loop",
+            "chat read-only tool loop executed",
+            {
+                "tool_calls": len(result.tool_calls),
+                "iterations": result.iterations,
+                "tools": [item.call.name for item in result.tool_calls],
+            },
+        )
+        return result.text
+
+    def _chat_read_tool_specs(self) -> list[ToolSpec]:
+        specs: list[ToolSpec] = []
+        for name, enabled in self.tool_registry.list_tools().items():
+            if not enabled:
+                continue
+            descriptor = self.tool_registry.get_descriptor(name)
+            if descriptor is None or descriptor.capability != "read":
+                continue
+            if not descriptor.description and not descriptor.parameters_schema:
+                continue
+            specs.append(
+                ToolSpec(
+                    name=descriptor.name,
+                    description=descriptor.description,
+                    parameters_schema=dict(descriptor.parameters_schema),
+                )
+            )
+        return specs
 
     def _run_chat_response_stream(
         self,

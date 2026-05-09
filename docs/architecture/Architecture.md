@@ -7,9 +7,10 @@
 ## Цель
 
 SlavikAI сейчас работает как single-user/server-side agent runtime с контурами chat,
-workspace/MWV и auto. После PR-0..PR-7 в коде есть честный tool-calling contract,
-минимальный `AgentToolLoop`, split chat/workspace API paths, debug-only command lane
-и единый terminal backend. Часть старого runtime ещё остаётся legacy-обвязкой.
+workspace/MWV и auto. После PR-0..PR-9 в коде есть честный tool-calling contract,
+read-only chat integration через `AgentToolLoop`, split chat/workspace API paths,
+debug-only command lane и единый terminal backend. Часть старого runtime ещё остаётся
+legacy-обвязкой.
 
 ## Основные слои
 
@@ -17,6 +18,8 @@ workspace/MWV и auto. После PR-0..PR-7 в коде есть честный
   - Оркестрация: `Agent` + mixins.
   - Tool loop: `core/tool_loop.py` вызывает `Brain.generate(..., tools=...)`, исполняет
     `tool_calls` через `ToolGateway` и добавляет `role="tool"` сообщения.
+  - Chat integration: `runtime_mode=ask` может использовать только описанные read-capability
+    tools; write/exec tool calls остаются вне chat path.
   - Планирование/исполнение: `Planner`/`Executor` больше не извлекают tool args из prose;
     они принимают только explicit `PlanStep.operation` + `PlanStep.tool_args`.
   - Трассировка: `Tracer` (`logs/trace.log`).

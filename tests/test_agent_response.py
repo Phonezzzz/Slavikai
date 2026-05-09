@@ -4,7 +4,7 @@ from pathlib import Path
 
 from core.agent import Agent
 from llm.brain_base import Brain
-from llm.types import LLMResult, ModelConfig, WebSearchEvidence
+from llm.types import LLMResult, ModelConfig, ToolCall, ToolSpec, WebSearchEvidence
 from shared.models import LLMMessage, PlanStep, PlanStepStatus, TaskPlan, ToolRequest, ToolResult
 
 
@@ -19,6 +19,37 @@ class SimpleBrain(Brain):
         self.calls += 1
         self.messages = list(messages)
         return LLMResult(text=self.text, web_search_evidence=self.evidence)
+
+
+class ToolLoopBrain(Brain):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen_tools: list[ToolSpec] = []
+        self.messages_seen: list[list[LLMMessage]] = []
+
+    def generate(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
+    ) -> LLMResult:
+        del config
+        self.calls += 1
+        self.seen_tools = list(tools or [])
+        self.messages_seen.append(list(messages))
+        if self.calls == 1:
+            return LLMResult(
+                text="need lookup",
+                tool_calls=[
+                    ToolCall(
+                        id="lookup-1",
+                        name="chat_lookup",
+                        arguments={"query": "ping"},
+                    )
+                ],
+            )
+        assert messages[-1].role == "tool"
+        return LLMResult(text=f"tool loop final: {messages[-1].content}")
 
 
 class FakeWebTool:
@@ -73,6 +104,47 @@ def test_agent_simple_response(tmp_path: Path) -> None:
     response = agent.respond([LLMMessage(role="user", content="привет")])
     assert "hello" in response
     assert brain.calls >= 1
+
+
+def test_agent_chat_response_can_use_read_only_native_tool_loop(tmp_path: Path) -> None:
+    brain = ToolLoopBrain()
+    agent = Agent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.tool_registry.register(
+        "chat_lookup",
+        lambda request: ToolResult.success({"output": f"lookup:{request.args['query']}"}),
+        enabled=True,
+        capability="read",
+        description="Read-only chat lookup",
+        parameters_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    )
+
+    response = agent.respond([LLMMessage(role="user", content="use lookup")])
+
+    assert "tool loop final" in response
+    assert brain.calls == 2
+    assert brain.seen_tools == [
+        ToolSpec(
+            name="chat_lookup",
+            description="Read-only chat lookup",
+            parameters_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        )
+    ]
+    assert brain.messages_seen[-1][-1].role == "tool"
 
 
 def test_agent_local_web_search_executes_before_non_xai_answer(tmp_path: Path) -> None:

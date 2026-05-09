@@ -7,8 +7,9 @@
 ## 0) Статус канона
 
 - **Target runtime**: Ask / Plan / Act / Auto, описанные ниже.
-- **Implemented baseline**: tool-calling типы, `AgentToolLoop`, explicit `PlanStep.tool_args`,
-  debug-only command lane, split chat/workspace send+SSE endpoints, единый `TerminalTool`.
+- **Implemented baseline**: tool-calling типы, `AgentToolLoop`, read-only chat tool-loop
+  integration, explicit `PlanStep.tool_args`, debug-only command lane, split chat/workspace
+  send+SSE endpoints, единый `TerminalTool`.
 - **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, storage `lane`
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой архитектурой.
 - **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
@@ -158,8 +159,8 @@ Legacy debt после PR-0..PR-7:
   существуют как domain views, а не как полностью отдельные таблицы.
 - Legacy `/ui/api/events/stream` и lane-multiplexed behavior внутри `/ui/api/chat/send`
   ещё есть для совместимости; целевой путь — split chat/workspace endpoints.
-- Провайдеры приняли `tools` в контракте, но native tool calling реализован не во всех
-  provider backends.
+- Провайдеры приняли `tools` в контракте, но native provider tool calling реализован не во
+  всех backends.
 
 Уже не является допустимым legacy для расширения:
 
