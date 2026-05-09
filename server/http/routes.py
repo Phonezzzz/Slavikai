@@ -49,6 +49,9 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/ui/api/settings", settings.handle_ui_settings)
     app.router.add_post("/ui/api/settings", settings.handle_ui_settings_update)
     app.router.add_get("/ui/api/memory/conflicts", memory.handle_ui_memory_conflicts)
+    app.router.add_get("/ui/api/memory/pinned", memory.handle_ui_memory_pinned)
+    app.router.add_post("/ui/api/memory/pin", memory.handle_ui_memory_pin)
+    app.router.add_post("/ui/api/memory/unpin", memory.handle_ui_memory_unpin)
     app.router.add_post(
         "/ui/api/memory/conflicts/resolve",
         memory.handle_ui_memory_conflicts_resolve,

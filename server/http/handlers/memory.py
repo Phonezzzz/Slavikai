@@ -156,6 +156,131 @@ async def handle_ui_memory_conflicts(request: web.Request) -> web.Response:
     return json_response({"conflicts": conflicts})
 
 
+async def handle_ui_memory_pinned(request: web.Request) -> web.Response:
+    agent = await _resolve_agent(request)
+    if agent is None:
+        return _model_not_selected_response()
+
+    limit_raw = request.query.get("limit", "").strip()
+    limit = 20
+    if limit_raw:
+        try:
+            limit = int(limit_raw)
+        except ValueError:
+            return error_response(
+                status=400,
+                message="limit должен быть int.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+    if limit <= 0 or limit > 200:
+        return error_response(
+            status=400,
+            message="limit должен быть в диапазоне 1..200.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    list_pinned = getattr(agent, "list_pinned_memory_atoms", None)
+    if not callable(list_pinned):
+        return error_response(
+            status=501,
+            message="Pinned memory store недоступен.",
+            error_type="not_supported",
+            code="memory_pinned_not_supported",
+        )
+    try:
+        pinned_raw = list_pinned(limit)
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=500,
+            message=f"Не удалось загрузить закрепленную память: {exc}",
+            error_type="internal_error",
+            code="memory_pinned_load_failed",
+        )
+    pinned: list[JSONValue] = []
+    if isinstance(pinned_raw, list):
+        for item in pinned_raw:
+            if isinstance(item, dict):
+                normalized: dict[str, JSONValue] = {}
+                for key, value in item.items():
+                    normalized[str(key)] = _normalize_json_value(value)
+                pinned.append(normalized)
+    return json_response({"pinned": pinned})
+
+
+async def _handle_ui_memory_pin_state(request: web.Request, *, pinned: bool) -> web.Response:
+    agent = await _resolve_agent(request)
+    if agent is None:
+        return _model_not_selected_response()
+
+    method_name = "pin_memory_atom" if pinned else "unpin_memory_atom"
+    update_pinned = getattr(agent, method_name, None)
+    if not callable(update_pinned):
+        return error_response(
+            status=501,
+            message="Pinned memory updater недоступен.",
+            error_type="not_supported",
+            code="memory_pin_not_supported",
+        )
+
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    stable_key_raw = payload.get("stable_key")
+    if not isinstance(stable_key_raw, str) or not stable_key_raw.strip():
+        return error_response(
+            status=400,
+            message="stable_key обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+
+    agent_lock: asyncio.Lock = request.app["agent_lock"]
+    try:
+        async with agent_lock:
+            updated_raw = update_pinned(stable_key_raw.strip())
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=500,
+            message=f"Не удалось обновить закрепление памяти: {exc}",
+            error_type="internal_error",
+            code="memory_pin_update_failed",
+        )
+    if updated_raw is None:
+        return error_response(
+            status=404,
+            message="Атом памяти не найден.",
+            error_type="invalid_request_error",
+            code="memory_atom_not_found",
+        )
+    normalized: dict[str, JSONValue] = {}
+    if isinstance(updated_raw, dict):
+        for key, value in updated_raw.items():
+            normalized[str(key)] = _normalize_json_value(value)
+    return json_response({"atom": normalized})
+
+
+async def handle_ui_memory_pin(request: web.Request) -> web.Response:
+    return await _handle_ui_memory_pin_state(request, pinned=True)
+
+
+async def handle_ui_memory_unpin(request: web.Request) -> web.Response:
+    return await _handle_ui_memory_pin_state(request, pinned=False)
+
+
 async def handle_ui_memory_triage_preview(request: web.Request) -> web.Response:
     agent = await _resolve_agent(request)
     if agent is None:

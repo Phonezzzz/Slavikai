@@ -475,6 +475,44 @@ class MemoryConflictAgent(DummyAgent):
         return dict(next_item)
 
 
+class MemoryPinnedAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self._atoms: dict[str, dict[str, JSONValue]] = {
+            "preference:response_format": {
+                "atom_id": "atom-pin",
+                "stable_key": "preference:response_format",
+                "claim_type": "preference",
+                "value_json": {"value": "markdown"},
+                "confidence": 0.9,
+                "support_count": 1,
+                "contradict_count": 0,
+                "last_seen_at": "2026-01-01T00:00:00+00:00",
+                "status": "active",
+                "summary_text": "preference:response_format=markdown",
+                "pinned": False,
+            }
+        }
+
+    def list_pinned_memory_atoms(self, limit: int = 20) -> list[dict[str, JSONValue]]:
+        items = [item for item in self._atoms.values() if item.get("pinned") is True]
+        return [dict(item) for item in items[:limit]]
+
+    def pin_memory_atom(self, stable_key: str) -> dict[str, JSONValue] | None:
+        atom = self._atoms.get(stable_key)
+        if atom is None:
+            return None
+        atom["pinned"] = True
+        return dict(atom)
+
+    def unpin_memory_atom(self, stable_key: str) -> dict[str, JSONValue] | None:
+        atom = self._atoms.get(stable_key)
+        if atom is None:
+            return None
+        atom["pinned"] = False
+        return dict(atom)
+
+
 class MemoryTriageAgent(DummyAgent):
     def __init__(self, db_path: Path) -> None:
         super().__init__()

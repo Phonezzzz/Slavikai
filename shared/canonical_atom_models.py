@@ -61,6 +61,7 @@ class CanonicalAtom:
     last_seen_at: str
     status: AtomStatus
     summary_text: str
+    pinned: bool = False
 
     def __post_init__(self) -> None:
         if not self.atom_id.strip():

@@ -35,15 +35,29 @@ class CanonicalAtomStore:
             )
             """
         )
+        self._ensure_pinned_column()
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_canonical_atom_claim_status "
             "ON canonical_atom (claim_type, status)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_atom_pinned "
+            "ON canonical_atom (pinned, last_seen_at)"
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_canonical_atom_last_seen "
             "ON canonical_atom (last_seen_at)"
         )
         self.conn.commit()
+
+    def _ensure_pinned_column(self) -> None:
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(canonical_atom)").fetchall()
+        }
+        if "pinned" in columns:
+            return
+        self.conn.execute("ALTER TABLE canonical_atom ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self.conn.close()
@@ -103,6 +117,28 @@ class CanonicalAtomStore:
     def list_conflicts(self, *, limit: int = 100) -> list[CanonicalAtom]:
         return self.list_atoms(statuses={AtomStatus.CONFLICT}, limit=limit)
 
+    def list_pinned(self, *, limit: int = 20) -> list[CanonicalAtom]:
+        if limit <= 0:
+            raise ValueError("limit должен быть > 0")
+        rows = self.conn.execute(
+            "SELECT * FROM canonical_atom "
+            "WHERE pinned = 1 "
+            "ORDER BY last_seen_at DESC, stable_key ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
+    def set_pinned(self, stable_key: str, pinned: bool) -> bool:
+        normalized = stable_key.strip()
+        if not normalized:
+            raise ValueError("stable_key должен быть непустым")
+        with self.conn:
+            cursor = self.conn.execute(
+                "UPDATE canonical_atom SET pinned = ? WHERE stable_key = ?",
+                (1 if pinned else 0, normalized),
+            )
+        return cursor.rowcount > 0
+
     def upsert(self, atom: CanonicalAtom) -> CanonicalAtom:
         payload = self._atom_for_write(atom)
         with self.conn:
@@ -118,8 +154,9 @@ class CanonicalAtomStore:
                     contradict_count,
                     last_seen_at,
                     status,
-                    summary_text
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    summary_text,
+                    pinned
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(stable_key) DO UPDATE SET
                     atom_id=excluded.atom_id,
                     claim_type=excluded.claim_type,
@@ -151,6 +188,7 @@ class CanonicalAtomStore:
         last_seen_at: str | None = None,
         status: AtomStatus = AtomStatus.ACTIVE,
         summary_text: str,
+        pinned: bool = False,
     ) -> CanonicalAtom:
         atom = CanonicalAtom(
             atom_id=atom_id,
@@ -163,6 +201,7 @@ class CanonicalAtomStore:
             last_seen_at=last_seen_at or utc_now_iso(),
             status=status,
             summary_text=summary_text,
+            pinned=pinned,
         )
         return self.upsert(atom)
 
@@ -190,6 +229,7 @@ class CanonicalAtomStore:
             last_seen_at=utc_now_iso(),
             status=resolution,
             summary_text=next_summary,
+            pinned=current.pinned,
         )
         return self.upsert(resolved)
 
@@ -211,6 +251,7 @@ class CanonicalAtomStore:
             last_seen_at=str(row["last_seen_at"]),
             status=AtomStatus(str(row["status"])),
             summary_text=str(row["summary_text"]),
+            pinned=bool(int(row["pinned"])),
         )
 
     def _atom_for_write(self, atom: CanonicalAtom) -> tuple[object, ...]:
@@ -225,4 +266,5 @@ class CanonicalAtomStore:
             atom.last_seen_at,
             atom.status.value,
             atom.summary_text,
+            1 if atom.pinned else 0,
         )

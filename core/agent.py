@@ -771,6 +771,28 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         atoms = self._canonical_store.list_conflicts(limit=limit)
         return [self._atom_to_payload(atom) for atom in atoms]
 
+    def list_pinned_memory_atoms(self, limit: int = 20) -> list[dict[str, JSONValue]]:
+        atoms = self._canonical_store.list_pinned(limit=limit)
+        return [self._atom_to_payload(atom) for atom in atoms]
+
+    def pin_memory_atom(self, stable_key: str) -> dict[str, JSONValue] | None:
+        if not self._canonical_store.set_pinned(stable_key, True):
+            return None
+        atom = self._canonical_store.get_by_stable_key(stable_key)
+        if atom is None:
+            return None
+        self.tracer.log("memory_atom_pinned", stable_key, {"stable_key": stable_key})
+        return self._atom_to_payload(atom)
+
+    def unpin_memory_atom(self, stable_key: str) -> dict[str, JSONValue] | None:
+        if not self._canonical_store.set_pinned(stable_key, False):
+            return None
+        atom = self._canonical_store.get_by_stable_key(stable_key)
+        if atom is None:
+            return None
+        self.tracer.log("memory_atom_unpinned", stable_key, {"stable_key": stable_key})
+        return self._atom_to_payload(atom)
+
     def resolve_memory_conflict(
         self,
         *,
@@ -814,6 +836,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             "last_seen_at": atom.last_seen_at,
             "status": atom.status.value,
             "summary_text": atom.summary_text,
+            "pinned": atom.pinned,
         }
 
     def _build_context_messages(self, messages: list[LLMMessage], query: str) -> list[LLMMessage]:
@@ -856,6 +879,15 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             filled_slots.append(slot)
             slot_sizes[name] = len(slot)
             remaining -= len(slot) + separator_len
+
+        pinned_atoms = self._canonical_store.list_pinned(limit=20)
+        if pinned_atoms:
+            pinned_parts = ["Закрепленная память:"]
+            for atom in pinned_atoms:
+                pinned_parts.append(
+                    f"- [{atom.claim_type.value}] {atom.stable_key}: {atom.summary_text}"
+                )
+            _append_slot("pinned_atoms", "\n".join(pinned_parts), budget.pinned_atoms_chars)
 
         recent_notes = self.memory.get_recent(
             max(1, budget.legacy_notes_chars // 200),

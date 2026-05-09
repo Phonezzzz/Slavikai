@@ -137,3 +137,30 @@ def test_agent_context_budget_caps_workspace_and_keeps_system_first(
     assert len(agent.last_context_text) <= 300
     assert "[[SLOT:workspace_file]]" in agent.last_context_text
     assert "x" * 200 not in agent.last_context_text
+
+
+def test_agent_context_includes_pinned_atoms_before_canonical_memory(tmp_path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+
+    applied = agent.capture_memory_claims_from_text(
+        "remember i prefer markdown output",
+        source_kind="chat.explicit_remember",
+        source_id="session-3",
+    )
+    assert applied
+    pinned = agent.pin_memory_atom("preference:response_format")
+    assert pinned is not None
+    assert pinned["pinned"] is True
+
+    context = agent._build_context_messages([LLMMessage(role="user", content="hi")], "format")
+
+    assert context[0].role == "system"
+    assert agent.last_context_text is not None
+    assert "[[SLOT:pinned_atoms]]" in agent.last_context_text
+    assert "preference:response_format" in agent.last_context_text
+    assert agent.last_context_text.index("[[SLOT:pinned_atoms]]") < agent.last_context_text.index(
+        "[[SLOT:canonical_memory]]"
+    )

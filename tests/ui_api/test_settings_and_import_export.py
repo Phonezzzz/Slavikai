@@ -522,6 +522,48 @@ def test_ui_memory_conflicts_endpoints() -> None:
     asyncio.run(run())
 
 
+def test_ui_memory_pinned_endpoints() -> None:
+    async def run() -> None:
+        client = await _create_client(MemoryPinnedAgent())
+        try:
+            empty_resp = await client.get("/ui/api/memory/pinned")
+            assert empty_resp.status == 200
+            empty_payload = await empty_resp.json()
+            assert empty_payload.get("pinned") == []
+
+            pin_resp = await client.post(
+                "/ui/api/memory/pin",
+                json={"stable_key": "preference:response_format"},
+            )
+            assert pin_resp.status == 200
+            pin_payload = await pin_resp.json()
+            atom = pin_payload.get("atom")
+            assert isinstance(atom, dict)
+            assert atom.get("pinned") is True
+
+            pinned_resp = await client.get("/ui/api/memory/pinned")
+            assert pinned_resp.status == 200
+            pinned_payload = await pinned_resp.json()
+            pinned = pinned_payload.get("pinned")
+            assert isinstance(pinned, list)
+            assert len(pinned) == 1
+            assert pinned[0].get("stable_key") == "preference:response_format"
+
+            unpin_resp = await client.post(
+                "/ui/api/memory/unpin",
+                json={"stable_key": "preference:response_format"},
+            )
+            assert unpin_resp.status == 200
+            unpin_payload = await unpin_resp.json()
+            unpinned_atom = unpin_payload.get("atom")
+            assert isinstance(unpinned_atom, dict)
+            assert unpinned_atom.get("pinned") is False
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_stt_transcribe_success(monkeypatch, tmp_path) -> None:
     ui_settings_path = tmp_path / "ui_settings.json"
     ui_settings_path.write_text("{}", encoding="utf-8")
