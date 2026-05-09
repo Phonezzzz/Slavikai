@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from config.memory_config import ContextBudgetConfig
 from core.agent import Agent
 from core.mwv.models import MWVMessage
 from core.mwv.routing import RouteDecision
@@ -48,8 +49,10 @@ def test_agent_build_context_includes_canonical_memory(tmp_path, monkeypatch) ->
 
     context = agent._build_context_messages([LLMMessage(role="user", content="hi")], "коротко")
     assert context
-    system = context[-1]
+    system = context[0]
     assert system.role == "system"
+    assert context[1].role == "user"
+    assert "[[SLOT:canonical_memory]]" in system.content
     assert "Каноническая память" in system.content
 
 
@@ -72,3 +75,31 @@ def test_agent_mwv_task_contains_memory_capsule(tmp_path, monkeypatch) -> None:
     count_raw = capsule_raw.get("count")
     assert isinstance(count_raw, int)
     assert count_raw >= 1
+
+
+def test_agent_context_budget_caps_workspace_and_keeps_system_first(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    object.__setattr__(
+        agent.memory_config,
+        "context_budget",
+        ContextBudgetConfig(
+            total_chars=300,
+            workspace_file_chars=120,
+        ),
+    )
+    agent.set_workspace_context("big.txt", "x" * 1000)
+
+    context = agent._build_context_messages([LLMMessage(role="user", content="hi")], "hi")
+
+    assert context[0].role == "system"
+    assert context[1].role == "user"
+    assert agent.last_context_text is not None
+    assert len(agent.last_context_text) <= 300
+    assert "[[SLOT:workspace_file]]" in agent.last_context_text
+    assert "x" * 200 not in agent.last_context_text

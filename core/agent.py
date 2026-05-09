@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from dataclasses import replace
 from typing import Literal, cast
 
 from config.memory_config import MemoryConfig, load_memory_config
@@ -777,19 +778,65 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         }
 
     def _build_context_messages(self, messages: list[LLMMessage], query: str) -> list[LLMMessage]:
-        context_parts: list[str] = []
+        budget = self.memory_config.context_budget
+        remaining = budget.total_chars
+        filled_slots: list[str] = []
+        slot_sizes: dict[str, int] = {}
 
-        recent_notes = self.memory.get_recent(3, kind=MemoryKind.NOTE)
+        def _append_slot(name: str, raw_text: str, max_chars: int) -> None:
+            nonlocal remaining
+            text = raw_text.strip()
+            if not text or max_chars <= 0:
+                slot_sizes[name] = 0
+                return
+            if remaining <= 0:
+                slot_sizes[name] = 0
+                self.tracer.log("context_budget_exhausted", name, {"slot": name})
+                return
+
+            text = text[:max_chars].rstrip()
+            prefix = f"[[SLOT:{name}]]\n"
+            suffix = "\n[[/SLOT]]"
+            separator_len = 2 if filled_slots else 0
+            overhead = separator_len + len(prefix) + len(suffix)
+            if remaining <= overhead:
+                slot_sizes[name] = 0
+                self.tracer.log(
+                    "context_budget_exhausted",
+                    name,
+                    {"slot": name, "remaining": remaining},
+                )
+                return
+
+            allowed_payload = min(len(text), remaining - overhead)
+            text = text[:allowed_payload].rstrip()
+            if not text:
+                slot_sizes[name] = 0
+                return
+            slot = f"{prefix}{text}{suffix}"
+            filled_slots.append(slot)
+            slot_sizes[name] = len(slot)
+            remaining -= len(slot) + separator_len
+
+        recent_notes = self.memory.get_recent(
+            max(1, budget.legacy_notes_chars // 200),
+            kind=MemoryKind.NOTE,
+        )
         if recent_notes:
-            context_parts.append("Недавняя память:")
+            note_parts = ["Недавняя память:"]
             for note in recent_notes:
-                context_parts.append(f"- {note.content[:200]}")
+                note_parts.append(f"- {note.content[:200]}")
+            _append_slot("legacy_notes", "\n".join(note_parts), budget.legacy_notes_chars)
 
-        hints_meta = self._collect_feedback_hints(2, severity_filter=["major", "fatal"])
+        hints_meta = self._collect_feedback_hints(
+            budget.feedback_max_items,
+            severity_filter=["major", "fatal"],
+        )
         if hints_meta:
-            context_parts.append("Подсказки от пользователя:")
+            hint_parts = ["Подсказки от пользователя:"]
             for hint_meta in hints_meta:
-                context_parts.append(f"- ({hint_meta.get('severity')}) {hint_meta.get('hint')}")
+                hint_parts.append(f"- ({hint_meta.get('severity')}) {hint_meta.get('hint')}")
+            _append_slot("feedback", "\n".join(hint_parts), budget.feedback_chars)
             self.last_hints_used = [h["hint"] for h in hints_meta]
             self.last_hints_meta = hints_meta
             self.tracer.log("auto_hint_applied", "Использованы подсказки", {"hints": hints_meta})
@@ -797,63 +844,94 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             self.last_hints_used = []
             self.last_hints_meta = []
 
-        prefs = self.memory.get_user_prefs()
+        prefs_all = self.memory.get_user_prefs()
+        prefs = prefs_all[: budget.prefs_max_items]
+        if len(prefs_all) > len(prefs):
+            self.tracer.log(
+                "prefs_truncated",
+                f"{len(prefs_all)} -> {len(prefs)}",
+                {"total": len(prefs_all), "kept": len(prefs)},
+            )
         if prefs:
-            context_parts.append("Предпочтения пользователя:")
+            pref_parts = ["Предпочтения пользователя:"]
             for pref in prefs:
                 meta = pref.meta or {}
-                context_parts.append(f"- {meta.get('key')}: {meta.get('value')}")
+                pref_parts.append(f"- {meta.get('key')}: {meta.get('value')}")
+            _append_slot("prefs", "\n".join(pref_parts), budget.prefs_chars)
 
         try:
-            memory_capsule = self.build_memory_capsule(
-                query,
+            retrieval_config = replace(
+                self._retrieval_config,
+                max_context_chars=budget.canonical_memory_chars,
+            )
+            memory_capsule = build_memory_capsule_payload(
+                query=query,
+                store=self._canonical_store,
+                vector_index=self.vectors,
                 for_mwv=False,
+                config=retrieval_config,
                 allow_vector_runtime_init=False,
             )
             capsule_text = memory_capsule.get("text")
             if isinstance(capsule_text, str) and capsule_text.strip():
-                context_parts.append("Каноническая память:")
-                context_parts.extend(capsule_text.splitlines())
+                canonical_text = "\n".join(["Каноническая память:", *capsule_text.splitlines()])
+                _append_slot(
+                    "canonical_memory",
+                    canonical_text,
+                    budget.canonical_memory_chars,
+                )
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("Canonical memory retrieval failed: %s", exc)
 
         # Векторный поиск по проектному индексу (code + docs)
         try:
+            code_top_k = max(1, budget.vector_code_chars // 400)
+            docs_top_k = max(1, budget.vector_docs_chars // 400)
             vec_results_code = self.vectors.search(
                 query,
                 namespace="code",
-                top_k=3,
+                top_k=code_top_k,
                 allow_runtime_init=False,
             )
             vec_results_docs = self.vectors.search(
                 query,
                 namespace="docs",
-                top_k=3,
+                top_k=docs_top_k,
                 allow_runtime_init=False,
             )
-            vec_results = [*vec_results_code, *vec_results_docs]
-            if vec_results:
-                context_parts.append("Контекст проекта (code/docs):")
-                for res in vec_results:
-                    context_parts.append(f"- {res.path}: {res.snippet}")
+            if vec_results_code:
+                code_parts = ["Контекст проекта (code):"]
+                for res in vec_results_code:
+                    code_parts.append(f"- {res.path}: {res.snippet}")
+                _append_slot("vectors_code", "\n".join(code_parts), budget.vector_code_chars)
+            if vec_results_docs:
+                docs_parts = ["Контекст проекта (docs):"]
+                for res in vec_results_docs:
+                    docs_parts.append(f"- {res.path}: {res.snippet}")
+                _append_slot("vectors_docs", "\n".join(docs_parts), budget.vector_docs_chars)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("Vector search failed: %s", exc)
 
         if self.workspace_file_path and self.workspace_file_content is not None:
-            context_parts.append("Текущий файл:")
-            context_parts.append(f"- path: {self.workspace_file_path}")
+            workspace_parts = ["Текущий файл:", f"- path: {self.workspace_file_path}"]
             if self.workspace_selection:
-                selection_snippet = self.workspace_selection[:1200]
-                context_parts.append(f"- выделение:\n{selection_snippet}")
+                selection_snippet = self.workspace_selection[: budget.workspace_file_chars]
+                workspace_parts.append(f"- выделение:\n{selection_snippet}")
             content_snippet = self.workspace_file_content
-            if len(content_snippet) > 6000:
-                content_snippet = content_snippet[:6000]
-            context_parts.append(f"- содержимое:\n{content_snippet}")
+            if len(content_snippet) > budget.workspace_file_chars:
+                content_snippet = content_snippet[: budget.workspace_file_chars]
+            workspace_parts.append(f"- содержимое:\n{content_snippet}")
+            _append_slot("workspace_file", "\n".join(workspace_parts), budget.workspace_file_chars)
 
-        if context_parts:
-            context_msg = "\n".join(context_parts)
+        if filled_slots:
+            context_msg = "\n\n".join(filled_slots)
             self.last_context_text = context_msg
-            return [*messages, LLMMessage(role="system", content=context_msg)]
+            self.tracer.log(
+                "context_built",
+                f"total_chars={len(context_msg)}",
+                {"total_chars": len(context_msg), "slots": slot_sizes},
+            )
+            return [LLMMessage(role="system", content=context_msg), *messages]
         self.last_context_text = None
         return messages
 
