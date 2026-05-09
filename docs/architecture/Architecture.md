@@ -1,14 +1,18 @@
-# Architecture — SlavikAI
+# Architecture — SlavikAI current runtime inventory
+
+Этот документ фиксирует **текущее фактическое устройство** системы. Целевое поведение runtime
+определено в `docs/architecture/ARCH_CANON.md`. Если здесь описан legacy-путь, это не делает его
+целевой архитектурой.
 
 ## Цель
 
-SlavikAI — серверный агент с тремя рабочими контурами выполнения: chat, MWV и auto. Система опирается на command lane, policy/approval контур, sandbox-ограничения и обязательный trace/tool logging.
+SlavikAI сейчас работает как серверный агент с тремя фактическими контурами выполнения: chat, MWV и auto. Система опирается на command lane, policy/approval контур, sandbox-ограничения и обязательный trace/tool logging.
 
 ## Основные слои
 
 - **Core** (`core/*`)
   - Оркестрация: `Agent` + mixins.
-  - Планирование/исполнение: `Planner` + `Executor` через `ToolGateway`.
+  - Legacy планирование/исполнение: `Planner` + `Executor` через `ToolGateway`.
   - Трассировка: `Tracer` (`logs/trace.log`).
 - **MWV runtime** (`core/mwv/*`)
   - Цикл `ManagerRuntime -> WorkerRuntime -> VerifierRuntime`.
@@ -26,14 +30,14 @@ SlavikAI — серверный агент с тремя рабочими кон
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
 
-## Маршрутизация запроса (факт runtime)
+## Маршрутизация запроса (current legacy runtime)
 
 1. Сообщение, начинающееся с `/`, идёт в command lane (`handle_tool_command`) и не проходит через MWV.
    - Команды: `/fs`, `/web`, `/sh`, `/project`, `/plan`, `/auto`, `/imggen`, `/imganalyze`, `/trace`. Подробнее — `docs/for-humans/COMMANDS.md`.
 2. Для обычного текста:
    - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
    - `runtime_mode=auto` — выполняется классификация/skill-проверка, затем запуск auto-контура.
-   - `runtime_mode=act|plan` — используется `classify_request(...)` (`chat` или `mwv`).
+   - `runtime_mode=act|plan` — в legacy runtime используется `classify_request(...)` (`chat` или `mwv`).
 
 ## Инструменты (зарегистрированные имена)
 
@@ -61,6 +65,9 @@ SlavikAI — серверный агент с тремя рабочими кон
 - `runtime_mode=ask|auto` — поддерживаемый opt-in.
 - `runtime_mode=plan|act` — `invalid_request_error` (использовать UI workflow).
 - без `runtime_mode` — legacy-поведение текущего runtime.
+
+Это не конфликтует с `ARCH_CANON`: `plan|act` являются целевыми runtime-ролями, но не доступны
+как `/v1/chat/completions` opt-in.
 
 ### UI API endpoint groups
 

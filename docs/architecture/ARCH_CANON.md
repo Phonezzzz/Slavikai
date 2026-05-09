@@ -1,7 +1,18 @@
-# ARCH_CANON — канон Ask/Plan/Act/Auto
+# ARCH_CANON — runtime canon Ask/Plan/Act/Auto
 
-Этот документ — **source of truth** для целевой архитектуры runtime.
-Если другие документы расходятся с ним, приоритет у `docs/architecture/ARCH_CANON.md`.
+Этот документ — **source of truth** для целевой архитектуры runtime и rollout-границ.
+`docs/architecture/Architecture.md` описывает текущую legacy-инвентаризацию и не является
+источником целевого поведения, если расходится с этим документом.
+
+## 0) Статус канона
+
+- **Target runtime**: Ask / Plan / Act / Auto, описанные ниже.
+- **Current legacy runtime**: допускается только как временная реализация до PR-цепочки
+  native tool calling и разделения Chat/Workspace.
+- **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
+  `plan|act` через `/v1` отклоняются и должны идти через UI workflow.
+- **UI workflow**: может иметь endpoints `/ui/api/plan/*` и mode transitions, но их смысл
+  должен соответствовать этому канону: Plan не исполняет, Act исполняет только packet.
 
 ## 1) Канонические роли режимов
 
@@ -131,3 +142,9 @@ API:
 - Если `slavik_meta.runtime_mode` отсутствует -> legacy поведение без изменений.
 - `slavik_meta.runtime_mode=ask|auto` -> opt-in в новый runtime router.
 - `slavik_meta.runtime_mode=plan|act` -> `invalid_request_error` + `next_steps` на UI workflow.
+
+## 8) Legacy debt boundary
+
+До завершения перехода текущие `Planner`/`Executor`, regex routing, command lane tools и общий
+Chat/Workspace session state считаются legacy debt. Новые фичи не должны расширять эти пути как
+целевую архитектуру.

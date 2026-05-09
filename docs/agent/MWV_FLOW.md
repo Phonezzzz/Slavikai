@@ -1,6 +1,8 @@
-# MWV_FLOW — Manager -> Worker -> Verifier
+# MWV_FLOW — current legacy Manager -> Worker -> Verifier
 
 Нормативный источник инвариантов: `docs/architecture/ARCH_CANON.md`.
+Этот документ описывает текущий MWV-путь. Упоминание `Planner` + `Executor` ниже является
+legacy-инвентаризацией, а не целевой заменой native tool calling.
 
 ## Точка входа
 
@@ -23,7 +25,7 @@
 ## Канонический цикл
 
 1. `ManagerRuntime.run_flow(...)` строит `TaskPacket` (v2 execution contract).
-2. `WorkerRuntime` исполняет план через `Planner` + `Executor` + tools.
+2. `WorkerRuntime` сейчас исполняет план через legacy `Planner` + `Executor` + tools.
 3. `VerifierRuntime.run(...)` выполняет deterministic-проверку. При отсутствии `scripts/check.sh` используется fallback-последовательность (`ruff`, `lint_skills`, `build_manifest --check`, `mypy`, `pytest --cov`).
 4. Успех только если одновременно:
    - `work_result.status == success`
