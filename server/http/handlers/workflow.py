@@ -4,7 +4,6 @@ from pathlib import Path
 
 from aiohttp import web
 
-from config.model_whitelist import ModelNotAllowedError
 from core.mwv.verifier_runtime import has_canonical_repo_verifier
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
@@ -13,7 +12,6 @@ from server.http_api import (
     UI_SESSION_HEADER,
     _apply_agent_runtime_state,
     _load_effective_session_security,
-    _model_not_allowed_response,
     _normalize_auto_state,
     _normalize_mode_value,
     _normalize_plan_payload,
@@ -269,10 +267,7 @@ async def handle_ui_runtime_init(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
 
-    try:
-        agent = await _resolve_agent(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
+    agent = await _resolve_agent(request)
 
     workspace_root = await _workspace_root_for_session(hub, session_id)
     workflow_before = await hub.get_session_workflow(session_id)

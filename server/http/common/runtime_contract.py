@@ -8,7 +8,6 @@ from typing import Protocol, cast
 import requests
 from aiohttp import web
 
-from config.model_whitelist import ensure_model_allowed
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import RunContext, TaskPacket
@@ -142,16 +141,6 @@ def _model_not_selected_response() -> web.Response:
     )
 
 
-def _model_not_allowed_response(model_id: str) -> web.Response:
-    return _error_response(
-        status=409,
-        message=f"Модель '{model_id}' не входит в whitelist.",
-        error_type="configuration_error",
-        code="model_not_allowed",
-        details={"model": model_id},
-    )
-
-
 async def _resolve_agent(request: web.Request) -> AgentProtocol | None:
     provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
     try:
@@ -176,7 +165,6 @@ async def _resolve_agent_for_base_http(request: web.Request) -> AgentProtocol | 
     main_config = await resolver.resolve_main(None)
     if main_config is None:
         return None
-    ensure_model_allowed(main_config.model, main_config.provider)
     agent_factory = _load_agent_factory()
     try:
         return await provider.ensure(lambda: agent_factory(main_config=main_config))

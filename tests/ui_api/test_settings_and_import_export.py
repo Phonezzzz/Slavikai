@@ -231,7 +231,7 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_user_plane_settings_allows_only_whitelisted_fields(monkeypatch) -> None:
+def test_user_plane_settings_allows_only_supported_fields(monkeypatch) -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:

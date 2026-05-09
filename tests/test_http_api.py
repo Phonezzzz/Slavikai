@@ -10,7 +10,6 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from config.http_server_config import HttpAuthConfig
-from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from core.tracer import Tracer
 from llm.brain_base import Brain
@@ -29,10 +28,6 @@ class DummyBrain(Brain):
 
     def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
         return LLMResult(text=self._text)
-
-
-def _forbidden_model_config(provider: str) -> ModelConfig:
-    return ModelConfig(provider=provider, model="forbidden-model")
 
 
 class DummyAgent:
@@ -547,40 +542,6 @@ def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_p
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("provider", ["openrouter"])
-def test_chat_completions_returns_409_when_model_not_whitelisted(
-    monkeypatch,
-    tmp_path,
-    provider: str,
-) -> None:
-    trace_path = tmp_path / "trace.log"
-
-    async def run() -> None:
-        client = await _create_client_without_agent(trace_path, monkeypatch)
-        try:
-            await _set_runtime_global_main(client, _forbidden_model_config(provider))
-            resp = await client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "slavik",
-                    "messages": [{"role": "user", "content": "Привет"}],
-                    "stream": False,
-                },
-            )
-            assert resp.status == 409
-            payload = await resp.json()
-            error = payload.get("error", {})
-            assert error.get("type") == "configuration_error"
-            assert error.get("code") == "model_not_allowed"
-            details = error.get("details")
-            assert isinstance(details, dict)
-            assert details.get("model") == "forbidden-model"
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
 def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent(
     monkeypatch, tmp_path
 ) -> None:
@@ -639,8 +600,8 @@ def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent
             await _set_runtime_global_main(
                 client,
                 ModelConfig(
-                    provider="xai",
-                    model="slavik",
+                    provider="openrouter",
+                    model="gryphe/mythomax-l2-13b",
                 ),
             )
             first = await client.post(
@@ -664,23 +625,25 @@ def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent
             assert len(captured_main_configs) == 1
             captured = captured_main_configs[0]
             assert captured is not None
-            assert captured.provider == "xai"
-            assert captured.model == "slavik"
+            assert captured.provider == "openrouter"
+            assert captured.model == "gryphe/mythomax-l2-13b"
         finally:
             await client.close()
 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("provider", ["openrouter"])
-def test_agent_init_fails_when_model_not_whitelisted(monkeypatch, provider: str) -> None:
-    with pytest.raises(ModelNotAllowedError):
-        from core.agent import Agent
+def test_agent_init_accepts_runtime_provider_model() -> None:
+    from core.agent import Agent
 
-        Agent(
-            brain=DummyBrain("ok"),
-            main_config=_forbidden_model_config(provider),
-        )
+    agent = Agent(
+        brain=DummyBrain("ok"),
+        main_config=ModelConfig(provider="openrouter", model="gryphe/mythomax-l2-13b"),
+    )
+
+    assert agent.main_config is not None
+    assert agent.main_config.provider == "openrouter"
+    assert agent.main_config.model == "gryphe/mythomax-l2-13b"
 
 
 def test_agent_init_with_external_brain_does_not_resolve_file_main() -> None:

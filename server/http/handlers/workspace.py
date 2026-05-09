@@ -5,7 +5,6 @@ from pathlib import Path
 
 from aiohttp import web
 
-from config.model_whitelist import ModelNotAllowedError
 from config.tools_config import DEFAULT_TOOLS_STATE
 from core.approval_policy import ApprovalCategory, ApprovalRequired
 from server import http_api as api
@@ -535,12 +534,9 @@ async def handle_ui_workspace_file_get(request: web.Request) -> web.Response:
 
 async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    try:
-        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
-            request
-        )
-    except ModelNotAllowedError as exc:
-        return api._model_not_allowed_response(exc.model_id)
+    agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+        request
+    )
     if session_error is not None:
         return session_error
     if session_id is None:
@@ -654,12 +650,9 @@ async def handle_ui_workspace_file_put(request: web.Request) -> web.Response:
 
 
 async def handle_ui_workspace_file_create(request: web.Request) -> web.Response:
-    try:
-        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
-            request
-        )
-    except ModelNotAllowedError as exc:
-        return api._model_not_allowed_response(exc.model_id)
+    agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+        request
+    )
     if session_error is not None:
         return session_error
     if session_id is None:
@@ -742,12 +735,9 @@ async def handle_ui_workspace_file_create(request: web.Request) -> web.Response:
 
 
 async def handle_ui_workspace_file_rename(request: web.Request) -> web.Response:
-    try:
-        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
-            request
-        )
-    except ModelNotAllowedError as exc:
-        return api._model_not_allowed_response(exc.model_id)
+    agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+        request
+    )
     if session_error is not None:
         return session_error
     if session_id is None:
@@ -821,12 +811,9 @@ async def handle_ui_workspace_file_rename(request: web.Request) -> web.Response:
 
 
 async def handle_ui_workspace_file_move(request: web.Request) -> web.Response:
-    try:
-        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
-            request
-        )
-    except ModelNotAllowedError as exc:
-        return api._model_not_allowed_response(exc.model_id)
+    agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+        request
+    )
     if session_error is not None:
         return session_error
     if session_id is None:
@@ -900,12 +887,9 @@ async def handle_ui_workspace_file_move(request: web.Request) -> web.Response:
 
 
 async def handle_ui_workspace_file_delete(request: web.Request) -> web.Response:
-    try:
-        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
-            request
-        )
-    except ModelNotAllowedError as exc:
-        return api._model_not_allowed_response(exc.model_id)
+    agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+        request
+    )
     if session_error is not None:
         return session_error
     if session_id is None:
@@ -985,12 +969,9 @@ async def handle_ui_workspace_file_delete(request: web.Request) -> web.Response:
 
 
 async def handle_ui_workspace_patch(request: web.Request) -> web.Response:
-    try:
-        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
-            request
-        )
-    except ModelNotAllowedError as exc:
-        return api._model_not_allowed_response(exc.model_id)
+    agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+        request
+    )
     if session_error is not None:
         return session_error
     if session_id is None:
@@ -1074,12 +1055,9 @@ async def handle_ui_workspace_patch(request: web.Request) -> web.Response:
 
 async def handle_ui_workspace_run(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    try:
-        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
-            request
-        )
-    except ModelNotAllowedError as exc:
-        return api._model_not_allowed_response(exc.model_id)
+    agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+        request
+    )
     if session_error is not None:
         return session_error
     if session_id is None:
@@ -1151,12 +1129,9 @@ async def handle_ui_workspace_run(request: web.Request) -> web.Response:
 
 
 async def handle_ui_workspace_terminal_run(request: web.Request) -> web.Response:
-    try:
-        agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
-            request
-        )
-    except ModelNotAllowedError as exc:
-        return api._model_not_allowed_response(exc.model_id)
+    agent, session_id, approved_categories, session_error = await _resolve_workspace_session(
+        request
+    )
     if session_error is not None:
         return session_error
     if session_id is None:

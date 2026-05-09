@@ -6,7 +6,6 @@ import uuid
 
 from aiohttp import web
 
-from config.model_whitelist import ModelNotAllowedError
 from server.http.common.chat_payload import (
     _extract_session_id,
     _split_response_and_report,
@@ -15,7 +14,6 @@ from server.http.common.responses import error_response, json_response
 from server.http_api import (
     TOOL_PIPELINE_ENABLED,
     _apply_agent_runtime_state,
-    _model_not_allowed_response,
     _model_not_selected_response,
     _parse_chat_request,
     _resolve_agent_for_base_http,
@@ -26,10 +24,7 @@ logger = logging.getLogger("SlavikAI.HttpAPI")
 
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
-    try:
-        agent = await _resolve_agent_for_base_http(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
+    agent = await _resolve_agent_for_base_http(request)
     if agent is None:
         return _model_not_selected_response()
     agent_lock = request.app["agent_lock"]

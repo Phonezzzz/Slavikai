@@ -136,7 +136,6 @@ TracerProtocol = runtime_contract.TracerProtocol
 AgentProtocol = runtime_contract.AgentProtocol
 RequestsModuleProtocol = runtime_contract.RequestsModuleProtocol
 _model_not_selected_response = runtime_contract._model_not_selected_response
-_model_not_allowed_response = runtime_contract._model_not_allowed_response
 _resolve_agent = runtime_contract._resolve_agent
 _resolve_agent_for_base_http = runtime_contract._resolve_agent_for_base_http
 _resolve_agent_for_ui_session = runtime_contract._resolve_agent_for_ui_session

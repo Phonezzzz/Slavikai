@@ -4,13 +4,11 @@ import logging
 
 from aiohttp import web
 
-from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ApprovalCategory
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     _CATEGORY_MAP,
     _build_trace_groups,
-    _model_not_allowed_response,
     _model_not_selected_response,
     _parse_trace_log,
     _require_admin_bearer,
@@ -69,10 +67,7 @@ async def handle_tool_calls(request: web.Request) -> web.Response:
 
 
 async def handle_feedback(request: web.Request) -> web.Response:
-    try:
-        agent = await _resolve_agent_for_base_http(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
+    agent = await _resolve_agent_for_base_http(request)
     if agent is None:
         return _model_not_selected_response()
     try:

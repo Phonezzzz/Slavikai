@@ -52,8 +52,7 @@ export INCEPTION_API_URL="https://api.inceptionlabs.ai/v1"
 # optional: OpenAI key for STT transcription endpoint
 export OPENAI_API_KEY="..."
 
-# важно: whitelist должен содержать выбранный model id
-export SLAVIK_MODEL_WHITELIST="your-model-id"
+# выбранная в UI модель должна быть доступна у настроенного провайдера
 ```
 
 Запуск сервера:
@@ -108,7 +107,6 @@ Type=simple
 WorkingDirectory=/opt/slavikai
 Environment=SLAVIK_HTTP_HOST=0.0.0.0
 Environment=SLAVIK_HTTP_PORT=8000
-Environment=SLAVIK_MODEL_WHITELIST=your-model-id
 Environment=XAI_API_KEY=your-key
 ExecStart=/opt/slavikai/venv/bin/python -m server
 Restart=always
@@ -130,5 +128,5 @@ sudo systemctl status slavikai
 
 - `make check` проходит локально.
 - UI собран (`make ui-build`), `ui/dist` актуален.
-- `SLAVIK_MODEL_WHITELIST` содержит целевой `model id`.
+- Целевая модель видна в списке моделей выбранного провайдера в UI.
 - Для выбранного провайдера выставлен корректный API key.

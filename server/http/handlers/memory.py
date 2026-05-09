@@ -5,12 +5,10 @@ from typing import Protocol, cast
 
 from aiohttp import web
 
-from config.model_whitelist import ModelNotAllowedError
 from memory.categorized_memory_store import ListPage
 from memory.triage import TriagePlan, TriageSuggestion, triage_apply, triage_preview, triage_undo
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
-    _model_not_allowed_response,
     _model_not_selected_response,
     _normalize_json_value,
     _resolve_agent,
@@ -112,10 +110,7 @@ def _parse_triage_plan(raw: object) -> TriagePlan:
 
 
 async def handle_ui_memory_conflicts(request: web.Request) -> web.Response:
-    try:
-        agent = await _resolve_agent(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
+    agent = await _resolve_agent(request)
     if agent is None:
         return json_response({"conflicts": []})
 
@@ -162,10 +157,7 @@ async def handle_ui_memory_conflicts(request: web.Request) -> web.Response:
 
 
 async def handle_ui_memory_triage_preview(request: web.Request) -> web.Response:
-    try:
-        agent = await _resolve_agent(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
+    agent = await _resolve_agent(request)
     if agent is None:
         return _model_not_selected_response()
     store = _resolve_memory_store(agent)
@@ -201,10 +193,7 @@ async def handle_ui_memory_triage_preview(request: web.Request) -> web.Response:
 
 
 async def handle_ui_memory_triage_apply(request: web.Request) -> web.Response:
-    try:
-        agent = await _resolve_agent(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
+    agent = await _resolve_agent(request)
     if agent is None:
         return _model_not_selected_response()
     store = _resolve_memory_store(agent)
@@ -261,10 +250,7 @@ async def handle_ui_memory_triage_apply(request: web.Request) -> web.Response:
 
 
 async def handle_ui_memory_triage_undo(request: web.Request) -> web.Response:
-    try:
-        agent = await _resolve_agent(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
+    agent = await _resolve_agent(request)
     if agent is None:
         return _model_not_selected_response()
     store = _resolve_memory_store(agent)
@@ -312,10 +298,7 @@ async def handle_ui_memory_triage_undo(request: web.Request) -> web.Response:
 
 
 async def handle_ui_memory_conflicts_resolve(request: web.Request) -> web.Response:
-    try:
-        agent = await _resolve_agent(request)
-    except ModelNotAllowedError as exc:
-        return _model_not_allowed_response(exc.model_id)
+    agent = await _resolve_agent(request)
     if agent is None:
         return _model_not_selected_response()
 

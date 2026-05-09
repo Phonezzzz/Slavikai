@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 
 from aiohttp import web
 
-from config.model_whitelist import ModelNotAllowedError
 from core.approval_policy import ApprovalRequired
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
@@ -387,14 +386,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "error": "resume_payload.run_id is missing.",
                     "source_endpoint": source_endpoint,
                 }
-            try:
-                agent = await _resolve_agent(request)
-            except ModelNotAllowedError as exc:
-                return {
-                    "ok": False,
-                    "error": f"model_not_allowed: {exc.model_id}",
-                    "source_endpoint": source_endpoint,
-                }
+            agent = await _resolve_agent(request)
             if agent is None:
                 return {
                     "ok": False,
@@ -578,14 +570,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             if isinstance(edited_args_raw, dict):
                 args = edited_args_raw
 
-        try:
-            agent = await _resolve_agent(request)
-        except ModelNotAllowedError as exc:
-            return {
-                "ok": False,
-                "error": f"model_not_allowed: {exc.model_id}",
-                "source_endpoint": source_endpoint,
-            }
+        agent = await _resolve_agent(request)
         if agent is None:
             return {
                 "ok": False,
@@ -1105,10 +1090,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 run_id_raw.strip() if isinstance(run_id_raw, str) and run_id_raw.strip() else ""
             )
             if run_id:
-                try:
-                    agent = await _resolve_agent(request)
-                except ModelNotAllowedError:
-                    agent = None
+                agent = await _resolve_agent(request)
                 if agent is not None:
                     async with agent_lock:
                         await _apply_agent_runtime_state(
