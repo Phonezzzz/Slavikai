@@ -392,6 +392,13 @@ async def handle_ui_chat_send(
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+        if payload_override is None and lane == "workspace":
+            return error_response(
+                status=400,
+                message="Этот endpoint принимает только lane=chat.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
         if lane == "workspace":
             force_canvas = False
         web_search_raw = payload.get("web_search")

@@ -82,7 +82,7 @@ def test_ui_workspace_write_requires_approval_and_emits_decision_packet() -> Non
             await _select_local_model(client, session_id)
 
             events_response = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 headers={"X-Slavik-Session": session_id},
             )
             assert events_response.status == 200
@@ -933,8 +933,8 @@ def test_ui_decision_respond_agent_decision_retry_preserves_workspace_lane() -> 
             await _select_local_model(client, session_id)
 
             send_resp = await client.post(
-                "/ui/api/chat/send",
-                json={"content": "trigger retry", "lane": "workspace"},
+                "/ui/api/workspace/send",
+                json={"content": "trigger retry"},
                 headers={"X-Slavik-Session": session_id},
             )
             assert send_resp.status == 200

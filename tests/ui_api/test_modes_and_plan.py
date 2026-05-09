@@ -593,7 +593,7 @@ def test_ui_chat_send_in_auto_mode_returns_auto_state_and_progress_event() -> No
             assert to_auto.status == 200
 
             events_response = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 headers={"X-Slavik-Session": session_id},
             )
             assert events_response.status == 200

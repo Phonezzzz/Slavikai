@@ -948,12 +948,8 @@ def test_ui_chat_send_workspace_lane_disables_canvas_and_artifacts() -> None:
             await _select_local_model(client, session_id)
 
             resp = await client.post(
-                "/ui/api/chat/send",
-                json={
-                    "content": "Generate long module",
-                    "lane": "workspace",
-                    "force_canvas": True,
-                },
+                "/ui/api/workspace/send",
+                json={"content": "Generate long module", "force_canvas": True},
                 headers={"X-Slavik-Session": session_id},
             )
             assert resp.status == 200

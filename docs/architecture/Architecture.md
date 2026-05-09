@@ -98,8 +98,8 @@ legacy-обвязкой.
 - Workflow: `/ui/api/mode`, `/ui/api/plan/*`, `/ui/api/runtime/init`.
 - Chat: `/ui/api/chat/send`, `/ui/api/chat/events/{session_id}`.
 - Workspace: `/ui/api/workspace/send`, `/ui/api/workspace/events/{session_id}`, `/ui/api/workspace/*`.
-- Legacy compatibility: `/ui/api/events/stream` ещё существует как общий stream, но новый код
-  должен использовать split chat/workspace endpoints.
+- Legacy compatibility: `/ui/api/events/stream` оставлен только как hard-failing response
+  (`410 legacy_event_stream_removed`). Новый код использует split chat/workspace endpoints.
 
 ## Backend PTY Terminal API
 

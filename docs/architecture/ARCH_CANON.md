@@ -158,8 +158,9 @@ Legacy debt после PR-0..PR-7:
 - Storage ещё хранит `ui_messages.lane` как legacy SQLite/import/export detail; storage
   adapter уже разделяет persisted records на chat/workspace domain records без `lane`.
   Это ещё не полностью отдельные таблицы.
-- Legacy `/ui/api/events/stream` и lane-multiplexed behavior внутри `/ui/api/chat/send`
-  ещё есть для совместимости; целевой путь — split chat/workspace endpoints.
+- Legacy `/ui/api/events/stream` теперь hard-fails (`410 legacy_event_stream_removed`), а
+  workspace-запросы через `/ui/api/chat/send` отклоняются. Целевой путь — split
+  chat/workspace endpoints.
 - Провайдеры приняли `tools` в контракте, но native provider tool calling реализован не во
   всех backends.
 

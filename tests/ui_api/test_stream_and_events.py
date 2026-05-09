@@ -18,7 +18,7 @@ def test_ui_chat_send_canvas_stream_keeps_full_answer_in_chat() -> None:
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
@@ -98,6 +98,27 @@ def test_ui_split_event_stream_paths_open_for_same_session() -> None:
     asyncio.run(run())
 
 
+def test_ui_legacy_event_stream_is_removed() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            legacy_stream = await client.get(f"/ui/api/events/stream?session_id={session_id}")
+            assert legacy_stream.status == 410
+            payload = await legacy_stream.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "legacy_event_stream_removed"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_workspace_send_endpoint_forces_workspace_lane() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
@@ -116,6 +137,32 @@ def test_ui_workspace_send_endpoint_forces_workspace_lane() -> None:
             assert send_resp.status == 200
             payload = await send_resp.json()
             assert payload.get("lane") == "workspace"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_send_rejects_workspace_lane() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Ping", "lane": "workspace"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 400
+            payload = await send_resp.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
         finally:
             await client.close()
 
@@ -177,7 +224,7 @@ def test_ui_events_stream_first_event_is_status() -> None:
             assert session_id
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
@@ -207,7 +254,7 @@ def test_ui_events_stream_includes_agent_activity() -> None:
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/workspace/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
@@ -241,7 +288,7 @@ def test_ui_events_stream_long_text_output_stays_in_chat() -> None:
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
@@ -280,7 +327,7 @@ def test_ui_events_stream_includes_chat_stream_events() -> None:
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
@@ -356,15 +403,15 @@ def test_ui_events_stream_workspace_lane_has_chat_stream_without_canvas() -> Non
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/workspace/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
             _ = await _read_first_sse_event(stream_resp)
 
             send_resp = await client.post(
-                "/ui/api/chat/send",
-                json={"content": "Generate long module", "lane": "workspace"},
+                "/ui/api/workspace/send",
+                json={"content": "Generate long module"},
                 headers={"X-Slavik-Session": session_id},
             )
             assert send_resp.status == 200
@@ -418,7 +465,7 @@ def test_ui_chat_send_stream_persists_assistant_only_after_stream_done() -> None
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
@@ -503,7 +550,7 @@ def test_session_ownership_enforced_for_stream_workspace_decision_delete_files_o
             }
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 headers=foreign_headers,
             )
             await assert_forbidden(stream_resp)
@@ -583,15 +630,15 @@ def test_workspace_stream_supports_replace_mode_chunks() -> None:
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/workspace/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
             _ = await _read_first_sse_event(stream_resp)
 
             send_resp = await client.post(
-                "/ui/api/chat/send",
-                json={"content": "workspace stream", "lane": "workspace"},
+                "/ui/api/workspace/send",
+                json={"content": "workspace stream"},
                 headers={"X-Slavik-Session": session_id},
             )
             assert send_resp.status == 200
@@ -798,7 +845,7 @@ def test_ui_events_stream_replays_buffer_by_last_event_id() -> None:
             hub: UIHub = client.server.app["ui_hub"]
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
@@ -825,7 +872,7 @@ def test_ui_events_stream_replays_buffer_by_last_event_id() -> None:
             stream_resp.close()
 
             reconnect = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 headers={"Last-Event-ID": anchor_id},
                 timeout=5,
             )
@@ -860,7 +907,7 @@ def test_ui_events_stream_stale_last_event_id_emits_resync_required() -> None:
             assert isinstance(session_id, str)
 
             stream_resp = await client.get(
-                f"/ui/api/events/stream?session_id={session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 headers={"Last-Event-ID": "stale-event-id"},
                 timeout=5,
             )
