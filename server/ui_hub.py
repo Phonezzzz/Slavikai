@@ -13,6 +13,8 @@ from server.ui_session_storage import (
     PersistedFolder,
     PersistedSession,
     UISessionStorage,
+    legacy_session_from_domain_records,
+    split_persisted_session_domains,
 )
 from shared.auto_models import normalize_auto_state
 from shared.models import JSONValue
@@ -1697,35 +1699,41 @@ class UIHub:
 
     def _restore_sessions(self) -> None:
         for item in self._storage.load_sessions():
-            decision = dict(item.decision) if item.decision is not None else None
+            domains = split_persisted_session_domains(item)
+            restored = legacy_session_from_domain_records(domains)
+            decision = dict(restored.decision) if restored.decision is not None else None
             last_decision_id: str | None = None
             if decision is not None:
                 decision_id = decision.get("id")
                 if isinstance(decision_id, str):
                     last_decision_id = decision_id
-            self._sessions[item.session_id] = _SessionState(
-                principal_id=self._normalize_principal_id(item.principal_id),
-                messages=[dict(message) for message in item.messages],
-                output_text=item.output_text,
-                output_updated_at=item.output_updated_at,
-                files=list(item.files),
-                artifacts=[dict(entry) for entry in item.artifacts],
+            self._sessions[restored.session_id] = _SessionState(
+                principal_id=self._normalize_principal_id(restored.principal_id),
+                messages=[dict(message) for message in restored.messages],
+                output_text=restored.output_text,
+                output_updated_at=restored.output_updated_at,
+                files=list(restored.files),
+                artifacts=[dict(entry) for entry in restored.artifacts],
                 last_decision_id=last_decision_id,
                 decision_packet=decision,
-                status_state=self._normalize_status(item.status),
-                model_provider=item.model_provider,
-                model_id=item.model_id,
-                title_override=item.title_override,
-                folder_id=item.folder_id,
-                workspace_root=item.workspace_root,
-                policy_profile=self._normalize_policy_profile(item.policy_profile),
-                tools_state=(self._normalize_tools_state(item.tools_state)),
-                mode=self._normalize_mode(item.mode),
-                active_plan=(dict(item.active_plan) if item.active_plan is not None else None),
-                active_task=(dict(item.active_task) if item.active_task is not None else None),
-                auto_state=normalize_auto_state(item.auto_state),
-                created_at=item.created_at,
-                updated_at=item.updated_at,
+                status_state=self._normalize_status(restored.status),
+                model_provider=restored.model_provider,
+                model_id=restored.model_id,
+                title_override=restored.title_override,
+                folder_id=restored.folder_id,
+                workspace_root=restored.workspace_root,
+                policy_profile=self._normalize_policy_profile(restored.policy_profile),
+                tools_state=(self._normalize_tools_state(restored.tools_state)),
+                mode=self._normalize_mode(restored.mode),
+                active_plan=(
+                    dict(restored.active_plan) if restored.active_plan is not None else None
+                ),
+                active_task=(
+                    dict(restored.active_task) if restored.active_task is not None else None
+                ),
+                auto_state=normalize_auto_state(restored.auto_state),
+                created_at=restored.created_at,
+                updated_at=restored.updated_at,
             )
 
     def _restore_folders(self) -> None:
@@ -1740,34 +1748,32 @@ class UIHub:
         state = self._sessions.get(session_id)
         if state is None:
             return
-        self._storage.save_session(
-            PersistedSession(
-                session_id=session_id,
-                principal_id=state.principal_id,
-                created_at=state.created_at,
-                updated_at=state.updated_at,
-                status=state.status_state,
-                decision=(
-                    dict(state.decision_packet) if state.decision_packet is not None else None
-                ),
-                messages=[dict(message) for message in state.messages],
-                model_provider=state.model_provider,
-                model_id=state.model_id,
-                title_override=state.title_override,
-                folder_id=state.folder_id,
-                output_text=state.output_text,
-                output_updated_at=state.output_updated_at,
-                files=list(state.files),
-                artifacts=[dict(entry) for entry in state.artifacts],
-                workspace_root=state.workspace_root,
-                policy_profile=state.policy_profile,
-                tools_state=self._normalize_tools_state(state.tools_state),
-                mode=state.mode,
-                active_plan=(dict(state.active_plan) if state.active_plan is not None else None),
-                active_task=(dict(state.active_task) if state.active_task is not None else None),
-                auto_state=(dict(state.auto_state) if state.auto_state is not None else None),
-            ),
+        legacy_session = PersistedSession(
+            session_id=session_id,
+            principal_id=state.principal_id,
+            created_at=state.created_at,
+            updated_at=state.updated_at,
+            status=state.status_state,
+            decision=(dict(state.decision_packet) if state.decision_packet is not None else None),
+            messages=[dict(message) for message in state.messages],
+            model_provider=state.model_provider,
+            model_id=state.model_id,
+            title_override=state.title_override,
+            folder_id=state.folder_id,
+            output_text=state.output_text,
+            output_updated_at=state.output_updated_at,
+            files=list(state.files),
+            artifacts=[dict(entry) for entry in state.artifacts],
+            workspace_root=state.workspace_root,
+            policy_profile=state.policy_profile,
+            tools_state=self._normalize_tools_state(state.tools_state),
+            mode=state.mode,
+            active_plan=(dict(state.active_plan) if state.active_plan is not None else None),
+            active_task=(dict(state.active_task) if state.active_task is not None else None),
+            auto_state=(dict(state.auto_state) if state.auto_state is not None else None),
         )
+        domains = split_persisted_session_domains(legacy_session)
+        self._storage.save_session(legacy_session_from_domain_records(domains))
 
     def _prune_sessions_locked(self, *, keep_session_id: str | None = None) -> None:
         to_remove: set[str] = set()

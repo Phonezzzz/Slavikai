@@ -42,11 +42,135 @@ class PersistedSession:
 
 
 @dataclass(frozen=True)
+class PersistedChatThreadRecord:
+    thread_id: str
+    principal_id: str | None
+    created_at: str
+    updated_at: str
+    status: str
+    decision: dict[str, JSONValue] | None
+    messages: list[dict[str, JSONValue]]
+    model_provider: str | None = None
+    model_id: str | None = None
+    title_override: str | None = None
+    folder_id: str | None = None
+    output_text: str | None = None
+    output_updated_at: str | None = None
+    files: list[str] = field(default_factory=list)
+    artifacts: list[dict[str, JSONValue]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PersistedWorkspaceSessionRecord:
+    session_id: str
+    principal_id: str | None
+    created_at: str
+    updated_at: str
+    messages: list[dict[str, JSONValue]]
+    workspace_root: str | None = None
+    policy_profile: str | None = None
+    yolo_armed: bool = False
+    yolo_armed_at: str | None = None
+    tools_state: dict[str, bool] | None = None
+    mode: str = "ask"
+    active_plan: dict[str, JSONValue] | None = None
+    active_task: dict[str, JSONValue] | None = None
+    auto_state: dict[str, JSONValue] | None = None
+
+
+@dataclass(frozen=True)
+class PersistedSessionDomainRecords:
+    chat: PersistedChatThreadRecord
+    workspace: PersistedWorkspaceSessionRecord
+
+
+@dataclass(frozen=True)
 class PersistedFolder:
     folder_id: str
     name: str
     created_at: str
     updated_at: str
+
+
+def split_persisted_session_domains(session: PersistedSession) -> PersistedSessionDomainRecords:
+    chat_messages: list[dict[str, JSONValue]] = []
+    workspace_messages: list[dict[str, JSONValue]] = []
+    for message in session.messages:
+        lane = _normalize_legacy_lane(message.get("lane"))
+        stripped = _message_without_legacy_lane(message)
+        if lane == "workspace":
+            workspace_messages.append(stripped)
+        else:
+            chat_messages.append(stripped)
+    return PersistedSessionDomainRecords(
+        chat=PersistedChatThreadRecord(
+            thread_id=session.session_id,
+            principal_id=session.principal_id,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            status=session.status,
+            decision=(dict(session.decision) if session.decision is not None else None),
+            messages=chat_messages,
+            model_provider=session.model_provider,
+            model_id=session.model_id,
+            title_override=session.title_override,
+            folder_id=session.folder_id,
+            output_text=session.output_text,
+            output_updated_at=session.output_updated_at,
+            files=list(session.files),
+            artifacts=[dict(item) for item in session.artifacts],
+        ),
+        workspace=PersistedWorkspaceSessionRecord(
+            session_id=session.session_id,
+            principal_id=session.principal_id,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            messages=workspace_messages,
+            workspace_root=session.workspace_root,
+            policy_profile=session.policy_profile,
+            yolo_armed=session.yolo_armed,
+            yolo_armed_at=session.yolo_armed_at,
+            tools_state=(dict(session.tools_state) if session.tools_state is not None else None),
+            mode=session.mode,
+            active_plan=(dict(session.active_plan) if session.active_plan is not None else None),
+            active_task=(dict(session.active_task) if session.active_task is not None else None),
+            auto_state=(dict(session.auto_state) if session.auto_state is not None else None),
+        ),
+    )
+
+
+def legacy_session_from_domain_records(records: PersistedSessionDomainRecords) -> PersistedSession:
+    chat = records.chat
+    workspace = records.workspace
+    messages = [_message_with_legacy_lane(message, lane="chat") for message in chat.messages] + [
+        _message_with_legacy_lane(message, lane="workspace") for message in workspace.messages
+    ]
+    return PersistedSession(
+        session_id=chat.thread_id,
+        principal_id=chat.principal_id,
+        created_at=chat.created_at,
+        updated_at=max(chat.updated_at, workspace.updated_at),
+        status=chat.status,
+        decision=(dict(chat.decision) if chat.decision is not None else None),
+        messages=messages,
+        model_provider=chat.model_provider,
+        model_id=chat.model_id,
+        title_override=chat.title_override,
+        folder_id=chat.folder_id,
+        output_text=chat.output_text,
+        output_updated_at=chat.output_updated_at,
+        files=list(chat.files),
+        artifacts=[dict(item) for item in chat.artifacts],
+        workspace_root=workspace.workspace_root,
+        policy_profile=workspace.policy_profile,
+        yolo_armed=workspace.yolo_armed,
+        yolo_armed_at=workspace.yolo_armed_at,
+        tools_state=(dict(workspace.tools_state) if workspace.tools_state is not None else None),
+        mode=workspace.mode,
+        active_plan=(dict(workspace.active_plan) if workspace.active_plan is not None else None),
+        active_task=(dict(workspace.active_task) if workspace.active_task is not None else None),
+        auto_state=(dict(workspace.auto_state) if workspace.auto_state is not None else None),
+    )
 
 
 class UISessionStorage(Protocol):
@@ -798,3 +922,29 @@ def _optional_str(value: object) -> str | None:
         normalized = value.strip()
         return normalized or None
     return None
+
+
+def _normalize_legacy_lane(value: object) -> MessageLane:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "workspace":
+            return "workspace"
+        if normalized == "chat":
+            return "chat"
+    return "chat"
+
+
+def _message_without_legacy_lane(message: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    normalized = dict(message)
+    normalized.pop("lane", None)
+    return normalized
+
+
+def _message_with_legacy_lane(
+    message: dict[str, JSONValue],
+    *,
+    lane: MessageLane,
+) -> dict[str, JSONValue]:
+    normalized = dict(message)
+    normalized["lane"] = lane
+    return normalized

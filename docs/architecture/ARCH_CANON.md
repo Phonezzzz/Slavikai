@@ -155,8 +155,9 @@ Legacy debt после PR-0..PR-7:
 - `core/agent.py`, `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`
   остаются крупными mixin-модулями.
 - `classify_request(...)` ещё участвует в legacy `plan|act|auto` маршрутизации.
-- Storage ещё хранит `ui_messages.lane`; новые `ChatThread` / `WorkspaceSession` типы
-  существуют как domain views, а не как полностью отдельные таблицы.
+- Storage ещё хранит `ui_messages.lane` как legacy SQLite/import/export detail; storage
+  adapter уже разделяет persisted records на chat/workspace domain records без `lane`.
+  Это ещё не полностью отдельные таблицы.
 - Legacy `/ui/api/events/stream` и lane-multiplexed behavior внутри `/ui/api/chat/send`
   ещё есть для совместимости; целевой путь — split chat/workspace endpoints.
 - Провайдеры приняли `tools` в контракте, но native provider tool calling реализован не во

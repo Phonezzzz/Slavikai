@@ -3,6 +3,11 @@ from __future__ import annotations
 import asyncio
 
 from server.ui_hub import UIHub
+from server.ui_session_storage import (
+    PersistedSession,
+    legacy_session_from_domain_records,
+    split_persisted_session_domains,
+)
 from shared.models import JSONValue
 from shared.session_domain import (
     ChatThread,
@@ -36,6 +41,49 @@ def test_session_domain_normalizers_default_to_safe_values() -> None:
     assert normalize_policy_profile("unknown") == "sandbox"
     assert normalize_session_mode("auto") == "auto"
     assert normalize_session_mode("unknown") == "ask"
+
+
+def test_persisted_session_domain_adapter_strips_legacy_lane_from_records() -> None:
+    session = PersistedSession(
+        session_id="s1",
+        principal_id="owner",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:01+00:00",
+        status="ok",
+        decision={"id": "d1"},
+        messages=[
+            {"message_id": "c1", "role": "user", "content": "chat", "lane": "chat"},
+            {
+                "message_id": "w1",
+                "role": "assistant",
+                "content": "workspace",
+                "lane": "workspace",
+            },
+        ],
+        model_provider="local",
+        model_id="llama",
+        workspace_root="/tmp/project",
+        policy_profile="yolo",
+        mode="auto",
+        active_plan={"id": "plan"},
+    )
+
+    records = split_persisted_session_domains(session)
+
+    assert records.chat.thread_id == "s1"
+    assert records.chat.messages == [{"message_id": "c1", "role": "user", "content": "chat"}]
+    assert records.workspace.session_id == "s1"
+    assert records.workspace.messages == [
+        {"message_id": "w1", "role": "assistant", "content": "workspace"}
+    ]
+    assert records.workspace.workspace_root == "/tmp/project"
+    assert records.workspace.policy_profile == "yolo"
+    assert records.workspace.mode == "auto"
+    assert records.workspace.active_plan == {"id": "plan"}
+
+    restored = legacy_session_from_domain_records(records)
+    assert restored.messages == session.messages
+    assert restored.workspace_root == "/tmp/project"
 
 
 def test_ui_hub_exposes_chat_thread_and_workspace_session_domains() -> None:

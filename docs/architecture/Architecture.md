@@ -44,8 +44,9 @@ legacy-обвязкой.
   - Terminal: `tools/terminal_tool.py`, режимы `oneshot|pty`.
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
-  - UI sessions пока физически совместимые: `ui_messages.lane` остаётся storage detail,
-    но доменные views `ChatThread` / `WorkspaceSession` уже выделены в `shared/session_domain.py`.
+  - UI sessions пока физически совместимые: `ui_messages.lane` остаётся legacy
+    SQLite/import/export detail, но storage adapter уже отдаёт chat/workspace
+    domain records без `lane`; полностью отдельные таблицы ещё не введены.
 
 ## Маршрутизация запроса (current legacy runtime)
 
