@@ -9,7 +9,8 @@
 - **Target runtime**: Ask / Plan / Act / Auto, описанные ниже.
 - **Implemented baseline**: tool-calling типы, `AgentToolLoop`, read-only chat tool-loop
   integration, explicit `PlanStep.tool_args`, debug-only command lane, split chat/workspace
-  send+SSE endpoints, единый `TerminalTool`.
+  send+SSE endpoints, единый `TerminalTool`, auto v1 path через
+  `AgentToolLoop -> ToolGateway -> verifier`.
 - **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, storage `lane`
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой архитектурой.
 - **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
@@ -154,7 +155,8 @@ Legacy debt после PR-0..PR-7:
 
 - `core/agent.py`, `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`
   остаются крупными mixin-модулями.
-- `classify_request(...)` ещё участвует в legacy `plan|act|auto` маршрутизации.
+- `classify_request(...)` ещё участвует в legacy `plan|act` маршрутизации и skill-gate
+  перед `runtime_mode=auto`; он не выбирает tools и не является planner.
 - Storage ещё хранит `ui_messages.lane` как legacy SQLite/import/export detail; storage
   adapter уже разделяет persisted records на chat/workspace domain records без `lane`.
   Это ещё не полностью отдельные таблицы.
@@ -164,6 +166,9 @@ Legacy debt после PR-0..PR-7:
 - Primary `local` OpenAI-compatible provider реализует native provider tool calling.
   `xai`, `openrouter`, `inception` явно отклоняют generic `tools`; xAI web search
   остаётся отдельным provider-native режимом.
+- Старый auto pipeline `planner -> coder pool -> merge -> verifier` остаётся в
+  `AutoOrchestrator.run()` как legacy compatibility path; новые auto-запуски через
+  `AutoAgent.run_outcome()` используют auto v1 tool loop.
 
 Уже не является допустимым legacy для расширения:
 

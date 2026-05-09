@@ -85,8 +85,8 @@ class AutoAgent:
         return outcome.text
 
     def run_outcome(self, goal: str) -> AutoRunOutcome:
-        self.tracer.log("auto_invoke", f"Planner->Coder->Verifier: {goal}")
-        return self.orchestrator.run(goal)
+        self.tracer.log("auto_invoke", f"AgentToolLoop->Verifier: {goal}")
+        return self.orchestrator.run_v1(goal)
 
     def resume_outcome(self, run_id: str) -> AutoRunOutcome | None:
         return self.orchestrator.resume(run_id)

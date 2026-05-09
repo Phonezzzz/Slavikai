@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from core.approval_policy import ApprovalRequired
 from core.executor import Executor
@@ -24,6 +24,7 @@ from core.mwv.models import (
 from core.mwv.verifier_runtime import VerifierRuntime, canonical_check_command
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.planner import Planner
+from core.tool_loop import AgentToolLoop, ExecutedToolCall
 from shared.auto_models import (
     AUTO_CODER_POOL_DEFAULT,
     AUTO_CODER_POOL_MAX,
@@ -56,6 +57,10 @@ AUTO_DEFAULT_ACCEPTANCE_CHECKS = [
     "Изменения применены без конфликтов",
     "Проверки завершены успешно",
 ]
+AUTO_V1_SYSTEM_PROMPT = (
+    "You are running Auto v1. Use native tool calls for all workspace actions. "
+    "Do not invent filesystem results. Stop with a concise final summary after tools finish."
+)
 
 
 @dataclass(frozen=True)
@@ -114,9 +119,10 @@ class _PausedRun:
     run_id: str
     goal: str
     pool_size: int
-    plan: AutoPlan
+    plan: AutoPlan | None
     started_at: str
     workspace_root: Path
+    runtime: str = "legacy"
 
 
 class AutoOrchestrator:
@@ -131,6 +137,260 @@ class AutoOrchestrator:
         self.workspace_root = (workspace_root or WORKSPACE_ROOT).resolve()
         self.progress_callback = progress_callback
         self._paused_runs: dict[str, _PausedRun] = {}
+
+    def run_v1(
+        self,
+        goal: str,
+        *,
+        run_id: str | None = None,
+        started_at: str | None = None,
+        run_root_override: Path | None = None,
+    ) -> AutoRunOutcome:
+        run_id_value = run_id or f"auto-{uuid.uuid4().hex}"
+        started = started_at or utc_now_iso()
+        started_monotonic = time.monotonic()
+        budgets = _resolve_auto_budgets()
+        runtime_root = get_workspace_root().resolve()
+        if run_root_override is not None:
+            run_root = run_root_override.resolve()
+        elif runtime_root != WORKSPACE_ROOT:
+            run_root = runtime_root
+        else:
+            run_root = self.workspace_root
+        state: dict[str, JSONValue] = {
+            "run_id": run_id_value,
+            "status": AutoRunStatus.IDLE.value,
+            "goal": goal,
+            "root_path": str(run_root),
+            "pool_size": 1,
+            "started_at": started,
+            "updated_at": started,
+            "planner": {"status": "idle", "runtime": "auto_v1_tool_loop"},
+            "plan": None,
+            "coders": [],
+            "merge": {"status": "idle", "changed_paths": []},
+            "execution_metrics": None,
+            "budgets": budgets.to_dict(),
+            "verifier": None,
+            "approval": None,
+            "error": None,
+            "error_code": None,
+            "missing_paths": [],
+        }
+        self._set_state(state)
+
+        try:
+            self._set_status(state, AutoRunStatus.PLANNING)
+            budget_stop = _budget_runtime_stop(
+                budgets=budgets,
+                started_monotonic=started_monotonic,
+            )
+            if budget_stop is not None:
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                state["error"] = budget_stop
+                state["error_code"] = "budget_runtime"
+                self._set_state(state)
+                return _budget_stop_outcome(self.parent, budget_stop)
+
+            plan = AutoPlan(
+                plan_id=f"plan-{uuid.uuid4().hex}",
+                goal=goal,
+                shards=[
+                    AutoShard(
+                        shard_id="tool-loop",
+                        goal=goal,
+                        path_scope=["."],
+                        acceptance_checks=[
+                            "Native tool loop completed",
+                            "Canonical verifier completed",
+                        ],
+                    )
+                ],
+            )
+            state["planner"] = {
+                "status": "completed",
+                "runtime": "auto_v1_tool_loop",
+                "shards_total": 1,
+            }
+            state["plan"] = plan.to_dict()
+            self._set_state(state)
+
+            self._set_status(state, AutoRunStatus.CODING)
+            gateway = self.parent._build_tool_gateway()
+            tool_specs = self.parent.tool_registry.list_tool_specs()
+            loop_result = AgentToolLoop(max_iterations=budgets.max_tool_calls).run(
+                brain=self.parent._get_main_brain(),
+                gateway=gateway,
+                messages=[
+                    LLMMessage(role="system", content=AUTO_V1_SYSTEM_PROMPT),
+                    LLMMessage(role="user", content=goal),
+                ],
+                tools=tool_specs,
+                config=self.parent.main_config,
+            )
+            tool_call_states = [_auto_v1_tool_call_state(item) for item in loop_result.tool_calls]
+            state["coders"] = tool_call_states
+            failed_calls = [
+                item
+                for item in tool_call_states
+                if isinstance(item.get("status"), str) and item.get("status") != "completed"
+            ]
+            state["merge"] = {
+                "status": "completed",
+                "changed_paths": [],
+                "runtime": "auto_v1_tool_loop",
+            }
+            state["execution_metrics"] = {
+                "tool_calls_used": len(loop_result.tool_calls),
+                "iterations": loop_result.iterations,
+                "files_touched": 0,
+            }
+            self._set_state(state)
+            if len(loop_result.tool_calls) >= budgets.max_tool_calls:
+                reason = (
+                    f"Budget exhausted: tool_calls={len(loop_result.tool_calls)} "
+                    f">= max_tool_calls={budgets.max_tool_calls}"
+                )
+                state["error"] = reason
+                state["error_code"] = "budget_tool_calls"
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                self._set_state(state)
+                return _budget_stop_outcome(self.parent, reason)
+            if failed_calls:
+                diagnostics_raw = failed_calls[0].get("diagnostics")
+                if isinstance(diagnostics_raw, list) and diagnostics_raw:
+                    first_error = str(diagnostics_raw[0])
+                else:
+                    first_error = "tool call failed"
+                state["error"] = first_error
+                self._set_status(state, AutoRunStatus.FAILED_WORKER)
+                return AutoRunOutcome(
+                    text=self.parent._format_stop_response(
+                        what="Auto-run остановлен: tool loop failed",
+                        why=first_error,
+                        next_steps=[
+                            "Проверь auto_state.coders.",
+                            "Исправь причину ошибки tool call и перезапусти auto.",
+                        ],
+                        stop_reason_code=StopReasonCode.WORKER_FAILED,
+                        route="auto",
+                        plan_summary="Auto v1 выполнил задачу через native tool loop.",
+                        execution_summary=first_error,
+                    ),
+                    status=AutoRunStatus.FAILED_WORKER,
+                    stop_reason_code=StopReasonCode.WORKER_FAILED,
+                    verifier=None,
+                    next_steps=[
+                        "Проверь auto_state.coders.",
+                        "Исправь причину ошибки tool call и перезапусти auto.",
+                    ],
+                )
+
+            self._set_status(state, AutoRunStatus.VERIFYING)
+            verification = self._run_verifier(
+                run_id=run_id_value,
+                goal=goal,
+                run_root=run_root,
+                budgets=budgets,
+            )
+            state["verifier"] = _verification_state(verification)
+            self._set_state(state)
+            if verification.status != VerificationStatus.PASSED:
+                self._set_status(state, AutoRunStatus.FAILED_VERIFIER)
+                return AutoRunOutcome(
+                    text=self.parent._format_stop_response(
+                        what="Auto-run остановлен: verifier не прошёл",
+                        why=_verifier_reason(verification),
+                        next_steps=[
+                            "Открой verifier stdout/stderr в отчёте.",
+                            "Исправь проблему и перезапусти auto.",
+                        ],
+                        stop_reason_code=StopReasonCode.VERIFIER_FAILED,
+                        route="auto",
+                        verifier=verification,
+                        attempts=(1, 1),
+                        plan_summary="Auto v1 выполнил native tool loop и дошёл до verifier.",
+                        execution_summary="Tool loop завершён, но verifier вернул fail/error.",
+                    ),
+                    status=AutoRunStatus.FAILED_VERIFIER,
+                    stop_reason_code=StopReasonCode.VERIFIER_FAILED,
+                    verifier=verification,
+                    next_steps=[
+                        "Открой verifier stdout/stderr в отчёте.",
+                        "Исправь проблему и перезапусти auto.",
+                    ],
+                )
+
+            self._set_status(state, AutoRunStatus.COMPLETED)
+            text = self.parent._append_report_block(
+                (
+                    "Auto-run v1 завершён успешно.\n"
+                    f"Tool calls: {len(loop_result.tool_calls)}\n"
+                    f"Verifier: {verification.status.value}\n"
+                    f"Result: {loop_result.text}"
+                ),
+                route="auto",
+                trace_id=None,
+                attempts=(1, 1),
+                verifier=verification,
+                next_steps=[],
+                stop_reason_code=None,
+                plan_summary="Auto v1 использовал AgentToolLoop и ToolGateway.",
+                execution_summary=(
+                    f"Native tool loop iterations={loop_result.iterations}, "
+                    f"tool_calls={len(loop_result.tool_calls)}."
+                ),
+            )
+            return AutoRunOutcome(
+                text=text,
+                status=AutoRunStatus.COMPLETED,
+                stop_reason_code=None,
+                verifier=verification,
+                next_steps=[],
+            )
+        except ApprovalRequired as exc:
+            self._paused_runs[run_id_value] = _PausedRun(
+                run_id=run_id_value,
+                goal=goal,
+                pool_size=1,
+                plan=None,
+                started_at=started,
+                workspace_root=run_root,
+                runtime="tool_loop_v1",
+            )
+            state["approval"] = {
+                "status": "required",
+                "required_categories": list(exc.request.required_categories),
+                "tool": exc.request.tool,
+                "details": dict(exc.request.details),
+                "resume_token": run_id_value,
+            }
+            self._set_status(state, AutoRunStatus.WAITING_APPROVAL)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            state["error"] = str(exc)
+            self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+            return AutoRunOutcome(
+                text=self.parent._format_stop_response(
+                    what="Auto-run остановлен: внутренняя ошибка",
+                    why=str(exc),
+                    next_steps=[
+                        "Проверь логи и trace.",
+                        "Повтори запуск auto после исправления.",
+                    ],
+                    stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
+                    route="auto",
+                    plan_summary="Auto v1 tool loop завершился внутренней ошибкой.",
+                    execution_summary=str(exc),
+                ),
+                status=AutoRunStatus.FAILED_INTERNAL,
+                stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
+                verifier=None,
+                next_steps=[
+                    "Проверь логи и trace.",
+                    "Повтори запуск auto после исправления.",
+                ],
+            )
 
     def run(
         self,
@@ -509,6 +769,15 @@ class AutoOrchestrator:
         paused = self._paused_runs.pop(run_id, None)
         if paused is None:
             return None
+        if paused.runtime == "tool_loop_v1":
+            return self.run_v1(
+                paused.goal,
+                run_id=paused.run_id,
+                started_at=paused.started_at,
+                run_root_override=paused.workspace_root,
+            )
+        if paused.plan is None:
+            return None
         return self.run(
             paused.goal,
             run_id=paused.run_id,
@@ -535,7 +804,7 @@ class AutoOrchestrator:
             "started_at": paused.started_at,
             "updated_at": utc_now_iso(),
             "planner": {"status": "completed"},
-            "plan": paused.plan.to_dict(),
+            "plan": paused.plan.to_dict() if paused.plan is not None else None,
             "coders": [],
             "merge": {"status": "cancelled"},
             "verifier": None,
@@ -730,6 +999,39 @@ class AutoOrchestrator:
                 changed_paths.add(operation.path)
         return sorted(changed_paths)
 
+    def _run_verifier(
+        self,
+        *,
+        run_id: str,
+        goal: str,
+        run_root: Path,
+        budgets: AutoBudgets,
+    ) -> VerificationResult:
+        verifier = VerifierRuntime(project_root=run_root)
+        context = RunContext(
+            session_id=self.parent.session_id or "local",
+            trace_id=str(uuid.uuid4()),
+            workspace_root=str(run_root),
+            safe_mode=bool(self.parent.tools_enabled.get("safe_mode", False)),
+            approved_categories=sorted(self.parent.approved_categories),
+            max_retries=budgets.max_retries,
+            attempt=1,
+        )
+        verifier_task = TaskPacket(
+            task_id=run_id,
+            session_id=context.session_id,
+            trace_id=context.trace_id,
+            goal=goal,
+            scope={"workspace_root": str(run_root)},
+            verifier={"command": canonical_check_command(), "cwd": str(run_root)},
+        )
+        verifier_run: Any = verifier.run
+        try:
+            return cast(VerificationResult, verifier_run(verifier_task, context))
+        except TypeError:
+            # Backward compatibility for legacy verifier stubs.
+            return cast(VerificationResult, verifier_run(context))
+
     def _set_status(
         self,
         state: dict[str, JSONValue],
@@ -747,6 +1049,34 @@ class AutoOrchestrator:
         if self.progress_callback is not None:
             self.progress_callback(dict(normalized))
         return normalized
+
+
+def _auto_v1_tool_call_state(item: ExecutedToolCall) -> dict[str, JSONValue]:
+    result = item.result
+    diagnostics: list[str] = []
+    if result.error:
+        diagnostics.append(result.error)
+    return {
+        "coder_id": item.call.id,
+        "shard_id": "tool-loop",
+        "status": "completed" if result.ok else "failed",
+        "changed_paths": [],
+        "diagnostics": diagnostics,
+        "tool": item.call.name,
+    }
+
+
+def _verification_state(verification: VerificationResult) -> dict[str, JSONValue]:
+    return {
+        "status": verification.status.value,
+        "command": list(verification.command),
+        "exit_code": verification.exit_code,
+        "error": verification.error,
+        "duration_ms": verification.duration_ms,
+        "fail_type": verification.fail_type,
+        "excerpt": verification.excerpt,
+        "verifier_profile": verification.verifier_profile,
+    }
 
 
 def _resolve_pool_size() -> int:

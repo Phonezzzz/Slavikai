@@ -7,10 +7,10 @@
 ## Цель
 
 SlavikAI сейчас работает как single-user/server-side agent runtime с контурами chat,
-workspace/MWV и auto. После PR-0..PR-9 в коде есть честный tool-calling contract,
-read-only chat integration через `AgentToolLoop`, split chat/workspace API paths,
-debug-only command lane и единый terminal backend. Часть старого runtime ещё остаётся
-legacy-обвязкой.
+workspace/MWV и auto. После PR-0..PR-14 в коде есть честный tool-calling contract,
+read-only chat integration через `AgentToolLoop`, auto v1 через `AgentToolLoop`,
+split chat/workspace API paths, debug-only command lane и единый terminal backend.
+Часть старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
@@ -28,8 +28,10 @@ legacy-обвязкой.
   - Успех только при `WorkStatus.SUCCESS` и `VerificationStatus.PASSED`.
   - Ограниченный retry через `RunContext.max_retries`.
 - **Auto runtime** (`core/auto_runtime.py`)
-  - Контур `planner -> coder pool -> merge -> verifier`.
-  - Поддерживает паузу `waiting_approval` и resume.
+  - Новый entry из `AutoAgent.run_outcome()` идёт через `AgentToolLoop -> ToolGateway -> verifier`.
+  - Legacy-контур `planner -> coder pool -> merge -> verifier` оставлен в `AutoOrchestrator.run()`
+    для прямой совместимости и не является путём для новых auto-запусков.
+  - Auto v1 поддерживает паузу `waiting_approval` и resume через повторный tool-loop run после approval.
 - **LLM слой** (`llm/*`)
   - Провайдеры: `xai`, `openrouter`, `local`, `inception`.
   - Контракт: `LLMMessage.role` включает `tool`, `LLMResult.tool_calls`,
@@ -55,7 +57,8 @@ legacy-обвязкой.
    - Разрешены только debug-команды `/trace` и `/end-session`. Подробнее — `docs/for-humans/COMMANDS.md`.
 2. Для обычного текста:
    - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
-   - `runtime_mode=auto` — выполняется классификация/skill-проверка, затем запуск auto-контура.
+   - `runtime_mode=auto` — выполняется legacy skill-gate, затем запуск auto v1
+     (`AgentToolLoop -> ToolGateway -> verifier`), без chat-fallback.
    - `runtime_mode=act|plan` — в legacy runtime используется `classify_request(...)` (`chat` или `mwv`).
 3. Целевой tool path:
    - LLM получает `ToolSpec[]`.

@@ -4,8 +4,13 @@ import pytest
 
 import core.auto_runtime as auto_runtime
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
+from core.auto_agent import AutoAgent
 from core.mwv.models import VerificationResult, VerificationStatus
+from core.tool_gateway import ToolGateway
+from llm.types import LLMResult, ToolCall, ToolSpec
 from shared.auto_models import AutoPlan, AutoRunStatus, AutoShard
+from shared.models import LLMMessage, ToolResult
+from tools.tool_registry import ToolRegistry
 
 
 class _FakeBrain:
@@ -49,6 +54,52 @@ class _FakeAgent:
 
     def _format_stop_response(self, **kwargs):  # noqa: ANN003
         return f"stop:{kwargs.get('what', '')}"
+
+
+class _ToolLoopBrain:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen_tools: list[ToolSpec] = []
+        self.messages_seen: list[list[LLMMessage]] = []
+
+    def generate(self, messages, config=None, tools=None):  # noqa: ANN001
+        del config
+        self.calls += 1
+        self.seen_tools = list(tools or [])
+        self.messages_seen.append(list(messages))
+        if self.calls == 1:
+            return LLMResult(
+                text="call tool",
+                tool_calls=[
+                    ToolCall(
+                        id="auto-call-1",
+                        name="echo",
+                        arguments={"value": messages[-1].content},
+                    )
+                ],
+            )
+        assert messages[-1].role == "tool"
+        return LLMResult(text="auto v1 final")
+
+
+class _AutoV1Agent(_FakeAgent):
+    def __init__(self) -> None:
+        super().__init__(brain_text="")
+        self._brain = _ToolLoopBrain()
+        self.tool_registry = ToolRegistry()
+        self.tool_registry.register(
+            "echo",
+            lambda request: ToolResult.success({"output": request.args["value"]}),
+            description="Echo auto input",
+            parameters_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+        )
+
+    def _build_tool_gateway(self):
+        return ToolGateway(self.tool_registry)
 
 
 class _PassingVerifierRuntime:
@@ -96,6 +147,37 @@ def _completed_result(shard_id: str, coder_id: str) -> auto_runtime.CoderResult:
         bundle=auto_runtime.PatchBundle(status="ok", changed_paths=[]),
         error=None,
     )
+
+
+def test_auto_agent_run_outcome_uses_auto_v1_tool_loop(monkeypatch) -> None:  # noqa: ANN001
+    agent = _AutoV1Agent()
+    auto = AutoAgent(agent)  # type: ignore[arg-type]
+    monkeypatch.setattr(auto_runtime, "VerifierRuntime", _PassingVerifierRuntime)
+
+    outcome = auto.run_outcome("inspect workspace")
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert isinstance(agent._brain, _ToolLoopBrain)
+    assert agent._brain.calls == 2
+    assert agent._brain.seen_tools == [
+        ToolSpec(
+            name="echo",
+            description="Echo auto input",
+            parameters_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+        )
+    ]
+    assert isinstance(agent.last_auto_state, dict)
+    planner = agent.last_auto_state.get("planner")
+    assert isinstance(planner, dict)
+    assert planner.get("runtime") == "auto_v1_tool_loop"
+    coders = agent.last_auto_state.get("coders")
+    assert isinstance(coders, list)
+    assert coders[0]["tool"] == "echo"
+    assert coders[0]["status"] == "completed"
 
 
 def test_auto_runtime_conflict_detection() -> None:
