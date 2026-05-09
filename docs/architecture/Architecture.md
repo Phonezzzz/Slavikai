@@ -34,8 +34,9 @@ legacy-обвязкой.
   - Провайдеры: `xai`, `openrouter`, `local`, `inception`.
   - Контракт: `LLMMessage.role` включает `tool`, `LLMResult.tool_calls`,
     `Brain.generate(..., tools=None)`.
-  - Provider caveat: не каждый backend реально исполняет native provider tool calling;
-    unsupported providers обязаны явно игнорировать/ограничивать tools, а не имитировать их regex-парсингом.
+  - Native provider tool calling реализован в primary `local` OpenAI-compatible path.
+    `xai`, `openrouter`, `inception` явно отклоняют generic `tools`; xAI web search
+    остаётся отдельным provider-native режимом.
   - `openai` используется только для STT endpoint/ключа в UI-настройках (не chat provider).
 - **Tools** (`tools/*`)
   - Реестр: `ToolRegistry`.

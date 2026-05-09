@@ -126,7 +126,8 @@ class InceptionBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResult:
-        del tools
+        if tools:
+            raise RuntimeError("Inception provider does not support native tools.")
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_payload(messages, cfg, stream=False)
@@ -174,7 +175,8 @@ class InceptionBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> Iterator[LLMStreamChunk]:
-        del tools
+        if tools:
+            raise RuntimeError("Inception provider does not support native tools.")
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_payload(messages, cfg, stream=True)

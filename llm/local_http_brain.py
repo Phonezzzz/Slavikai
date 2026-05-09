@@ -9,7 +9,7 @@ import requests
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
-from llm.types import LLMResult, LLMUsage, ModelConfig, ToolSpec
+from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage
 
 DEFAULT_LOCAL_ENDPOINT: Final[str] = "http://localhost:11434/v1/chat/completions"
@@ -39,6 +39,74 @@ def _extract_stream_delta(data: dict[str, JSONValue]) -> str:
                 parts.append(text_raw)
         return "".join(parts)
     return ""
+
+
+def _tool_spec_to_provider_dict(tool: ToolSpec) -> dict[str, JSONValue]:
+    parameters: dict[str, JSONValue] = tool.parameters_schema or {
+        "type": "object",
+        "properties": {},
+    }
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": parameters,
+        },
+    }
+
+
+def _parse_tool_calls(message: dict[str, JSONValue]) -> list[ToolCall]:
+    calls_raw = message.get("tool_calls")
+    if not isinstance(calls_raw, list):
+        return []
+    calls: list[ToolCall] = []
+    for index, item in enumerate(calls_raw):
+        if not isinstance(item, dict):
+            continue
+        function_raw = item.get("function")
+        if not isinstance(function_raw, dict):
+            continue
+        name_raw = function_raw.get("name")
+        if not isinstance(name_raw, str) or not name_raw.strip():
+            continue
+        raw_arguments = function_raw.get("arguments")
+        arguments = _parse_tool_arguments(raw_arguments)
+        call_id_raw = item.get("id")
+        call_id = (
+            call_id_raw.strip() if isinstance(call_id_raw, str) and call_id_raw.strip() else ""
+        )
+        calls.append(
+            ToolCall(
+                id=call_id or f"local-tool-call-{index}",
+                name=name_raw.strip(),
+                arguments=arguments,
+                raw_arguments=raw_arguments if isinstance(raw_arguments, str) else None,
+            )
+        )
+    return calls
+
+
+def _parse_tool_arguments(value: JSONValue) -> dict[str, JSONValue]:
+    if isinstance(value, dict):
+        return {str(key): item for key, item in value.items()}
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): item for key, item in parsed.items()}
+
+
+def _message_content_to_text(value: JSONValue) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
 
 
 class LocalHttpBrain(Brain):
@@ -77,16 +145,18 @@ class LocalHttpBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResult:
-        del tools
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
-        payload = {
+        payload: dict[str, JSONValue] = {
             "model": cfg.model,
             "messages": [
                 message.to_provider_dict() for message in self._inject_system(messages, cfg)
             ],
             "temperature": cfg.temperature,
         }
+        if tools:
+            payload["tools"] = [_tool_spec_to_provider_dict(tool) for tool in tools]
+            payload["tool_choice"] = "auto"
         if cfg.max_tokens is not None:
             payload["max_tokens"] = cfg.max_tokens
         if cfg.top_p is not None:
@@ -112,7 +182,8 @@ class LocalHttpBrain(Brain):
         message_raw = first_choice.get("message")
         if not isinstance(message_raw, dict):
             raise RuntimeError("Некорректный формат message.")
-        content = str(message_raw.get("content", ""))
+        content = _message_content_to_text(message_raw.get("content"))
+        tool_calls = _parse_tool_calls(message_raw)
         reasoning_raw = message_raw.get("reasoning")
         reasoning = (
             str(reasoning_raw).strip()
@@ -129,7 +200,13 @@ class LocalHttpBrain(Brain):
                 total_tokens=int(usage_block.get("total_tokens", 0)),
             )
 
-        return LLMResult(text=content, reasoning=reasoning, usage=usage, raw=data)
+        return LLMResult(
+            text=content,
+            reasoning=reasoning,
+            usage=usage,
+            raw=data,
+            tool_calls=tool_calls,
+        )
 
     def generate_stream(
         self,
@@ -137,7 +214,8 @@ class LocalHttpBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> Iterator[str]:
-        del tools
+        if tools:
+            raise RuntimeError("Local HTTP streaming does not support native tool calls.")
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = {

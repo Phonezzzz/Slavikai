@@ -291,7 +291,8 @@ class XAiBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResult:
-        del tools
+        if tools:
+            raise RuntimeError("xAI provider supports web_search only, not generic native tools.")
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         if cfg.web_search_enabled:
@@ -429,7 +430,8 @@ class XAiBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> Iterator[str]:
-        del tools
+        if tools:
+            raise RuntimeError("xAI provider supports web_search only, not generic native tools.")
         cfg = self._resolve_config(config)
         if cfg.web_search_enabled:
             result = self.generate(messages, config=cfg)

@@ -69,7 +69,10 @@ class OpenRouterBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResult:
-        del tools
+        if tools:
+            raise RuntimeError(
+                "OpenRouter provider is debug-only and does not support native tools."
+            )
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = {
@@ -129,7 +132,10 @@ class OpenRouterBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> Iterator[str]:
-        del tools
+        if tools:
+            raise RuntimeError(
+                "OpenRouter provider is debug-only and does not support native tools."
+            )
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = {

@@ -9,7 +9,7 @@ from llm.brain_factory import create_brain
 from llm.inception_brain import InceptionBrain
 from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
-from llm.types import ModelConfig
+from llm.types import ModelConfig, ToolSpec
 from llm.xai_brain import XAiBrain
 from shared.models import LLMMessage
 
@@ -88,6 +88,96 @@ def test_local_http_generate(monkeypatch) -> None:
     assert result.text == "pong"
     assert calls["url"] == "http://localhost:9999/v1/chat/completions"
     assert calls["json"]["model"] == "local-model"
+
+
+def test_local_http_generate_sends_and_parses_native_tools(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_post(url, json, headers, timeout):
+        del url, headers, timeout
+        calls["json"] = json
+        return _mock_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_read",
+                                        "arguments": '{"path":"README.md"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("llm.local_http_brain.requests.post", fake_post)
+    config = ModelConfig(provider="local", model="local-model")
+    brain = LocalHttpBrain(default_config=config)
+    tools = [
+        ToolSpec(
+            name="workspace_read",
+            description="Read a workspace file",
+            parameters_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        )
+    ]
+
+    result = brain.generate([LLMMessage(role="user", content="read")], tools=tools)
+
+    assert calls["json"]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_read",
+                "description": "Read a workspace file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+    ]
+    assert calls["json"]["tool_choice"] == "auto"
+    assert result.text == ""
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "call-1"
+    assert result.tool_calls[0].name == "workspace_read"
+    assert result.tool_calls[0].arguments == {"path": "README.md"}
+
+
+def test_non_primary_providers_reject_generic_native_tools(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    tool = ToolSpec(name="workspace_read", description="Read")
+
+    with pytest.raises(RuntimeError, match="OpenRouter"):
+        OpenRouterBrain(
+            api_key="openrouter-key",
+            default_config=ModelConfig(provider="openrouter", model="debug-model"),
+        ).generate([LLMMessage(role="user", content="read")], tools=[tool])
+
+    with pytest.raises(RuntimeError, match="xAI"):
+        XAiBrain(
+            api_key="xai-key",
+            default_config=ModelConfig(provider="xai", model="xai-model"),
+        ).generate([LLMMessage(role="user", content="read")], tools=[tool])
+
+    with pytest.raises(RuntimeError, match="Inception"):
+        InceptionBrain(
+            api_key="inception-key",
+            default_config=ModelConfig(provider="inception", model="inception-model"),
+        ).generate([LLMMessage(role="user", content="read")], tools=[tool])
 
 
 def test_openrouter_without_key_raises(monkeypatch) -> None:

@@ -161,8 +161,9 @@ Legacy debt после PR-0..PR-7:
 - Legacy `/ui/api/events/stream` теперь hard-fails (`410 legacy_event_stream_removed`), а
   workspace-запросы через `/ui/api/chat/send` отклоняются. Целевой путь — split
   chat/workspace endpoints.
-- Провайдеры приняли `tools` в контракте, но native provider tool calling реализован не во
-  всех backends.
+- Primary `local` OpenAI-compatible provider реализует native provider tool calling.
+  `xai`, `openrouter`, `inception` явно отклоняют generic `tools`; xAI web search
+  остаётся отдельным provider-native режимом.
 
 Уже не является допустимым legacy для расширения:
 
