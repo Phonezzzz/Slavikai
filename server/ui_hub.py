@@ -16,6 +16,11 @@ from server.ui_session_storage import (
 )
 from shared.auto_models import normalize_auto_state
 from shared.models import JSONValue
+from shared.session_domain import (
+    ChatThread,
+    WorkspaceSession,
+    legacy_messages_for_lane,
+)
 
 
 def _utc_iso_now() -> str:
@@ -396,6 +401,39 @@ class UIHub:
             if state is None:
                 return None
             return self._messages_for_lane(state.messages, lane=lane)
+
+    async def get_chat_thread(self, session_id: str) -> ChatThread | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            workspace_session_id = session_id if state.workspace_root is not None else None
+            return ChatThread(
+                thread_id=session_id,
+                model_provider=state.model_provider,
+                model_id=state.model_id,
+                messages=legacy_messages_for_lane(state.messages, lane="chat"),
+                workspace_session_id=workspace_session_id,
+            )
+
+    async def get_workspace_session_domain(
+        self,
+        session_id: str,
+    ) -> WorkspaceSession | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            return WorkspaceSession(
+                session_id=session_id,
+                root=state.workspace_root,
+                policy_profile=state.policy_profile,
+                mode=state.mode,
+                messages=legacy_messages_for_lane(state.messages, lane="workspace"),
+                active_plan=dict(state.active_plan) if state.active_plan is not None else None,
+                active_task=dict(state.active_task) if state.active_task is not None else None,
+                auto_state=dict(state.auto_state) if state.auto_state is not None else None,
+            )
 
     async def get_session_output(self, session_id: str) -> dict[str, str | None] | None:
         async with self._lock:
