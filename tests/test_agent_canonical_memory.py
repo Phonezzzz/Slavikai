@@ -77,6 +77,40 @@ def test_agent_mwv_task_contains_memory_capsule(tmp_path, monkeypatch) -> None:
     assert count_raw >= 1
 
 
+def test_agent_explicit_remember_response_persists_claim(tmp_path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    agent.runtime_mode = "ask"
+
+    response = agent.respond(
+        [LLMMessage(role="user", content="запомни: я предпочитаю короткие ответы")]
+    )
+
+    assert response == "Запомнил: preference:response_length"
+    atom = agent._canonical_store.get_by_stable_key("preference:response_length")
+    assert atom is not None
+    assert atom.value_json == {
+        "raw": "я предпочитаю короткие ответы",
+        "value": "короткие ответы",
+    }
+
+
+def test_agent_explicit_remember_stream_persists_fallback_fact(tmp_path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    agent.runtime_mode = "ask"
+
+    chunks = list(
+        agent.respond_stream(
+            [LLMMessage(role="user", content="remember my laptop hostname is alpha")]
+        )
+    )
+
+    assert chunks == ["Запомнил: fact:my_laptop_hostname_is_alpha"]
+    assert agent.last_stream_response_raw == "Запомнил: fact:my_laptop_hostname_is_alpha"
+    atom = agent._canonical_store.get_by_stable_key("fact:my_laptop_hostname_is_alpha")
+    assert atom is not None
+    assert atom.value_json == {"text": "my laptop hostname is alpha"}
+
+
 def test_agent_context_budget_caps_workspace_and_keeps_system_first(
     tmp_path,
     monkeypatch,

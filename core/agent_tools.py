@@ -129,6 +129,14 @@ class AgentToolsMixin:
         _last_user_input: str | None
 
         def _build_brain(self) -> Brain: ...
+        def remember_explicit_text(
+            self,
+            text: str,
+            *,
+            source_kind: str,
+            source_id: str | None = None,
+            lang_hint: str | None = None,
+        ) -> str: ...
 
     main_config: ModelConfig | None
     main_api_key: str | None
@@ -210,6 +218,15 @@ class AgentToolsMixin:
                 req = ToolRequest(name="web", args={"query": query})
                 tool_result = self._call_tool_logged(command, req, safe_mode_override=True)
                 result = self._format_tool_result(tool_result)
+                response = _wrap(result)
+                self._log_chat_interaction(raw_input=command, response_text=response)
+                return response
+
+            if cmd == "remember":
+                result = self.remember_explicit_text(
+                    " ".join(args),
+                    source_kind="command.remember",
+                )
                 response = _wrap(result)
                 self._log_chat_interaction(raw_input=command, response_text=response)
                 return response

@@ -52,6 +52,15 @@ class AgentRoutingMixin:
         def handle_tool_command(self, command: str) -> str: ...
         def handle_auto_command(self, goal: str, *, command_lane: bool = False) -> str: ...
         def save_to_memory(self, user_text: str, assistant_text: str) -> None: ...
+        def is_explicit_memory_request(self, text: str) -> bool: ...
+        def remember_explicit_text(
+            self,
+            text: str,
+            *,
+            source_kind: str,
+            source_id: str | None = None,
+            lang_hint: str | None = None,
+        ) -> str: ...
         def _log_chat_interaction(
             self,
             raw_input: str,
@@ -169,6 +178,16 @@ class AgentRoutingMixin:
             if last_content.startswith("/"):
                 return self.handle_tool_command(last_content)
 
+            if self.is_explicit_memory_request(last_content):
+                response = self.remember_explicit_text(
+                    last_content,
+                    source_kind="chat.explicit_remember",
+                )
+                self._log_chat_interaction(raw_input=last_content, response_text=response)
+                if record_in_history:
+                    self._append_short_term([LLMMessage(role="assistant", content=response)])
+                return response
+
             runtime_mode = getattr(self, "runtime_mode", "ask")
             if runtime_mode == "ask":
                 return self._run_chat_response(messages, last_content, record_in_history)
@@ -270,6 +289,18 @@ class AgentRoutingMixin:
                 result = self.handle_tool_command(last_content)
                 self.last_stream_response_raw = result
                 yield result
+                return
+
+            if self.is_explicit_memory_request(last_content):
+                response = self.remember_explicit_text(
+                    last_content,
+                    source_kind="chat.explicit_remember",
+                )
+                self._log_chat_interaction(raw_input=last_content, response_text=response)
+                if record_in_history:
+                    self._append_short_term([LLMMessage(role="assistant", content=response)])
+                self.last_stream_response_raw = response
+                yield response
                 return
 
             runtime_mode = getattr(self, "runtime_mode", "ask")

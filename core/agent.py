@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import replace
@@ -124,6 +125,7 @@ SAFE_MODE_TOOLS_OFF = {
 MAX_MWV_ATTEMPTS = 3
 SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
 _DEFAULT_POLICY_DECAY_HALF_LIFE_DAYS = 30
+_EXPLICIT_MEMORY_PREFIX = re.compile(r"^\s*(?:запомни|remember)\b[:\-\s]*", re.IGNORECASE)
 _FEEDBACK_LABEL_HINTS: dict[FeedbackLabel, tuple[str, str]] = {
     FeedbackLabel.OFF_TOPIC: ("fatal", "Держись темы вопроса."),
     FeedbackLabel.HALLUCINATION: ("major", "Проверь факты и избегай галлюцинаций."),
@@ -711,6 +713,43 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
                 {"claims": applied, "source_kind": source_kind, "source_id": source_id},
             )
         return applied
+
+    def is_explicit_memory_request(self, text: str) -> bool:
+        return _EXPLICIT_MEMORY_PREFIX.match(text.strip()) is not None
+
+    def remember_explicit_text(
+        self,
+        text: str,
+        *,
+        source_kind: str,
+        source_id: str | None = None,
+        lang_hint: str | None = None,
+    ) -> str:
+        cleaned = text.strip()
+        if not cleaned:
+            return "Нечего запомнить."
+
+        capture_text = (
+            cleaned if self.is_explicit_memory_request(cleaned) else f"remember {cleaned}"
+        )
+        resolved_source_id = source_id or self.session_id or self.conversation_id
+        applied = self.capture_memory_claims_from_text(
+            capture_text,
+            source_kind=source_kind,
+            source_id=resolved_source_id,
+            lang_hint=lang_hint,
+        )
+        if not applied:
+            return "Не удалось выделить факт для памяти."
+
+        stable_keys = [
+            str(item["stable_key"])
+            for item in applied
+            if isinstance(item.get("stable_key"), str) and item["stable_key"]
+        ]
+        if not stable_keys:
+            return f"Запомнил: {len(applied)}"
+        return f"Запомнил: {', '.join(stable_keys)}"
 
     def build_memory_capsule(
         self,

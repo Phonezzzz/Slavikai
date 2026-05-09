@@ -18,6 +18,7 @@ def test_agent_unknown_tool_command(tmp_path: Path) -> None:
         brain=SimpleBrain(),
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
     )
     resp = agent.handle_tool_command("/unknown")
     assert "неизвестен" in resp.lower() or "неактивен" in resp.lower()
@@ -29,9 +30,30 @@ def test_agent_shell_disabled_in_safe_mode(tmp_path: Path) -> None:
         enable_tools={"safe_mode": True},
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
     )
     resp = agent.handle_tool_command("/sh ls")
     lowered = resp.lower()
     assert "что случилось" in lowered
     assert "требуется подтверждение" in lowered
     assert "command_lane" in lowered
+
+
+def test_agent_remember_command_uses_canonical_memory(tmp_path: Path) -> None:
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+
+    response = agent.handle_tool_command("/remember i prefer markdown output")
+
+    assert "command_lane" in response.lower()
+    assert "Запомнил: preference:response_format" in response
+    atom = agent._canonical_store.get_by_stable_key("preference:response_format")
+    assert atom is not None
+    assert atom.value_json == {
+        "raw": "i prefer markdown output",
+        "value": "markdown output",
+    }
