@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_PATH = Path("config/memory.json")
@@ -14,11 +14,86 @@ DEFAULT_INBOX_WRITES_PER_MINUTE = 6
 
 
 @dataclass(frozen=True)
+class ContextBudgetConfig:
+    total_chars: int = 12000
+    prefs_max_items: int = 10
+    prefs_chars: int = 800
+    legacy_notes_chars: int = 600
+    feedback_max_items: int = 2
+    feedback_chars: int = 400
+    canonical_memory_chars: int = 1800
+    vector_code_chars: int = 1200
+    vector_docs_chars: int = 1200
+    workspace_file_chars: int = 2000
+    pinned_atoms_chars: int = 1200
+    session_summary_chars: int = 1500
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> ContextBudgetConfig:
+        defaults = cls()
+        return cls(
+            total_chars=_read_int(data, "total_chars", defaults.total_chars),
+            prefs_max_items=_read_int(data, "prefs_max_items", defaults.prefs_max_items),
+            prefs_chars=_read_int(data, "prefs_chars", defaults.prefs_chars),
+            legacy_notes_chars=_read_int(
+                data,
+                "legacy_notes_chars",
+                defaults.legacy_notes_chars,
+            ),
+            feedback_max_items=_read_int(
+                data,
+                "feedback_max_items",
+                defaults.feedback_max_items,
+            ),
+            feedback_chars=_read_int(data, "feedback_chars", defaults.feedback_chars),
+            canonical_memory_chars=_read_int(
+                data,
+                "canonical_memory_chars",
+                defaults.canonical_memory_chars,
+            ),
+            vector_code_chars=_read_int(data, "vector_code_chars", defaults.vector_code_chars),
+            vector_docs_chars=_read_int(data, "vector_docs_chars", defaults.vector_docs_chars),
+            workspace_file_chars=_read_int(
+                data,
+                "workspace_file_chars",
+                defaults.workspace_file_chars,
+            ),
+            pinned_atoms_chars=_read_int(
+                data,
+                "pinned_atoms_chars",
+                defaults.pinned_atoms_chars,
+            ),
+            session_summary_chars=_read_int(
+                data,
+                "session_summary_chars",
+                defaults.session_summary_chars,
+            ),
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "total_chars": self.total_chars,
+            "prefs_max_items": self.prefs_max_items,
+            "prefs_chars": self.prefs_chars,
+            "legacy_notes_chars": self.legacy_notes_chars,
+            "feedback_max_items": self.feedback_max_items,
+            "feedback_chars": self.feedback_chars,
+            "canonical_memory_chars": self.canonical_memory_chars,
+            "vector_code_chars": self.vector_code_chars,
+            "vector_docs_chars": self.vector_docs_chars,
+            "workspace_file_chars": self.workspace_file_chars,
+            "pinned_atoms_chars": self.pinned_atoms_chars,
+            "session_summary_chars": self.session_summary_chars,
+        }
+
+
+@dataclass(frozen=True)
 class MemoryConfig:
     auto_save_dialogue: bool = DEFAULT_AUTO_SAVE_DIALOGUE
     inbox_max_items: int = DEFAULT_INBOX_MAX_ITEMS
     inbox_ttl_days: int = DEFAULT_INBOX_TTL_DAYS
     inbox_writes_per_minute: int = DEFAULT_INBOX_WRITES_PER_MINUTE
+    context_budget: ContextBudgetConfig = field(default_factory=ContextBudgetConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> MemoryConfig:
@@ -32,19 +107,22 @@ class MemoryConfig:
             "inbox_writes_per_minute",
             DEFAULT_INBOX_WRITES_PER_MINUTE,
         )
+        context_budget = _read_context_budget(data.get("context_budget"))
         return cls(
             auto_save_dialogue=raw_value,
             inbox_max_items=inbox_max_items,
             inbox_ttl_days=inbox_ttl_days,
             inbox_writes_per_minute=inbox_writes_per_minute,
+            context_budget=context_budget,
         )
 
-    def to_dict(self) -> dict[str, int | bool]:
+    def to_dict(self) -> dict[str, int | bool | dict[str, int]]:
         return {
             "auto_save_dialogue": self.auto_save_dialogue,
             "inbox_max_items": self.inbox_max_items,
             "inbox_ttl_days": self.inbox_ttl_days,
             "inbox_writes_per_minute": self.inbox_writes_per_minute,
+            "context_budget": self.context_budget.to_dict(),
         }
 
 
@@ -66,9 +144,18 @@ def save_memory_config(config: MemoryConfig, path: Path = DEFAULT_PATH) -> None:
     path.write_text(json.dumps(config.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _read_context_budget(raw: object) -> ContextBudgetConfig:
+    if raw is None:
+        return ContextBudgetConfig()
+    if not isinstance(raw, dict):
+        raise ValueError("context_budget должен быть объектом")
+    context_data = {key: value for key, value in raw.items() if isinstance(key, str)}
+    return ContextBudgetConfig.from_dict(context_data)
+
+
 def _read_int(data: dict[str, object], key: str, default: int) -> int:
     raw = data.get(key, default)
-    if not isinstance(raw, int):
+    if isinstance(raw, bool) or not isinstance(raw, int):
         raise ValueError(f"{key} должен быть int")
     if raw <= 0:
         raise ValueError(f"{key} должен быть положительным")
