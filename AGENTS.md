@@ -15,18 +15,18 @@
 
 ## Canonical rules (must read)
 
-- `docs/DevRules.md` — глобальные инварианты проекта.
-- `docs/dev_workflow.md` — git-процесс (режим A).
-- `docs/COMMAND_LANE_POLICY.md` — границы командного режима.
-- `docs/ROUTING_POLICY.md` — маршрутизация chat/mwv.
-- `docs/STOP_RESPONSES.md` — единый формат остановки.
+- `docs/agent/DevRules.md` — глобальные инварианты проекта.
+- `docs/workflow/dev_workflow.md` — git-процесс (режим A).
+- `docs/agent/COMMAND_LANE_POLICY.md` — границы командного режима.
+- `docs/agent/ROUTING_POLICY.md` — маршрутизация chat/mwv.
+- `docs/agent/STOP_RESPONSES.md` — единый формат остановки.
 
 ## Contextual references (читать по релевантности)
 
-- `docs/Architecture.md`
-- `docs/COMMANDS.md`
-- `docs/CONTRIBUTING.md`
-- `docs/MWV_FLOW.md`
+- `docs/architecture/Architecture.md`
+- `docs/for-humans/COMMANDS.md`
+- `docs/workflow/CONTRIBUTING.md`
+- `docs/agent/MWV_FLOW.md`
 - `docs/archive/README.md` (если нужен исторический контекст)
 
 ## Rules + Context Snapshot (формат)

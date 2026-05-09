@@ -29,7 +29,7 @@ SlavikAI — серверный агент с тремя рабочими кон
 ## Маршрутизация запроса (факт runtime)
 
 1. Сообщение, начинающееся с `/`, идёт в command lane (`handle_tool_command`) и не проходит через MWV.
-   - Команды: `/fs`, `/web`, `/sh`, `/project`, `/plan`, `/auto`, `/imggen`, `/imganalyze`, `/trace`. Подробнее — `docs/COMMANDS.md`.
+   - Команды: `/fs`, `/web`, `/sh`, `/project`, `/plan`, `/auto`, `/imggen`, `/imganalyze`, `/trace`. Подробнее — `docs/for-humans/COMMANDS.md`.
 2. Для обычного текста:
    - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
    - `runtime_mode=auto` — выполняется классификация/skill-проверка, затем запуск auto-контура.

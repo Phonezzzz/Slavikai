@@ -17,9 +17,9 @@
 ## Как использовать
 
 - Для актуальных правил и фактического поведения смотри:
-  - `../DevRules.md`
-  - `../Architecture.md`
-  - `../COMMANDS.md`
-  - `../CONTRIBUTING.md`
-  - `../MWV_FLOW.md`
+  - `../agent/DevRules.md`
+  - `../architecture/Architecture.md`
+  - `../for-humans/COMMANDS.md`
+  - `../workflow/CONTRIBUTING.md`
+  - `../agent/MWV_FLOW.md`
 - Документы из `docs/archive/` читать только как исторический контекст.

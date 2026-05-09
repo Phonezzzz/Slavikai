@@ -21,7 +21,7 @@
 
 ## Обязательный workflow
 
-Смотри `docs/dev_workflow.md`.
+Смотри `docs/workflow/dev_workflow.md`.
 Коротко:
 
 1. `git checkout main`

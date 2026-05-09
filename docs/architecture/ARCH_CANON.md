@@ -1,7 +1,7 @@
 # ARCH_CANON — канон Ask/Plan/Act/Auto
 
 Этот документ — **source of truth** для целевой архитектуры runtime.
-Если другие документы расходятся с ним, приоритет у `docs/ARCH_CANON.md`.
+Если другие документы расходятся с ним, приоритет у `docs/architecture/ARCH_CANON.md`.
 
 ## 1) Канонические роли режимов
 
@@ -91,7 +91,7 @@
 - `attempts`
 - `verifier`
 
-Формат совместим с `docs/STOP_RESPONSES.md` и `MWV_REPORT_JSON`.
+Формат совместим с `docs/agent/STOP_RESPONSES.md` и `MWV_REPORT_JSON`.
 
 ## 5) `/init` = RuntimeReset
 
@@ -131,4 +131,3 @@ API:
 - Если `slavik_meta.runtime_mode` отсутствует -> legacy поведение без изменений.
 - `slavik_meta.runtime_mode=ask|auto` -> opt-in в новый runtime router.
 - `slavik_meta.runtime_mode=plan|act` -> `invalid_request_error` + `next_steps` на UI workflow.
-

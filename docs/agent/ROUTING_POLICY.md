@@ -54,13 +54,13 @@
 
 ## Command lane
 
-См. `docs/COMMAND_LANE_POLICY.md` — команды `/...` считаются ручным режимом и не входят в MWV.
+См. `docs/agent/COMMAND_LANE_POLICY.md` — команды `/...` считаются ручным режимом и не входят в MWV.
 Это включает `/auto <goal>`: команда остаётся command lane alias и всегда помечается
 `Командный режим (без MWV)`.
 
 ## Stop responses
 
-Единый формат остановки см. в `docs/STOP_RESPONSES.md`.
+Единый формат остановки см. в `docs/agent/STOP_RESPONSES.md`.
 
 ## Ограничения
 

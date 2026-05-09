@@ -1,6 +1,6 @@
 # MWV_FLOW — Manager -> Worker -> Verifier
 
-Нормативный источник инвариантов: `docs/ARCH_CANON.md`.
+Нормативный источник инвариантов: `docs/architecture/ARCH_CANON.md`.
 
 ## Точка входа
 
@@ -11,12 +11,12 @@
 
 - `chat`: объяснение/консультация без явных действий.
 - `mwv`: задачи с кодом, файлами, инструментами, командами установки/системы.
-- `/...` команды: command lane, вне MWV (см. `docs/COMMAND_LANE_POLICY.md`).
+- `/...` команды: command lane, вне MWV (см. `docs/agent/COMMAND_LANE_POLICY.md`).
 
 ## Данные контура
 
 - `RunContext`: `session_id`, `trace_id`, `safe_mode`, `approved_categories`, `max_retries`, `attempt`.
-- `TaskPacket`: execution contract (см. `TaskPacket v2` в `docs/ARCH_CANON.md`).
+- `TaskPacket`: execution contract (см. `TaskPacket v2` в `docs/architecture/ARCH_CANON.md`).
 - `WorkResult`: summary, changes, diagnostics.
 - `VerificationResult`: статус, команда, exit code, stdout/stderr, длительность.
 
@@ -38,8 +38,8 @@
 
 ## Stop-ответы
 
-Формат соответствует `docs/STOP_RESPONSES.md`.
-Канонический формат `STOP_TO_CHAT` — см. `docs/ARCH_CANON.md`.
+Формат соответствует `docs/agent/STOP_RESPONSES.md`.
+Канонический формат `STOP_TO_CHAT` — см. `docs/architecture/ARCH_CANON.md`.
 
 ## Что не входит в MWV
 
