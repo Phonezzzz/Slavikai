@@ -88,6 +88,14 @@ class SettingsRuntimeBindings:
             ui_settings_path=self._ui_settings_path(),
         )
 
+    def load_appearance_settings(self) -> str:
+        return ui_settings._load_appearance_settings(ui_settings_path=self._ui_settings_path())
+
+    def save_appearance_settings(self, *, theme: str) -> None:
+        ui_settings._save_appearance_settings(
+            theme=theme, ui_settings_path=self._ui_settings_path()
+        )
+
     def load_policy_settings(self) -> tuple[str, bool, str | None]:
         return ui_settings._load_policy_settings(ui_settings_path=self._ui_settings_path())
 
@@ -152,6 +160,7 @@ class SettingsRuntimeBindings:
 
     def build_settings_payload(self) -> dict[str, JSONValue]:
         tone, system_prompt = self.load_personalization_settings()
+        appearance_theme = self.load_appearance_settings()
         long_paste_to_file_enabled, long_paste_threshold_chars = self.load_composer_settings()
         policy_profile, yolo_armed, yolo_armed_at = self.load_policy_settings()
         memory_config = self.load_memory_config_fn()
@@ -161,6 +170,7 @@ class SettingsRuntimeBindings:
         return {
             "settings": {
                 "personalization": {"tone": tone, "system_prompt": system_prompt},
+                "appearance": {"theme": appearance_theme},
                 "composer": {
                     "long_paste_to_file_enabled": long_paste_to_file_enabled,
                     "long_paste_threshold_chars": long_paste_threshold_chars,

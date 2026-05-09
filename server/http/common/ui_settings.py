@@ -53,11 +53,14 @@ DEFAULT_LONG_PASTE_TO_FILE_ENABLED: Final[bool] = True
 DEFAULT_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 12_000
 MIN_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 1_000
 MAX_LONG_PASTE_THRESHOLD_CHARS: Final[int] = 80_000
+APPEARANCE_THEMES: Final[set[str]] = {"default", "oled"}
+DEFAULT_APPEARANCE_THEME: Final[str] = "default"
 POLICY_PROFILES: Final[set[str]] = {"sandbox", "index", "yolo"}
 DEFAULT_POLICY_PROFILE: Final[str] = "sandbox"
 UI_SETTINGS_USER_ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = {
     "personalization",
     "composer",
+    "appearance",
     "memory",
     "providers",
 }
@@ -336,6 +339,34 @@ def _save_composer_settings(
         "long_paste_to_file_enabled": long_paste_to_file_enabled,
         "long_paste_threshold_chars": long_paste_threshold_chars,
     }
+    _save_ui_settings_blob(payload, ui_settings_path=ui_settings_path)
+
+
+def _load_appearance_settings(
+    *,
+    ui_settings_path: Path = UI_SETTINGS_PATH,
+) -> str:
+    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
+    appearance_raw = payload.get("appearance")
+    if not isinstance(appearance_raw, dict):
+        return DEFAULT_APPEARANCE_THEME
+    theme_raw = appearance_raw.get("theme")
+    if not isinstance(theme_raw, str):
+        return DEFAULT_APPEARANCE_THEME
+    theme = theme_raw.strip().lower()
+    return theme if theme in APPEARANCE_THEMES else DEFAULT_APPEARANCE_THEME
+
+
+def _save_appearance_settings(
+    *,
+    theme: str,
+    ui_settings_path: Path = UI_SETTINGS_PATH,
+) -> None:
+    normalized = theme.strip().lower()
+    if normalized not in APPEARANCE_THEMES:
+        normalized = DEFAULT_APPEARANCE_THEME
+    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
+    payload["appearance"] = {"theme": normalized}
     _save_ui_settings_blob(payload, ui_settings_path=ui_settings_path)
 
 
@@ -668,6 +699,7 @@ def _build_settings_payload(
     ui_settings_path: Path = UI_SETTINGS_PATH,
 ) -> dict[str, JSONValue]:
     tone, system_prompt = _load_personalization_settings(ui_settings_path=ui_settings_path)
+    appearance_theme = _load_appearance_settings(ui_settings_path=ui_settings_path)
     long_paste_to_file_enabled, long_paste_threshold_chars = _load_composer_settings(
         ui_settings_path=ui_settings_path
     )
@@ -681,6 +713,7 @@ def _build_settings_payload(
     return {
         "settings": {
             "personalization": {"tone": tone, "system_prompt": system_prompt},
+            "appearance": {"theme": appearance_theme},
             "composer": {
                 "long_paste_to_file_enabled": long_paste_to_file_enabled,
                 "long_paste_threshold_chars": long_paste_threshold_chars,

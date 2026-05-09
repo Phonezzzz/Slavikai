@@ -26,6 +26,10 @@ export type ComposerUiSettings = {
   longPasteThresholdChars: number;
 };
 
+export type UiTheme = 'default' | 'oled';
+
+export const DEFAULT_UI_THEME: UiTheme = 'default';
+
 export type SessionArtifactRecord = {
   id: string;
   kind: 'output';
@@ -196,6 +200,22 @@ export const parseComposerSettings = (value: unknown): ComposerUiSettings => {
     longPasteToFileEnabled: enabled,
     longPasteThresholdChars: threshold,
   };
+};
+
+export const parseUiTheme = (value: unknown): UiTheme => {
+  if (!value || typeof value !== 'object') {
+    return DEFAULT_UI_THEME;
+  }
+  const settings = (value as { settings?: unknown }).settings;
+  if (!settings || typeof settings !== 'object') {
+    return DEFAULT_UI_THEME;
+  }
+  const appearance = (settings as { appearance?: unknown }).appearance;
+  if (!appearance || typeof appearance !== 'object') {
+    return DEFAULT_UI_THEME;
+  }
+  const theme = (appearance as { theme?: unknown }).theme;
+  return theme === 'oled' ? 'oled' : DEFAULT_UI_THEME;
 };
 
 export const parseSelectedModel = (value: unknown): SelectedModel | null => {

@@ -19,9 +19,11 @@ import {
   parseFolders,
   parseProviderModels,
   parseSessions,
+  parseUiTheme,
   sortSessionsByUpdated,
   triggerBrowserDownload,
   type ComposerUiSettings,
+  type UiTheme,
 } from './session-payload';
 import {
   loadWorkspaceExplorerVisible,
@@ -57,6 +59,7 @@ export default function App() {
   const [composerSettings, setComposerSettings] = useState<ComposerUiSettings>(
     DEFAULT_COMPOSER_SETTINGS,
   );
+  const [uiTheme, setUiTheme] = useState<UiTheme>('default');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const overlays = useSessionOverlays({ activeView });
@@ -109,6 +112,7 @@ export default function App() {
     }
     const parsed = parseComposerSettings(payload);
     setComposerSettings(parsed);
+    setUiTheme(parseUiTheme(payload));
     return parsed;
   };
 
@@ -553,7 +557,12 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen overflow-hidden bg-zinc-950 text-foreground">
+    <div
+      className={`flex h-screen overflow-hidden text-foreground ${
+        uiTheme === 'oled' ? 'bg-black' : 'bg-zinc-950'
+      }`}
+      data-ui-theme={uiTheme}
+    >
       <HistorySidebar
         chats={historyChats}
         folders={folders.map((folder) => ({ id: folder.folder_id, name: folder.name }))}

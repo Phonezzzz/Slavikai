@@ -55,6 +55,9 @@ def test_ui_settings_endpoint() -> None:
             assert isinstance(personalization, dict)
             assert isinstance(personalization.get("tone"), str)
             assert isinstance(personalization.get("system_prompt"), str)
+            appearance = settings.get("appearance")
+            assert isinstance(appearance, dict)
+            assert appearance.get("theme") in {"default", "oled"}
             composer = settings.get("composer")
             assert isinstance(composer, dict)
             assert isinstance(composer.get("long_paste_to_file_enabled"), bool)
@@ -136,6 +139,7 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
                         "long_paste_to_file_enabled": False,
                         "long_paste_threshold_chars": 20000,
                     },
+                    "appearance": {"theme": "oled"},
                     "memory": {
                         "auto_save_dialogue": True,
                         "inbox_max_items": 77,
@@ -163,6 +167,9 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert isinstance(composer, dict)
             assert composer.get("long_paste_to_file_enabled") is False
             assert composer.get("long_paste_threshold_chars") == 20000
+            appearance = settings.get("appearance")
+            assert isinstance(appearance, dict)
+            assert appearance.get("theme") == "oled"
             memory = settings.get("memory")
             assert isinstance(memory, dict)
             assert memory.get("auto_save_dialogue") is True
@@ -204,6 +211,7 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             saved_payload = json.loads(ui_settings_path.read_text(encoding="utf-8"))
             assert isinstance(saved_payload, dict)
             assert "providers" not in saved_payload
+            assert saved_payload.get("appearance") == {"theme": "oled"}
             openai_provider = provider_by_name.get("openai")
             assert isinstance(openai_provider, dict)
             assert openai_provider.get("api_key_set") is False
@@ -232,6 +240,7 @@ def test_user_plane_settings_allows_only_whitelisted_fields(monkeypatch) -> None
                 json={
                     "personalization": {"tone": "strict"},
                     "composer": {"long_paste_threshold_chars": 25000},
+                    "appearance": {"theme": "oled"},
                     "memory": {"inbox_max_items": 101},
                 },
             )

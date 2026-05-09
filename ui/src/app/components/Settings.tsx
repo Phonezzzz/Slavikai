@@ -9,12 +9,13 @@ interface SettingsProps {
   onSaved?: () => void;
 }
 
-type SettingsTab = 'assistant' | 'composer' | 'memory' | 'data' | 'diagnostics';
+type SettingsTab = 'assistant' | 'appearance' | 'composer' | 'memory' | 'data' | 'diagnostics';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai';
 type ModelProvider = 'xai' | 'openrouter' | 'local' | 'inception';
 type ApiKeySource = 'env' | 'missing';
 type EmbeddingsProvider = 'local' | 'openai';
 type ImportMode = 'replace' | 'merge';
+type AppearanceTheme = 'default' | 'oled';
 
 type ProviderSettings = {
   provider: ApiKeyProvider;
@@ -48,6 +49,7 @@ type ParsedSettings = {
   ttsBackend: TtsBackendSettings;
   tone: string;
   systemPrompt: string;
+  appearanceTheme: AppearanceTheme;
   longPasteToFileEnabled: boolean;
   longPasteThresholdChars: number;
   memoryAutoSaveDialogue: boolean;
@@ -110,6 +112,7 @@ const RESPONSE_STYLE_OPTIONS = [
 
 const TAB_ITEMS: Array<{ id: SettingsTab; title: string }> = [
   { id: 'assistant', title: 'Assistant' },
+  { id: 'appearance', title: 'Appearance' },
   { id: 'composer', title: 'Composer' },
   { id: 'memory', title: 'Memory' },
   { id: 'data', title: 'Data' },
@@ -120,6 +123,23 @@ const THRESHOLD_PRESETS = [8000, 12000, 25000];
 
 const DEFAULT_LONG_PASTE_TO_FILE_ENABLED = true;
 const DEFAULT_LONG_PASTE_THRESHOLD_CHARS = 12000;
+const DEFAULT_APPEARANCE_THEME: AppearanceTheme = 'default';
+const APPEARANCE_THEME_OPTIONS: Array<{
+  value: AppearanceTheme;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: 'default',
+    label: 'Default',
+    description: 'Current dark UI with the existing panel tones.',
+  },
+  {
+    value: 'oled',
+    label: 'OLED',
+    description: 'Pure black app and chat background for OLED screens.',
+  },
+];
 const DEFAULT_EMBEDDINGS_PROVIDER: EmbeddingsProvider = 'local';
 const DEFAULT_EMBEDDINGS_LOCAL_MODEL = 'all-MiniLM-L6-v2';
 const DEFAULT_EMBEDDINGS_OPENAI_MODEL = 'text-embedding-3-small';
@@ -228,6 +248,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     ttsBackend: DEFAULT_TTS_BACKEND,
     tone: 'balanced',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
+    appearanceTheme: DEFAULT_APPEARANCE_THEME,
     longPasteToFileEnabled: DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
     longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
     memoryAutoSaveDialogue: DEFAULT_MEMORY_AUTO_SAVE_DIALOGUE,
@@ -245,6 +266,15 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   const settings = (payload as { settings?: unknown }).settings;
   if (!settings || typeof settings !== 'object') {
     return defaults;
+  }
+
+  let appearanceTheme = defaults.appearanceTheme;
+  const appearance = (settings as { appearance?: unknown }).appearance;
+  if (appearance && typeof appearance === 'object') {
+    const themeRaw = (appearance as { theme?: unknown }).theme;
+    if (themeRaw === 'oled' || themeRaw === 'default') {
+      appearanceTheme = themeRaw;
+    }
   }
 
   let tone = defaults.tone;
@@ -397,6 +427,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     ttsBackend,
     tone,
     systemPrompt,
+    appearanceTheme,
     longPasteToFileEnabled,
     longPasteThresholdChars,
     memoryAutoSaveDialogue,
@@ -546,6 +577,9 @@ export function Settings({
   const [providerRuntimeError, setProviderRuntimeError] = useState<string | null>(null);
   const [tone, setTone] = useState('balanced');
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
+  const [appearanceTheme, setAppearanceTheme] = useState<AppearanceTheme>(
+    DEFAULT_APPEARANCE_THEME,
+  );
   const [showAssistantAdvanced, setShowAssistantAdvanced] = useState(false);
   const [longPasteToFileEnabled, setLongPasteToFileEnabled] = useState(DEFAULT_LONG_PASTE_TO_FILE_ENABLED);
   const [longPasteThresholdChars, setLongPasteThresholdChars] = useState(DEFAULT_LONG_PASTE_THRESHOLD_CHARS);
@@ -578,6 +612,7 @@ export function Settings({
     setTtsBackend(parsed.ttsBackend);
     setTone(parsed.tone);
     setSystemPrompt(parsed.systemPrompt);
+    setAppearanceTheme(parsed.appearanceTheme);
     setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
     setLongPasteThresholdChars(parsed.longPasteThresholdChars);
     setMemoryAutoSaveDialogue(parsed.memoryAutoSaveDialogue);
@@ -639,6 +674,9 @@ export function Settings({
         personalization: {
           tone: tone.trim() || 'balanced',
           system_prompt: systemPrompt,
+        },
+        appearance: {
+          theme: appearanceTheme,
         },
         composer: {
           long_paste_to_file_enabled: longPasteToFileEnabled,
@@ -916,6 +954,34 @@ export function Settings({
                             </label>
                           </div>
                         ) : null}
+                      </SectionCard>
+                    </div>
+                  ) : null}
+
+                  {!loading && activeTab === 'appearance' ? (
+                    <div className="space-y-6">
+                      <SectionCard
+                        title="Theme"
+                        description="Choose the app background style."
+                        scope="Global"
+                      >
+                        <div className="grid gap-3 md:grid-cols-2">
+                          {APPEARANCE_THEME_OPTIONS.map((option) => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => setAppearanceTheme(option.value)}
+                              className={`rounded-xl border p-4 text-left transition-colors ${
+                                appearanceTheme === option.value
+                                  ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
+                                  : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-900'
+                              }`}
+                            >
+                              <div className="text-sm font-medium">{option.label}</div>
+                              <div className="mt-2 text-xs text-zinc-400">{option.description}</div>
+                            </button>
+                          ))}
+                        </div>
                       </SectionCard>
                     </div>
                   ) : null}

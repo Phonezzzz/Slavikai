@@ -744,7 +744,7 @@ export function Canvas({
       className={`flex h-full min-h-0 flex-col bg-transparent ${className}`}
     >
       {/* Model selector header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[#141418]">
+      <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-3">
           <button
             onClick={onOpenSessionDrawer}
@@ -832,7 +832,7 @@ export function Canvas({
       ) : null}
 
       {/* Input area */}
-      <div className="border-t border-[#141418] px-4 py-3">
+      <div className="px-4 py-3">
         <div className="max-w-5xl mx-auto">
           {visibleStatusMessage ? (
             <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">

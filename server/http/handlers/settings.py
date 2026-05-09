@@ -133,6 +133,34 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
 
     next_embeddings_settings: UIEmbeddingsSettings | None = None
 
+    appearance_raw = payload.get("appearance")
+    if appearance_raw is not None:
+        if not isinstance(appearance_raw, dict):
+            return error_response(
+                status=400,
+                message="appearance должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        theme_raw = appearance_raw.get("theme")
+        if theme_raw is not None:
+            if not isinstance(theme_raw, str):
+                return error_response(
+                    status=400,
+                    message="appearance.theme должен быть строкой.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            theme = theme_raw.strip().lower()
+            if theme not in api.APPEARANCE_THEMES:
+                return error_response(
+                    status=400,
+                    message="appearance.theme должен быть default или oled.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            api._save_appearance_settings(theme=theme)
+
     personalization_raw = payload.get("personalization")
     if personalization_raw is not None:
         if not isinstance(personalization_raw, dict):
