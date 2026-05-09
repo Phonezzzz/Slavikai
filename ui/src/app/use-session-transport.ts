@@ -336,9 +336,7 @@ export function useSessionTransport({
     };
     setChatStreamingState(null);
     setWorkspaceStreamingState(null);
-    const streamUrl = `/ui/api/events/stream?session_id=${encodeURIComponent(selectedConversation)}`;
-    const eventSource = new EventSource(streamUrl);
-    eventSource.onmessage = (event) => {
+    const handleEventMessage = (event: MessageEvent<string>) => {
       let parsed: unknown;
       try {
         parsed = JSON.parse(event.data) as unknown;
@@ -469,9 +467,16 @@ export function useSessionTransport({
         });
       }
     };
-    eventSource.onerror = () => {};
+    const encodedSessionId = encodeURIComponent(selectedConversation);
+    const chatEventSource = new EventSource(`/ui/api/chat/events/${encodedSessionId}`);
+    const workspaceEventSource = new EventSource(`/ui/api/workspace/events/${encodedSessionId}`);
+    chatEventSource.onmessage = handleEventMessage;
+    workspaceEventSource.onmessage = handleEventMessage;
+    chatEventSource.onerror = () => {};
+    workspaceEventSource.onerror = () => {};
     return () => {
-      eventSource.close();
+      chatEventSource.close();
+      workspaceEventSource.close();
       setChatStreamingState(null);
       setWorkspaceStreamingState(null);
     };
@@ -499,7 +504,8 @@ export function useSessionTransport({
     const forceCanvasForRequest = lane === 'chat' ? forceCanvasNext : false;
     setSending(true);
     try {
-      const response = await fetch('/ui/api/chat/send', {
+      const sendEndpoint = lane === 'workspace' ? '/ui/api/workspace/send' : '/ui/api/chat/send';
+      const response = await fetch(sendEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

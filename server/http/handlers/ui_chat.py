@@ -1278,3 +1278,41 @@ async def handle_ui_chat_send(
         set_runtime_workspace_root(None)
         if status_opened and session_id is not None and not error:
             await hub.set_session_status(session_id, "ok")
+
+
+async def _handle_ui_send_for_lane(request: web.Request, lane: MessageLane) -> web.Response:
+    try:
+        payload_raw = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        return error_response(
+            status=400,
+            message=f"Некорректный JSON: {exc}",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    if not isinstance(payload_raw, dict):
+        return error_response(
+            status=400,
+            message="JSON должен быть объектом.",
+            error_type="invalid_request_error",
+            code="invalid_json",
+        )
+    payload: dict[str, JSONValue] = dict(payload_raw)
+    explicit_lane = payload.get("lane")
+    if explicit_lane is not None and explicit_lane != lane:
+        return error_response(
+            status=400,
+            message=f"Этот endpoint принимает только lane={lane}.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    payload["lane"] = lane
+    return await handle_ui_chat_send(request, payload_override=payload)
+
+
+async def handle_ui_chat_send_chat(request: web.Request) -> web.Response:
+    return await _handle_ui_send_for_lane(request, "chat")
+
+
+async def handle_ui_workspace_send(request: web.Request) -> web.Response:
+    return await _handle_ui_send_for_lane(request, "workspace")

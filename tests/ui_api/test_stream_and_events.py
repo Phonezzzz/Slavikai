@@ -72,6 +72,56 @@ def test_ui_chat_send_canvas_stream_keeps_full_answer_in_chat() -> None:
     asyncio.run(run())
 
 
+def test_ui_split_event_stream_paths_open_for_same_session() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            chat_stream = await client.get(f"/ui/api/chat/events/{session_id}", timeout=5)
+            workspace_stream = await client.get(
+                f"/ui/api/workspace/events/{session_id}",
+                timeout=5,
+            )
+            assert chat_stream.status == 200
+            assert workspace_stream.status == 200
+            assert (await _read_first_sse_event(chat_stream)).get("type") == "status"
+            assert (await _read_first_sse_event(workspace_stream)).get("type") == "status"
+            chat_stream.close()
+            workspace_stream.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_send_endpoint_forces_workspace_lane() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/workspace/send",
+                json={"content": "Ping"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            payload = await send_resp.json()
+            assert payload.get("lane") == "workspace"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_canvas_keeps_full_answer_when_file_appears_late() -> None:
     async def run() -> None:
         client = await _create_client(LateNamedFileStreamAgent())

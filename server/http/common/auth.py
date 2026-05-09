@@ -22,6 +22,13 @@ def _extract_ui_session_id(request: web.Request) -> str | None:
     header_value = request.headers.get("X-Slavik-Session", "").strip()
     if header_value:
         return header_value
+    match_value = (
+        request.match_info.get("session_id", "")
+        or request.match_info.get("thread_id", "")
+        or request.match_info.get("workspace_session_id", "")
+    ).strip()
+    if match_value:
+        return match_value
     query_value = request.query.get("session_id", "").strip()
     if query_value:
         return query_value

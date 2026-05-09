@@ -129,5 +129,11 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/terminal/resize", terminal.handle_ui_terminal_resize)
     app.router.add_post("/ui/api/terminal/close", terminal.handle_ui_terminal_close)
     app.router.add_post("/ui/api/chat/send", ui_chat.handle_ui_chat_send)
+    app.router.add_post("/ui/api/workspace/send", ui_chat.handle_ui_workspace_send)
     app.router.add_post("/ui/api/tools/project", project.handle_ui_project_command)
     app.router.add_get("/ui/api/events/stream", events.handle_ui_events_stream)
+    app.router.add_get("/ui/api/chat/events/{session_id}", events.handle_ui_chat_events_stream)
+    app.router.add_get(
+        "/ui/api/workspace/events/{session_id}",
+        events.handle_ui_workspace_events_stream,
+    )
