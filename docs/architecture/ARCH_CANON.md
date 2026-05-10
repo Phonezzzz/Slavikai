@@ -151,15 +151,18 @@ API:
 
 Новые фичи не должны расширять legacy-пути как целевую архитектуру.
 
-Legacy debt после PR-0..PR-7:
+Legacy debt после PR-14:
 
 - `core/agent.py`, `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`
   остаются крупными mixin-модулями.
 - `classify_request(...)` ещё участвует в legacy `plan|act` маршрутизации и skill-gate
   перед `runtime_mode=auto`; он не выбирает tools и не является planner.
-- Storage ещё хранит `ui_messages.lane` как legacy SQLite/import/export detail; storage
-  adapter уже разделяет persisted records на chat/workspace domain records без `lane`.
-  Это ещё не полностью отдельные таблицы.
+- Storage ещё физически хранит `ui_messages.lane`, но `lane` не является domain
+  discriminator. Он допускается только как временный legacy marker во время
+  audit/deletion и не должен управлять runtime storage/API/frontend flow после split.
+- Локальные UI sessions/chats/history disposable by default. Для PR-20 целевое
+  направление — destructive/direct physical split на `chat_messages` и
+  `workspace_messages` без migrations/backward compatibility/import-export adapters.
 - Legacy `/ui/api/events/stream` теперь hard-fails (`410 legacy_event_stream_removed`), а
   workspace-запросы через `/ui/api/chat/send` отклоняются. Целевой путь — split
   chat/workspace endpoints.
@@ -175,3 +178,5 @@ Legacy debt после PR-0..PR-7:
 - regex extraction tool args из prose в `Planner`/`Executor`;
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
+
+Roadmap устранения legacy после PR-14: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

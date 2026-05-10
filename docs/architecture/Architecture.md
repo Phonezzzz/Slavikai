@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-0..PR-7.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-14.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -48,8 +48,11 @@ split chat/workspace API paths, debug-only command lane и единый terminal
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
   - UI sessions пока физически совместимые: `ui_messages.lane` остаётся legacy
-    SQLite/import/export detail, но storage adapter уже отдаёт chat/workspace
-    domain records без `lane`; полностью отдельные таблицы ещё не введены.
+    SQLite detail, но `lane` не является целевым domain discriminator.
+  - Локальная `.run/ui_sessions.db`, старые sessions/chats/history disposable by default.
+    Planned cleanup PR-20 может destructive reset/recreate локальную DB/schema и не
+    обязан сохранять старое состояние.
+  - Полностью отдельные `chat_messages` и `workspace_messages` ещё не введены.
 
 ## Маршрутизация запроса (current legacy runtime)
 
@@ -159,7 +162,10 @@ split chat/workspace API paths, debug-only command lane и единый terminal
   `AgentToolLoop`/`ToolGateway`, а не получать новые ветки.
 - `classify_request(...)` всё ещё используется в legacy routing; новые tool-capabilities не
   должны добавляться через keyword router.
+- `lane` не должен оставаться domain discriminator. До storage split он допускается только
+  как временный legacy marker для audit/deletion.
 - `Planner`/`Executor` больше не делают regex extraction. Любое возвращение к парсингу prose
   как source of truth запрещено.
 - Command lane не является способом вызова tools. Только `/trace` и `/end-session`.
 - `server/terminal_manager.py` — совместимый alias на `TerminalTool`, не отдельная реализация.
+- Planned cleanup roadmap: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
