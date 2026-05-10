@@ -1,12 +1,12 @@
 # Legacy Cleanup Roadmap After PR-14
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-14. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-16. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-14 находятся в `main`.
+- PR-0..PR-16 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -18,11 +18,14 @@
 - Terminal backend объединён в `TerminalTool`.
 - Новые auto-запуски через `AutoAgent.run_outcome()` идут в auto v1:
   `AgentToolLoop -> ToolGateway -> verifier`.
+- Runtime tools имеют LLM descriptions/JSON Schema.
+- `runtime_mode=auto` больше не вызывает `classify_request(...)`; auto сразу идёт в
+  `AutoAgent.run_outcome() -> run_v1()`.
 
 ## Known legacy
 
-- `classify_request(...)` ещё участвует в legacy `plan|act` routing и skill-gate
-  перед auto. Он не является tool planner.
+- `classify_request(...)` ещё участвует в legacy `plan|act` routing. Он не является
+  tool planner.
 - Storage физически ещё хранит `ui_messages.lane`.
 - `lane` остаётся временным marker-ом старой модели, но не должен считаться
   domain discriminator.
@@ -74,11 +77,11 @@ BLOCKED report должен включать:
 
 ## Planned cleanup
 
-1. PR-15 `pr-tool-descriptors-complete`
+1. PR-15 `pr-tool-descriptors-complete` — done
    - Заполнить descriptions и JSON Schema для runtime tools.
    - Проверить, что tools, видимые LLM, имеют usable `ToolSpec`.
 
-2. PR-16 `pr-auto-no-classifier-gate`
+2. PR-16 `pr-auto-no-classifier-gate` — done
    - Убрать `classify_request(...)` из auto path.
    - Auto должен идти в `AutoAgent.run_outcome() -> run_v1()` без route classifier.
 
@@ -127,4 +130,3 @@ BLOCKED report должен включать:
 12. PR-26 `pr-workspace-ide-decompose`
     - Разбить `workspace-ide.tsx` на меньшие компоненты без redesign.
     - Цель: снизить риск дальнейших workspace UI изменений.
-

@@ -113,3 +113,44 @@ def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, mon
     assert main.calls == 0
     assert calls.get("goal") == "исправь тесты и обнови файл src/main.py"
     assert calls.get("command_lane") is False
+
+
+def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypatch) -> None:
+    agent, main = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+
+    def _classifier_unreachable(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Auto mode must not call classify_request")
+
+    def _auto_stub(goal: str, *, command_lane: bool = False) -> str:
+        assert command_lane is False
+        return f"auto:{goal}"
+
+    monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
+    monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
+
+    response = agent.respond([LLMMessage(role="user", content="workspace_read status")])
+
+    assert response == "auto:workspace_read status"
+    assert main.calls == 0
+
+
+def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkeypatch) -> None:
+    agent, main = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+
+    def _classifier_unreachable(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Auto stream mode must not call classify_request")
+
+    def _auto_stub(goal: str, *, command_lane: bool = False) -> str:
+        assert command_lane is False
+        return f"auto-stream:{goal}"
+
+    monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
+    monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
+
+    chunks = list(agent.respond_stream([LLMMessage(role="user", content="image_generate plan")]))
+
+    assert chunks == ["auto-stream:image_generate plan"]
+    assert agent.last_stream_response_raw == "auto-stream:image_generate plan"
+    assert main.calls == 0

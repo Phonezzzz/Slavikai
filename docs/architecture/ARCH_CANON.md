@@ -10,7 +10,8 @@
 - **Implemented baseline**: tool-calling типы, `AgentToolLoop`, read-only chat tool-loop
   integration, explicit `PlanStep.tool_args`, debug-only command lane, split chat/workspace
   send+SSE endpoints, единый `TerminalTool`, auto v1 path через
-  `AgentToolLoop -> ToolGateway -> verifier`.
+  `AgentToolLoop -> ToolGateway -> verifier`, complete runtime tool descriptors, auto без
+  `classify_request(...)`.
 - **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, storage `lane`
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой архитектурой.
 - **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
@@ -155,8 +156,8 @@ Legacy debt после PR-14:
 
 - `core/agent.py`, `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`
   остаются крупными mixin-модулями.
-- `classify_request(...)` ещё участвует в legacy `plan|act` маршрутизации и skill-gate
-  перед `runtime_mode=auto`; он не выбирает tools и не является planner.
+- `classify_request(...)` ещё участвует в legacy `plan|act` маршрутизации; он не выбирает
+  tools и не является planner. `runtime_mode=auto` больше не проходит через этот classifier.
 - Storage ещё физически хранит `ui_messages.lane`, но `lane` не является domain
   discriminator. Он допускается только как временный legacy marker во время
   audit/deletion и не должен управлять runtime storage/API/frontend flow после split.

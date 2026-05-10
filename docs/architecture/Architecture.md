@@ -10,7 +10,9 @@ SlavikAI сейчас работает как single-user/server-side agent runt
 workspace/MWV и auto. После PR-0..PR-14 в коде есть честный tool-calling contract,
 read-only chat integration через `AgentToolLoop`, auto v1 через `AgentToolLoop`,
 split chat/workspace API paths, debug-only command lane и единый terminal backend.
-Часть старого runtime ещё остаётся legacy-обвязкой.
+После PR-15 runtime tools имеют LLM descriptions/JSON Schema. После PR-16 auto mode
+больше не проходит через `classify_request(...)`. Часть старого runtime ещё остаётся
+legacy-обвязкой.
 
 ## Основные слои
 
@@ -60,8 +62,8 @@ split chat/workspace API paths, debug-only command lane и единый terminal
    - Разрешены только debug-команды `/trace` и `/end-session`. Подробнее — `docs/for-humans/COMMANDS.md`.
 2. Для обычного текста:
    - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
-   - `runtime_mode=auto` — выполняется legacy skill-gate, затем запуск auto v1
-     (`AgentToolLoop -> ToolGateway -> verifier`), без chat-fallback.
+   - `runtime_mode=auto` — сразу запуск auto v1
+     (`AgentToolLoop -> ToolGateway -> verifier`), без `classify_request` и без chat-fallback.
    - `runtime_mode=act|plan` — в legacy runtime используется `classify_request(...)` (`chat` или `mwv`).
 3. Целевой tool path:
    - LLM получает `ToolSpec[]`.
@@ -160,8 +162,8 @@ split chat/workspace API paths, debug-only command lane и единый terminal
 
 - `core/agent*.py` остаются крупной mixin-обвязкой и должны постепенно сжиматься вокруг
   `AgentToolLoop`/`ToolGateway`, а не получать новые ветки.
-- `classify_request(...)` всё ещё используется в legacy routing; новые tool-capabilities не
-  должны добавляться через keyword router.
+- `classify_request(...)` всё ещё используется в legacy `plan|act` routing; новые
+  tool-capabilities не должны добавляться через keyword router.
 - `lane` не должен оставаться domain discriminator. До storage split он допускается только
   как временный legacy marker для audit/deletion.
 - `Planner`/`Executor` больше не делают regex extraction. Любое возвращение к парсингу prose

@@ -202,8 +202,13 @@ class AgentRoutingMixin:
             runtime_mode = getattr(self, "runtime_mode", "ask")
             if runtime_mode == "ask":
                 return self._run_chat_response(messages, last_content, record_in_history)
+            if runtime_mode == "auto":
+                result = self.handle_auto_command(last_content)
+                self._log_chat_interaction(raw_input=last_content, response_text=result)
+                if record_in_history:
+                    self._append_short_term([LLMMessage(role="assistant", content=result)])
+                return result
 
-            is_auto_mode = runtime_mode == "auto"
             decision = classify_request(
                 messages,
                 last_content,
@@ -239,15 +244,6 @@ class AgentRoutingMixin:
                     raw_input=last_content,
                     record_in_history=record_in_history,
                 )
-            if is_auto_mode:
-                if decision.skill_decision and decision.skill_decision.status == "no_match":
-                    self._record_unknown_inbox(last_content, decision)
-                    self._record_unknown_skill_candidate(last_content, decision)
-                result = self.handle_auto_command(last_content)
-                self._log_chat_interaction(raw_input=last_content, response_text=result)
-                if record_in_history:
-                    self._append_short_term([LLMMessage(role="assistant", content=result)])
-                return result
             if decision.route == "mwv":
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_inbox(last_content, decision)
@@ -322,8 +318,12 @@ class AgentRoutingMixin:
                     record_in_history,
                 )
                 return
+            if runtime_mode == "auto":
+                response = self.handle_auto_command(last_content)
+                self.last_stream_response_raw = response
+                yield response
+                return
 
-            is_auto_mode = runtime_mode == "auto"
             decision = classify_request(
                 messages,
                 last_content,
@@ -357,14 +357,6 @@ class AgentRoutingMixin:
                     raw_input=last_content,
                     record_in_history=record_in_history,
                 )
-                self.last_stream_response_raw = response
-                yield response
-                return
-            if is_auto_mode:
-                if decision.skill_decision and decision.skill_decision.status == "no_match":
-                    self._record_unknown_inbox(last_content, decision)
-                    self._record_unknown_skill_candidate(last_content, decision)
-                response = self.handle_auto_command(last_content)
                 self.last_stream_response_raw = response
                 yield response
                 return
