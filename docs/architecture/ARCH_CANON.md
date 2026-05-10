@@ -14,7 +14,7 @@
   `classify_request(...)`, удалённый legacy auto pipeline entrypoint, MWV/CodingTask
   execution через explicit `ToolRequest` + `ToolGateway`, destructive physical split UI
   message storage на `chat_messages` и `workspace_messages`, отдельные chat/workspace
-  send handlers.
+  send handlers, удалённый legacy event stream route.
 - **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, runtime/API/UI
   `lane` markers и legacy UI endpoints ещё существуют как совместимость и не считаются
   целевой архитектурой.
@@ -156,7 +156,7 @@ API:
 
 Новые фичи не должны расширять legacy-пути как целевую архитектуру.
 
-Legacy debt после PR-21:
+Legacy debt после PR-22:
 
 - `core/agent.py`, `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`
   остаются крупными mixin-модулями.
@@ -168,9 +168,9 @@ Legacy debt после PR-21:
 - `lane` не является domain discriminator. Он допускается только как временный runtime/API/UI
   legacy marker во время audit/deletion и не должен управлять storage/API/frontend flow
   после соответствующих split PR.
-- Legacy `/ui/api/events/stream` теперь hard-fails (`410 legacy_event_stream_removed`), а
-  workspace-запросы через `/ui/api/chat/send` и chat-запросы через
-  `/ui/api/workspace/send` отклоняются. Целевой путь — split chat/workspace endpoints.
+- Legacy `/ui/api/events/stream` удалён из routes. Workspace-запросы через
+  `/ui/api/chat/send` и chat-запросы через `/ui/api/workspace/send` отклоняются.
+  Целевой путь — split chat/workspace endpoints.
 - Primary `local` OpenAI-compatible provider реализует native provider tool calling.
   `xai`, `openrouter`, `inception` явно отклоняют generic `tools`; xAI web search
   остаётся отдельным provider-native режимом.
@@ -191,4 +191,4 @@ Legacy debt после PR-21:
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
 
-Roadmap устранения legacy после PR-21: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
+Roadmap устранения legacy после PR-22: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

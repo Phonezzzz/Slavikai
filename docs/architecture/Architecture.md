@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-21.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-22.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -119,8 +119,8 @@ legacy-обвязкой.
 - Workspace: `/ui/api/workspace/send`, `/ui/api/workspace/events/{session_id}`, `/ui/api/workspace/*`.
 - `/ui/api/chat/send` принимает только chat-запросы; `/ui/api/workspace/send` принимает
   только workspace-запросы. Cross-lane payloads отклоняются.
-- Legacy compatibility: `/ui/api/events/stream` оставлен только как hard-failing response
-  (`410 legacy_event_stream_removed`). Новый код использует split chat/workspace endpoints.
+- Legacy `/ui/api/events/stream` удалён из routes. Новый код использует split
+  chat/workspace endpoints.
 
 ## Backend PTY Terminal API
 

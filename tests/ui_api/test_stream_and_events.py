@@ -98,7 +98,7 @@ def test_ui_split_event_stream_paths_open_for_same_session() -> None:
     asyncio.run(run())
 
 
-def test_ui_legacy_event_stream_is_removed() -> None:
+def test_ui_legacy_event_stream_route_is_absent() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -108,11 +108,7 @@ def test_ui_legacy_event_stream_is_removed() -> None:
             assert isinstance(session_id, str)
 
             legacy_stream = await client.get(f"/ui/api/events/stream?session_id={session_id}")
-            assert legacy_stream.status == 410
-            payload = await legacy_stream.json()
-            error = payload.get("error")
-            assert isinstance(error, dict)
-            assert error.get("code") == "legacy_event_stream_removed"
+            assert legacy_stream.status == 404
         finally:
             await client.close()
 

@@ -6,7 +6,6 @@ from collections.abc import Mapping
 
 from aiohttp import web
 
-from server.http.common.responses import error_response
 from server.http_api import (
     UI_SESSION_HEADER,
     _resolve_ui_session_id_for_principal,
@@ -102,18 +101,6 @@ async def _handle_ui_events_stream(
     finally:
         await hub.unsubscribe(session_id, queue)
     return response
-
-
-async def handle_ui_events_stream(request: web.Request) -> web.StreamResponse:
-    return error_response(
-        status=410,
-        message=(
-            "Legacy event stream удалён. Используй /ui/api/chat/events/{session_id} "
-            "или /ui/api/workspace/events/{session_id}."
-        ),
-        error_type="invalid_request_error",
-        code="legacy_event_stream_removed",
-    )
 
 
 async def handle_ui_chat_events_stream(request: web.Request) -> web.StreamResponse:

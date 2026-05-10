@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-21
+# Legacy Cleanup Roadmap After PR-22
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-21. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-22. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-21 находятся в `main`.
+- PR-0..PR-22 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -32,6 +32,8 @@
   import/export adapters, backward compatibility или compatibility layers.
 - Chat/workspace send handlers разделены: каждый endpoint читает payload сам, выбирает
   свой lane явно и отклоняет cross-lane payloads.
+- Legacy `/ui/api/events/stream` route удалён. Доступны только split streams:
+  `/ui/api/chat/events/{session_id}` и `/ui/api/workspace/events/{session_id}`.
 
 ## Known legacy
 
@@ -43,7 +45,6 @@
   HTTP entrypoints уже не используют shared `payload_override` path.
 - `server/ui_hub.py`, `use-session-runtime-controller.ts`, `use-session-transport.ts` и
   `workspace-ide.tsx` остаются крупными монолитами.
-- `/ui/api/events/stream` ещё зарегистрирован как hard-failing legacy route.
 
 ## Cleanup workflow
 
@@ -118,7 +119,7 @@ BLOCKED report должен включать:
    - Разделить chat/workspace handlers.
    - Убрать shared `payload_override` path как основной runtime path.
 
-8. PR-22 `pr-remove-legacy-event-route`
+8. PR-22 `pr-remove-legacy-event-route` — done
    - Удалить `/ui/api/events/stream` route полностью.
    - Можно выполнить раньше только если audit докажет, что route уже не используется.
 
