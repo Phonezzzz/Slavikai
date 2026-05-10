@@ -338,19 +338,9 @@ export function useSessionRuntimeController({
   };
 
   const loadConversation = async (sessionId: string): Promise<SelectedModel | null> => {
-    const [sessionResponse, historyResponse, workspaceHistoryResponse, outputResponse, filesResponse] =
+    const [sessionResponse, outputResponse, filesResponse] =
       await Promise.all([
         fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
-          headers: {
-            [sessionHeader]: sessionId,
-          },
-        }),
-        fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/history`, {
-          headers: {
-            [sessionHeader]: sessionId,
-          },
-        }),
-        fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}/history?lane=workspace`, {
           headers: {
             [sessionHeader]: sessionId,
           },
@@ -367,25 +357,15 @@ export function useSessionRuntimeController({
         }),
       ]);
 
-    const [sessionPayload, historyPayload, workspaceHistoryPayload, outputPayload, filesPayload]: unknown[] =
+    const [sessionPayload, outputPayload, filesPayload]: unknown[] =
       await Promise.all([
         sessionResponse.json(),
-        historyResponse.json(),
-        workspaceHistoryResponse.json(),
         outputResponse.json(),
         filesResponse.json(),
       ]);
 
     if (!sessionResponse.ok) {
       throw new Error(extractErrorMessage(sessionPayload, 'Failed to load chat session.'));
-    }
-    if (!historyResponse.ok) {
-      throw new Error(extractErrorMessage(historyPayload, 'Failed to load chat history.'));
-    }
-    if (!workspaceHistoryResponse.ok) {
-      throw new Error(
-        extractErrorMessage(workspaceHistoryPayload, 'Failed to load workspace history.'),
-      );
     }
     if (!outputResponse.ok) {
       throw new Error(extractErrorMessage(outputPayload, 'Failed to load canvas output.'));
@@ -396,9 +376,9 @@ export function useSessionRuntimeController({
 
     const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
     transportRef.current?.applyLoadedConversation({
-      chatMessages: parseMessages((historyPayload as { messages?: unknown }).messages),
+      chatMessages: parseMessages((session as { messages?: unknown } | undefined)?.messages),
       workspaceMessages: parseMessages(
-        (workspaceHistoryPayload as { messages?: unknown }).messages,
+        (session as { workspace_messages?: unknown } | undefined)?.workspace_messages,
       ),
       outputContent: parseSessionOutput((outputPayload as { output?: unknown }).output).content,
       files: parseSessionFiles((filesPayload as { files?: unknown }).files),

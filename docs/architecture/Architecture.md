@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-22.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-23.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -18,8 +18,9 @@ append-comment edits напрямую; выполнение идёт через 
 `ToolGateway`. После PR-20 UI message storage физически разделён на `chat_messages` и
 `workspace_messages`; старая локальная DB с `ui_messages` destructive reset/recreate.
 После PR-21 HTTP send handlers разделены: chat и workspace endpoints читают payload
-сами и передают lane во внутренний runtime явно. Часть старого runtime ещё остаётся
-legacy-обвязкой.
+сами и передают lane во внутренний runtime явно. После PR-23 frontend вызывает
+`handleSendChat`/`handleSendWorkspace` и грузит chat/workspace messages из session snapshot
+без `/history?lane=workspace`. Часть старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
@@ -121,6 +122,8 @@ legacy-обвязкой.
   только workspace-запросы. Cross-lane payloads отклоняются.
 - Legacy `/ui/api/events/stream` удалён из routes. Новый код использует split
   chat/workspace endpoints.
+- Frontend send flow использует отдельные `handleSendChat` и `handleSendWorkspace`.
+  Runtime controller больше не загружает workspace history через `/history?lane=workspace`.
 
 ## Backend PTY Terminal API
 

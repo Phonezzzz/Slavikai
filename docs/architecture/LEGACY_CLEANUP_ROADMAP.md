@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-22
+# Legacy Cleanup Roadmap After PR-23
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-22. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-23. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-22 находятся в `main`.
+- PR-0..PR-23 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -34,13 +34,16 @@
   свой lane явно и отклоняет cross-lane payloads.
 - Legacy `/ui/api/events/stream` route удалён. Доступны только split streams:
   `/ui/api/chat/events/{session_id}` и `/ui/api/workspace/events/{session_id}`.
+- Frontend send flow разделён на `handleSendChat` и `handleSendWorkspace`; request body
+  больше не использует `lane` как selector, а workspace history берётся из session
+  snapshot вместо `/history?lane=workspace`.
 
 ## Known legacy
 
 - `classify_request(...)` ещё участвует в legacy `plan|act` routing. Он не является
   tool planner.
-- `lane` остаётся временным marker-ом старой runtime/API/frontend модели, но не является
-  storage/domain discriminator.
+- `lane` остаётся временным marker-ом старой runtime/API модели, но не является
+  storage/domain/frontend discriminator.
 - `server/http/handlers/ui_chat.py` всё ещё содержит общий внутренний send runtime, но
   HTTP entrypoints уже не используют shared `payload_override` path.
 - `server/ui_hub.py`, `use-session-runtime-controller.ts`, `use-session-transport.ts` и
@@ -123,7 +126,7 @@ BLOCKED report должен включать:
    - Удалить `/ui/api/events/stream` route полностью.
    - Можно выполнить раньше только если audit докажет, что route уже не используется.
 
-9. PR-23 `pr-frontend-runtime-split`
+9. PR-23 `pr-frontend-runtime-split` — done
    - Разделить frontend chat/workspace runtime hooks/transports.
    - `lane` не должен управлять frontend runtime flow.
 

@@ -61,7 +61,8 @@ export type SessionTransportResult = {
   streamingAssistantCanvasMessage: CanvasMessage | null;
   workspaceMessages: CanvasMessage[];
   artifacts: Artifact[];
-  handleSend: (payload: CanvasSendPayload, lane?: MessageLane) => Promise<boolean>;
+  handleSendChat: (payload: CanvasSendPayload) => Promise<boolean>;
+  handleSendWorkspace: (payload: CanvasSendPayload) => Promise<boolean>;
   bridge: SessionTransportBridge;
 };
 
@@ -482,9 +483,9 @@ export function useSessionTransport({
     };
   }, [selectedConversation]);
 
-  const handleSend = async (
+  const handleSendForLane = async (
     payload: CanvasSendPayload,
-    lane: MessageLane = 'chat',
+    lane: MessageLane,
   ): Promise<boolean> => {
     if (!selectedConversation || sending) {
       return false;
@@ -513,7 +514,6 @@ export function useSessionTransport({
         },
         body: JSON.stringify({
           content: trimmed,
-          lane,
           force_canvas: forceCanvasForRequest,
           attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
           web_search: lane === 'chat' && payload.webSearch === true ? true : undefined,
@@ -562,6 +562,12 @@ export function useSessionTransport({
       setSending(false);
     }
   };
+
+  const handleSendChat = (payload: CanvasSendPayload): Promise<boolean> =>
+    handleSendForLane(payload, 'chat');
+
+  const handleSendWorkspace = (payload: CanvasSendPayload): Promise<boolean> =>
+    handleSendForLane(payload, 'workspace');
 
   const pendingForChat =
     pendingSessionId === selectedConversation && pendingUserMessage?.lane === 'chat'
@@ -627,7 +633,8 @@ export function useSessionTransport({
     streamingAssistantCanvasMessage,
     workspaceMessages,
     artifacts,
-    handleSend,
+    handleSendChat,
+    handleSendWorkspace,
     bridge: {
       applyLoadedConversation,
       applySessionPayload,

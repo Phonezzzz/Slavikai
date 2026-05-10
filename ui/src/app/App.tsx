@@ -616,7 +616,7 @@ export default function App() {
             }}
             onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
             onOpenRepositoryPanel={() => overlays.setRepositoryPanelOpen(true)}
-            onSendAgentMessage={(payload) => transport.handleSend(payload, 'workspace')}
+            onSendAgentMessage={transport.handleSendWorkspace}
             onApplyWorkspaceRoot={runtime.applyWorkspaceRoot}
             mode={runtime.sessionMode}
             activePlan={runtime.activePlan}
@@ -661,7 +661,7 @@ export default function App() {
             decision={runtime.pendingDecision}
             decisionBusy={runtime.decisionBusy}
             decisionError={runtime.decisionError}
-            onSendMessage={(payload) => transport.handleSend(payload, 'chat')}
+            onSendMessage={transport.handleSendChat}
             onSendFeedback={handleSendFeedback}
             onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
             onToggleForceCanvasNext={() => overlays.setForceCanvasNext((prev) => !prev)}

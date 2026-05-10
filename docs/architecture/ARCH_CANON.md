@@ -14,7 +14,7 @@
   `classify_request(...)`, удалённый legacy auto pipeline entrypoint, MWV/CodingTask
   execution через explicit `ToolRequest` + `ToolGateway`, destructive physical split UI
   message storage на `chat_messages` и `workspace_messages`, отдельные chat/workspace
-  send handlers, удалённый legacy event stream route.
+  send handlers, удалённый legacy event stream route, split frontend send entrypoints.
 - **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, runtime/API/UI
   `lane` markers и legacy UI endpoints ещё существуют как совместимость и не считаются
   целевой архитектурой.
@@ -156,7 +156,7 @@ API:
 
 Новые фичи не должны расширять legacy-пути как целевую архитектуру.
 
-Legacy debt после PR-22:
+Legacy debt после PR-23:
 
 - `core/agent.py`, `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`
   остаются крупными mixin-модулями.
@@ -165,9 +165,10 @@ Legacy debt после PR-22:
 - Storage больше не использует физическую таблицу `ui_messages`; сообщения разделены на
   `chat_messages` и `workspace_messages`. Старые локальные DB с `ui_messages`
   destructive reset/recreate, без migrations/backward compatibility/import-export adapters.
-- `lane` не является domain discriminator. Он допускается только как временный runtime/API/UI
+- `lane` не является domain discriminator. Он допускается только как временный runtime/API
   legacy marker во время audit/deletion и не должен управлять storage/API/frontend flow
-  после соответствующих split PR.
+  после соответствующих split PR. Frontend send/history flow больше не выбирает endpoint
+  через `lane`.
 - Legacy `/ui/api/events/stream` удалён из routes. Workspace-запросы через
   `/ui/api/chat/send` и chat-запросы через `/ui/api/workspace/send` отклоняются.
   Целевой путь — split chat/workspace endpoints.
@@ -191,4 +192,4 @@ Legacy debt после PR-22:
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
 
-Roadmap устранения legacy после PR-22: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
+Roadmap устранения legacy после PR-23: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
