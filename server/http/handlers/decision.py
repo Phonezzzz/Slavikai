@@ -4,13 +4,14 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 from aiohttp import web
 
 from core.approval_policy import ApprovalRequired
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
-from server.http.handlers.ui_chat import handle_ui_chat_send
+from server.http.handlers.ui_chat import handle_ui_send_resume
 from server.http_api import (
     UI_DECISION_RESPONSES,
     _apply_agent_runtime_state,
@@ -58,7 +59,7 @@ def _mode_transitions_payload(workflow: dict[str, JSONValue]) -> dict[str, JSONV
     )
 
 
-def _normalize_message_lane(value: object) -> str:
+def _normalize_message_lane(value: object) -> Literal["chat", "workspace"]:
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized == "workspace":
@@ -672,15 +673,16 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "unless explicitly approved."
             )
             content = f"{safe_hint}\n\n{content_raw}"
-        payload_override: dict[str, JSONValue] = {
+        resume_request_payload: dict[str, JSONValue] = {
             "content": content,
             "force_canvas": force_canvas,
             "lane": lane,
             "attachments": attachments,
         }
-        resumed_response = await handle_ui_chat_send(
+        resumed_response = await handle_ui_send_resume(
             request,
-            payload_override=payload_override,
+            payload=resume_request_payload,
+            lane=lane,
             bypass_root_gate=False,
         )
         parsed_resume_payload: dict[str, JSONValue] = {}
@@ -955,15 +957,17 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 actual_decision=normalized_latest,
             )
 
-        payload_override: dict[str, JSONValue] = {
+        resume_request_payload: dict[str, JSONValue] = {
             "content": source_request_raw.get("content"),
             "force_canvas": source_request_raw.get("force_canvas"),
             "lane": _normalize_message_lane(source_request_raw.get("lane")),
             "attachments": source_request_raw.get("attachments"),
         }
-        resumed_response = await handle_ui_chat_send(
+        resume_lane = _normalize_message_lane(source_request_raw.get("lane"))
+        resumed_response = await handle_ui_send_resume(
             request,
-            payload_override=payload_override,
+            payload=resume_request_payload,
+            lane=resume_lane,
             bypass_root_gate=True,
         )
         resume_data: dict[str, JSONValue] | None = None

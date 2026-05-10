@@ -231,7 +231,7 @@ def _normalize_agent_decision(
     context = dict(context_raw) if isinstance(context_raw, dict) else {}
     source_endpoint_raw = context.get("source_endpoint")
     if not isinstance(source_endpoint_raw, str) or not source_endpoint_raw.strip():
-        context["source_endpoint"] = "chat.agent_decision"
+        context["source_endpoint"] = f"{lane}.agent_decision"
 
     resume_payload_raw = context.get("resume_payload")
     resume_payload = dict(resume_payload_raw) if isinstance(resume_payload_raw, dict) else {}
@@ -253,11 +253,13 @@ def _normalize_agent_decision(
     return normalized
 
 
-async def handle_ui_chat_send(
+async def _handle_ui_send_impl(
     request: web.Request,
     *,
-    payload_override: dict[str, JSONValue] | None = None,
+    payload: dict[str, JSONValue],
+    lane: MessageLane,
     bypass_root_gate: bool = False,
+    idempotency_enabled: bool = True,
 ) -> web.Response:
     agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
@@ -282,7 +284,7 @@ async def handle_ui_chat_send(
         ):
             return
         await idempotency_store.complete(
-            endpoint="ui.chat.send",
+            endpoint=idempotency_endpoint,
             session_id=session_id,
             key=idempotency_key,
             fingerprint=idempotency_fingerprint,
@@ -299,7 +301,7 @@ async def handle_ui_chat_send(
         ):
             return
         await idempotency_store.abort(
-            endpoint="ui.chat.send",
+            endpoint=idempotency_endpoint,
             session_id=session_id,
             key=idempotency_key,
             fingerprint=idempotency_fingerprint,
@@ -325,19 +327,9 @@ async def handle_ui_chat_send(
         }
         await _complete_idempotency(error_payload, status=status)
 
+    idempotency_endpoint = f"ui.{lane}.send"
+
     try:
-        if payload_override is None:
-            try:
-                payload = await request.json()
-            except Exception as exc:  # noqa: BLE001
-                return error_response(
-                    status=400,
-                    message=f"Некорректный JSON: {exc}",
-                    error_type="invalid_request_error",
-                    code="invalid_json",
-                )
-        else:
-            payload = dict(payload_override)
         if not isinstance(payload, dict):
             return error_response(
                 status=400,
@@ -370,32 +362,6 @@ async def handle_ui_chat_send(
             return error_response(
                 status=400,
                 message="force_canvas должен быть boolean.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        lane_raw = payload.get("lane")
-        if lane_raw is None:
-            lane: MessageLane = "chat"
-        elif isinstance(lane_raw, str):
-            lane = _normalize_message_lane(lane_raw, default="chat")
-            if lane_raw.strip().lower() not in {"chat", "workspace"}:
-                return error_response(
-                    status=400,
-                    message="lane должен быть chat|workspace.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-        else:
-            return error_response(
-                status=400,
-                message="lane должен быть chat|workspace.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        if payload_override is None and lane == "workspace":
-            return error_response(
-                status=400,
-                message="Этот endpoint принимает только lane=chat.",
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
@@ -455,7 +421,7 @@ async def handle_ui_chat_send(
         if resolved_session_id is None:
             return _session_forbidden_response()
         session_id = resolved_session_id
-        if payload_override is None:
+        if idempotency_enabled:
             idempotency_key = normalize_idempotency_key(request.headers.get("Idempotency-Key"))
         if idempotency_key is not None:
             idempotency_fingerprint = fingerprint_json_payload(
@@ -470,7 +436,7 @@ async def handle_ui_chat_send(
                 }
             )
             idempotency_state, replay = await idempotency_store.begin(
-                endpoint="ui.chat.send",
+                endpoint=idempotency_endpoint,
                 session_id=session_id,
                 key=idempotency_key,
                 fingerprint=idempotency_fingerprint,
@@ -562,7 +528,7 @@ async def handle_ui_chat_send(
             root_gate_decision = _build_ui_approval_decision(
                 approval_request=root_gate_approval_request,
                 session_id=session_id,
-                source_endpoint="chat.run_root",
+                source_endpoint=f"{lane}.run_root",
                 resume_payload={
                     "root_path": str(session_root),
                     "mode": mode,
@@ -600,7 +566,7 @@ async def handle_ui_chat_send(
                 hub,
                 session_id=session_id,
                 phase="approval.required",
-                detail="chat.run_root",
+                detail=f"{lane}.run_root",
             )
             output_payload = await hub.get_session_output(session_id)
             files_payload = await hub.get_session_files(session_id)
@@ -643,7 +609,7 @@ async def handle_ui_chat_send(
             hub,
             session_id=session_id,
             phase="request.received",
-            detail="chat",
+            detail=lane,
         )
 
         approved_categories = await session_store.get_categories(session_id)
@@ -724,7 +690,7 @@ async def handle_ui_chat_send(
                 hub,
                 session_id=session_id,
                 phase="response.ready",
-                detail="chat",
+                detail=lane,
             )
             return response
 
@@ -733,7 +699,7 @@ async def handle_ui_chat_send(
             hub,
             session_id=session_id,
             phase="context.prepared",
-            detail="chat",
+            detail=lane,
         )
 
         mwv_report: dict[str, JSONValue] | None = None
@@ -788,7 +754,7 @@ async def handle_ui_chat_send(
                 hub,
                 session_id=session_id,
                 phase="agent.respond.start",
-                detail="chat",
+                detail=lane,
             )
             response_raw: str
             respond_stream_method = getattr(agent, "respond_stream", None)
@@ -959,7 +925,7 @@ async def handle_ui_chat_send(
                 hub,
                 session_id=session_id,
                 phase="agent.respond.end",
-                detail="chat",
+                detail=lane,
             )
             decision = _extract_decision_payload(response_text)
             if isinstance(decision, dict):
@@ -1000,7 +966,7 @@ async def handle_ui_chat_send(
                     approval_source_endpoint_raw.strip()
                     if isinstance(approval_source_endpoint_raw, str)
                     and approval_source_endpoint_raw.strip()
-                    else "chat.send"
+                    else f"{lane}.send"
                 )
                 approval_resume_payload_raw = getattr(agent, "last_approval_resume_payload", None)
                 approval_resume_payload = (
@@ -1084,7 +1050,7 @@ async def handle_ui_chat_send(
                 hub,
                 session_id=session_id,
                 phase="approval.required",
-                detail="chat",
+                detail=lane,
             )
             messages = await hub.get_messages(session_id, lane="chat")
             workspace_messages = await hub.get_messages(session_id, lane="workspace")
@@ -1126,7 +1092,7 @@ async def handle_ui_chat_send(
                 hub,
                 session_id=session_id,
                 phase="response.ready",
-                detail="chat",
+                detail=lane,
             )
             return response
 
@@ -1244,7 +1210,7 @@ async def handle_ui_chat_send(
             hub,
             session_id=session_id,
             phase="response.ready",
-            detail="chat",
+            detail=lane,
         )
         return response
     except Exception:  # noqa: BLE001
@@ -1264,7 +1230,7 @@ async def handle_ui_chat_send(
                 hub,
                 session_id=session_id,
                 phase="error",
-                detail="chat: internal_error",
+                detail=f"{lane}: internal_error",
             )
             await hub.set_session_status(session_id, "error")
         await _complete_idempotency_error(
@@ -1287,7 +1253,7 @@ async def handle_ui_chat_send(
             await hub.set_session_status(session_id, "ok")
 
 
-async def _handle_ui_send_for_lane(request: web.Request, lane: MessageLane) -> web.Response:
+async def _read_ui_send_payload(request: web.Request) -> dict[str, JSONValue] | web.Response:
     try:
         payload_raw = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -1304,7 +1270,13 @@ async def _handle_ui_send_for_lane(request: web.Request, lane: MessageLane) -> w
             error_type="invalid_request_error",
             code="invalid_json",
         )
-    payload: dict[str, JSONValue] = dict(payload_raw)
+    return dict(payload_raw)
+
+
+def _validate_endpoint_lane(
+    payload: dict[str, JSONValue],
+    lane: MessageLane,
+) -> web.Response | None:
     explicit_lane = payload.get("lane")
     if explicit_lane is not None and explicit_lane != lane:
         return error_response(
@@ -1313,13 +1285,42 @@ async def _handle_ui_send_for_lane(request: web.Request, lane: MessageLane) -> w
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    payload["lane"] = lane
-    return await handle_ui_chat_send(request, payload_override=payload)
+    return None
 
 
-async def handle_ui_chat_send_chat(request: web.Request) -> web.Response:
-    return await _handle_ui_send_for_lane(request, "chat")
+async def handle_ui_chat_send(request: web.Request) -> web.Response:
+    payload_or_response = await _read_ui_send_payload(request)
+    if isinstance(payload_or_response, web.Response):
+        return payload_or_response
+    payload = payload_or_response
+    lane_error = _validate_endpoint_lane(payload, "chat")
+    if lane_error is not None:
+        return lane_error
+    return await _handle_ui_send_impl(request, payload=payload, lane="chat")
 
 
 async def handle_ui_workspace_send(request: web.Request) -> web.Response:
-    return await _handle_ui_send_for_lane(request, "workspace")
+    payload_or_response = await _read_ui_send_payload(request)
+    if isinstance(payload_or_response, web.Response):
+        return payload_or_response
+    payload = payload_or_response
+    lane_error = _validate_endpoint_lane(payload, "workspace")
+    if lane_error is not None:
+        return lane_error
+    return await _handle_ui_send_impl(request, payload=payload, lane="workspace")
+
+
+async def handle_ui_send_resume(
+    request: web.Request,
+    *,
+    payload: dict[str, JSONValue],
+    lane: MessageLane,
+    bypass_root_gate: bool,
+) -> web.Response:
+    return await _handle_ui_send_impl(
+        request,
+        payload=dict(payload),
+        lane=lane,
+        bypass_root_gate=bypass_root_gate,
+        idempotency_enabled=False,
+    )

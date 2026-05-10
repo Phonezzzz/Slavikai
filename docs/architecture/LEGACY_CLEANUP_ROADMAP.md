@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-20
+# Legacy Cleanup Roadmap After PR-21
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-20. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-21. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-20 находятся в `main`.
+- PR-0..PR-21 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -30,6 +30,8 @@
 - UI message storage физически разделён на `chat_messages` и `workspace_messages`.
   Старая local DB/schema с `ui_messages` destructive reset/recreate, без migrations,
   import/export adapters, backward compatibility или compatibility layers.
+- Chat/workspace send handlers разделены: каждый endpoint читает payload сам, выбирает
+  свой lane явно и отклоняет cross-lane payloads.
 
 ## Known legacy
 
@@ -37,8 +39,9 @@
   tool planner.
 - `lane` остаётся временным marker-ом старой runtime/API/frontend модели, но не является
   storage/domain discriminator.
-- `server/http/handlers/ui_chat.py`, `server/ui_hub.py`,
-  `use-session-runtime-controller.ts`, `use-session-transport.ts` и
+- `server/http/handlers/ui_chat.py` всё ещё содержит общий внутренний send runtime, но
+  HTTP entrypoints уже не используют shared `payload_override` path.
+- `server/ui_hub.py`, `use-session-runtime-controller.ts`, `use-session-transport.ts` и
   `workspace-ide.tsx` остаются крупными монолитами.
 - `/ui/api/events/stream` ещё зарегистрирован как hard-failing legacy route.
 
@@ -111,7 +114,7 @@ BLOCKED report должен включать:
    - Оставшиеся references к `lane`, `/history?lane` и текущим persisted session
      contracts относятся к PR-21/PR-23, а не к физической storage-схеме.
 
-7. PR-21 `pr-ui-chat-workspace-handler-split`
+7. PR-21 `pr-ui-chat-workspace-handler-split` — done
    - Разделить chat/workspace handlers.
    - Убрать shared `payload_override` path как основной runtime path.
 

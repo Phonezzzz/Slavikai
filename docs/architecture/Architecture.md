@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-20.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-21.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -17,7 +17,9 @@ PR-18 MWV/CodingTask worker не извлекает target path из prose и н
 append-comment edits напрямую; выполнение идёт через explicit `ToolRequest` и
 `ToolGateway`. После PR-20 UI message storage физически разделён на `chat_messages` и
 `workspace_messages`; старая локальная DB с `ui_messages` destructive reset/recreate.
-Часть старого runtime ещё остаётся legacy-обвязкой.
+После PR-21 HTTP send handlers разделены: chat и workspace endpoints читают payload
+сами и передают lane во внутренний runtime явно. Часть старого runtime ещё остаётся
+legacy-обвязкой.
 
 ## Основные слои
 
@@ -115,6 +117,8 @@ append-comment edits напрямую; выполнение идёт через 
 - Workflow: `/ui/api/mode`, `/ui/api/plan/*`, `/ui/api/runtime/init`.
 - Chat: `/ui/api/chat/send`, `/ui/api/chat/events/{session_id}`.
 - Workspace: `/ui/api/workspace/send`, `/ui/api/workspace/events/{session_id}`, `/ui/api/workspace/*`.
+- `/ui/api/chat/send` принимает только chat-запросы; `/ui/api/workspace/send` принимает
+  только workspace-запросы. Cross-lane payloads отклоняются.
 - Legacy compatibility: `/ui/api/events/stream` оставлен только как hard-failing response
   (`410 legacy_event_stream_removed`). Новый код использует split chat/workspace endpoints.
 

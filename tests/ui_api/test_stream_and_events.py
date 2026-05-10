@@ -169,6 +169,32 @@ def test_ui_chat_send_rejects_workspace_lane() -> None:
     asyncio.run(run())
 
 
+def test_ui_workspace_send_rejects_chat_lane() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            send_resp = await client.post(
+                "/ui/api/workspace/send",
+                json={"content": "Ping", "lane": "chat"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 400
+            payload = await send_resp.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_canvas_keeps_full_answer_when_file_appears_late() -> None:
     async def run() -> None:
         client = await _create_client(LateNamedFileStreamAgent())
