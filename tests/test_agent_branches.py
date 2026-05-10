@@ -13,7 +13,7 @@ from shared.memory_companion_models import (
     InteractionKind,
     InteractionMode,
 )
-from shared.models import LLMMessage, MemoryKind, MemoryRecord, PlanStep, PlanStepStatus, TaskPlan
+from shared.models import LLMMessage, MemoryKind, MemoryRecord
 
 
 class ErrorBrain(Brain):
@@ -27,33 +27,6 @@ class SimpleBrain(Brain):
 
     def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
         return LLMResult(text=self.text)
-
-
-class StubPlanner:
-    def __init__(self) -> None:
-        self.executed = False
-
-    def build_plan(self, goal: str, brain=None, model_config=None) -> TaskPlan:
-        return TaskPlan(goal=goal, steps=[PlanStep(description="step-one")])
-
-    def execute_plan(self, plan: TaskPlan) -> TaskPlan:
-        self.executed = True
-        for step in plan.steps:
-            step.status = PlanStepStatus.DONE
-            step.result = "done"
-        return plan
-
-
-class StubExecutor:
-    def __init__(self) -> None:
-        self.run_called = False
-
-    def run(self, plan: TaskPlan, tool_gateway=None) -> TaskPlan:  # noqa: ANN001
-        self.run_called = True
-        for step in plan.steps:
-            step.status = PlanStepStatus.DONE
-            step.result = "done"
-        return plan
 
 
 def _log_interaction(agent: Agent, interaction_id: str) -> None:
@@ -90,13 +63,8 @@ def test_agent_plan_command_with_stub_planner(tmp_path: Path) -> None:
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
-    stub = StubPlanner()
-    executor = StubExecutor()
-    agent.planner = stub  # type: ignore[assignment]
-    agent.executor = executor  # type: ignore[assignment]
     result = agent.handle_tool_command("/plan goal")
     assert "отключена" in result.lower()
-    assert executor.run_called is False
 
 
 def test_save_feedback_major_hint(tmp_path: Path) -> None:

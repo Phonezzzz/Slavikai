@@ -177,10 +177,13 @@ Legacy debt после PR-14:
 - MWV/CodingTask больше не извлекает target path из prose и не применяет fake
   append-comment change напрямую через Python file writes; worker execution требует
   explicit gateway tool requests.
+- Старые `Planner`/`Executor` удалены как runtime entrypoints; MWV execution не
+  проходит через отдельный plan/executor wrapper.
 
 Уже не является допустимым legacy для расширения:
 
-- regex extraction tool args из prose в `Planner`/`Executor`;
+- возвращение `Planner`/`Executor` как runtime entrypoints;
+- regex extraction tool args из prose;
 - regex target extraction / append-comment fake worker в MWV/CodingTask;
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.

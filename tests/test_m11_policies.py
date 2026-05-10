@@ -8,7 +8,7 @@ from core.skills.index import SkillIndex
 from core.skills.models import SkillEntry, SkillManifest
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
-from shared.models import LLMMessage, PlanStep, TaskPlan
+from shared.models import LLMMessage
 from tests.report_utils import extract_report_block
 
 
@@ -20,22 +20,6 @@ class DummyBrain(Brain):
     def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
         self.calls += 1
         return LLMResult(text=self.text)
-
-
-class StubPlanner:
-    def build_plan(self, goal: str, brain=None, model_config=None) -> TaskPlan:
-        _ = (brain, model_config)
-        return TaskPlan(goal=goal, steps=[PlanStep(description="step-one")])
-
-
-class StubExecutor:
-    def __init__(self) -> None:
-        self.run_called = False
-
-    def run(self, plan: TaskPlan, tool_gateway=None) -> TaskPlan:  # noqa: ANN001
-        _ = tool_gateway
-        self.run_called = True
-        return plan
 
 
 def _make_skill_index(entries: list[SkillEntry]) -> SkillIndex:
@@ -73,8 +57,6 @@ def test_command_lane_manual_mode_without_mwv(tmp_path: Path, monkeypatch) -> No
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
     )
-    agent.planner = StubPlanner()  # type: ignore[assignment]
-    agent.executor = StubExecutor()  # type: ignore[assignment]
 
     def _mwv_stub(*_args: object, **_kwargs: object) -> str:
         raise AssertionError("MWV should not be called for / commands.")

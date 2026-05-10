@@ -73,7 +73,6 @@ if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
     from core.auto_agent import AutoAgent
     from core.decision.handler import DecisionHandler
-    from core.planner import Planner
     from core.rule_engine import RuleEngine
     from core.skills.candidates import SkillCandidateWriter
     from core.tracer import Tracer
@@ -109,7 +108,6 @@ class AgentToolsMixin:
         brain: Brain
         tracer: Tracer
         decision_handler: DecisionHandler
-        planner: Planner
         memory: MemoryManager
         memory_config: MemoryConfig
         auto_agent: AutoAgent
@@ -856,7 +854,7 @@ class AgentToolsMixin:
 
     def handle_auto_command(self, goal: str, *, command_lane: bool = False) -> str:
         goal_clean = goal.strip() or "auto run"
-        self.tracer.log("auto_invoke", f"Planner->Coder->Verifier: {goal_clean}")
+        self.tracer.log("auto_invoke", f"Auto v1 tool loop: {goal_clean}")
         outcome = self.auto_agent.run_outcome(goal_clean)
         if command_lane:
             return self._strip_report_block(outcome.text)

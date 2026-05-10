@@ -25,8 +25,8 @@ append-comment edits напрямую; выполнение идёт через 
     `tool_calls` через `ToolGateway` и добавляет `role="tool"` сообщения.
   - Chat integration: `runtime_mode=ask` может использовать только описанные read-capability
     tools; write/exec tool calls остаются вне chat path.
-  - Планирование/исполнение: `Planner`/`Executor` больше не извлекают tool args из prose;
-    они принимают только explicit `PlanStep.operation` + `PlanStep.tool_args`.
+  - Старые `Planner`/`Executor` удалены как runtime entrypoints; MWV строит
+    `TaskPacket` напрямую, а шаги исполняются explicit gateway tool requests.
   - Трассировка: `Tracer` (`logs/trace.log`).
 - **MWV runtime** (`core/mwv/*`)
   - Цикл `ManagerRuntime -> WorkerRuntime -> VerifierRuntime`.
@@ -171,8 +171,8 @@ append-comment edits напрямую; выполнение идёт через 
   tool-capabilities не должны добавляться через keyword router.
 - `lane` не должен оставаться domain discriminator. До storage split он допускается только
   как временный legacy marker для audit/deletion.
-- `Planner`/`Executor` больше не делают regex extraction. Любое возвращение к парсингу prose
-  как source of truth запрещено.
+- `Planner`/`Executor` удалены из runtime entrypoints. Любое возвращение к парсингу prose
+  как source of truth для tool args запрещено.
 - Command lane не является способом вызова tools. Только `/trace` и `/end-session`.
 - `server/terminal_manager.py` — совместимый alias на `TerminalTool`, не отдельная реализация.
 - Planned cleanup roadmap: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

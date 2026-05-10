@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.mwv.interfaces import AgentFacade, PlannerFacade, VerifierFacade, WorkerFacade
+from core.mwv.interfaces import AgentFacade, VerifierFacade, WorkerFacade
 from core.mwv.models import (
     RunContext,
     TaskPacket,
@@ -9,22 +9,12 @@ from core.mwv.models import (
     WorkResult,
     WorkStatus,
 )
-from shared.models import LLMMessage, PlanStep, TaskPlan
+from shared.models import LLMMessage
 
 
 class DummyAgent:
     def respond(self, messages: list[LLMMessage]) -> str:
         return messages[-1].content if messages else ""
-
-
-class DummyPlanner:
-    def build_plan(self, goal: str) -> TaskPlan:
-        return TaskPlan(goal=goal, steps=[PlanStep(description="step")])
-
-    def execute_plan(self, plan: TaskPlan) -> TaskPlan:
-        for step in plan.steps:
-            step.result = "done"
-        return plan
 
 
 class DummyWorker:
@@ -47,6 +37,5 @@ class DummyVerifier:
 
 def test_interfaces_are_runtime_checkable() -> None:
     assert isinstance(DummyAgent(), AgentFacade)
-    assert isinstance(DummyPlanner(), PlannerFacade)
     assert isinstance(DummyWorker(), WorkerFacade)
     assert isinstance(DummyVerifier(), VerifierFacade)

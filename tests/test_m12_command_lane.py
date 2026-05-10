@@ -69,10 +69,10 @@ def test_command_lane_auto_alias_has_command_label(tmp_path: Path) -> None:
 def test_command_lane_plan_does_not_execute_tools(tmp_path: Path, monkeypatch) -> None:
     agent = _make_agent(tmp_path)
 
-    def _executor_unreachable(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("/plan must not execute tools")
+    def _mwv_unreachable(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("/plan must not enter MWV")
 
-    monkeypatch.setattr(agent.executor, "run", _executor_unreachable)
+    monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_unreachable)
     response = agent.handle_tool_command("/plan подготовить план миграции")
     assert "Командный режим (без MWV)" in response
     assert "отключена" in response.lower()

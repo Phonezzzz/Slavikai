@@ -42,6 +42,7 @@ from shared.models import (
     PlanStep,
     PlanStepStatus,
     TaskPlan,
+    ToolRequest,
     WorkspaceDiffEntry,
 )
 from tools.workspace_tools import WORKSPACE_ROOT, workspace_root_context
@@ -79,8 +80,6 @@ if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
     from core.decision.handler import DecisionHandler
     from core.decision.models import DecisionPacket
-    from core.executor import Executor
-    from core.planner import Planner
     from core.skills.index import SkillMatch
     from core.tool_gateway import ToolGateway
     from core.tracer import Tracer
@@ -114,8 +113,6 @@ class AgentMWVMixin:
         tracer: Tracer
         logger: logging.Logger
         decision_handler: DecisionHandler
-        planner: Planner
-        executor: Executor
         tools_enabled: dict[str, bool]
         memory_config: MemoryConfig
         main_config: ModelConfig | None
@@ -336,9 +333,7 @@ class AgentMWVMixin:
                         skill_context["memory_capsule"] = memory_capsule
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning("MWV memory capsule build failed: %s", exc)
-            plan_goal = goal
-            plan = self.planner.build_plan(plan_goal)
-            task_steps = self._plan_to_task_steps(plan)
+            task_steps = self._build_mwv_task_steps(goal)
             packet = TaskPacket(
                 task_id=str(uuid.uuid4()),
                 session_id=context.session_id,
@@ -370,27 +365,18 @@ class AgentMWVMixin:
 
         return _build
 
-    def _plan_to_task_steps(self, plan: TaskPlan) -> list[TaskStepContract]:
-        steps: list[TaskStepContract] = []
-        for index, step in enumerate(plan.steps, start=1):
-            operation = step.operation.strip() if isinstance(step.operation, str) else ""
-            allowed = [operation] if operation else []
-            steps.append(
-                TaskStepContract(
-                    step_id=f"step-{index}",
-                    title=f"Step {index}",
-                    description=step.description,
-                    allowed_tool_kinds=allowed,
-                    inputs={
-                        "operation": operation if operation else None,
-                        "tool_args": dict(step.tool_args),
-                        "description": step.description,
-                    },
-                    expected_outputs=[],
-                    acceptance_checks=[],
-                )
+    def _build_mwv_task_steps(self, goal: str) -> list[TaskStepContract]:
+        return [
+            TaskStepContract(
+                step_id="step-1",
+                title="MWV execution",
+                description=goal,
+                allowed_tool_kinds=[],
+                inputs={"description": goal},
+                expected_outputs=[],
+                acceptance_checks=[],
             )
-        return steps
+        ]
 
     def _mwv_worker_runner(self, task: TaskPacket, context: RunContext) -> WorkResult:
         started = time.monotonic()
@@ -576,10 +562,9 @@ class AgentMWVMixin:
                         )
                         stop_reason = StopReasonCode.REPLAN_REQUIRED
                         break
-                    step_plan = TaskPlan(goal=task.goal, steps=[plan_step])
                     try:
-                        executed = self.executor.run(
-                            step_plan,
+                        executed_step = self._execute_mwv_plan_step(
+                            plan_step,
                             tool_gateway=self._build_tool_gateway(
                                 pre_call=self._workspace_diff_pre_call,
                                 post_call=_mwv_post_call,
@@ -622,7 +607,6 @@ class AgentMWVMixin:
                             tool_calls_used=successful_tool_calls,
                             diff_size=prior_diff_size + current_diff_size,
                         ) from exc
-                    executed_step = executed.steps[0]
                     step_states.append(executed_step)
                     step_diff_entries = self._workspace_diff_entries_delta(
                         diff_totals_before,
@@ -942,6 +926,27 @@ class AgentMWVMixin:
         if operation not in allowed_tool_kinds:
             return None, f"operation '{operation}' не входит в allowed_tool_kinds."
         return operation, None
+
+    def _execute_mwv_plan_step(self, step: PlanStep, tool_gateway: ToolGateway) -> PlanStep:
+        step.status = PlanStepStatus.IN_PROGRESS
+        try:
+            if step.operation:
+                request = ToolRequest(name=step.operation, args=dict(step.tool_args))
+                result = tool_gateway.call(request)
+                if result.ok:
+                    step.result = str(result.data.get("output") or result.data)
+                    step.status = PlanStepStatus.DONE
+                    return step
+                raise RuntimeError(f"Ошибка: {result.error}")
+            step.result = f"Выполнен: {step.description}"
+            step.status = PlanStepStatus.DONE
+            return step
+        except ApprovalRequired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            step.status = PlanStepStatus.ERROR
+            step.result = str(exc)
+            return step
 
     def _mwv_risk_flags(self, task: TaskPacket) -> set[str]:
         raw = task.context.get("risk_flags")

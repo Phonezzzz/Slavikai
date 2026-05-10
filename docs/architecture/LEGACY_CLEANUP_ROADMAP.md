@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-18
+# Legacy Cleanup Roadmap After PR-19
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-18. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-19. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-18 находятся в `main`.
+- PR-0..PR-19 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -25,6 +25,8 @@
   runtime entrypoint.
 - MWV/CodingTask worker больше не делает regex target extraction и fake append-comment
   edits; выполнение требует explicit `ToolRequest` и идёт через `ToolGateway`.
+- Старые `Planner`/`Executor` удалены как runtime entrypoints; MWV строит packet напрямую
+  и исполняет explicit tool requests через gateway.
 
 ## Known legacy
 
@@ -33,7 +35,6 @@
 - Storage физически ещё хранит `ui_messages.lane`.
 - `lane` остаётся временным marker-ом старой модели, но не должен считаться
   domain discriminator.
-- `Planner`/`Executor` ещё существуют как runtime entrypoints в части legacy tests/code.
 - `server/http/handlers/ui_chat.py`, `server/ui_hub.py`,
   `use-session-runtime-controller.ts`, `use-session-transport.ts` и
   `workspace-ide.tsx` остаются крупными монолитами.
@@ -93,7 +94,7 @@ BLOCKED report должен включать:
    - Перевести MWV worker на real tool loop/gateway execution.
    - Убрать regex target extraction и append-comment fake worker behavior.
 
-5. PR-19 `pr-kill-planner-executor-entrypoints`
+5. PR-19 `pr-kill-planner-executor-entrypoints` — done
    - Удалить `Planner`/`Executor` как runtime entrypoints.
    - Сохранить только typed contracts/adapters, если они нужны текущему TaskPacket flow.
 

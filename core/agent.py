@@ -18,10 +18,8 @@ from core.auto_agent import AutoAgent
 from core.batch_review import BatchReviewer
 from core.decision.handler import DecisionHandler
 from core.decision.models import DecisionPacket
-from core.executor import Executor
 from core.mwv.manager import ManagerRuntime
 from core.mwv.verifier_runtime import VerifierRuntime
-from core.planner import Planner
 from core.rule_engine import RuleEngine
 from core.skills.candidates import SkillCandidateWriter
 from core.skills.index import SkillIndex, SkillMatch
@@ -186,8 +184,6 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
                 "(policies-first override)."
             )
         self.tracer = Tracer()
-        self.planner = Planner()
-        self.executor = Executor(self.tracer)
         self.auto_agent = AutoAgent(self)
         self.auto_agent.set_progress_callback(self._record_auto_progress)
         self.tools_enabled = enable_tools or self._load_tools()
