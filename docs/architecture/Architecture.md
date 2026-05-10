@@ -12,8 +12,10 @@ read-only chat integration через `AgentToolLoop`, auto v1 через `Agent
 split chat/workspace API paths, debug-only command lane и единый terminal backend.
 После PR-15 runtime tools имеют LLM descriptions/JSON Schema. После PR-16 auto mode
 больше не проходит через `classify_request(...)`. После PR-17 старый auto pipeline
-`planner -> coder pool -> merge -> verifier` удалён из runtime entrypoints. Часть
-старого runtime ещё остаётся legacy-обвязкой.
+`planner -> coder pool -> merge -> verifier` удалён из runtime entrypoints. После
+PR-18 MWV/CodingTask worker не извлекает target path из prose и не делает fake
+append-comment edits напрямую; выполнение идёт через explicit `ToolRequest` и
+`ToolGateway`. Часть старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
@@ -28,6 +30,8 @@ split chat/workspace API paths, debug-only command lane и единый terminal
   - Трассировка: `Tracer` (`logs/trace.log`).
 - **MWV runtime** (`core/mwv/*`)
   - Цикл `ManagerRuntime -> WorkerRuntime -> VerifierRuntime`.
+  - Worker execution принимает explicit tool requests и исполняет их через `ToolGateway`;
+    prose/regex extraction не является runtime contract.
   - Успех только при `WorkStatus.SUCCESS` и `VerificationStatus.PASSED`.
   - Ограниченный retry через `RunContext.max_retries`.
 - **Auto runtime** (`core/auto_runtime.py`)

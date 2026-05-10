@@ -1,7 +1,7 @@
 # MWV_FLOW — current Manager -> Worker -> Verifier
 
 Нормативный источник инвариантов: `docs/architecture/ARCH_CANON.md`.
-Этот документ описывает текущий MWV-путь после PR-0..PR-7.
+Этот документ описывает текущий MWV-путь после PR-18.
 
 ## Точка входа
 
@@ -26,8 +26,8 @@
 ## Канонический цикл
 
 1. `ManagerRuntime.run_flow(...)` строит `TaskPacket` (v2 execution contract).
-2. `WorkerRuntime` исполняет только explicit tool requests через gateway/tools.
-   `Planner`/`Executor` больше не извлекают аргументы инструментов из prose.
+2. `WorkerRuntime`/CodingTask исполняют только explicit tool requests через gateway/tools.
+   Worker не извлекает target path из prose и не применяет fake append-comment edits.
 3. `VerifierRuntime.run(...)` выполняет deterministic-проверку. При отсутствии `scripts/check.sh` используется fallback-последовательность (`ruff`, `lint_skills`, `build_manifest --check`, `mypy`, `pytest --cov`).
 4. Успех только если одновременно:
    - `work_result.status == success`

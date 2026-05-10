@@ -11,7 +11,8 @@
   integration, explicit `PlanStep.tool_args`, debug-only command lane, split chat/workspace
   send+SSE endpoints, единый `TerminalTool`, auto v1 path через
   `AgentToolLoop -> ToolGateway -> verifier`, complete runtime tool descriptors, auto без
-  `classify_request(...)`, удалённый legacy auto pipeline entrypoint.
+  `classify_request(...)`, удалённый legacy auto pipeline entrypoint, MWV/CodingTask
+  execution через explicit `ToolRequest` + `ToolGateway`.
 - **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, storage `lane`
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой архитектурой.
 - **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
@@ -173,10 +174,14 @@ Legacy debt после PR-14:
 - Старый auto pipeline `planner -> coder pool -> merge -> verifier` больше не имеет
   runtime entrypoint; auto-запуски через `AutoAgent.run_outcome()` используют auto v1
   tool loop.
+- MWV/CodingTask больше не извлекает target path из prose и не применяет fake
+  append-comment change напрямую через Python file writes; worker execution требует
+  explicit gateway tool requests.
 
 Уже не является допустимым legacy для расширения:
 
 - regex extraction tool args из prose в `Planner`/`Executor`;
+- regex target extraction / append-comment fake worker в MWV/CodingTask;
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
 

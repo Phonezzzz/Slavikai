@@ -5,6 +5,7 @@ from pathlib import Path
 from core.mwv.coding_task import CodingTaskRuntime
 from core.mwv.models import VerificationStatus, WorkStatus
 from core.mwv.verifier import VerifierRunner
+from shared.models import ToolRequest
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -31,13 +32,24 @@ def test_single_attempt_coding_pass(tmp_path: Path) -> None:
     target.write_text("print('hi')\n", encoding="utf-8")
 
     runner = VerifierRunner(script_path=script_path)
-    runtime = CodingTaskRuntime(workspace_root=repo, verifier=runner)
-    result = runtime.run("make a small change in file sample.py")
+    runtime = CodingTaskRuntime(
+        workspace_root=repo,
+        verifier=runner,
+        request_builder=lambda _task, _context: [
+            ToolRequest(
+                name="workspace_write",
+                args={"path": "sample.py", "content": "print('hi')\n# mwv change\n"},
+            )
+        ],
+    )
+    result = runtime.run("make a small change")
 
     assert result.attempt == 1
     assert result.work_result.status == WorkStatus.SUCCESS
     assert result.verification_result.status == VerificationStatus.PASSED
-    assert str(target) in result.report.changed_files
+    assert result.work_result.tool_calls_used == 1
+    assert result.work_result.tool_summaries == ["workspace_write: ok"]
+    assert "sample.py" in result.report.changed_files
     assert "Changed files:" in result.report_text
     assert "Verifier: PASS" in result.report_text
     assert "Next steps:" in result.report_text
@@ -48,19 +60,39 @@ def test_single_attempt_coding_fail_with_diagnostics(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     script_path = repo / "scripts" / "check.sh"
     script_path.write_text("#!/usr/bin/env bash\necho fail 1>&2\nexit 1\n", encoding="utf-8")
-    target = repo / "sample.py"
-    target.write_text("print('hi')\n# mwv change\n", encoding="utf-8")
-
     runner = VerifierRunner(script_path=script_path)
-    runtime = CodingTaskRuntime(workspace_root=repo, verifier=runner)
-    result = runtime.run("make a small change in file sample.py")
+    runtime = CodingTaskRuntime(
+        workspace_root=repo,
+        verifier=runner,
+        request_builder=lambda _task, _context: [
+            ToolRequest(
+                name="workspace_write",
+                args={"path": "sample.py", "content": "print('hi')\n# mwv change\n"},
+            )
+        ],
+    )
+    result = runtime.run("make a small change")
 
     assert result.attempt == 1
-    assert result.work_result.status == WorkStatus.FAILURE
+    assert result.work_result.status == WorkStatus.SUCCESS
     assert result.verification_result.status == VerificationStatus.FAILED
+    assert result.work_result.tool_calls_used == 1
     assert result.report.diagnostics is not None
     assert result.report.diagnostics.command == ["make", "check"]
     assert result.report.diagnostics.summary
     assert "Verifier: FAIL" in result.report_text
     assert "Diagnostics:" in result.report_text
     assert "Next steps:" in result.report_text
+
+
+def test_single_attempt_requires_explicit_gateway_requests(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    script_path = repo / "scripts" / "check.sh"
+    script_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+    runner = VerifierRunner(script_path=script_path)
+    runtime = CodingTaskRuntime(workspace_root=repo, verifier=runner)
+    result = runtime.run("make a small change in file sample.py")
+
+    assert result.work_result.status == WorkStatus.FAILURE
+    assert result.work_result.summary == "no gateway tool requests configured"

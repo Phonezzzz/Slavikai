@@ -97,7 +97,7 @@ class CodingSkill:
                 summary="empty gateway tool request list",
             )
 
-        gateway = _build_workspace_gateway()
+        gateway = build_workspace_gateway()
         changes: list[WorkChange] = []
         with workspace_root_context(self.workspace_root):
             for request in requests:
@@ -109,7 +109,7 @@ class CodingSkill:
                         summary=f"{request.name} failed: {result.error}",
                         changes=changes,
                     )
-                change = _work_change_from_request(request)
+                change = work_change_from_request(request)
                 if change is not None:
                     changes.append(change)
 
@@ -121,7 +121,7 @@ class CodingSkill:
         )
 
 
-def _build_workspace_gateway() -> ToolGateway:
+def build_workspace_gateway() -> ToolGateway:
     registry = ToolRegistry()
     read_metadata = get_tool_metadata("workspace_read")
     registry.register(
@@ -153,7 +153,7 @@ def _build_workspace_gateway() -> ToolGateway:
     return ToolGateway(registry)
 
 
-def _work_change_from_request(request: ToolRequest) -> WorkChange | None:
+def work_change_from_request(request: ToolRequest) -> WorkChange | None:
     if request.name not in {"workspace_write", "workspace_patch"}:
         return None
     raw_path = request.args.get("path")

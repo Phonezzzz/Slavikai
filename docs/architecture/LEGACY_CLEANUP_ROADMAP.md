@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-17
+# Legacy Cleanup Roadmap After PR-18
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-17. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-18. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-17 находятся в `main`.
+- PR-0..PR-18 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -23,6 +23,8 @@
   `AutoAgent.run_outcome() -> run_v1()`.
 - Legacy auto pipeline `planner -> coder pool -> merge -> verifier` больше не имеет
   runtime entrypoint.
+- MWV/CodingTask worker больше не делает regex target extraction и fake append-comment
+  edits; выполнение требует explicit `ToolRequest` и идёт через `ToolGateway`.
 
 ## Known legacy
 
@@ -31,8 +33,6 @@
 - Storage физически ещё хранит `ui_messages.lane`.
 - `lane` остаётся временным marker-ом старой модели, но не должен считаться
   domain discriminator.
-- MWV/CodingTask legacy path ещё содержит regex target extraction и append-comment
-  behavior.
 - `Planner`/`Executor` ещё существуют как runtime entrypoints в части legacy tests/code.
 - `server/http/handlers/ui_chat.py`, `server/ui_hub.py`,
   `use-session-runtime-controller.ts`, `use-session-transport.ts` и
@@ -89,7 +89,7 @@ BLOCKED report должен включать:
    - Удалить или изолировать legacy `AutoOrchestrator.run()` pipeline.
    - Оставить один auto execution path: `AgentToolLoop -> ToolGateway -> verifier`.
 
-4. PR-18 `pr-mwv-worker-tool-loop`
+4. PR-18 `pr-mwv-worker-tool-loop` — done
    - Перевести MWV worker на real tool loop/gateway execution.
    - Убрать regex target extraction и append-comment fake worker behavior.
 
