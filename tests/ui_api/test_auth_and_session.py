@@ -1531,7 +1531,7 @@ def test_ui_chat_send_uses_restored_session_model_as_runtime_override(
     asyncio.run(run())
 
 
-def test_ui_storage_resets_legacy_messages_schema_without_lane(tmp_path) -> None:
+def test_ui_storage_destructively_replaces_legacy_ui_messages_table(tmp_path) -> None:
     db_path = tmp_path / "ui_sessions.db"
     conn = sqlite3.connect(db_path)
     try:
@@ -1606,14 +1606,80 @@ def test_ui_storage_resets_legacy_messages_schema_without_lane(tmp_path) -> None
     verify_conn = sqlite3.connect(db_path)
     try:
         verify_conn.row_factory = sqlite3.Row
-        columns = {
+        tables = {
             str(row["name"])
-            for row in verify_conn.execute("PRAGMA table_info(ui_messages)").fetchall()
+            for row in verify_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+            if isinstance(row, sqlite3.Row)
+        }
+        chat_columns = {
+            str(row["name"])
+            for row in verify_conn.execute("PRAGMA table_info(chat_messages)").fetchall()
+            if isinstance(row, sqlite3.Row)
+        }
+        workspace_columns = {
+            str(row["name"])
+            for row in verify_conn.execute("PRAGMA table_info(workspace_messages)").fetchall()
             if isinstance(row, sqlite3.Row)
         }
     finally:
         verify_conn.close()
-    assert "lane" in columns
+    assert "ui_messages" not in tables
+    assert "chat_messages" in tables
+    assert "workspace_messages" in tables
+    assert "lane" not in chat_columns
+    assert "lane" not in workspace_columns
+
+
+def test_ui_storage_uses_physical_chat_and_workspace_message_tables(tmp_path) -> None:
+    db_path = tmp_path / "ui_sessions.db"
+    storage = SQLiteUISessionStorage(db_path)
+    storage.save_session(
+        PersistedSession(
+            session_id="split-session",
+            principal_id="principal",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:01+00:00",
+            status="ok",
+            decision=None,
+            messages=[
+                {
+                    "message_id": "chat-msg",
+                    "role": "user",
+                    "lane": "chat",
+                    "content": "chat",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                },
+                {
+                    "message_id": "workspace-msg",
+                    "role": "assistant",
+                    "lane": "workspace",
+                    "content": "workspace",
+                    "created_at": "2026-01-01T00:00:01+00:00",
+                },
+            ],
+        )
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        chat_rows = conn.execute("SELECT message_id FROM chat_messages").fetchall()
+        workspace_rows = conn.execute("SELECT message_id FROM workspace_messages").fetchall()
+        legacy_rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ui_messages'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [str(row["message_id"]) for row in chat_rows] == ["chat-msg"]
+    assert [str(row["message_id"]) for row in workspace_rows] == ["workspace-msg"]
+    assert legacy_rows == []
+
+    restored = storage.load_sessions()
+    assert len(restored) == 1
+    assert [message["lane"] for message in restored[0].messages] == ["chat", "workspace"]
 
 
 def test_ui_session_policy_persist_after_restart(tmp_path) -> None:

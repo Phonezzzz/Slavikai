@@ -12,9 +12,11 @@
   send+SSE endpoints, единый `TerminalTool`, auto v1 path через
   `AgentToolLoop -> ToolGateway -> verifier`, complete runtime tool descriptors, auto без
   `classify_request(...)`, удалённый legacy auto pipeline entrypoint, MWV/CodingTask
-  execution через explicit `ToolRequest` + `ToolGateway`.
-- **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, storage `lane`
-  и legacy UI endpoints ещё существуют как совместимость и не считаются целевой архитектурой.
+  execution через explicit `ToolRequest` + `ToolGateway`, destructive physical split UI
+  message storage на `chat_messages` и `workspace_messages`.
+- **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, runtime/API/UI
+  `lane` markers и legacy UI endpoints ещё существуют как совместимость и не считаются
+  целевой архитектурой.
 - **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
   `plan|act` через `/v1` отклоняются и должны идти через UI workflow.
 - **UI workflow**: endpoints `/ui/api/plan/*` и mode transitions допустимы только если
@@ -153,18 +155,18 @@ API:
 
 Новые фичи не должны расширять legacy-пути как целевую архитектуру.
 
-Legacy debt после PR-14:
+Legacy debt после PR-20:
 
 - `core/agent.py`, `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`
   остаются крупными mixin-модулями.
 - `classify_request(...)` ещё участвует в legacy `plan|act` маршрутизации; он не выбирает
   tools и не является planner. `runtime_mode=auto` больше не проходит через этот classifier.
-- Storage ещё физически хранит `ui_messages.lane`, но `lane` не является domain
-  discriminator. Он допускается только как временный legacy marker во время
-  audit/deletion и не должен управлять runtime storage/API/frontend flow после split.
-- Локальные UI sessions/chats/history disposable by default. Для PR-20 целевое
-  направление — destructive/direct physical split на `chat_messages` и
-  `workspace_messages` без migrations/backward compatibility/import-export adapters.
+- Storage больше не использует физическую таблицу `ui_messages`; сообщения разделены на
+  `chat_messages` и `workspace_messages`. Старые локальные DB с `ui_messages`
+  destructive reset/recreate, без migrations/backward compatibility/import-export adapters.
+- `lane` не является domain discriminator. Он допускается только как временный runtime/API/UI
+  legacy marker во время audit/deletion и не должен управлять storage/API/frontend flow
+  после соответствующих split PR.
 - Legacy `/ui/api/events/stream` теперь hard-fails (`410 legacy_event_stream_removed`), а
   workspace-запросы через `/ui/api/chat/send` отклоняются. Целевой путь — split
   chat/workspace endpoints.
@@ -188,4 +190,4 @@ Legacy debt после PR-14:
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
 
-Roadmap устранения legacy после PR-14: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
+Roadmap устранения legacy после PR-20: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

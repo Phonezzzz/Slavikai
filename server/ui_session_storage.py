@@ -387,15 +387,19 @@ class SQLiteUISessionStorage:
                     self._encode_json_object(session.auto_state),
                 ),
             )
-            conn.execute("DELETE FROM ui_messages WHERE session_id = ?", (session.session_id,))
+            conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session.session_id,))
+            conn.execute(
+                "DELETE FROM workspace_messages WHERE session_id = ?",
+                (session.session_id,),
+            )
             for message in session.messages:
                 prepared = self._message_for_write(message)
+                table_name = self._message_table_for_lane(prepared["lane"])
                 conn.execute(
-                    """
-                    INSERT INTO ui_messages (
+                    f"""
+                    INSERT INTO {table_name} (
                         message_id,
                         session_id,
-                        lane,
                         role,
                         content,
                         created_at,
@@ -403,12 +407,11 @@ class SQLiteUISessionStorage:
                         parent_user_message_id,
                         attachments_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         prepared["message_id"],
                         session.session_id,
-                        prepared["lane"],
                         prepared["role"],
                         prepared["content"],
                         prepared["created_at"],
@@ -425,7 +428,11 @@ class SQLiteUISessionStorage:
         placeholders = ", ".join("?" for _ in session_ids)
         with self._connect() as conn:
             conn.execute(
-                f"DELETE FROM ui_messages WHERE session_id IN ({placeholders})",
+                f"DELETE FROM chat_messages WHERE session_id IN ({placeholders})",
+                tuple(session_ids),
+            )
+            conn.execute(
+                f"DELETE FROM workspace_messages WHERE session_id IN ({placeholders})",
                 tuple(session_ids),
             )
             conn.execute(
@@ -503,6 +510,8 @@ class SQLiteUISessionStorage:
             conn.execute("PRAGMA journal_mode=WAL")
             if self._requires_legacy_reset(conn):
                 conn.execute("DROP TABLE IF EXISTS ui_messages")
+                conn.execute("DROP TABLE IF EXISTS chat_messages")
+                conn.execute("DROP TABLE IF EXISTS workspace_messages")
                 conn.execute("DROP TABLE IF EXISTS ui_sessions")
                 conn.execute("DROP TABLE IF EXISTS ui_folders")
             conn.execute(
@@ -545,23 +554,7 @@ class SQLiteUISessionStorage:
                 )
                 """,
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ui_messages (
-                    message_id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    lane TEXT NOT NULL DEFAULT 'chat',
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    trace_id TEXT,
-                    parent_user_message_id TEXT,
-                    attachments_json TEXT NOT NULL DEFAULT '[]',
-                    FOREIGN KEY(session_id) REFERENCES ui_sessions(session_id) ON DELETE CASCADE
-                )
-                """,
-            )
-            self._ensure_ui_messages_table(conn)
+            self._ensure_message_tables(conn)
             conn.commit()
 
     def _requires_legacy_reset(self, conn: sqlite3.Connection) -> bool:
@@ -572,14 +565,7 @@ class SQLiteUISessionStorage:
             ).fetchall()
             if isinstance(row, sqlite3.Row) and row["name"] is not None
         }
-        if "ui_messages" not in existing_tables:
-            return False
-        message_columns = {
-            str(row["name"])
-            for row in conn.execute("PRAGMA table_info(ui_messages)").fetchall()
-            if isinstance(row, sqlite3.Row) and row["name"] is not None
-        }
-        return "lane" not in message_columns
+        return "ui_messages" in existing_tables
 
     def _load_messages(
         self,
@@ -590,18 +576,30 @@ class SQLiteUISessionStorage:
             """
             SELECT
                 message_id,
-                lane,
+                'chat' AS lane,
                 role,
                 content,
                 created_at,
                 trace_id,
                 parent_user_message_id,
                 attachments_json
-            FROM ui_messages
+            FROM chat_messages
             WHERE session_id = ?
-            ORDER BY rowid ASC
+            UNION ALL
+            SELECT
+                message_id,
+                'workspace' AS lane,
+                role,
+                content,
+                created_at,
+                trace_id,
+                parent_user_message_id,
+                attachments_json
+            FROM workspace_messages
+            WHERE session_id = ?
+            ORDER BY created_at ASC
             """,
-            (session_id,),
+            (session_id, session_id),
         ).fetchall()
         messages: list[dict[str, JSONValue]] = []
         for row in rows:
@@ -736,11 +734,10 @@ class SQLiteUISessionStorage:
         if "auto_state_json" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN auto_state_json TEXT")
 
-    def _ensure_ui_messages_table(self, conn: sqlite3.Connection) -> None:
+    def _ensure_message_tables(self, conn: sqlite3.Connection) -> None:
         expected_columns = [
             "message_id",
             "session_id",
-            "lane",
             "role",
             "content",
             "created_at",
@@ -748,32 +745,37 @@ class SQLiteUISessionStorage:
             "parent_user_message_id",
             "attachments_json",
         ]
-        existing = conn.execute("PRAGMA table_info(ui_messages)").fetchall()
-        existing_names = [str(row["name"]) for row in existing if isinstance(row, sqlite3.Row)]
-        if existing_names != expected_columns:
-            conn.execute("DROP TABLE IF EXISTS ui_messages")
-            conn.execute(
-                """
-                CREATE TABLE ui_messages (
-                    message_id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    lane TEXT NOT NULL DEFAULT 'chat',
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    trace_id TEXT,
-                    parent_user_message_id TEXT,
-                    attachments_json TEXT NOT NULL DEFAULT '[]',
-                    FOREIGN KEY(session_id) REFERENCES ui_sessions(session_id) ON DELETE CASCADE
+        for table_name in ("chat_messages", "workspace_messages"):
+            existing = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            existing_names = [str(row["name"]) for row in existing if isinstance(row, sqlite3.Row)]
+            if existing_names != expected_columns:
+                conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+                conn.execute(
+                    f"""
+                    CREATE TABLE {table_name} (
+                        message_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        trace_id TEXT,
+                        parent_user_message_id TEXT,
+                        attachments_json TEXT NOT NULL DEFAULT '[]',
+                        FOREIGN KEY(session_id) REFERENCES ui_sessions(session_id) ON DELETE CASCADE
+                    )
+                    """,
                 )
+            conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_session_created
+                ON {table_name} (session_id, created_at)
                 """,
             )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_ui_messages_session_created
-            ON ui_messages (session_id, created_at)
-            """,
-        )
+
+    def _message_table_for_lane(self, lane: object) -> str:
+        if lane == "workspace":
+            return "workspace_messages"
+        return "chat_messages"
 
     def _message_for_write(self, message: dict[str, JSONValue]) -> dict[str, str | None]:
         message_id = message.get("message_id")

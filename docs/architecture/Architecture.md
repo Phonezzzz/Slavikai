@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-14.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-20.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -15,7 +15,9 @@ split chat/workspace API paths, debug-only command lane и единый terminal
 `planner -> coder pool -> merge -> verifier` удалён из runtime entrypoints. После
 PR-18 MWV/CodingTask worker не извлекает target path из prose и не делает fake
 append-comment edits напрямую; выполнение идёт через explicit `ToolRequest` и
-`ToolGateway`. Часть старого runtime ещё остаётся legacy-обвязкой.
+`ToolGateway`. После PR-20 UI message storage физически разделён на `chat_messages` и
+`workspace_messages`; старая локальная DB с `ui_messages` destructive reset/recreate.
+Часть старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
@@ -54,12 +56,13 @@ append-comment edits напрямую; выполнение идёт через 
   - Terminal: `tools/terminal_tool.py`, режимы `oneshot|pty`.
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
-  - UI sessions пока физически совместимые: `ui_messages.lane` остаётся legacy
-    SQLite detail, но `lane` не является целевым domain discriminator.
+  - UI message storage физически разделён: `chat_messages` для chat-сообщений и
+    `workspace_messages` для workspace-сообщений.
+  - Физическая таблица `ui_messages` больше не является текущей схемой. При обнаружении
+    старой local DB с `ui_messages` storage делает destructive reset/recreate schema.
   - Локальная `.run/ui_sessions.db`, старые sessions/chats/history disposable by default.
-    Planned cleanup PR-20 может destructive reset/recreate локальную DB/schema и не
-    обязан сохранять старое состояние.
-  - Полностью отдельные `chat_messages` и `workspace_messages` ещё не введены.
+  - `lane` может ещё встречаться в runtime/API/frontend как временный legacy marker до
+    PR-21/PR-23, но не является storage/domain discriminator.
 
 ## Маршрутизация запроса (current legacy runtime)
 
@@ -169,8 +172,8 @@ append-comment edits напрямую; выполнение идёт через 
   `AgentToolLoop`/`ToolGateway`, а не получать новые ветки.
 - `classify_request(...)` всё ещё используется в legacy `plan|act` routing; новые
   tool-capabilities не должны добавляться через keyword router.
-- `lane` не должен оставаться domain discriminator. До storage split он допускается только
-  как временный legacy marker для audit/deletion.
+- `lane` не должен оставаться domain discriminator. После storage split он допускается
+  только как временный runtime/API/frontend legacy marker для audit/deletion.
 - `Planner`/`Executor` удалены из runtime entrypoints. Любое возвращение к парсингу prose
   как source of truth для tool args запрещено.
 - Command lane не является способом вызова tools. Только `/trace` и `/end-session`.

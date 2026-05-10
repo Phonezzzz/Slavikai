@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-19
+# Legacy Cleanup Roadmap After PR-20
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-19. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-20. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-19 находятся в `main`.
+- PR-0..PR-20 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -27,14 +27,16 @@
   edits; выполнение требует explicit `ToolRequest` и идёт через `ToolGateway`.
 - Старые `Planner`/`Executor` удалены как runtime entrypoints; MWV строит packet напрямую
   и исполняет explicit tool requests через gateway.
+- UI message storage физически разделён на `chat_messages` и `workspace_messages`.
+  Старая local DB/schema с `ui_messages` destructive reset/recreate, без migrations,
+  import/export adapters, backward compatibility или compatibility layers.
 
 ## Known legacy
 
 - `classify_request(...)` ещё участвует в legacy `plan|act` routing. Он не является
   tool planner.
-- Storage физически ещё хранит `ui_messages.lane`.
-- `lane` остаётся временным marker-ом старой модели, но не должен считаться
-  domain discriminator.
+- `lane` остаётся временным marker-ом старой runtime/API/frontend модели, но не является
+  storage/domain discriminator.
 - `server/http/handlers/ui_chat.py`, `server/ui_hub.py`,
   `use-session-runtime-controller.ts`, `use-session-transport.ts` и
   `workspace-ide.tsx` остаются крупными монолитами.
@@ -98,15 +100,16 @@ BLOCKED report должен включать:
    - Удалить `Planner`/`Executor` как runtime entrypoints.
    - Сохранить только typed contracts/adapters, если они нужны текущему TaskPacket flow.
 
-6. PR-20 `pr-storage-destructive-physical-split`
+6. PR-20 `pr-storage-destructive-physical-split` — done
    - Destructive/direct storage physical split.
    - Заменить `ui_messages(session_id, lane, ...)` на физические `chat_messages` и
      `workspace_messages`.
    - Не добавлять migrations, import/export adapters, backward compatibility или
      compatibility layers.
    - Destructive reset/recreate local DB/schema допустим.
-   - Audit ищет references к `ui_messages`, `lane`, `/history?lane`,
-     persisted session contracts, которые нужно удалить или переписать.
+   - Старые local DB с `ui_messages` destructive reset/recreate.
+   - Оставшиеся references к `lane`, `/history?lane` и текущим persisted session
+     contracts относятся к PR-21/PR-23, а не к физической storage-схеме.
 
 7. PR-21 `pr-ui-chat-workspace-handler-split`
    - Разделить chat/workspace handlers.
