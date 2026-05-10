@@ -11,8 +11,9 @@ workspace/MWV и auto. После PR-0..PR-14 в коде есть честны�
 read-only chat integration через `AgentToolLoop`, auto v1 через `AgentToolLoop`,
 split chat/workspace API paths, debug-only command lane и единый terminal backend.
 После PR-15 runtime tools имеют LLM descriptions/JSON Schema. После PR-16 auto mode
-больше не проходит через `classify_request(...)`. Часть старого runtime ещё остаётся
-legacy-обвязкой.
+больше не проходит через `classify_request(...)`. После PR-17 старый auto pipeline
+`planner -> coder pool -> merge -> verifier` удалён из runtime entrypoints. Часть
+старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
@@ -31,8 +32,8 @@ legacy-обвязкой.
   - Ограниченный retry через `RunContext.max_retries`.
 - **Auto runtime** (`core/auto_runtime.py`)
   - Новый entry из `AutoAgent.run_outcome()` идёт через `AgentToolLoop -> ToolGateway -> verifier`.
-  - Legacy-контур `planner -> coder pool -> merge -> verifier` оставлен в `AutoOrchestrator.run()`
-    для прямой совместимости и не является путём для новых auto-запусков.
+  - Legacy-контур `planner -> coder pool -> merge -> verifier` больше не имеет
+    runtime entrypoint.
   - Auto v1 поддерживает паузу `waiting_approval` и resume через повторный tool-loop run после approval.
 - **LLM слой** (`llm/*`)
   - Провайдеры: `xai`, `openrouter`, `local`, `inception`.

@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-14
+# Legacy Cleanup Roadmap After PR-17
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-16. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-17. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-16 находятся в `main`.
+- PR-0..PR-17 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -21,6 +21,8 @@
 - Runtime tools имеют LLM descriptions/JSON Schema.
 - `runtime_mode=auto` больше не вызывает `classify_request(...)`; auto сразу идёт в
   `AutoAgent.run_outcome() -> run_v1()`.
+- Legacy auto pipeline `planner -> coder pool -> merge -> verifier` больше не имеет
+  runtime entrypoint.
 
 ## Known legacy
 
@@ -29,8 +31,6 @@
 - Storage физически ещё хранит `ui_messages.lane`.
 - `lane` остаётся временным marker-ом старой модели, но не должен считаться
   domain discriminator.
-- Legacy auto pipeline `planner -> coder pool -> merge -> verifier` ещё существует
-  в `AutoOrchestrator.run()` как старый compatibility path.
 - MWV/CodingTask legacy path ещё содержит regex target extraction и append-comment
   behavior.
 - `Planner`/`Executor` ещё существуют как runtime entrypoints в части legacy tests/code.
@@ -85,7 +85,7 @@ BLOCKED report должен включать:
    - Убрать `classify_request(...)` из auto path.
    - Auto должен идти в `AutoAgent.run_outcome() -> run_v1()` без route classifier.
 
-3. PR-17 `pr-remove-legacy-auto-pipeline`
+3. PR-17 `pr-remove-legacy-auto-pipeline` — done
    - Удалить или изолировать legacy `AutoOrchestrator.run()` pipeline.
    - Оставить один auto execution path: `AgentToolLoop -> ToolGateway -> verifier`.
 

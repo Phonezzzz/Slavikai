@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import concurrent.futures
-import json
 import os
 import re
-import shutil
 import time
 import uuid
 from collections.abc import Callable
@@ -13,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from core.approval_policy import ApprovalRequired
-from core.executor import Executor
 from core.mwv.models import (
     RunContext,
     StopReasonCode,
@@ -23,7 +19,6 @@ from core.mwv.models import (
 )
 from core.mwv.verifier_runtime import VerifierRuntime, canonical_check_command
 from core.mwv.verifier_summary import extract_verifier_excerpt
-from core.planner import Planner
 from core.tool_loop import AgentToolLoop, ExecutedToolCall
 from shared.auto_models import (
     AUTO_CODER_POOL_DEFAULT,
@@ -35,8 +30,8 @@ from shared.auto_models import (
     normalize_auto_state,
     utc_now_iso,
 )
-from shared.models import JSONValue, LLMMessage, PlanStepStatus
-from tools.workspace_tools import WORKSPACE_ROOT, get_workspace_root, workspace_root_context
+from shared.models import JSONValue, LLMMessage
+from tools.workspace_tools import WORKSPACE_ROOT, get_workspace_root
 
 if TYPE_CHECKING:
     from core.agent import Agent
@@ -392,396 +387,15 @@ class AutoOrchestrator:
                 ],
             )
 
-    def run(
-        self,
-        goal: str,
-        *,
-        run_id: str | None = None,
-        plan_override: AutoPlan | None = None,
-        started_at: str | None = None,
-        run_root_override: Path | None = None,
-    ) -> AutoRunOutcome:
-        run_id_value = run_id or f"auto-{uuid.uuid4().hex}"
-        pool_size = _resolve_pool_size()
-        started = started_at or utc_now_iso()
-        started_monotonic = time.monotonic()
-        budgets = _resolve_auto_budgets()
-        runtime_root = get_workspace_root().resolve()
-        if run_root_override is not None:
-            run_root = run_root_override.resolve()
-        elif runtime_root != WORKSPACE_ROOT:
-            run_root = runtime_root
-        else:
-            run_root = self.workspace_root
-        state: dict[str, JSONValue] = {
-            "run_id": run_id_value,
-            "status": AutoRunStatus.IDLE.value,
-            "goal": goal,
-            "root_path": str(run_root),
-            "pool_size": pool_size,
-            "started_at": started,
-            "updated_at": started,
-            "planner": {"status": "idle"},
-            "plan": None,
-            "coders": [],
-            "merge": {"status": "idle", "changed_paths": []},
-            "execution_metrics": None,
-            "budgets": budgets.to_dict(),
-            "verifier": None,
-            "approval": None,
-            "error": None,
-            "error_code": None,
-            "missing_paths": [],
-        }
-        self._set_state(state)
-
-        try:
-            self._set_status(state, AutoRunStatus.PLANNING)
-            budget_stop = _budget_runtime_stop(
-                budgets=budgets,
-                started_monotonic=started_monotonic,
-            )
-            if budget_stop is not None:
-                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
-                state["error"] = budget_stop
-                state["error_code"] = "budget_runtime"
-                self._set_state(state)
-                return _budget_stop_outcome(self.parent, budget_stop)
-            plan = plan_override or self._build_plan(goal)
-            state["planner"] = {
-                "status": "completed",
-                "shards_total": len(plan.shards),
-            }
-            state["plan"] = plan.to_dict()
-            self._set_state(state)
-
-            self._set_status(state, AutoRunStatus.CODING)
-            budget_stop = _budget_runtime_stop(
-                budgets=budgets,
-                started_monotonic=started_monotonic,
-            )
-            if budget_stop is not None:
-                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
-                state["error"] = budget_stop
-                state["error_code"] = "budget_runtime"
-                self._set_state(state)
-                return _budget_stop_outcome(self.parent, budget_stop)
-            baseline_snapshot = _snapshot_workspace(run_root)
-            coder_results = self._run_coder_pool(
-                run_id=run_id_value,
-                plan=plan,
-                pool_size=pool_size,
-                baseline_snapshot=baseline_snapshot,
-                state=state,
-                workspace_root=run_root,
-            )
-
-            worker_fail = [item for item in coder_results if item.status != "completed"]
-            if worker_fail:
-                first_error = worker_fail[0].error or "Worker failed"
-                state["error"] = first_error
-                missing_paths = _extract_missing_paths(worker_fail)
-                if missing_paths:
-                    state["error_code"] = "missing_file"
-                    state["missing_paths"] = missing_paths
-                elif _is_missing_target_path_error(first_error):
-                    state["error_code"] = "missing_target_path"
-                self._set_status(state, AutoRunStatus.FAILED_WORKER)
-                return AutoRunOutcome(
-                    text=self.parent._format_stop_response(
-                        what="Auto-run остановлен: ошибка coder-воркера",
-                        why=first_error,
-                        next_steps=[
-                            "Проверь diagnostics в auto_state.coders.",
-                            "Уточни задачу и запусти auto повторно.",
-                        ],
-                        stop_reason_code=StopReasonCode.WORKER_FAILED,
-                        route="auto",
-                        plan_summary=(
-                            "План шардирован, но часть coder-воркеров завершилась ошибкой."
-                        ),
-                        execution_summary=first_error,
-                    ),
-                    status=AutoRunStatus.FAILED_WORKER,
-                    stop_reason_code=StopReasonCode.WORKER_FAILED,
-                    verifier=None,
-                    next_steps=[
-                        "Проверь diagnostics в auto_state.coders.",
-                        "Уточни задачу и запусти auto повторно.",
-                    ],
-                )
-
-            tool_calls_used = len(coder_results)
-            if tool_calls_used > budgets.max_tool_calls:
-                reason = (
-                    f"Budget exhausted: tool_calls={tool_calls_used} "
-                    f"> max_tool_calls={budgets.max_tool_calls}"
-                )
-                state["error"] = reason
-                state["error_code"] = "budget_tool_calls"
-                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
-                self._set_state(state)
-                return _budget_stop_outcome(self.parent, reason)
-
-            self._set_status(state, AutoRunStatus.MERGING)
-            budget_stop = _budget_runtime_stop(
-                budgets=budgets,
-                started_monotonic=started_monotonic,
-            )
-            if budget_stop is not None:
-                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
-                state["error"] = budget_stop
-                state["error_code"] = "budget_runtime"
-                self._set_state(state)
-                return _budget_stop_outcome(self.parent, budget_stop)
-            topo = _topological_order(plan)
-            topo_ids = [item.shard_id for item in topo]
-            ordered_results = sorted(
-                coder_results,
-                key=lambda item: topo_ids.index(item.shard_id)
-                if item.shard_id in topo_ids
-                else len(topo_ids),
-            )
-
-            conflict = _detect_conflict(ordered_results, plan)
-            if conflict is not None:
-                left, right, paths = conflict
-                changed_paths_union = sorted(
-                    {
-                        *left.bundle.changed_paths,
-                        *right.bundle.changed_paths,
-                    }
-                )
-                state["merge"] = {
-                    "status": "failed_conflict",
-                    "changed_paths": changed_paths_union,
-                    "details": {
-                        "left_shard": left.shard_id,
-                        "right_shard": right.shard_id,
-                        "paths": paths,
-                    },
-                }
-                state["error"] = "merge_conflict"
-                self._set_status(state, AutoRunStatus.FAILED_CONFLICT)
-                conflict_why = (
-                    f"Shard '{left.shard_id}' и '{right.shard_id}' "
-                    f"изменяют одни и те же пути: {', '.join(paths)}"
-                )
-                return AutoRunOutcome(
-                    text=self.parent._format_stop_response(
-                        what="Auto-run остановлен: конфликт merge",
-                        why=conflict_why,
-                        next_steps=[
-                            "Сузь path_scope шарда или добавь depends_on.",
-                            "Перезапусти auto после уточнения зависимостей.",
-                        ],
-                        stop_reason_code=StopReasonCode.WORKER_FAILED,
-                        route="auto",
-                        plan_summary=(
-                            "План построен, merge остановлен fail-fast политикой конфликтов."
-                        ),
-                        execution_summary=(
-                            "Обнаружено пересечение changed_paths между независимыми shard-ами."
-                        ),
-                    ),
-                    status=AutoRunStatus.FAILED_CONFLICT,
-                    stop_reason_code=StopReasonCode.WORKER_FAILED,
-                    verifier=None,
-                    next_steps=[
-                        "Сузь path_scope шарда или добавь depends_on.",
-                        "Перезапусти auto после уточнения зависимостей.",
-                    ],
-                )
-
-            merged_paths = self._apply_patch_bundles(ordered_results, workspace_root=run_root)
-            if len(merged_paths) > budgets.max_files_touched:
-                reason = (
-                    f"Budget exhausted: files_touched={len(merged_paths)} "
-                    f"> max_files_touched={budgets.max_files_touched}"
-                )
-                state["error"] = reason
-                state["error_code"] = "budget_files_touched"
-                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
-                self._set_state(state)
-                return _budget_stop_outcome(self.parent, reason)
-            state["merge"] = {
-                "status": "completed",
-                "changed_paths": sorted(merged_paths),
-            }
-            state["execution_metrics"] = {
-                "tool_calls_used": len(coder_results),
-                "files_touched": len(merged_paths),
-            }
-            self._set_state(state)
-
-            self._set_status(state, AutoRunStatus.VERIFYING)
-            budget_stop = _budget_runtime_stop(
-                budgets=budgets,
-                started_monotonic=started_monotonic,
-            )
-            if budget_stop is not None:
-                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
-                state["error"] = budget_stop
-                state["error_code"] = "budget_runtime"
-                self._set_state(state)
-                return _budget_stop_outcome(self.parent, budget_stop)
-            verifier = VerifierRuntime(project_root=run_root)
-            context = RunContext(
-                session_id=self.parent.session_id or "local",
-                trace_id=str(uuid.uuid4()),
-                workspace_root=str(run_root),
-                safe_mode=bool(self.parent.tools_enabled.get("safe_mode", False)),
-                approved_categories=sorted(self.parent.approved_categories),
-                max_retries=budgets.max_retries,
-                attempt=1,
-            )
-            verifier_task = TaskPacket(
-                task_id=run_id_value,
-                session_id=context.session_id,
-                trace_id=context.trace_id,
-                goal=goal,
-                scope={"workspace_root": str(run_root)},
-                verifier={"command": canonical_check_command(), "cwd": str(run_root)},
-            )
-            verifier_run: Any = verifier.run
-            try:
-                verification = verifier_run(verifier_task, context)
-            except TypeError:
-                # Backward compatibility for legacy verifier stubs.
-                verification = verifier_run(context)
-            state["verifier"] = {
-                "status": verification.status.value,
-                "command": list(verification.command),
-                "exit_code": verification.exit_code,
-                "error": verification.error,
-                "duration_ms": verification.duration_ms,
-                "fail_type": verification.fail_type,
-                "excerpt": verification.excerpt,
-                "verifier_profile": verification.verifier_profile,
-            }
-            self._set_state(state)
-
-            if verification.status != VerificationStatus.PASSED:
-                self._set_status(state, AutoRunStatus.FAILED_VERIFIER)
-                return AutoRunOutcome(
-                    text=self.parent._format_stop_response(
-                        what="Auto-run остановлен: verifier не прошёл",
-                        why=_verifier_reason(verification),
-                        next_steps=[
-                            "Открой verifier stdout/stderr в отчёте.",
-                            "Исправь проблему и перезапусти auto.",
-                        ],
-                        stop_reason_code=StopReasonCode.VERIFIER_FAILED,
-                        route="auto",
-                        verifier=verification,
-                        attempts=(1, 1),
-                        plan_summary=_auto_plan_summary(plan),
-                        execution_summary="Merge завершён, но verifier вернул fail/error.",
-                    ),
-                    status=AutoRunStatus.FAILED_VERIFIER,
-                    stop_reason_code=StopReasonCode.VERIFIER_FAILED,
-                    verifier=verification,
-                    next_steps=[
-                        "Открой verifier stdout/stderr в отчёте.",
-                        "Исправь проблему и перезапусти auto.",
-                    ],
-                )
-
-            self._set_status(state, AutoRunStatus.COMPLETED)
-            text = self.parent._append_report_block(
-                (
-                    "Auto-run завершён успешно.\n"
-                    f"Planner shards: {len(plan.shards)}\n"
-                    f"Merged paths: {len(merged_paths)}\n"
-                    f"Verifier: {verification.status.value}"
-                ),
-                route="auto",
-                trace_id=context.trace_id,
-                attempts=(1, 1),
-                verifier=verification,
-                next_steps=[],
-                stop_reason_code=None,
-                plan_summary=_auto_plan_summary(plan),
-                execution_summary=(
-                    f"Применено {len(merged_paths)} изменённых путей, verifier passed."
-                ),
-            )
-            return AutoRunOutcome(
-                text=text,
-                status=AutoRunStatus.COMPLETED,
-                stop_reason_code=None,
-                verifier=verification,
-                next_steps=[],
-            )
-        except ApprovalRequired as exc:
-            plan_payload = state.get("plan")
-            if not isinstance(plan_payload, dict):
-                fallback_plan = plan_override or AutoPlan(
-                    plan_id=f"plan-{uuid.uuid4().hex}",
-                    goal=goal,
-                    shards=[_fallback_shard(goal)],
-                )
-                plan_payload = fallback_plan.to_dict()
-            plan = _plan_from_payload(plan_payload, goal=goal)
-            self._paused_runs[run_id_value] = _PausedRun(
-                run_id=run_id_value,
-                goal=goal,
-                pool_size=pool_size,
-                plan=plan,
-                started_at=started,
-                workspace_root=run_root,
-            )
-            state["approval"] = {
-                "status": "required",
-                "required_categories": list(exc.request.required_categories),
-                "tool": exc.request.tool,
-                "details": dict(exc.request.details),
-                "resume_token": run_id_value,
-            }
-            self._set_status(state, AutoRunStatus.WAITING_APPROVAL)
-            raise
-        except Exception as exc:  # noqa: BLE001
-            state["error"] = str(exc)
-            self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
-            return AutoRunOutcome(
-                text=self.parent._format_stop_response(
-                    what="Auto-run остановлен: внутренняя ошибка",
-                    why=str(exc),
-                    next_steps=[
-                        "Проверь логи и trace.",
-                        "Повтори запуск auto после исправления.",
-                    ],
-                    stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
-                    route="auto",
-                    plan_summary="Auto pipeline завершился внутренней ошибкой.",
-                    execution_summary=str(exc),
-                ),
-                status=AutoRunStatus.FAILED_INTERNAL,
-                stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
-                verifier=None,
-                next_steps=[
-                    "Проверь логи и trace.",
-                    "Повтори запуск auto после исправления.",
-                ],
-            )
-
     def resume(self, run_id: str) -> AutoRunOutcome | None:
         paused = self._paused_runs.pop(run_id, None)
         if paused is None:
             return None
-        if paused.runtime == "tool_loop_v1":
-            return self.run_v1(
-                paused.goal,
-                run_id=paused.run_id,
-                started_at=paused.started_at,
-                run_root_override=paused.workspace_root,
-            )
-        if paused.plan is None:
+        if paused.runtime != "tool_loop_v1":
             return None
-        return self.run(
+        return self.run_v1(
             paused.goal,
             run_id=paused.run_id,
-            plan_override=paused.plan,
             started_at=paused.started_at,
             run_root_override=paused.workspace_root,
         )
@@ -803,10 +417,10 @@ class AutoOrchestrator:
             "pool_size": paused.pool_size,
             "started_at": paused.started_at,
             "updated_at": utc_now_iso(),
-            "planner": {"status": "completed"},
+            "planner": {"status": "completed", "runtime": "auto_v1_tool_loop"},
             "plan": paused.plan.to_dict() if paused.plan is not None else None,
             "coders": [],
-            "merge": {"status": "cancelled"},
+            "merge": {"status": "cancelled", "runtime": "auto_v1_tool_loop"},
             "verifier": None,
             "approval": {"status": "rejected"},
             "error": reason,
@@ -814,190 +428,6 @@ class AutoOrchestrator:
             "missing_paths": [],
         }
         return self._set_state(state)
-
-    def _build_plan(self, goal: str) -> AutoPlan:
-        prompt = (
-            "Верни JSON объект AutoPlan с полями plan_id, goal, shards. "
-            "Каждый shard: shard_id, goal, path_scope, depends_on, acceptance_checks. "
-            "Без markdown и без пояснений."
-        )
-        content = f"goal={goal}\nmax_shards=6"
-        try:
-            result = self.parent._get_main_brain().generate(
-                [
-                    LLMMessage(role="system", content=prompt),
-                    LLMMessage(role="user", content=content),
-                ],
-                self.parent.main_config,
-            )
-            parsed = json.loads(result.text)
-            plan = _parse_auto_plan_payload(parsed, goal=goal)
-            if plan is not None:
-                return plan
-        except Exception:  # noqa: BLE001
-            self.parent.tracer.log("auto_planner_fallback", "planner json parse failed")
-        return AutoPlan(
-            plan_id=f"plan-{uuid.uuid4().hex}",
-            goal=goal,
-            shards=[_fallback_shard(goal)],
-        )
-
-    def _run_coder_pool(
-        self,
-        *,
-        run_id: str,
-        plan: AutoPlan,
-        pool_size: int,
-        baseline_snapshot: dict[str, bytes],
-        state: dict[str, JSONValue],
-        workspace_root: Path,
-    ) -> list[CoderResult]:
-        shards = list(plan.shards)
-        coders: list[dict[str, JSONValue]] = []
-        for index, shard in enumerate(shards, start=1):
-            coders.append(
-                {
-                    "coder_id": f"coder-{index}",
-                    "shard_id": shard.shard_id,
-                    "status": "queued",
-                    "changed_paths": [],
-                    "diagnostics": [],
-                }
-            )
-        state["coders"] = coders
-        self._set_state(state)
-
-        run_root = workspace_root / ".auto" / run_id
-        run_root.mkdir(parents=True, exist_ok=True)
-
-        results: list[CoderResult] = []
-        max_workers = min(pool_size, max(1, len(shards)))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            future_map: dict[concurrent.futures.Future[CoderResult], tuple[str, str]] = {}
-            for index, shard in enumerate(shards, start=1):
-                coder_id = f"coder-{index}"
-                future = pool.submit(
-                    self._run_single_coder,
-                    run_root,
-                    coder_id,
-                    shard,
-                    baseline_snapshot,
-                    workspace_root,
-                )
-                future_map[future] = (coder_id, shard.shard_id)
-                _update_coder_state(state, coder_id, status="running")
-                self._set_state(state)
-
-            try:
-                for future in concurrent.futures.as_completed(future_map):
-                    coder_id, shard_id = future_map[future]
-                    result = future.result()
-                    results.append(result)
-                    _update_coder_state(
-                        state,
-                        coder_id,
-                        status=result.status,
-                        changed_paths=result.bundle.changed_paths,
-                        diagnostics=result.bundle.diagnostics,
-                    )
-                    if result.error:
-                        state["error"] = result.error
-                    self._set_state(state)
-            except ApprovalRequired:
-                for future in future_map:
-                    future.cancel()
-                raise
-
-        return results
-
-    def _run_single_coder(
-        self,
-        run_root: Path,
-        coder_id: str,
-        shard: AutoShard,
-        baseline_snapshot: dict[str, bytes],
-        workspace_root: Path,
-    ) -> CoderResult:
-        workspace_copy = run_root / coder_id
-        if workspace_copy.exists():
-            shutil.rmtree(workspace_copy)
-        shutil.copytree(
-            workspace_root,
-            workspace_copy,
-            dirs_exist_ok=False,
-            ignore=shutil.ignore_patterns(".auto"),
-        )
-
-        planner = Planner()
-        executor = Executor(self.parent.tracer)
-        try:
-            plan = planner.build_plan(
-                shard.goal,
-                brain=self.parent._get_main_brain(),
-                model_config=self.parent.main_config,
-            )
-            with workspace_root_context(workspace_copy):
-                executed = executor.run(
-                    plan,
-                    tool_gateway=self.parent._build_tool_gateway(),
-                )
-            worker_errors = [
-                step.result or "step failed"
-                for step in executed.steps
-                if step.status == PlanStepStatus.ERROR
-            ]
-            if worker_errors:
-                return CoderResult(
-                    coder_id=coder_id,
-                    shard_id=shard.shard_id,
-                    status="failed",
-                    bundle=PatchBundle(status="failed", diagnostics=worker_errors),
-                    error=worker_errors[0],
-                )
-            after_snapshot = _snapshot_workspace(workspace_copy)
-            bundle = _build_patch_bundle(baseline_snapshot, after_snapshot)
-            return CoderResult(
-                coder_id=coder_id,
-                shard_id=shard.shard_id,
-                status="completed",
-                bundle=bundle,
-                error=None,
-            )
-        except ApprovalRequired:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            return CoderResult(
-                coder_id=coder_id,
-                shard_id=shard.shard_id,
-                status="failed",
-                bundle=PatchBundle(status="failed", diagnostics=[str(exc)]),
-                error=str(exc),
-            )
-
-    def _apply_patch_bundles(
-        self,
-        results: list[CoderResult],
-        *,
-        workspace_root: Path,
-    ) -> list[str]:
-        changed_paths: set[str] = set()
-        for item in results:
-            for operation in item.bundle.operations:
-                target = (workspace_root / operation.path).resolve()
-                try:
-                    target.relative_to(workspace_root)
-                except ValueError as exc:
-                    raise ValueError(f"path outside workspace: {operation.path}") from exc
-                if operation.op == "delete":
-                    if target.exists() and target.is_file():
-                        target.unlink()
-                elif operation.op in {"create", "update"}:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(operation.content or b"")
-                else:
-                    raise ValueError(f"unsupported patch operation: {operation.op}")
-                changed_paths.add(operation.path)
-        return sorted(changed_paths)
 
     def _run_verifier(
         self,

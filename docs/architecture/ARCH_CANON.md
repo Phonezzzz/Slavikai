@@ -11,7 +11,7 @@
   integration, explicit `PlanStep.tool_args`, debug-only command lane, split chat/workspace
   send+SSE endpoints, единый `TerminalTool`, auto v1 path через
   `AgentToolLoop -> ToolGateway -> verifier`, complete runtime tool descriptors, auto без
-  `classify_request(...)`.
+  `classify_request(...)`, удалённый legacy auto pipeline entrypoint.
 - **Current legacy runtime**: `core/agent*.py`, часть `classify_request(...)`, storage `lane`
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой архитектурой.
 - **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
@@ -170,9 +170,9 @@ Legacy debt после PR-14:
 - Primary `local` OpenAI-compatible provider реализует native provider tool calling.
   `xai`, `openrouter`, `inception` явно отклоняют generic `tools`; xAI web search
   остаётся отдельным provider-native режимом.
-- Старый auto pipeline `planner -> coder pool -> merge -> verifier` остаётся в
-  `AutoOrchestrator.run()` как legacy compatibility path; новые auto-запуски через
-  `AutoAgent.run_outcome()` используют auto v1 tool loop.
+- Старый auto pipeline `planner -> coder pool -> merge -> verifier` больше не имеет
+  runtime entrypoint; auto-запуски через `AutoAgent.run_outcome()` используют auto v1
+  tool loop.
 
 Уже не является допустимым legacy для расширения:
 
