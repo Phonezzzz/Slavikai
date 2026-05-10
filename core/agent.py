@@ -84,9 +84,11 @@ from tools.http_client import HttpClient
 from tools.image_analyze_tool import ImageAnalyzeTool
 from tools.image_generate_tool import ImageGenerateTool
 from tools.project_tool import ProjectTool
+from tools.protocols import Tool
 from tools.shell_tool import ShellTool
 from tools.stt_tool import SttTool
-from tools.tool_registry import ToolRegistry
+from tools.tool_descriptors import get_tool_metadata
+from tools.tool_registry import ToolCapability, ToolHandler, ToolRegistry
 from tools.tts_tool import TtsTool
 from tools.web_search_tool import WebSearchTool
 from tools.workspace_tools import (
@@ -283,40 +285,59 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
         return main_brain
 
     def _register_tools(self) -> None:
-        self.tool_registry.register(
+        def register_tool(
+            name: str,
+            handler: Tool | ToolHandler,
+            *,
+            enabled: bool,
+            capability: ToolCapability,
+            risk_classes: list[str] | None = None,
+        ) -> None:
+            metadata = get_tool_metadata(name)
+            self.tool_registry.register(
+                name,
+                handler,
+                enabled=enabled,
+                capability=capability,
+                risk_classes=risk_classes,
+                description=metadata.description,
+                parameters_schema=metadata.parameters_schema,
+            )
+
+        register_tool(
             "fs",
             FilesystemTool(),
             enabled=self.tools_enabled.get("fs", False),
             capability="exec",
         )
-        self.tool_registry.register(
+        register_tool(
             "web",
             self.web_tool.handle,
             enabled=self.tools_enabled.get("web", False),
             capability="read",
             risk_classes=["read", "network", "external_side_effect"],
         )
-        self.tool_registry.register(
+        register_tool(
             "shell",
             ShellTool(),
             enabled=self.tools_enabled.get("shell", False),
             capability="exec",
             risk_classes=["execute"],
         )
-        self.tool_registry.register(
+        register_tool(
             "project",
             ProjectTool(),
             enabled=self.tools_enabled.get("project", False),
             capability="exec",
             risk_classes=["execute"],
         )
-        self.tool_registry.register(
+        register_tool(
             "image_analyze",
             ImageAnalyzeTool(),
             enabled=self.tools_enabled.get("image_analyze", False),
             capability="read",
         )
-        self.tool_registry.register(
+        register_tool(
             "image_generate",
             ImageGenerateTool(),
             enabled=self.tools_enabled.get("image_generate", False),
@@ -324,56 +345,77 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin):
             risk_classes=["execute", "network", "external_side_effect"],
         )
         http_client = HttpClient()
-        self.tool_registry.register(
+        register_tool(
             "tts",
             TtsTool(http_client),
             enabled=self.tools_enabled.get("tts", False),
             capability="exec",
             risk_classes=["execute", "network", "external_side_effect"],
         )
-        self.tool_registry.register(
+        register_tool(
             "stt",
             SttTool(http_client),
             enabled=self.tools_enabled.get("stt", False),
             capability="exec",
             risk_classes=["execute", "network", "external_side_effect"],
         )
-        self.tool_registry.register(
-            "workspace_list", ListFilesTool(), enabled=True, capability="read"
+        register_tool(
+            "workspace_list",
+            ListFilesTool(),
+            enabled=True,
+            capability="read",
         )
-        self.tool_registry.register(
-            "workspace_read", ReadFileTool(), enabled=True, capability="read"
+        register_tool(
+            "workspace_read",
+            ReadFileTool(),
+            enabled=True,
+            capability="read",
         )
-        self.tool_registry.register(
-            "workspace_write", WriteFileTool(), enabled=True, capability="write"
+        register_tool(
+            "workspace_write",
+            WriteFileTool(),
+            enabled=True,
+            capability="write",
         )
-        self.tool_registry.register(
-            "workspace_create", CreateFileTool(), enabled=True, capability="write"
+        register_tool(
+            "workspace_create",
+            CreateFileTool(),
+            enabled=True,
+            capability="write",
         )
-        self.tool_registry.register(
-            "workspace_rename", RenameFileTool(), enabled=True, capability="write"
+        register_tool(
+            "workspace_rename",
+            RenameFileTool(),
+            enabled=True,
+            capability="write",
         )
-        self.tool_registry.register(
-            "workspace_move", MoveFileTool(), enabled=True, capability="write"
+        register_tool(
+            "workspace_move",
+            MoveFileTool(),
+            enabled=True,
+            capability="write",
         )
-        self.tool_registry.register(
+        register_tool(
             "workspace_delete",
             DeleteFileTool(),
             enabled=True,
             capability="write",
             risk_classes=["write", "destructive"],
         )
-        self.tool_registry.register(
-            "workspace_patch", ApplyPatchTool(), enabled=True, capability="write"
+        register_tool(
+            "workspace_patch",
+            ApplyPatchTool(),
+            enabled=True,
+            capability="write",
         )
-        self.tool_registry.register(
+        register_tool(
             "workspace_run",
             RunCodeTool(),
             enabled=self.tools_enabled.get("workspace_run", True),
             capability="exec",
             risk_classes=["execute"],
         )
-        self.tool_registry.register(
+        register_tool(
             "workspace_terminal_run",
             WorkspaceTerminalRunTool(),
             enabled=self.tools_enabled.get("workspace_run", True),

@@ -21,6 +21,7 @@ from core.mwv.verifier import VerifierRunner
 from core.mwv.verifier_summary import summarize_verifier_failure
 from core.tool_gateway import ToolGateway
 from shared.models import ToolRequest
+from tools.tool_descriptors import get_tool_metadata
 from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import (
     ApplyPatchTool,
@@ -122,9 +123,33 @@ class CodingSkill:
 
 def _build_workspace_gateway() -> ToolGateway:
     registry = ToolRegistry()
-    registry.register("workspace_read", ReadFileTool(), enabled=True, capability="read")
-    registry.register("workspace_write", WriteFileTool(), enabled=True, capability="write")
-    registry.register("workspace_patch", ApplyPatchTool(), enabled=True, capability="write")
+    read_metadata = get_tool_metadata("workspace_read")
+    registry.register(
+        "workspace_read",
+        ReadFileTool(),
+        enabled=True,
+        capability="read",
+        description=read_metadata.description,
+        parameters_schema=read_metadata.parameters_schema,
+    )
+    write_metadata = get_tool_metadata("workspace_write")
+    registry.register(
+        "workspace_write",
+        WriteFileTool(),
+        enabled=True,
+        capability="write",
+        description=write_metadata.description,
+        parameters_schema=write_metadata.parameters_schema,
+    )
+    patch_metadata = get_tool_metadata("workspace_patch")
+    registry.register(
+        "workspace_patch",
+        ApplyPatchTool(),
+        enabled=True,
+        capability="write",
+        description=patch_metadata.description,
+        parameters_schema=patch_metadata.parameters_schema,
+    )
     return ToolGateway(registry)
 
 

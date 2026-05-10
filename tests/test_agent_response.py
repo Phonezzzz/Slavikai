@@ -127,6 +127,7 @@ def test_agent_chat_response_can_use_read_only_native_tool_loop(tmp_path: Path) 
             "properties": {"query": {"type": "string"}},
             "required": ["query"],
         },
+        chat_exposed=True,
     )
 
     response = agent.respond([LLMMessage(role="user", content="use lookup")])

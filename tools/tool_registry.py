@@ -34,6 +34,7 @@ class ToolDescriptor:
     risk_classes: list[ToolRiskClass] | None = None
     description: str = ""
     parameters_schema: dict[str, JSONValue] = field(default_factory=dict)
+    chat_exposed: bool = False
 
 
 class ToolRegistry:
@@ -62,6 +63,7 @@ class ToolRegistry:
         risk_classes: list[str] | None = None,
         description: str = "",
         parameters_schema: dict[str, JSONValue] | None = None,
+        chat_exposed: bool = False,
     ) -> None:
         resolved: ToolHandler
         if isinstance(handler, Tool):
@@ -79,6 +81,7 @@ class ToolRegistry:
             ),
             description=description,
             parameters_schema=parameters_schema or {},
+            chat_exposed=chat_exposed,
         )
         self._logger.info(
             "tool_registered",

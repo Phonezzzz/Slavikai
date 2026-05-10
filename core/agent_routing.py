@@ -513,6 +513,8 @@ class AgentRoutingMixin:
             descriptor = self.tool_registry.get_descriptor(name)
             if descriptor is None or descriptor.capability != "read":
                 continue
+            if not descriptor.chat_exposed:
+                continue
             if not descriptor.description and not descriptor.parameters_schema:
                 continue
             specs.append(
