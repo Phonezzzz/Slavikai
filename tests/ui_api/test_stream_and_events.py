@@ -6,7 +6,7 @@ import pytest
 from .fakes import *
 
 
-def test_ui_chat_send_canvas_stream_keeps_full_answer_in_chat() -> None:
+def test_ui_chat_send_named_file_canvas_stream_keeps_full_answer_in_chat() -> None:
     async def run() -> None:
         client = await _create_client(StreamNamedFileArtifactsAgent())
         try:

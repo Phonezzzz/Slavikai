@@ -82,13 +82,17 @@ def _request_likely_canvas(user_input: str) -> bool:
     if re.search(r"\b\d+\s*(files?|файл(а|ов)?)\b", normalized):
         return True
 
-    keywords = (
-        "canvas",
-        "канвас",
-        "артефакт",
-        "artifact",
+    intent_patterns = (
+        r"\b(open|show|render|save|put|display|view)\b.{0,48}\b(canvas|artifact)\b",
+        r"\b(canvas|artifact)\b.{0,48}\b(open|show|render|save|display|view)\b",
+        r"\b(in|to|as)\s+(the\s+)?(canvas|artifact)\b",
+        r"\b(create|make|build|save)\s+(an?\s+)?artifact\b",
+        r"(?:в|на)\s+(?:canvas|канвас(?:е)?)\b",
+        r"(?:как|в виде)\s+(?:artifact|артефакт(?:а)?)\b",
+        r"(?:создай|создать|сделай|сохранить|сохрани|открой|покажи|выведи)"
+        r".{0,48}(?:canvas|канвас|artifact|артефакт)",
     )
-    return any(token in normalized for token in keywords)
+    return any(re.search(pattern, normalized) for pattern in intent_patterns)
 
 
 def _should_render_result_in_canvas(

@@ -10,6 +10,15 @@ import { VerifierBlock } from './blocks/verifier-block';
 import type { MessageBlock, MessageRendererProps } from './types';
 
 const detailsKey = (messageId: string, blockId: string): string => `${messageId}:${blockId}`;
+const USER_COLLAPSE_CHAR_LIMIT = 1200;
+const USER_COLLAPSE_LINE_LIMIT = 14;
+
+const shouldCollapseUserContent = (content: string): boolean => {
+  if (content.length > USER_COLLAPSE_CHAR_LIMIT) {
+    return true;
+  }
+  return content.split(/\r\n|\r|\n/).length > USER_COLLAPSE_LINE_LIMIT;
+};
 
 const isRenderableTextBlock = (block: MessageBlock): block is Extract<MessageBlock, { kind: 'text' }> => {
   return block.kind === 'text';
@@ -37,6 +46,7 @@ export function MessageRenderer({
   onDecisionRespond,
 }: MessageRendererProps) {
   const [detailsOpenByKey, setDetailsOpenByKey] = useState<Record<string, boolean>>({});
+  const [userMessageExpanded, setUserMessageExpanded] = useState(false);
 
   const blocks = useMemo(() => buildMessageBlocks(context, message), [context, message]);
 
@@ -53,6 +63,9 @@ export function MessageRenderer({
 
   const isUser = message.message.role === 'user';
   const attachments = message.message.attachments ?? [];
+  const collapseUserMessage =
+    context === 'chat' && isUser && shouldCollapseUserContent(message.message.content);
+  const userContentCollapsed = collapseUserMessage && !userMessageExpanded;
 
   const toggleDetails = (blockId: string) => {
     const key = detailsKey(message.message.messageId, blockId);
@@ -69,63 +82,79 @@ export function MessageRenderer({
       }`}
     >
       <div className="message-card">
-        {blocks.map((block) => {
-          if (isRenderableTextBlock(block)) {
-            return <TextBlock key={block.id} context={context} markdown={block.markdown} />;
-          }
-          if (isRenderableCodeBlock(block)) {
-            return (
-              <CodeBlock
-                key={block.id}
-                context={context}
-                language={block.language}
-                code={block.code}
-                isFinal={block.isFinal}
-              />
-            );
-          }
-          if (isRenderableToolBlock(block)) {
-            const key = detailsKey(message.message.messageId, block.id);
-            return (
-              <ToolBlock
-                key={block.id}
-                traceId={block.traceId}
-                summary={block.summary}
-                report={block.report}
-                open={Boolean(detailsOpenByKey[key])}
-                onToggle={() => toggleDetails(block.id)}
-              />
-            );
-          }
-          if (isRenderableVerifierBlock(block)) {
-            const key = detailsKey(message.message.messageId, block.id);
-            return (
-              <VerifierBlock
-                key={block.id}
-                summary={block.summary}
-                verifier={block.verifier}
-                traceId={block.traceId}
-                open={Boolean(detailsOpenByKey[key])}
-                onToggle={() => toggleDetails(block.id)}
-              />
-            );
-          }
-          return null;
-        })}
+        <div
+          className={`message-card-content ${
+            userContentCollapsed ? 'message-card-content--collapsed' : ''
+          }`}
+        >
+          {blocks.map((block) => {
+            if (isRenderableTextBlock(block)) {
+              return <TextBlock key={block.id} context={context} markdown={block.markdown} />;
+            }
+            if (isRenderableCodeBlock(block)) {
+              return (
+                <CodeBlock
+                  key={block.id}
+                  context={context}
+                  language={block.language}
+                  code={block.code}
+                  isFinal={block.isFinal}
+                />
+              );
+            }
+            if (isRenderableToolBlock(block)) {
+              const key = detailsKey(message.message.messageId, block.id);
+              return (
+                <ToolBlock
+                  key={block.id}
+                  traceId={block.traceId}
+                  summary={block.summary}
+                  report={block.report}
+                  open={Boolean(detailsOpenByKey[key])}
+                  onToggle={() => toggleDetails(block.id)}
+                />
+              );
+            }
+            if (isRenderableVerifierBlock(block)) {
+              const key = detailsKey(message.message.messageId, block.id);
+              return (
+                <VerifierBlock
+                  key={block.id}
+                  summary={block.summary}
+                  verifier={block.verifier}
+                  traceId={block.traceId}
+                  open={Boolean(detailsOpenByKey[key])}
+                  onToggle={() => toggleDetails(block.id)}
+                />
+              );
+            }
+            return null;
+          })}
 
-        {attachments.length > 0 ? (
-          <div className="message-attachments-row">
-            {attachments.map((attachment, index) => (
-              <div
-                key={`${attachment.name}-${index}`}
-                className="message-attachment"
-                title={`${attachment.name} (${attachment.mime})`}
-              >
-                <FileText className="h-3.5 w-3.5" />
-                <span className="truncate">{attachment.name}</span>
-              </div>
-            ))}
-          </div>
+          {attachments.length > 0 ? (
+            <div className="message-attachments-row">
+              {attachments.map((attachment, index) => (
+                <div
+                  key={`${attachment.name}-${index}`}
+                  className="message-attachment"
+                  title={`${attachment.name} (${attachment.mime})`}
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                  <span className="truncate">{attachment.name}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        {collapseUserMessage ? (
+          <button
+            type="button"
+            className="message-user-expand"
+            aria-expanded={userMessageExpanded}
+            onClick={() => setUserMessageExpanded((expanded) => !expanded)}
+          >
+            {userMessageExpanded ? 'Свернуть' : 'Развернуть'}
+          </button>
         ) : null}
       </div>
     </div>

@@ -431,6 +431,40 @@ def test_ui_chat_send_endpoint() -> None:
     asyncio.run(run())
 
 
+def test_ui_chat_send_canvas_topic_stays_in_chat_without_artifact() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={
+                    "content": (
+                        "Explain why canvas/storage/API flow should not duplicate "
+                        "ordinary assistant answers."
+                    )
+                },
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            display = payload.get("display")
+            assert isinstance(display, dict)
+            assert display.get("target") == "chat"
+            artifacts = payload.get("artifacts")
+            assert isinstance(artifacts, list)
+            assert artifacts == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_uses_global_runtime_model_when_session_override_missing() -> None:
     async def run() -> None:
         agent = CaptureConfigAgent()

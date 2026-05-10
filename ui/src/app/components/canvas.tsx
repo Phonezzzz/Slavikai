@@ -116,7 +116,7 @@ function MessageBubble({ message }: { message: CanvasMessage }) {
           <span className="text-[11px] font-semibold text-[#aeb1ff]">YOU</span>
         )}
       </div>
-      <div className={`flex-1 min-w-0 ${message.role === "user" ? "text-right" : ""}`}>
+      <div className="flex-1 min-w-0">
         <MessageRenderer context="chat" message={renderable} />
       </div>
     </div>
