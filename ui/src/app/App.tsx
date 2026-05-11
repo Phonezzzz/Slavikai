@@ -634,7 +634,6 @@ export default function App() {
             sessionYoloActive={runtime.sessionSecuritySummary.yoloActive}
             sessionSafeMode={runtime.sessionSecuritySummary.safeMode}
             messages={transport.workspaceMessages}
-            sending={transport.sending}
             statusMessage={statusMessage}
             onBackToChat={() => {
               overlays.setRepositoryPanelOpen(false);
@@ -642,7 +641,6 @@ export default function App() {
             }}
             onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
             onOpenRepositoryPanel={() => overlays.setRepositoryPanelOpen(true)}
-            onSendAgentMessage={transport.handleSendWorkspace}
             onApplyWorkspaceRoot={runtime.applyWorkspaceRoot}
             mode={runtime.sessionMode}
             activePlan={runtime.activePlan}

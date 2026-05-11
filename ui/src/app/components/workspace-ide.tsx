@@ -12,7 +12,7 @@ import type {
   UiDecision,
 } from '../types';
 import { getDecisionDisplayState } from '../decision-display';
-import type { CanvasMessage, CanvasSendPayload } from './canvas';
+import type { CanvasMessage } from './canvas';
 import {
   findFirstFilePath,
   terminalTimestamp,
@@ -55,9 +55,7 @@ import {
   putWorkspaceFile,
 } from '../../features/workspace/workspace-api';
 import {
-  buildWorkspaceContextAttachments,
   buildWorkspaceContextChips,
-  mergeWorkspaceAttachments,
 } from '../../features/workspace/workspace-context';
 
 type WorkspaceIdeProps = {
@@ -69,12 +67,10 @@ type WorkspaceIdeProps = {
   sessionYoloActive: boolean;
   sessionSafeMode: boolean;
   messages: CanvasMessage[];
-  sending: boolean;
   statusMessage?: string | null;
   onBackToChat: () => void;
   onOpenSessionDrawer: () => void;
   onOpenRepositoryPanel: () => void;
-  onSendAgentMessage: (payload: CanvasSendPayload) => Promise<boolean>;
   onApplyWorkspaceRoot: (workspaceRoot: string) => void;
   onSendFeedback?: (interactionId: string, rating: 'good' | 'bad') => Promise<boolean>;
   mode: SessionMode;
@@ -112,12 +108,10 @@ export function WorkspaceIde({
   sessionYoloActive,
   sessionSafeMode,
   messages,
-  sending,
   statusMessage,
   onBackToChat,
   onOpenSessionDrawer,
   onOpenRepositoryPanel,
-  onSendAgentMessage,
   onApplyWorkspaceRoot,
   onSendFeedback,
   mode,
@@ -158,7 +152,6 @@ export function WorkspaceIde({
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalBusy, setTerminalBusy] = useState(false);
 
-  const [agentInput, setAgentInput] = useState('');
   const [includeOpenTabs, setIncludeOpenTabs] = useState(true);
   const [includeSelection, setIncludeSelection] = useState(true);
   const [includeGitDiff, setIncludeGitDiff] = useState(true);
@@ -1086,37 +1079,6 @@ export function WorkspaceIde({
     }
   };
 
-  const buildContextAttachments = () =>
-    buildWorkspaceContextAttachments({
-      includeOpenTabs,
-      includeSelection,
-      includeGitDiff,
-      includeTerminal,
-      openFiles,
-      activeFile: activeTab,
-      selectionText,
-      gitDiff,
-      lastTerminalOutput,
-    });
-
-  const buildAssistantAttachments = (
-    payloadAttachments: CanvasSendPayload['attachments'] | undefined = undefined,
-  ) => {
-    return mergeWorkspaceAttachments(payloadAttachments ?? [], buildContextAttachments());
-  };
-
-  const handleWorkspaceAssistantSend = async (payload: CanvasSendPayload): Promise<boolean> => {
-    const content = payload.content.trim();
-    const attachments = buildAssistantAttachments(payload.attachments);
-    if ((!content && attachments.length === 0) || sending || isDecisionBlocking) {
-      return false;
-    }
-    return onSendAgentMessage({
-      content,
-      attachments: attachments.length > 0 ? attachments : undefined,
-    });
-  };
-
   const handleEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
     editor.onDidChangeCursorSelection(() => {
@@ -1147,7 +1109,6 @@ export function WorkspaceIde({
   const terminalPendingText = isDecisionBlocking
     ? 'Ожидает подтверждения решения. Отправка временно заблокирована.'
     : null;
-  const canSendWithContext = Boolean(agentInput.trim() || buildContextAttachments().length > 0);
   return (
     <div className="h-full min-h-0 flex flex-col bg-[#0a0a0d] text-[#d2d2d9]">
       <WorkspaceToolbar
@@ -1258,13 +1219,7 @@ export function WorkspaceIde({
           onDecisionRespond={onDecisionRespond}
           messages={messages}
           terminalPendingText={terminalPendingText}
-          agentInput={agentInput}
-          sending={sending}
-          isDecisionBlocking={isDecisionBlocking}
-          canSend={canSendWithContext}
           onSendFeedback={onSendFeedback}
-          onAgentInputChange={setAgentInput}
-          onSendPayload={handleWorkspaceAssistantSend}
         />
 
         <button

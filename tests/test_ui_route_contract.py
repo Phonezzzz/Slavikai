@@ -98,3 +98,20 @@ def test_legacy_ui_api_paths_are_not_used_in_tracked_sources() -> None:
                 if re.search(legacy_pattern, text):
                     found.setdefault(legacy_pattern, []).append(str(file_path))
     assert found == {}, f"Found forbidden legacy API paths: {found}"
+
+
+def test_workspace_assistant_has_no_composer_entrypoint() -> None:
+    panel_source = Path("ui/src/features/workspace/workspace-assistant-panel.tsx").read_text(
+        encoding="utf-8",
+    )
+    forbidden = [
+        "Ask agent",
+        "workspace-composer-textarea",
+        "onSendPayload",
+        "onAgentInputChange",
+    ]
+    found = [marker for marker in forbidden if marker in panel_source]
+    assert found == [], f"Workspace assistant still exposes composer markers: {found}"
+
+    app_source = Path("ui/src/app/App.tsx").read_text(encoding="utf-8")
+    assert "onSendAgentMessage={transport.handleSendWorkspace}" not in app_source

@@ -1,5 +1,5 @@
 import { WorkspaceIde } from './workspace-ide';
-import type { CanvasMessage, CanvasSendPayload } from './canvas';
+import type { CanvasMessage } from './canvas';
 import type {
   AutoState,
   DecisionRespondChoice,
@@ -19,7 +19,6 @@ type WorkspaceSessionScreenProps = {
   sessionYoloActive: boolean;
   sessionSafeMode: boolean;
   messages: CanvasMessage[];
-  sending: boolean;
   statusMessage: string | null;
   mode: SessionMode;
   activePlan: PlanEnvelope | null;
@@ -36,7 +35,6 @@ type WorkspaceSessionScreenProps = {
   onBackToChat: () => void;
   onOpenSessionDrawer: () => void;
   onOpenRepositoryPanel: () => void;
-  onSendAgentMessage: (payload: CanvasSendPayload) => Promise<boolean>;
   onApplyWorkspaceRoot: (workspaceRoot: string) => void;
   onChangeMode: (mode: SessionMode) => Promise<void>;
   onPlanDraft: (goal: string) => Promise<void>;
@@ -58,7 +56,6 @@ export function WorkspaceSessionScreen({
   sessionYoloActive,
   sessionSafeMode,
   messages,
-  sending,
   statusMessage,
   mode,
   activePlan,
@@ -75,7 +72,6 @@ export function WorkspaceSessionScreen({
   onBackToChat,
   onOpenSessionDrawer,
   onOpenRepositoryPanel,
-  onSendAgentMessage,
   onApplyWorkspaceRoot,
   onChangeMode,
   onPlanDraft,
@@ -94,12 +90,10 @@ export function WorkspaceSessionScreen({
       sessionYoloActive={sessionYoloActive}
       sessionSafeMode={sessionSafeMode}
       messages={messages}
-      sending={sending}
       statusMessage={statusMessage}
       onBackToChat={onBackToChat}
       onOpenSessionDrawer={onOpenSessionDrawer}
       onOpenRepositoryPanel={onOpenRepositoryPanel}
-      onSendAgentMessage={onSendAgentMessage}
       onApplyWorkspaceRoot={onApplyWorkspaceRoot}
       mode={mode}
       activePlan={activePlan}
