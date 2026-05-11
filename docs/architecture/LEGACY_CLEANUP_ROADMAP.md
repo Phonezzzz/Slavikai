@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-25
+# Legacy Cleanup Roadmap After PR-26
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-25. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-26. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-25 находятся в `main`.
+- PR-0..PR-26 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -42,6 +42,10 @@
 - Tool failure threshold больше не создаёт отдельный `DecisionPacket(tool_fail)` и не
   прерывает runtime через `DecisionRequired`; tool failure остаётся observability/candidate
   signal после gateway call.
+- Workspace IDE начал декомпозицию: layout/resize state вынесен в
+  `useWorkspaceLayout`, quick-open index/filter/recent-path logic вынесена в
+  `workspace-quick-open-index.ts`. Это первый срез без redesign и без изменения
+  workspace runtime/API behavior.
 
 ## Known legacy
 
@@ -54,8 +58,10 @@
 - `server/http/handlers/ui_chat.py` всё ещё содержит общий внутренний send runtime, но
   HTTP entrypoints уже не используют shared `payload_override` path.
 - `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`, `server/ui_hub.py`,
-  `use-session-runtime-controller.ts`, `use-session-transport.ts` и `workspace-ide.tsx`
-  остаются крупными монолитами.
+  `use-session-runtime-controller.ts`, `use-session-transport.ts` остаются крупными
+  монолитами.
+- `workspace-ide.tsx` всё ещё остаётся крупным controller-компонентом, но layout и
+  quick-open logic уже вынесены в feature-модули.
 
 ## Cleanup workflow
 
@@ -150,6 +156,7 @@ BLOCKED report должен включать:
     - Удалён tool-fail decision branch: repeated tool failures больше не создают
       `DecisionPacket`; candidate/inbox observability сохраняется.
 
-12. PR-26 `pr-workspace-ide-decompose`
+12. PR-26 `pr-workspace-ide-decompose` — done
     - Разбить `workspace-ide.tsx` на меньшие компоненты без redesign.
     - Цель: снизить риск дальнейших workspace UI изменений.
+    - Первый срез: вынесены layout/resize hook и quick-open index/filter helpers.

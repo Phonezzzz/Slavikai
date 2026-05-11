@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-25.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-26.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -23,8 +23,10 @@ append-comment edits напрямую; выполнение идёт через 
 без `/history?lane=workspace`. После PR-24 memory/policy-feedback surface вынесен из
 `core/agent.py` в `core/agent_memory.py::AgentMemoryMixin` без изменения runtime behavior.
 После PR-25 repeated tool failures больше не создают отдельный `DecisionPacket(tool_fail)`;
-они остаются observability/candidate сигналом после gateway call. Часть старого runtime
-ещё остаётся legacy-обвязкой.
+они остаются observability/candidate сигналом после gateway call. После PR-26
+workspace IDE начал декомпозицию: layout/resize state и quick-open index/filter logic
+вынесены из `workspace-ide.tsx` в feature-модули. Часть старого runtime ещё остаётся
+legacy-обвязкой.
 
 ## Основные слои
 
@@ -130,6 +132,9 @@ append-comment edits напрямую; выполнение идёт через 
   chat/workspace endpoints.
 - Frontend send flow использует отдельные `handleSendChat` и `handleSendWorkspace`.
   Runtime controller больше не загружает workspace history через `/history?lane=workspace`.
+- Workspace IDE всё ещё имеет крупный controller-компонент, но layout/resize state
+  живёт в `useWorkspaceLayout`, а quick-open indexing/filtering — в
+  `workspace-quick-open-index.ts`.
 
 ## Backend PTY Terminal API
 
@@ -193,5 +198,8 @@ append-comment edits напрямую; выполнение идёт через 
 - Command lane не является способом вызова tools. Только `/trace` и `/end-session`.
 - Tool failure threshold не является decision runtime; failures не должны обходить
   gateway/approval через отдельный `DecisionRequired` path.
+- `workspace-ide.tsx` больше не должен снова принимать layout/resize или quick-open
+  indexing responsibilities; новые workspace UI изменения должны продолжать выносить
+  bounded surfaces в `ui/src/features/workspace/*`.
 - `server/terminal_manager.py` — совместимый alias на `TerminalTool`, не отдельная реализация.
 - Planned cleanup roadmap: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

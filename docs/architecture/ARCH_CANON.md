@@ -16,7 +16,8 @@
   message storage на `chat_messages` и `workspace_messages`, отдельные chat/workspace
   send handlers, удалённый legacy event stream route, split frontend send entrypoints,
   memory/policy-feedback surface вынесен из `core/agent.py` в `AgentMemoryMixin`,
-  tool-fail decision branch удалён.
+  tool-fail decision branch удалён, первый срез декомпозиции `workspace-ide.tsx`
+  вынес layout/resize state и quick-open indexing/filtering в feature-модули.
 - **Current legacy runtime**: крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой
@@ -159,7 +160,7 @@ API:
 
 Новые фичи не должны расширять legacy-пути как целевую архитектуру.
 
-Legacy debt после PR-25:
+Legacy debt после PR-26:
 
 - `core/agent.py` уже сжат до bootstrap/configuration shell; `core/agent_mwv.py`,
   `core/agent_tools.py`, `core/agent_routing.py` остаются крупными mixin-модулями.
@@ -188,6 +189,9 @@ Legacy debt после PR-25:
   проходит через отдельный plan/executor wrapper.
 - Tool failures после gateway call не создают отдельный `DecisionPacket(tool_fail)`;
   failures остаются observability/candidate сигналом и не должны обходить gateway/approval.
+- `workspace-ide.tsx` остаётся крупным controller-компонентом, но layout/resize state
+  и quick-open index/filter helpers уже вынесены. Дальнейшая UI-декомпозиция должна
+  продолжать выделять реальные bounded surfaces без redesign.
 
 Уже не является допустимым legacy для расширения:
 
@@ -197,4 +201,4 @@ Legacy debt после PR-25:
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
 
-Roadmap устранения legacy после PR-25: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
+Roadmap устранения legacy после PR-26: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

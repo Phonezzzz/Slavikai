@@ -32,7 +32,14 @@ import {
   WorkspaceQuickOpen,
   type WorkspaceQuickOpenItem,
 } from '../../features/workspace/workspace-quick-open';
+import {
+  collectQuickOpenItems,
+  filterQuickOpenItems,
+  nextRecentWorkspacePaths,
+  type QuickOpenIndexCache,
+} from '../../features/workspace/workspace-quick-open-index';
 import { WorkspaceToolbar } from '../../features/workspace/workspace-toolbar';
+import { useWorkspaceLayout } from '../../features/workspace/use-workspace-layout';
 import {
   deleteWorkspaceFile,
   fetchWorkspaceFile,
@@ -93,26 +100,8 @@ type WorkspaceIdeProps = {
   explorerVisible: boolean;
 };
 
-const MIN_EXPLORER_WIDTH = 240;
-const MAX_EXPLORER_WIDTH = 420;
-const MIN_ASSISTANT_WIDTH = 340;
-const ASSISTANT_MAX_SCREEN_SHARE = 0.5;
-const MIN_TERMINAL_HEIGHT = 140;
-const MAX_TERMINAL_HEIGHT = 420;
-const MIN_EDITOR_WIDTH = 420;
-const ASSISTANT_RESIZER_WIDTH = 6;
-const EXPLORER_RESIZER_WIDTH = 6;
 const ROOT_TREE_DEBOUNCE_MS = 150;
 const CHILD_TREE_DEBOUNCE_MS = 80;
-const QUICK_OPEN_MAX_RESULTS = 120;
-const QUICK_OPEN_MAX_RECENT = 24;
-
-type QuickOpenIndexCache = {
-  rootKey: string;
-  items: WorkspaceQuickOpenItem[];
-  partial: boolean;
-  loadedAt: number;
-};
 
 export function WorkspaceIde({
   sessionId,
@@ -187,13 +176,14 @@ export function WorkspaceIde({
   const [quickOpenPartial, setQuickOpenPartial] = useState(false);
   const [quickOpenItems, setQuickOpenItems] = useState<WorkspaceQuickOpenItem[]>([]);
   const [recentPaths, setRecentPaths] = useState<string[]>([]);
-
-  const [explorerWidth, setExplorerWidth] = useState(280);
-  const [assistantWidth, setAssistantWidth] = useState(390);
-  const [terminalHeight, setTerminalHeight] = useState(220);
-  const [draggingExplorer, setDraggingExplorer] = useState(false);
-  const [draggingAssistant, setDraggingAssistant] = useState(false);
-  const [draggingTerminal, setDraggingTerminal] = useState(false);
+  const {
+    terminalHeight,
+    workspaceGridColumns,
+    workspaceGridRef,
+    startExplorerResize,
+    startAssistantResize,
+    startTerminalResize,
+  } = useWorkspaceLayout({ explorerVisible });
 
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const assistantSeenRef = useRef<Set<string>>(new Set());
@@ -207,25 +197,6 @@ export function WorkspaceIde({
   const treeInFlightPathsRef = useRef<Set<string>>(new Set());
   const quickOpenFileIndexRef = useRef<QuickOpenIndexCache | null>(null);
   const quickOpenLoadedForRoot = useRef<string | null>(null);
-  const workspaceGridRef = useRef<HTMLDivElement>(null);
-
-  const clampAssistantWidth = (nextWidth: number): number => {
-    const fallbackWidth = typeof window === 'undefined' ? 1280 : window.innerWidth;
-    const gridWidth = workspaceGridRef.current?.clientWidth ?? fallbackWidth;
-    const fixedColumns = explorerVisible
-      ? explorerWidth + EXPLORER_RESIZER_WIDTH + ASSISTANT_RESIZER_WIDTH
-      : ASSISTANT_RESIZER_WIDTH;
-    const maxByEditor = Math.max(
-      MIN_ASSISTANT_WIDTH,
-      Math.floor(gridWidth - fixedColumns - MIN_EDITOR_WIDTH),
-    );
-    const maxByHalfScreen = Math.max(
-      MIN_ASSISTANT_WIDTH,
-      Math.floor(gridWidth * ASSISTANT_MAX_SCREEN_SHARE),
-    );
-    const maxAllowed = Math.min(maxByEditor, maxByHalfScreen);
-    return Math.min(maxAllowed, Math.max(MIN_ASSISTANT_WIDTH, nextWidth));
-  };
 
   const activeTab = useMemo(
     () => openFiles.find((item) => item.id === activeFileId) ?? null,
@@ -247,80 +218,13 @@ export function WorkspaceIde({
     if (!normalized) {
       return;
     }
-    setRecentPaths((prev) => {
-      const next = [normalized, ...prev.filter((item) => item !== normalized)];
-      return next.slice(0, QUICK_OPEN_MAX_RECENT);
-    });
+    setRecentPaths((prev) => nextRecentWorkspacePaths(prev, normalized));
   };
 
-  const collectQuickOpenItems = (nodes: WorkspaceNode[]): WorkspaceQuickOpenItem[] => {
-    const output: WorkspaceQuickOpenItem[] = [];
-    const walk = (items: WorkspaceNode[]) => {
-      for (const node of items) {
-        if (node.type === 'file') {
-          const path = node.path?.trim() ?? '';
-          if (!path) {
-            continue;
-          }
-          const slash = path.lastIndexOf('/');
-          const name = slash >= 0 ? path.slice(slash + 1) : path;
-          const dir = slash >= 0 ? path.slice(0, slash) : '';
-          output.push({ path, name, dir });
-          continue;
-        }
-        if (node.children && node.children.length > 0) {
-          walk(node.children);
-        }
-      }
-    };
-    walk(nodes);
-    output.sort((a, b) => {
-      const byName = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-      if (byName !== 0) {
-        return byName;
-      }
-      return a.path.localeCompare(b.path, undefined, { sensitivity: 'base' });
-    });
-    return output;
-  };
-
-  const quickOpenResults = useMemo(() => {
-    const rawQuery = quickOpenQuery.trim().toLowerCase();
-    if (!rawQuery) {
-      return quickOpenItems.slice(0, QUICK_OPEN_MAX_RESULTS);
-    }
-    const recentBoost = new Set(recentPaths);
-    const scored = quickOpenItems
-      .map((item) => {
-        const name = item.name.toLowerCase();
-        const path = item.path.toLowerCase();
-        let score = -1;
-        if (name === rawQuery) {
-          score = 400;
-        } else if (name.startsWith(rawQuery)) {
-          score = 300;
-        } else if (name.includes(rawQuery)) {
-          score = 200;
-        } else if (path.includes(rawQuery)) {
-          score = 120;
-        }
-        if (score < 0) {
-          return null;
-        }
-        if (recentBoost.has(item.path)) {
-          score += 35;
-        }
-        return { item, score };
-      })
-      .filter((entry): entry is { item: WorkspaceQuickOpenItem; score: number } => entry !== null)
-      .sort((a, b) => {
-        if (b.score !== a.score) {
-          return b.score - a.score;
-        }
-        return a.item.path.localeCompare(b.item.path, undefined, { sensitivity: 'base' });
-      });
-    return scored.slice(0, QUICK_OPEN_MAX_RESULTS).map((entry) => entry.item);
-  }, [quickOpenItems, quickOpenQuery, recentPaths]);
+  const quickOpenResults = useMemo(
+    () => filterQuickOpenItems(quickOpenItems, quickOpenQuery, recentPaths),
+    [quickOpenItems, quickOpenQuery, recentPaths],
+  );
 
   const lastTerminalOutput = useMemo(() => {
     for (let index = terminalLines.length - 1; index >= 0; index -= 1) {
@@ -449,51 +353,6 @@ export function WorkspaceIde({
       treeInFlightPathsRef.current.clear();
     };
   }, []);
-
-  useEffect(() => {
-    if (!(draggingExplorer || draggingAssistant || draggingTerminal)) {
-      return;
-    }
-    const handleMove = (event: MouseEvent) => {
-      if (explorerVisible && draggingExplorer) {
-        setExplorerWidth((prev) => Math.min(MAX_EXPLORER_WIDTH, Math.max(MIN_EXPLORER_WIDTH, prev + event.movementX)));
-      }
-      if (draggingAssistant) {
-        setAssistantWidth((prev) => clampAssistantWidth(prev + event.movementX));
-      }
-      if (draggingTerminal) {
-        setTerminalHeight((prev) => Math.min(MAX_TERMINAL_HEIGHT, Math.max(MIN_TERMINAL_HEIGHT, prev - event.movementY)));
-      }
-    };
-    const handleUp = () => {
-      setDraggingExplorer(false);
-      setDraggingAssistant(false);
-      setDraggingTerminal(false);
-    };
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-    };
-  }, [draggingAssistant, draggingExplorer, draggingTerminal, explorerVisible]);
-
-  useEffect(() => {
-    if (!explorerVisible && draggingExplorer) {
-      setDraggingExplorer(false);
-    }
-  }, [draggingExplorer, explorerVisible]);
-
-  useEffect(() => {
-    const syncAssistantWidth = () => {
-      setAssistantWidth((prev) => clampAssistantWidth(prev));
-    };
-    syncAssistantWidth();
-    window.addEventListener('resize', syncAssistantWidth);
-    return () => {
-      window.removeEventListener('resize', syncAssistantWidth);
-    };
-  }, [explorerVisible, explorerWidth]);
 
   const replaceNodeChildren = (
     nodes: WorkspaceNode[],
@@ -1289,10 +1148,6 @@ export function WorkspaceIde({
     ? 'Ожидает подтверждения решения. Отправка временно заблокирована.'
     : null;
   const canSendWithContext = Boolean(agentInput.trim() || buildContextAttachments().length > 0);
-  const workspaceGridColumns = explorerVisible
-    ? `${explorerWidth}px ${EXPLORER_RESIZER_WIDTH}px ${assistantWidth}px ${ASSISTANT_RESIZER_WIDTH}px minmax(${MIN_EDITOR_WIDTH}px,1fr)`
-    : `${assistantWidth}px ${ASSISTANT_RESIZER_WIDTH}px minmax(${MIN_EDITOR_WIDTH}px,1fr)`;
-
   return (
     <div className="h-full min-h-0 flex flex-col bg-[#0a0a0d] text-[#d2d2d9]">
       <WorkspaceToolbar
@@ -1375,7 +1230,7 @@ export function WorkspaceIde({
             />
 
             <button
-              onMouseDown={() => setDraggingExplorer(true)}
+              onMouseDown={startExplorerResize}
               className="cursor-col-resize bg-[#121218] hover:bg-[#1b1b23]"
               aria-label="Resize explorer"
               title="Resize explorer"
@@ -1385,12 +1240,12 @@ export function WorkspaceIde({
 
         <WorkspaceAssistantPanel
           contextChips={aiContextChips}
-        mode={mode}
-        activePlan={activePlan}
-        activeTask={activeTask}
-        autoState={autoState}
-        modeTransitions={modeTransitions}
-        modeBusy={modeBusy}
+          mode={mode}
+          activePlan={activePlan}
+          activeTask={activeTask}
+          autoState={autoState}
+          modeTransitions={modeTransitions}
+          modeBusy={modeBusy}
           modeError={modeError}
           onChangeMode={onChangeMode}
           onPlanDraft={onPlanDraft}
@@ -1413,7 +1268,7 @@ export function WorkspaceIde({
         />
 
         <button
-          onMouseDown={() => setDraggingAssistant(true)}
+          onMouseDown={startAssistantResize}
           className="cursor-col-resize bg-[#121218] hover:bg-[#1b1b23]"
           aria-label="Resize assistant"
           title="Resize assistant"
@@ -1442,7 +1297,7 @@ export function WorkspaceIde({
           }}
           onEditorMount={handleEditorMount}
           onEditorChange={updateActiveContent}
-          onTerminalResizeStart={() => setDraggingTerminal(true)}
+          onTerminalResizeStart={startTerminalResize}
           onTerminalInputChange={setTerminalInput}
           onTerminalSubmit={() => {
             void handleTerminalSubmit();
