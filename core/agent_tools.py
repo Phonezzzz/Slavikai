@@ -17,7 +17,7 @@ from core.approval_policy import (
     ApprovalRequest,
     ApprovalRequired,
 )
-from core.decision.handler import DecisionContext, DecisionEvent, DecisionRequired
+from core.decision.handler import DecisionContext
 from core.decision.models import DecisionPacket
 from core.mwv.models import (
     MWV_REPORT_PREFIX,
@@ -148,7 +148,6 @@ class AgentToolsMixin:
     last_stream_response_raw: str | None
     last_plan: TaskPlan | None
     last_plan_original: TaskPlan | None
-    _pending_decision_packet: DecisionPacket | None
     runtime_mode: str
     runtime_active_plan: dict[str, JSONValue] | None
     runtime_active_task: dict[str, JSONValue] | None
@@ -221,12 +220,6 @@ class AgentToolsMixin:
                 record_in_history=False,
                 command_lane=True,
             )
-        except DecisionRequired as exc:
-            return self._handle_decision_packet(
-                exc.packet,
-                raw_input=command,
-                record_in_history=False,
-            )
         except Exception as exc:  # noqa: BLE001
             self.tracer.log("error", f"Ошибка при вызове инструмента: {exc}")
             error_text = f"[Ошибка при вызове инструмента: {exc}]"
@@ -277,7 +270,6 @@ class AgentToolsMixin:
         self.last_plan_original = None
         self.last_plan_summary = None
         self.last_execution_summary = None
-        self._pending_decision_packet = None
         self.last_auto_state = None
         self.runtime_mode = "ask"
         self.runtime_active_plan = None
@@ -408,16 +400,6 @@ class AgentToolsMixin:
         if count < SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD:
             return
         self._tool_error_counts[request.name] = 0
-        error_text = sanitize_text(result.error or "unknown error")
-        self._pending_decision_packet = self.decision_handler.evaluate(
-            event=DecisionEvent.tool_fail(
-                tool_name=request.name,
-                error_text=error_text,
-                count=count,
-                threshold=SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD,
-                user_input=self._last_user_input,
-            )
-        )
         self._record_tool_error_inbox(request, result, count)
         self._record_tool_error_candidate(request, result, count)
 
@@ -689,10 +671,6 @@ class AgentToolsMixin:
             self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
             raise
         self._log_tool_interaction(raw_input=raw_input, request=request, result=result)
-        if self._pending_decision_packet is not None:
-            packet = self._pending_decision_packet
-            self._pending_decision_packet = None
-            raise DecisionRequired(packet)
         return result
 
     def _log_chat_interaction(

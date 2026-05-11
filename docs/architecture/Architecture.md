@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-24.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-25.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -22,7 +22,9 @@ append-comment edits напрямую; выполнение идёт через 
 `handleSendChat`/`handleSendWorkspace` и грузит chat/workspace messages из session snapshot
 без `/history?lane=workspace`. После PR-24 memory/policy-feedback surface вынесен из
 `core/agent.py` в `core/agent_memory.py::AgentMemoryMixin` без изменения runtime behavior.
-Часть старого runtime ещё остаётся legacy-обвязкой.
+После PR-25 repeated tool failures больше не создают отдельный `DecisionPacket(tool_fail)`;
+они остаются observability/candidate сигналом после gateway call. Часть старого runtime
+ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
@@ -189,5 +191,7 @@ append-comment edits напрямую; выполнение идёт через 
 - `Planner`/`Executor` удалены из runtime entrypoints. Любое возвращение к парсингу prose
   как source of truth для tool args запрещено.
 - Command lane не является способом вызова tools. Только `/trace` и `/end-session`.
+- Tool failure threshold не является decision runtime; failures не должны обходить
+  gateway/approval через отдельный `DecisionRequired` path.
 - `server/terminal_manager.py` — совместимый alias на `TerminalTool`, не отдельная реализация.
 - Planned cleanup roadmap: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

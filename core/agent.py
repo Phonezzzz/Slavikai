@@ -208,7 +208,6 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.last_stream_response_raw: str | None = None
         self.last_plan_summary: str | None = None
         self.last_execution_summary: str | None = None
-        self._pending_decision_packet: DecisionPacket | None = None
         self.last_auto_state: dict[str, JSONValue] | None = None
         self._auto_progress_events: list[dict[str, JSONValue]] = []
         self.workspace_file_path: str | None = None

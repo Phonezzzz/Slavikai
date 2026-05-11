@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 
 from core.decision.ambiguous import build_ambiguous_skill_packet
 from core.decision.models import DecisionPacket, DecisionReason
-from core.decision.tool_fail import build_tool_fail_packet
 from core.decision.verifier_fail import build_verifier_fail_packet
 from core.mwv.models import VerificationResult
 from core.skills.index import SkillMatchDecision
@@ -23,10 +22,6 @@ class DecisionContext:
 @dataclass(frozen=True)
 class DecisionEvent:
     kind: str
-    tool_name: str | None = None
-    error_text: str | None = None
-    count: int | None = None
-    threshold: int | None = None
     verification_result: VerificationResult | None = None
     task_id: str | None = None
     trace_id: str | None = None
@@ -46,25 +41,6 @@ class DecisionEvent:
         return cls(
             kind="ambiguous_skill",
             skill_decision=skill_decision,
-            user_input=user_input,
-        )
-
-    @classmethod
-    def tool_fail(
-        cls,
-        *,
-        tool_name: str,
-        error_text: str,
-        count: int,
-        threshold: int,
-        user_input: str | None,
-    ) -> DecisionEvent:
-        return cls(
-            kind="tool_fail",
-            tool_name=tool_name,
-            error_text=error_text,
-            count=count,
-            threshold=threshold,
             user_input=user_input,
         )
 
@@ -129,21 +105,6 @@ class DecisionHandler:
             if skill_decision is None or user_input is None:
                 raise ValueError("ambiguous_skill event требует skill_decision и user_input")
             return build_ambiguous_skill_packet(skill_decision, user_input=user_input)
-        if event.kind == "tool_fail":
-            if (
-                event.tool_name is None
-                or event.error_text is None
-                or event.count is None
-                or event.threshold is None
-            ):
-                raise ValueError("tool_fail event требует tool_name/error_text/count/threshold")
-            return build_tool_fail_packet(
-                tool_name=event.tool_name,
-                error_text=event.error_text,
-                count=event.count,
-                threshold=event.threshold,
-                user_input=event.user_input,
-            )
         if event.kind == "verifier_fail":
             if (
                 event.verification_result is None
@@ -165,9 +126,3 @@ class DecisionHandler:
                 retry_allowed=event.retry_allowed,
             )
         raise ValueError(f"Unsupported decision event kind: {event.kind}")
-
-
-class DecisionRequired(Exception):
-    def __init__(self, packet: DecisionPacket) -> None:
-        super().__init__("Decision required")
-        self.packet = packet

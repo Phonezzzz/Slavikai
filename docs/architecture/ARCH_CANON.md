@@ -15,7 +15,8 @@
   execution через explicit `ToolRequest` + `ToolGateway`, destructive physical split UI
   message storage на `chat_messages` и `workspace_messages`, отдельные chat/workspace
   send handlers, удалённый legacy event stream route, split frontend send entrypoints,
-  memory/policy-feedback surface вынесен из `core/agent.py` в `AgentMemoryMixin`.
+  memory/policy-feedback surface вынесен из `core/agent.py` в `AgentMemoryMixin`,
+  tool-fail decision branch удалён.
 - **Current legacy runtime**: крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой
@@ -158,7 +159,7 @@ API:
 
 Новые фичи не должны расширять legacy-пути как целевую архитектуру.
 
-Legacy debt после PR-24:
+Legacy debt после PR-25:
 
 - `core/agent.py` уже сжат до bootstrap/configuration shell; `core/agent_mwv.py`,
   `core/agent_tools.py`, `core/agent_routing.py` остаются крупными mixin-модулями.
@@ -185,6 +186,8 @@ Legacy debt после PR-24:
   explicit gateway tool requests.
 - Старые `Planner`/`Executor` удалены как runtime entrypoints; MWV execution не
   проходит через отдельный plan/executor wrapper.
+- Tool failures после gateway call не создают отдельный `DecisionPacket(tool_fail)`;
+  failures остаются observability/candidate сигналом и не должны обходить gateway/approval.
 
 Уже не является допустимым legacy для расширения:
 
@@ -194,4 +197,4 @@ Legacy debt после PR-24:
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
 
-Roadmap устранения legacy после PR-24: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
+Roadmap устранения legacy после PR-25: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

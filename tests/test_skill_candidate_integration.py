@@ -53,6 +53,7 @@ def test_tool_error_candidate_after_threshold(tmp_path: Path) -> None:
         agent._track_tool_error(request, result)  # noqa: SLF001
     files = list((tmp_path / "skills" / "_candidates").glob("*.md"))
     assert files
+    assert agent.last_decision_packet is None
 
 
 def test_tool_error_candidate_deduped(tmp_path: Path) -> None:

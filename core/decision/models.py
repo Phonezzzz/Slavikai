@@ -15,7 +15,6 @@ class DecisionReason(StrEnum):
     BLOCKED = "blocked"
     RISK = "risk"
     NEED_USER_INPUT = "need_user_input"
-    TOOL_FAIL = "tool_fail"
     AMBIGUOUS_SKILL = "ambiguous_skill"
     VERIFIER_FAIL = "verifier_fail"
 
@@ -24,8 +23,6 @@ class DecisionAction(StrEnum):
     ASK_USER = "ask_user"
     PROCEED_SAFE = "proceed_safe"
     RETRY = "retry"
-    ADJUST_THRESHOLD = "adjust_threshold"
-    CREATE_CANDIDATE = "create_candidate"
     SELECT_SKILL = "select_skill"
     ABORT = "abort"
 

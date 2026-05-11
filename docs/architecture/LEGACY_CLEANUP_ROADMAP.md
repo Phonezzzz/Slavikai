@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-24
+# Legacy Cleanup Roadmap After PR-25
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-24. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-25. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-24 находятся в `main`.
+- PR-0..PR-25 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -39,11 +39,16 @@
   snapshot вместо `/history?lane=workspace`.
 - `core/agent.py` больше не содержит memory/policy-feedback surface: этот контур вынесен
   в `core/agent_memory.py::AgentMemoryMixin` без изменения runtime behavior.
+- Tool failure threshold больше не создаёт отдельный `DecisionPacket(tool_fail)` и не
+  прерывает runtime через `DecisionRequired`; tool failure остаётся observability/candidate
+  signal после gateway call.
 
 ## Known legacy
 
 - `classify_request(...)` ещё участвует в legacy `plan|act` routing. Он не является
   tool planner.
+- Decision subsystem ещё остаётся для ambiguous skill и verifier fail packets; дальнейшее
+  слияние со stop/gateway layer требует отдельного решения.
 - `lane` остаётся временным marker-ом старой runtime/API модели, но не является
   storage/domain/frontend discriminator.
 - `server/http/handlers/ui_chat.py` всё ещё содержит общий внутренний send runtime, но
@@ -139,9 +144,11 @@ BLOCKED report должен включать:
     - Первый срез: memory/policy-feedback surface вынесен из `core/agent.py` в
       `AgentMemoryMixin`; routing/MWV/tool-loop behavior не менялся.
 
-11. PR-25 `pr-decision-gateway-cleanup`
+11. PR-25 `pr-decision-gateway-cleanup` — done
     - Свести decision cleanup к gateway approval/stop layer.
     - Удалить недостижимые decision branches после split runtimes.
+    - Удалён tool-fail decision branch: repeated tool failures больше не создают
+      `DecisionPacket`; candidate/inbox observability сохраняется.
 
 12. PR-26 `pr-workspace-ide-decompose`
     - Разбить `workspace-ide.tsx` на меньшие компоненты без redesign.

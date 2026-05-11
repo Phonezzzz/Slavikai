@@ -31,27 +31,6 @@ def _ambiguous_decision() -> SkillMatchDecision:
     )
 
 
-def test_decision_handler_builds_tool_fail_packet() -> None:
-    handler = DecisionHandler()
-
-    packet = handler.evaluate(
-        event=DecisionEvent.tool_fail(
-            tool_name="workspace_write",
-            error_text="boom",
-            count=3,
-            threshold=3,
-            user_input="save file",
-        )
-    )
-
-    assert packet is not None
-    assert packet.reason.value == "tool_fail"
-    assert packet.context["tool"] == "workspace_write"
-    option_actions = [option.action.value for option in packet.options]
-    assert "retry" not in option_actions
-    assert option_actions == ["adjust_threshold", "create_candidate", "abort"]
-
-
 def test_decision_handler_builds_verifier_fail_packet() -> None:
     handler = DecisionHandler()
     result = VerificationResult(

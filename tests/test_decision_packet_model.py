@@ -79,7 +79,7 @@ def test_decision_packet_validation() -> None:
         DecisionPacket(
             id="dp-2",
             created_at=created,
-            reason=DecisionReason.TOOL_FAIL,
+            reason=DecisionReason.VERIFIER_FAIL,
             summary="Too few options.",
             options=_options()[:2],
         )
@@ -87,7 +87,7 @@ def test_decision_packet_validation() -> None:
         DecisionPacket(
             id="dp-3",
             created_at=created,
-            reason=DecisionReason.TOOL_FAIL,
+            reason=DecisionReason.VERIFIER_FAIL,
             summary="Invalid default option.",
             options=_options(),
             default_option_id="missing",

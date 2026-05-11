@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Literal
 
 from core.approval_policy import ApprovalRequired
-from core.decision.handler import DecisionContext, DecisionRequired
+from core.decision.handler import DecisionContext
 from core.mwv.models import StopReasonCode
 from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
@@ -256,12 +256,6 @@ class AgentRoutingMixin:
                 raw_input=last_content,
                 record_in_history=record_in_history,
             )
-        except DecisionRequired as exc:
-            return self._handle_decision_packet(
-                exc.packet,
-                raw_input=last_content,
-                record_in_history=record_in_history,
-            )
         except Exception as exc:
             self.logger.exception("Agent.respond error: %s", exc)
             self.tracer.log("error", f"Ошибка Agent.respond: {exc}")
@@ -378,14 +372,6 @@ class AgentRoutingMixin:
         except ApprovalRequired as exc:
             response = self._handle_approval_required(
                 exc.request,
-                raw_input=last_content,
-                record_in_history=record_in_history,
-            )
-            self.last_stream_response_raw = response
-            yield response
-        except DecisionRequired as exc:
-            response = self._handle_decision_packet(
-                exc.packet,
                 raw_input=last_content,
                 record_in_history=record_in_history,
             )
