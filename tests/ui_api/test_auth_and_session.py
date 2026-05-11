@@ -61,6 +61,82 @@ def test_ui_models_inception_docs_fallback_returns_mercury_2(monkeypatch) -> Non
     asyncio.run(run())
 
 
+def test_ui_models_summary_returns_provider_shell_without_fetch(monkeypatch) -> None:
+    def _unexpected_fetch(provider: str) -> tuple[list[str], str | None]:
+        raise AssertionError(f"unexpected model fetch for {provider}")
+
+    monkeypatch.setattr("server.http_api._fetch_provider_models", _unexpected_fetch)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.get("/ui/api/models?summary=1")
+            assert response.status == 200
+            payload = await response.json()
+            providers = payload.get("providers")
+            assert isinstance(providers, list)
+            names = {item.get("provider") for item in providers if isinstance(item, dict)}
+            assert names == {"local", "openrouter", "xai", "inception"}
+            for item in providers:
+                assert isinstance(item, dict)
+                assert item.get("models") == []
+                assert item.get("error") is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_models_strict_local_does_not_return_fallback(monkeypatch) -> None:
+    def _fail_get(*args, **kwargs):  # noqa: ANN001
+        del args, kwargs
+        raise RuntimeError("ollama down")
+
+    monkeypatch.setattr("server.http.common.ui_settings.requests.get", _fail_get)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.get("/ui/api/models?provider=local&strict=1")
+            assert response.status == 200
+            payload = await response.json()
+            providers = payload.get("providers")
+            assert isinstance(providers, list)
+            assert len(providers) == 1
+            item = providers[0]
+            assert isinstance(item, dict)
+            assert item.get("provider") == "local"
+            assert item.get("models") == []
+            error = item.get("error")
+            assert isinstance(error, str)
+            assert "Не удалось получить список моделей провайдера local" in error
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_local_ollama_start_returns_models(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "server.http.handlers.sessions._start_local_ollama_runtime",
+        lambda: {"status": "started", "models": ["llama3.1:8b"]},
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post("/ui/api/local/ollama/start")
+            assert response.status == 200
+            payload = await response.json()
+            assert payload.get("provider") == "local"
+            assert payload.get("status") == "started"
+            assert payload.get("models") == ["llama3.1:8b"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_session_model_accepts_inception_mercury_2(monkeypatch) -> None:
     monkeypatch.setattr(
         "server.http_api._fetch_provider_models",

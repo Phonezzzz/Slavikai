@@ -10,7 +10,6 @@ import { SessionControlShell } from './components/session-control-shell';
 import { WorkspaceSessionScreen } from './components/workspace-session-screen';
 import type { SessionTransportBridge } from './session-bridges';
 import {
-  compactProviderError,
   DEFAULT_COMPOSER_SETTINGS,
   extractErrorMessage,
   extractFilenameFromDisposition,
@@ -40,6 +39,15 @@ import { useSessionTransport } from './use-session-transport';
 
 const SESSION_HEADER = 'X-Slavik-Session';
 const SCROLLBAR_REVEAL_DISTANCE_PX = 38;
+
+const upsertProviderModels = (
+  current: ProviderModels[],
+  nextProvider: ProviderModels,
+): ProviderModels[] => {
+  const updated = current.filter((item) => item.provider !== nextProvider.provider);
+  updated.push(nextProvider);
+  return updated;
+};
 
 export default function App() {
   const transportRef = useRef<SessionTransportBridge | null>(null);
@@ -91,7 +99,7 @@ export default function App() {
   const loadModels = async (): Promise<ProviderModels[]> => {
     setModelsLoading(true);
     try {
-      const response = await fetch('/ui/api/models');
+      const response = await fetch('/ui/api/models?summary=1');
       const payload: unknown = await response.json();
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to load models.'));
@@ -99,6 +107,51 @@ export default function App() {
       const parsed = parseProviderModels((payload as { providers?: unknown }).providers);
       setProviderModels(parsed);
       return parsed;
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
+  const loadProviderModels = async (provider: string): Promise<ProviderModels | null> => {
+    const normalized = provider.trim().toLowerCase();
+    if (!normalized) {
+      return null;
+    }
+    setModelsLoading(true);
+    try {
+      const params = new URLSearchParams({ provider: normalized, strict: '1' });
+      const response = await fetch(`/ui/api/models?${params.toString()}`);
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, `Failed to load ${normalized} models.`));
+      }
+      const parsed = parseProviderModels((payload as { providers?: unknown }).providers);
+      const next = parsed[0] ?? null;
+      if (next) {
+        setProviderModels((current) => upsertProviderModels(current, next));
+      }
+      return next;
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
+  const startLocalOllama = async (): Promise<ProviderModels | null> => {
+    setModelsLoading(true);
+    try {
+      const response = await fetch('/ui/api/local/ollama/start', { method: 'POST' });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to start Local Ollama.'));
+      }
+      const body = payload as { provider?: unknown; models?: unknown };
+      const provider = typeof body.provider === 'string' ? body.provider : 'local';
+      const models = Array.isArray(body.models)
+        ? body.models.filter((item): item is string => typeof item === 'string')
+        : [];
+      const next: ProviderModels = { provider, models, error: null };
+      setProviderModels((current) => upsertProviderModels(current, next));
+      return next;
     } finally {
       setModelsLoading(false);
     }
@@ -160,33 +213,6 @@ export default function App() {
   const modelLabel = runtime.selectedModel
     ? `${runtime.selectedModel.provider}/${runtime.selectedModel.model}`
     : 'Model not selected';
-  const modelOptions = useMemo(
-    () =>
-      providerModels.flatMap((provider) => {
-        if (provider.models.length > 0) {
-          return provider.models.map((model) => ({
-            value: `${provider.provider}::${model}`,
-            label: `${provider.provider}/${model}`,
-            provider: provider.provider,
-            model,
-            disabled: false,
-          }));
-        }
-        const unavailableReason = provider.error
-          ? `unavailable: ${compactProviderError(provider.error)}`
-          : 'unavailable';
-        return [
-          {
-            value: `${provider.provider}::__unavailable__`,
-            label: `${provider.provider}/${unavailableReason}`,
-            provider: provider.provider,
-            model: '',
-            disabled: true,
-          },
-        ];
-      }),
-    [providerModels],
-  );
   const selectedModelValue = runtime.selectedModel
     ? `${runtime.selectedModel.provider}::${runtime.selectedModel.model}`
     : null;
@@ -726,10 +752,12 @@ export default function App() {
         modeBusy={runtime.modeBusy}
         onChangeMode={runtime.handleChangeMode}
         modelLabel={modelLabel}
-        modelOptions={modelOptions}
+        providerModels={providerModels}
         selectedModelValue={selectedModelValue}
         modelsLoading={modelsLoading}
         savingModel={runtime.savingModel}
+        onLoadProviderModels={loadProviderModels}
+        onStartLocalOllama={startLocalOllama}
         onSelectModel={(provider, model) => {
           void runtime.handleSetModel(provider, model);
         }}

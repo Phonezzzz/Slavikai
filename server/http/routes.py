@@ -64,6 +64,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/ui/api/settings/chats/export", sessions.handle_ui_chats_export)
     app.router.add_post("/ui/api/settings/chats/import", sessions.handle_ui_chats_import)
     app.router.add_get("/ui/api/models", sessions.handle_ui_models)
+    app.router.add_post("/ui/api/local/ollama/start", sessions.handle_ui_local_ollama_start)
     app.router.add_get("/ui/api/folders", sessions.handle_ui_folders_list)
     app.router.add_post("/ui/api/folders", sessions.handle_ui_folders_create)
     app.router.add_get("/ui/api/sessions", sessions.handle_ui_sessions_list)

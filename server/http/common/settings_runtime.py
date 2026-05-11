@@ -29,10 +29,16 @@ class SettingsRuntimeBindings:
             ui_settings_path=self._ui_settings_path(),
         )
 
-    def fetch_provider_models(self, provider: str) -> tuple[list[str], str | None]:
+    def fetch_provider_models(
+        self,
+        provider: str,
+        *,
+        allow_local_fallback: bool = True,
+    ) -> tuple[list[str], str | None]:
         return ui_settings._fetch_provider_models(
             provider,
             ui_settings_path=self._ui_settings_path(),
+            allow_local_fallback=allow_local_fallback,
         )
 
     def load_memory_config_runtime(self) -> MemoryConfig:

@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import io
+import os
+import shlex
+import subprocess
+import time
 import zipfile
+from collections.abc import Callable
+from pathlib import Path
 from typing import Literal, cast
 
 from aiohttp import web
@@ -34,6 +41,10 @@ from server.ui_hub import UIHub
 from server.ui_session_storage import PersistedSession
 from shared.models import JSONValue
 from tools.terminal_tool import TerminalTool
+
+OLLAMA_STARTUP_TIMEOUT_SECONDS = 8.0
+OLLAMA_STARTUP_POLL_SECONDS = 0.35
+OLLAMA_LOG_PATH = Path(".run") / "ollama.log"
 
 
 def _normalize_history_lane(value: str | None) -> Literal["chat", "workspace"]:
@@ -136,6 +147,8 @@ async def handle_ui_chats_import(request: web.Request) -> web.Response:
 
 async def handle_ui_models(request: web.Request) -> web.Response:
     provider_query = request.query.get("provider", "").strip().lower()
+    summary_only = request.query.get("summary", "").strip().lower() in {"1", "true", "yes"}
+    strict = request.query.get("strict", "").strip().lower() in {"1", "true", "yes"}
     providers: list[str]
     if provider_query:
         normalized = _normalize_provider(provider_query)
@@ -150,10 +163,98 @@ async def handle_ui_models(request: web.Request) -> web.Response:
     else:
         providers = sorted(SUPPORTED_MODEL_PROVIDERS)
     payload_items: list[dict[str, JSONValue]] = []
+    if summary_only and not provider_query:
+        for provider in providers:
+            payload_items.append({"provider": provider, "models": [], "error": None})
+        return json_response({"providers": payload_items})
     for provider in providers:
-        models, error_text = api._fetch_provider_models(provider)
+        if strict:
+            models, error_text = api._fetch_provider_models(provider, allow_local_fallback=False)
+        else:
+            models, error_text = api._fetch_provider_models(provider)
         payload_items.append({"provider": provider, "models": models, "error": error_text})
     return json_response({"providers": payload_items})
+
+
+def _fetch_local_ollama_models() -> tuple[list[str], str | None]:
+    return api._fetch_provider_models("local", allow_local_fallback=False)
+
+
+def _start_ollama_process() -> None:
+    command_raw = os.getenv("OLLAMA_BIN", "ollama").strip() or "ollama"
+    command = shlex.split(command_raw)
+    if not command:
+        command = ["ollama"]
+    log_path = OLLAMA_LOG_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("ab")
+    try:
+        subprocess.Popen(  # noqa: S603
+            [*command, "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception:
+        log_file.close()
+        raise
+    log_file.close()
+
+
+def _wait_for_local_ollama(
+    *,
+    fetch_models: Callable[[], tuple[list[str], str | None]] = _fetch_local_ollama_models,
+) -> tuple[list[str], str | None]:
+    deadline = time.monotonic() + OLLAMA_STARTUP_TIMEOUT_SECONDS
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        models, error_text = fetch_models()
+        if error_text is None:
+            return models, None
+        last_error = error_text
+        time.sleep(OLLAMA_STARTUP_POLL_SECONDS)
+    return [], last_error or "Ollama не ответил до истечения таймаута запуска."
+
+
+def _start_local_ollama_runtime() -> dict[str, JSONValue]:
+    models, error_text = _fetch_local_ollama_models()
+    if error_text is None:
+        return {"status": "already_running", "models": models}
+    try:
+        _start_ollama_process()
+    except FileNotFoundError:
+        return {
+            "status": "error",
+            "models": [],
+            "error": "Команда ollama не найдена. Установите Ollama или задайте OLLAMA_BIN.",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "models": [],
+            "error": f"Не удалось запустить Ollama: {exc}",
+        }
+    models, wait_error = _wait_for_local_ollama()
+    if wait_error is not None:
+        return {"status": "error", "models": [], "error": wait_error}
+    return {"status": "started", "models": models}
+
+
+async def handle_ui_local_ollama_start(request: web.Request) -> web.Response:
+    del request
+    result = await asyncio.to_thread(_start_local_ollama_runtime)
+    if result.get("status") == "error":
+        error_raw = result.get("error")
+        message = error_raw if isinstance(error_raw, str) else "Не удалось запустить Ollama."
+        return error_response(
+            status=502,
+            message=message,
+            error_type="provider_error",
+            code="local_ollama_unavailable",
+            details={"models": result.get("models", [])},
+        )
+    return json_response({"provider": "local", **result})
 
 
 async def handle_ui_session_model(request: web.Request) -> web.Response:

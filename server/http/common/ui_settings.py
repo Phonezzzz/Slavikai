@@ -188,6 +188,7 @@ def _fetch_provider_models(
     provider: str,
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
+    allow_local_fallback: bool = True,
 ) -> tuple[list[str], str | None]:
     if provider == "inception":
         docs_models = list(INCEPTION_DOCS_MODELS)
@@ -221,13 +222,13 @@ def _fetch_provider_models(
         response = requests.get(url, headers=headers, timeout=MODEL_FETCH_TIMEOUT)
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001
-        if provider == "local":
+        if provider == "local" and allow_local_fallback:
             fallback = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default").strip()
             if fallback:
                 return [fallback], None
         return [], f"Не удалось получить список моделей провайдера {provider}: {exc}"
     models = _parse_models_payload(response.json())
-    if not models and provider == "local":
+    if not models and provider == "local" and allow_local_fallback:
         fallback = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default").strip()
         if fallback:
             models = [fallback]
