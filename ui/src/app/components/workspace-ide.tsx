@@ -423,10 +423,10 @@ export function WorkspaceIde({
         abortController.signal,
       );
       if (pendingApproval) {
-        setTreeError('Ожидает подтверждения действия для доступа к workspace.');
+        setTreeError('Ожидает подтверждения действия для доступа к Computer.');
         setTerminalLines((prev) => [
           ...prev,
-          `[${terminalTimestamp()}] pending approval: workspace tree request`,
+          `[${terminalTimestamp()}] pending approval: computer tree request`,
         ]);
         return;
       }
@@ -448,7 +448,7 @@ export function WorkspaceIde({
       if (error instanceof DOMException && error.name === 'AbortError') {
         return;
       }
-      const message = error instanceof Error ? error.message : 'Failed to load workspace tree.';
+      const message = error instanceof Error ? error.message : 'Failed to load Computer tree.';
       if (isRootLoad) {
         setTreeError(message);
       } else {
@@ -879,7 +879,7 @@ export function WorkspaceIde({
       if (result.pendingApproval) {
         setTerminalLines((prev) => [
           ...prev,
-          `[${terminalTimestamp()}] pending approval: switch workspace root`,
+          `[${terminalTimestamp()}] pending approval: switch Computer root`,
         ]);
         setRootPickerOpen(false);
         return;
@@ -891,9 +891,9 @@ export function WorkspaceIde({
       setActiveFileId(null);
       requestTreeLoad(undefined, 'root_change');
       void loadGitDiff();
-      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] workspace root: ${appliedRoot}`]);
+      setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] Computer root: ${appliedRoot}`]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to change workspace root.';
+      const message = error instanceof Error ? error.message : 'Failed to change Computer root.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
     } finally {
       setRootBusy(false);
@@ -912,7 +912,7 @@ export function WorkspaceIde({
         `[${terminalTimestamp()}] index complete: code=${indexedCode} docs=${indexedDocs} skipped=${skipped}`,
       ]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to index workspace.';
+      const message = error instanceof Error ? error.message : 'Failed to index Computer.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
     } finally {
       setIndexing(false);
@@ -920,7 +920,7 @@ export function WorkspaceIde({
   };
 
   const handleCreateFile = async () => {
-    const raw = window.prompt('Новый путь файла (относительно workspace):');
+    const raw = window.prompt('Новый путь файла (относительно Computer root):');
     const nextPath = raw?.trim() ?? '';
     if (!nextPath) {
       return;

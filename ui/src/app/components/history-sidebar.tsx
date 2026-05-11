@@ -95,8 +95,8 @@ export function HistorySidebar({
   const yesterdayChats = chats.filter((c) => c.group === "yesterday");
   const olderChats = chats.filter((c) => c.group === "older");
   const workspaceButtonLabel = workspaceActive
-    ? (workspaceExplorerVisible ? "Hide File Manager" : "Show File Manager")
-    : "Workspace";
+    ? (workspaceExplorerVisible ? "Hide Files" : "Show Files")
+    : "Computer";
 
   if (compact) {
     return (
@@ -210,7 +210,7 @@ export function HistorySidebar({
                   C:{chat.chatMessageCount ?? chat.messageCount}
                 </span>
                 <span className="text-[11px] text-[#666]">
-                  W:{chat.workspaceMessageCount ?? 0}
+                  Tools:{chat.workspaceMessageCount ?? 0}
                 </span>
                 <span className="text-[11px] text-[#444]">-</span>
                 <span className="text-[11px] text-[#555]">
@@ -369,7 +369,7 @@ export function HistorySidebar({
           className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#999] hover:text-[#ddd] hover:bg-[#141418] transition-all cursor-pointer"
         >
           <LayoutGrid className="w-4 h-4" />
-          Workspace
+          Computer
         </button>
       </div>
 

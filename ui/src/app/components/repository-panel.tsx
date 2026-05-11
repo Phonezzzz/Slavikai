@@ -152,7 +152,7 @@ export function RepositoryPanel({
           <div>
             <h2 className="text-sm font-semibold text-zinc-100">Repository</h2>
             <p className="text-xs text-zinc-400">
-              Импорт и будущие repository-specific actions для текущего workspace.
+              Импорт и будущие repository-specific actions для текущего Computer.
             </p>
           </div>
           <button

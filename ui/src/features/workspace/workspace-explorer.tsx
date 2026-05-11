@@ -217,7 +217,7 @@ export function WorkspaceExplorer({
         ) : treeError ? (
           <div className="px-3 py-2 text-[12px] text-red-400">{treeError}</div>
         ) : flatRows.length === 0 ? (
-          <div className="px-3 py-2 text-[12px] text-[#777]">Workspace is empty.</div>
+          <div className="px-3 py-2 text-[12px] text-[#777]">Computer has no files.</div>
         ) : (
           <div>
             <div style={{ height: `${topSpacerHeight}px` }} />

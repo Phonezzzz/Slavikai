@@ -74,7 +74,7 @@ export function WorkspaceToolbar({
             onClick={onToggleRootPicker}
             className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2.5 py-1 text-[12px] text-[#c7c7d0] hover:bg-[#181820]"
           >
-            Open Workspace Root
+            Open Project Root
           </button>
           <button
             onClick={onReindex}
@@ -130,7 +130,7 @@ export function WorkspaceToolbar({
           <input
             value={rootInput}
             onChange={(event) => onRootInputChange(event.target.value)}
-            placeholder="/path/to/workspace/root"
+            placeholder="/path/to/project/root"
             className="flex-1 rounded-md border border-[#2a2a31] bg-[#111117] px-3 py-1.5 text-[12px] text-[#d0d0d8] outline-none"
           />
           <button

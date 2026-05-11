@@ -126,3 +126,19 @@ def test_workspace_chat_routes_are_not_product_paths() -> None:
     }
     assert workspace_chat_paths.isdisjoint(server_routes)
     assert workspace_chat_paths.isdisjoint(ui_paths)
+
+
+def test_workspace_ui_entrypoints_use_computer_copy() -> None:
+    sources = {
+        Path("ui/src/app/components/history-sidebar.tsx"): [': "Workspace";', ">Workspace<"],
+        Path("ui/src/features/workspace/workspace-toolbar.tsx"): ["Open Workspace Root"],
+        Path("ui/src/features/workspace/workspace-explorer.tsx"): ["Workspace is empty."],
+        Path("ui/src/app/components/Sidebar.tsx"): ["Рабочее пространство"],
+    }
+    found: dict[str, list[str]] = {}
+    for source, markers in sources.items():
+        text = source.read_text(encoding="utf-8")
+        for marker in markers:
+            if marker in text:
+                found.setdefault(str(source), []).append(marker)
+    assert found == {}

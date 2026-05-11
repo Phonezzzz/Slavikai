@@ -101,7 +101,7 @@ export function PlanPanel({
             <input
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
-              placeholder="Цель плана (например: исправить streaming в workspace)"
+              placeholder="Цель плана (например: исправить streaming в Computer)"
               className="h-8 flex-1 rounded-md border border-[#2a2a31] bg-[#111117] px-2 text-[12px] text-[#d0d0d8] outline-none"
               disabled={busy}
             />

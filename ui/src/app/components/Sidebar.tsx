@@ -330,7 +330,7 @@ export function Sidebar({
                   }`}
                 >
                   <LayoutGrid className="h-4 w-4" />
-                  Рабочее пространство
+                  Computer
                 </button>
               </div>
               <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-wide text-white/40">
