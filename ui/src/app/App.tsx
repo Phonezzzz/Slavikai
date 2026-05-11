@@ -57,7 +57,7 @@ export default function App() {
     }
     return viewFromPathname(window.location.pathname);
   });
-  const [workspaceExplorerVisible, setWorkspaceExplorerVisible] = useState<boolean>(() =>
+  const [workspaceExplorerVisible] = useState<boolean>(() =>
     loadWorkspaceExplorerVisible(),
   );
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -327,11 +327,7 @@ export default function App() {
   };
 
   const handleWorkspaceSidebarAction = () => {
-    if (activeView !== 'workspace') {
-      setView('workspace');
-      return;
-    }
-    setWorkspaceExplorerVisible((prev) => !prev);
+    setView(activeView === 'workspace' ? 'chat' : 'workspace');
   };
 
   const createFolder = async (name: string): Promise<FolderSummary> => {
@@ -618,56 +614,12 @@ export default function App() {
         onCreateFolder={() => {
           void handleCreateFolder();
         }}
-        compact={activeView === 'workspace'}
+        compact={false}
         workspaceActive={activeView === 'workspace'}
-        workspaceExplorerVisible={workspaceExplorerVisible}
       />
 
-      <div className="relative h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-        {activeView === 'workspace' ? (
-          <WorkspaceSessionScreen
-            sessionId={runtime.selectedConversation}
-            sessionHeader={SESSION_HEADER}
-            modelLabel={modelLabel}
-            workspaceRoot={runtime.workspaceRoot}
-            sessionPolicyLabel={runtime.sessionSecuritySummary.policyLabel}
-            sessionYoloActive={runtime.sessionSecuritySummary.yoloActive}
-            sessionSafeMode={runtime.sessionSecuritySummary.safeMode}
-            messages={[]}
-            statusMessage={statusMessage}
-            onBackToChat={() => {
-              overlays.setRepositoryPanelOpen(false);
-              setView('chat');
-            }}
-            onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
-            onOpenRepositoryPanel={() => overlays.setRepositoryPanelOpen(true)}
-            onApplyWorkspaceRoot={runtime.applyWorkspaceRoot}
-            mode={runtime.sessionMode}
-            activePlan={runtime.activePlan}
-            activeTask={runtime.activeTask}
-            autoState={runtime.autoState}
-            modeTransitions={runtime.modeTransitions}
-            modeBusy={runtime.modeBusy}
-            modeError={runtime.modeError}
-            onChangeMode={runtime.handleChangeMode}
-            onPlanDraft={runtime.handlePlanDraft}
-            onPlanApprove={runtime.handlePlanApprove}
-            onPlanExecute={runtime.handlePlanExecute}
-            onPlanCancel={runtime.handlePlanCancel}
-            decision={runtime.pendingDecision}
-            decisionBusy={runtime.decisionBusy}
-            decisionError={runtime.decisionError}
-            onDecisionRespond={(choice, editedAction) => {
-              void runtime.handleDecisionRespond(
-                choice,
-                editedAction,
-                repositoryActions.handleDecisionResume,
-              );
-            }}
-            refreshToken={repositoryActions.workspaceRefreshToken}
-            explorerVisible={workspaceExplorerVisible}
-          />
-        ) : (
+      <div className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div className="min-w-0 flex-1">
           <ChatSessionScreen
             messages={transport.canvasMessages}
             pendingMessage={transport.pendingCanvasMessage}
@@ -707,7 +659,53 @@ export default function App() {
             onDownloadArtifact={handleDownloadArtifact}
             onDownloadAll={handleDownloadAllArtifacts}
           />
-        )}
+        </div>
+        {activeView === 'workspace' ? (
+          <div className="h-full min-h-0 w-[48vw] min-w-[420px] max-w-[920px] border-l border-[#1b1b20] bg-[#0a0a0d] shadow-[-12px_0_30px_rgba(0,0,0,0.28)] max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:w-[min(92vw,760px)] max-lg:min-w-0">
+            <WorkspaceSessionScreen
+              sessionId={runtime.selectedConversation}
+              sessionHeader={SESSION_HEADER}
+              modelLabel={modelLabel}
+              workspaceRoot={runtime.workspaceRoot}
+              sessionPolicyLabel={runtime.sessionSecuritySummary.policyLabel}
+              sessionYoloActive={runtime.sessionSecuritySummary.yoloActive}
+              sessionSafeMode={runtime.sessionSecuritySummary.safeMode}
+              messages={[]}
+              statusMessage={statusMessage}
+              onBackToChat={() => {
+                overlays.setRepositoryPanelOpen(false);
+                setView('chat');
+              }}
+              onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
+              onOpenRepositoryPanel={() => overlays.setRepositoryPanelOpen(true)}
+              onApplyWorkspaceRoot={runtime.applyWorkspaceRoot}
+              mode={runtime.sessionMode}
+              activePlan={runtime.activePlan}
+              activeTask={runtime.activeTask}
+              autoState={runtime.autoState}
+              modeTransitions={runtime.modeTransitions}
+              modeBusy={runtime.modeBusy}
+              modeError={runtime.modeError}
+              onChangeMode={runtime.handleChangeMode}
+              onPlanDraft={runtime.handlePlanDraft}
+              onPlanApprove={runtime.handlePlanApprove}
+              onPlanExecute={runtime.handlePlanExecute}
+              onPlanCancel={runtime.handlePlanCancel}
+              decision={runtime.pendingDecision}
+              decisionBusy={runtime.decisionBusy}
+              decisionError={runtime.decisionError}
+              onDecisionRespond={(choice, editedAction) => {
+                void runtime.handleDecisionRespond(
+                  choice,
+                  editedAction,
+                  repositoryActions.handleDecisionResume,
+                );
+              }}
+              refreshToken={repositoryActions.workspaceRefreshToken}
+              explorerVisible={workspaceExplorerVisible}
+            />
+          </div>
+        ) : null}
       </div>
 
       <SearchModal

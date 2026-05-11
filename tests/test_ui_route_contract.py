@@ -142,3 +142,11 @@ def test_workspace_ui_entrypoints_use_computer_copy() -> None:
             if marker in text:
                 found.setdefault(str(source), []).append(marker)
     assert found == {}
+
+
+def test_computer_panel_does_not_replace_chat_screen() -> None:
+    app_source = Path("ui/src/app/App.tsx").read_text(encoding="utf-8")
+    assert "{activeView === 'workspace' ? (\n          <WorkspaceSessionScreen" not in app_source
+    assert "<ChatSessionScreen" in app_source
+    assert "activeView === 'workspace' ? (" in app_source
+    assert "<WorkspaceSessionScreen" in app_source

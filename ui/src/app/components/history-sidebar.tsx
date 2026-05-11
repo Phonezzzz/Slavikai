@@ -47,7 +47,6 @@ interface HistorySidebarProps {
   className?: string;
   compact?: boolean;
   workspaceActive?: boolean;
-  workspaceExplorerVisible?: boolean;
 }
 
 const defaultChats: ChatItem[] = [];
@@ -69,7 +68,6 @@ export function HistorySidebar({
   className = "",
   compact = false,
   workspaceActive = false,
-  workspaceExplorerVisible = true,
 }: HistorySidebarProps) {
   const [hoveredChat, setHoveredChat] = useState<string | null>(null);
   const [menuChatId, setMenuChatId] = useState<string | null>(null);
@@ -94,9 +92,7 @@ export function HistorySidebar({
   const todayChats = chats.filter((c) => c.group === "today");
   const yesterdayChats = chats.filter((c) => c.group === "yesterday");
   const olderChats = chats.filter((c) => c.group === "older");
-  const workspaceButtonLabel = workspaceActive
-    ? (workspaceExplorerVisible ? "Hide Files" : "Show Files")
-    : "Computer";
+  const workspaceButtonLabel = workspaceActive ? "Close Computer" : "Computer";
 
   if (compact) {
     return (
@@ -133,7 +129,7 @@ export function HistorySidebar({
           className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg bg-[#141418] text-[#d0d0d0] hover:bg-[#1b1b20]"
           title={workspaceButtonLabel}
           aria-label={workspaceButtonLabel}
-          aria-pressed={workspaceActive ? workspaceExplorerVisible : undefined}
+          aria-pressed={workspaceActive}
         >
           <LayoutGrid className="h-4 w-4" />
         </button>
