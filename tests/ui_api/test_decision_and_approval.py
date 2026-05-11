@@ -882,7 +882,7 @@ def test_ui_decision_respond_agent_decision_retry_replays_source_request() -> No
     asyncio.run(run())
 
 
-def test_ui_decision_respond_agent_decision_retry_preserves_workspace_lane() -> None:
+def test_ui_decision_respond_agent_decision_retry_uses_chat_lane() -> None:
     class RetryDecisionAgent(DummyAgent):
         def __init__(self) -> None:
             super().__init__()
@@ -933,19 +933,16 @@ def test_ui_decision_respond_agent_decision_retry_preserves_workspace_lane() -> 
             await _select_local_model(client, session_id)
 
             send_resp = await client.post(
-                "/ui/api/workspace/send",
+                "/ui/api/chat/send",
                 json={"content": "trigger retry"},
                 headers={"X-Slavik-Session": session_id},
             )
             assert send_resp.status == 200
             send_payload = await send_resp.json()
-            assert send_payload.get("lane") == "workspace"
+            assert send_payload.get("lane") == "chat"
             chat_messages = send_payload.get("messages")
             assert isinstance(chat_messages, list)
-            assert chat_messages == []
-            workspace_messages = send_payload.get("workspace_messages")
-            assert isinstance(workspace_messages, list)
-            assert len(workspace_messages) == 1
+            assert len(chat_messages) == 1
             decision = send_payload.get("decision")
             assert isinstance(decision, dict)
             decision_id = decision.get("id")
@@ -974,23 +971,13 @@ def test_ui_decision_respond_agent_decision_retry_preserves_workspace_lane() -> 
             chat_history_payload = await chat_history_resp.json()
             chat_history = chat_history_payload.get("messages")
             assert isinstance(chat_history, list)
-            assert chat_history == []
-
-            workspace_history_resp = await client.get(
-                f"/ui/api/sessions/{session_id}/history?lane=workspace"
-            )
-            assert workspace_history_resp.status == 200
-            workspace_history_payload = await workspace_history_resp.json()
-            workspace_history = workspace_history_payload.get("messages")
-            assert isinstance(workspace_history, list)
-            assert len(workspace_history) == 3
-            last_item = workspace_history[-1]
+            assert len(chat_history) == 3
+            last_item = chat_history[-1]
             assert isinstance(last_item, dict)
             assert last_item.get("role") == "assistant"
             assert last_item.get("content") == "retry-ok"
             assert all(
-                isinstance(item, dict) and item.get("lane") == "workspace"
-                for item in workspace_history
+                isinstance(item, dict) and item.get("lane") == "chat" for item in chat_history
             )
         finally:
             await client.close()

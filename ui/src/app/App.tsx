@@ -633,7 +633,7 @@ export default function App() {
             sessionPolicyLabel={runtime.sessionSecuritySummary.policyLabel}
             sessionYoloActive={runtime.sessionSecuritySummary.yoloActive}
             sessionSafeMode={runtime.sessionSecuritySummary.safeMode}
-            messages={transport.workspaceMessages}
+            messages={[]}
             statusMessage={statusMessage}
             onBackToChat={() => {
               overlays.setRepositoryPanelOpen(false);

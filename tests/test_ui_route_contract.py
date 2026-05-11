@@ -115,3 +115,14 @@ def test_workspace_assistant_has_no_composer_entrypoint() -> None:
 
     app_source = Path("ui/src/app/App.tsx").read_text(encoding="utf-8")
     assert "onSendAgentMessage={transport.handleSendWorkspace}" not in app_source
+
+
+def test_workspace_chat_routes_are_not_product_paths() -> None:
+    server_routes = _extract_server_routes()
+    ui_paths = _extract_ui_paths_from_dir(Path("ui/src"))
+    workspace_chat_paths = {
+        "/ui/api/workspace/send",
+        "/ui/api/workspace/events/{var}",
+    }
+    assert workspace_chat_paths.isdisjoint(server_routes)
+    assert workspace_chat_paths.isdisjoint(ui_paths)

@@ -72,7 +72,7 @@ def test_ui_chat_send_named_file_canvas_stream_keeps_full_answer_in_chat() -> No
     asyncio.run(run())
 
 
-def test_ui_split_event_stream_paths_open_for_same_session() -> None:
+def test_ui_only_chat_event_stream_path_is_open_for_session() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -87,11 +87,9 @@ def test_ui_split_event_stream_paths_open_for_same_session() -> None:
                 timeout=5,
             )
             assert chat_stream.status == 200
-            assert workspace_stream.status == 200
+            assert workspace_stream.status == 404
             assert (await _read_first_sse_event(chat_stream)).get("type") == "status"
-            assert (await _read_first_sse_event(workspace_stream)).get("type") == "status"
             chat_stream.close()
-            workspace_stream.close()
         finally:
             await client.close()
 
@@ -115,7 +113,7 @@ def test_ui_legacy_event_stream_route_is_absent() -> None:
     asyncio.run(run())
 
 
-def test_ui_workspace_send_endpoint_forces_workspace_lane() -> None:
+def test_ui_workspace_send_endpoint_is_absent() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -130,9 +128,7 @@ def test_ui_workspace_send_endpoint_forces_workspace_lane() -> None:
                 json={"content": "Ping"},
                 headers={"X-Slavik-Session": session_id},
             )
-            assert send_resp.status == 200
-            payload = await send_resp.json()
-            assert payload.get("lane") == "workspace"
+            assert send_resp.status == 404
         finally:
             await client.close()
 
@@ -165,7 +161,7 @@ def test_ui_chat_send_rejects_workspace_lane() -> None:
     asyncio.run(run())
 
 
-def test_ui_workspace_send_rejects_chat_lane() -> None:
+def test_ui_workspace_send_route_is_absent_even_with_chat_lane() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -180,11 +176,7 @@ def test_ui_workspace_send_rejects_chat_lane() -> None:
                 json={"content": "Ping", "lane": "chat"},
                 headers={"X-Slavik-Session": session_id},
             )
-            assert send_resp.status == 400
-            payload = await send_resp.json()
-            error = payload.get("error")
-            assert isinstance(error, dict)
-            assert error.get("code") == "invalid_request_error"
+            assert send_resp.status == 404
         finally:
             await client.close()
 
@@ -276,7 +268,7 @@ def test_ui_events_stream_includes_agent_activity() -> None:
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/workspace/events/{session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
@@ -413,7 +405,7 @@ def test_ui_events_stream_includes_chat_stream_events() -> None:
     asyncio.run(run())
 
 
-def test_ui_events_stream_workspace_lane_has_chat_stream_without_canvas() -> None:
+def test_ui_workspace_event_stream_route_is_absent() -> None:
     async def run() -> None:
         client = await _create_client(LongCodeAgent())
         try:
@@ -428,47 +420,7 @@ def test_ui_events_stream_workspace_lane_has_chat_stream_without_canvas() -> Non
                 f"/ui/api/workspace/events/{session_id}",
                 timeout=5,
             )
-            assert stream_resp.status == 200
-            _ = await _read_first_sse_event(stream_resp)
-
-            send_resp = await client.post(
-                "/ui/api/workspace/send",
-                json={"content": "Generate long module"},
-                headers={"X-Slavik-Session": session_id},
-            )
-            assert send_resp.status == 200
-            send_payload = await send_resp.json()
-            assert send_payload.get("lane") == "workspace"
-            display = send_payload.get("display")
-            assert isinstance(display, dict)
-            assert display.get("target") == "chat"
-            artifacts = send_payload.get("artifacts")
-            assert isinstance(artifacts, list)
-            assert artifacts == []
-
-            events = await _read_sse_events(stream_resp, max_events=64)
-            event_types = [
-                event.get("type") for event in events if isinstance(event.get("type"), str)
-            ]
-            assert "chat.stream.start" in event_types
-            assert "chat.stream.delta" in event_types
-            assert "chat.stream.done" in event_types
-            assert "canvas.stream.start" not in event_types
-            assert "canvas.stream.delta" not in event_types
-            assert "canvas.stream.done" not in event_types
-            lanes: set[str] = set()
-            for event in events:
-                event_type = event.get("type")
-                if not isinstance(event_type, str) or not event_type.startswith("chat.stream."):
-                    continue
-                payload = event.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                lane = payload.get("lane")
-                if isinstance(lane, str):
-                    lanes.add(lane)
-            assert lanes == {"workspace"}
-            stream_resp.close()
+            assert stream_resp.status == 404
         finally:
             await client.close()
 
@@ -629,17 +581,17 @@ def test_session_ownership_enforced_for_stream_workspace_decision_delete_files_o
     asyncio.run(run())
 
 
-def test_workspace_stream_supports_replace_mode_chunks() -> None:
+def test_chat_stream_supports_replace_mode_chunks() -> None:
     class ReplaceStreamAgent(DummyAgent):
         def respond_stream(self, messages):  # noqa: ANN001
             del messages
             yield {"text": "hel", "mode": "replace"}
-            yield {"text": "hello", "mode": "replace"}
-            self.last_stream_response_raw = "hello"
+            yield {"text": "hello " * 20, "mode": "replace"}
+            self.last_stream_response_raw = "hello " * 20
 
         def respond(self, messages) -> str:  # noqa: ANN001
             del messages
-            return "hello"
+            return "hello " * 20
 
     async def run() -> None:
         client = await _create_client(ReplaceStreamAgent())
@@ -652,15 +604,15 @@ def test_workspace_stream_supports_replace_mode_chunks() -> None:
             await _select_local_model(client, session_id)
 
             stream_resp = await client.get(
-                f"/ui/api/workspace/events/{session_id}",
+                f"/ui/api/chat/events/{session_id}",
                 timeout=5,
             )
             assert stream_resp.status == 200
             _ = await _read_first_sse_event(stream_resp)
 
             send_resp = await client.post(
-                "/ui/api/workspace/send",
-                json={"content": "workspace stream"},
+                "/ui/api/chat/send",
+                json={"content": "chat stream"},
                 headers={"X-Slavik-Session": session_id},
             )
             assert send_resp.status == 200
@@ -676,8 +628,8 @@ def test_workspace_stream_supports_replace_mode_chunks() -> None:
                 if payload.get("mode") == "replace":
                     replace_payloads.append(payload)
             assert replace_payloads
-            assert all(item.get("lane") == "workspace" for item in replace_payloads)
-            assert replace_payloads[-1].get("delta") == "hello"
+            assert all(item.get("lane") == "chat" for item in replace_payloads)
+            assert replace_payloads[-1].get("delta") == "hello " * 20
             stream_resp.close()
         finally:
             await client.close()

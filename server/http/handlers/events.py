@@ -105,7 +105,3 @@ async def _handle_ui_events_stream(
 
 async def handle_ui_chat_events_stream(request: web.Request) -> web.StreamResponse:
     return await _handle_ui_events_stream(request, lane="chat")
-
-
-async def handle_ui_workspace_events_stream(request: web.Request) -> web.StreamResponse:
-    return await _handle_ui_events_stream(request, lane="workspace")

@@ -27,7 +27,6 @@ export type RuntimePayloadSnapshot = {
 export type SessionTransportBridge = {
   applyLoadedConversation: (snapshot: {
     chatMessages: ChatMessage[];
-    workspaceMessages: ChatMessage[];
     outputContent: string | null;
     files: string[];
     artifacts: SessionArtifactRecord[];

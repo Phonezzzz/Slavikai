@@ -1084,7 +1084,7 @@ def test_ui_chat_send_force_canvas_override() -> None:
     asyncio.run(run())
 
 
-def test_ui_chat_send_workspace_lane_disables_canvas_and_artifacts() -> None:
+def test_ui_workspace_send_route_is_absent() -> None:
     async def run() -> None:
         client = await _create_client(LongCodeAgent())
         try:
@@ -1099,30 +1099,7 @@ def test_ui_chat_send_workspace_lane_disables_canvas_and_artifacts() -> None:
                 json={"content": "Generate long module", "force_canvas": True},
                 headers={"X-Slavik-Session": session_id},
             )
-            assert resp.status == 200
-            payload = await resp.json()
-            assert payload.get("lane") == "workspace"
-            display = payload.get("display")
-            assert isinstance(display, dict)
-            assert display.get("target") == "chat"
-            assert display.get("forced") is False
-            messages = payload.get("messages")
-            assert isinstance(messages, list)
-            assert messages == []
-            workspace_messages = payload.get("workspace_messages")
-            assert isinstance(workspace_messages, list)
-            assert len(workspace_messages) == 2
-            assistant = workspace_messages[-1]
-            assert isinstance(assistant, dict)
-            assistant_content = assistant.get("content")
-            assert isinstance(assistant_content, str)
-            assert assistant_content.startswith("```python")
-            artifacts = payload.get("artifacts")
-            assert isinstance(artifacts, list)
-            assert artifacts == []
-            output_payload = payload.get("output")
-            assert isinstance(output_payload, dict)
-            assert output_payload.get("content") is None
+            assert resp.status == 404
 
             chat_history_resp = await client.get(f"/ui/api/sessions/{session_id}/history")
             assert chat_history_resp.status == 200
@@ -1131,14 +1108,6 @@ def test_ui_chat_send_workspace_lane_disables_canvas_and_artifacts() -> None:
             assert isinstance(chat_history, list)
             assert chat_history == []
 
-            workspace_history_resp = await client.get(
-                f"/ui/api/sessions/{session_id}/history?lane=workspace"
-            )
-            assert workspace_history_resp.status == 200
-            workspace_history_payload = await workspace_history_resp.json()
-            workspace_history = workspace_history_payload.get("messages")
-            assert isinstance(workspace_history, list)
-            assert len(workspace_history) == 2
         finally:
             await client.close()
 

@@ -1299,17 +1299,6 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
     return await _handle_ui_send_impl(request, payload=payload, lane="chat")
 
 
-async def handle_ui_workspace_send(request: web.Request) -> web.Response:
-    payload_or_response = await _read_ui_send_payload(request)
-    if isinstance(payload_or_response, web.Response):
-        return payload_or_response
-    payload = payload_or_response
-    lane_error = _validate_endpoint_lane(payload, "workspace")
-    if lane_error is not None:
-        return lane_error
-    return await _handle_ui_send_impl(request, payload=payload, lane="workspace")
-
-
 async def handle_ui_send_resume(
     request: web.Request,
     *,

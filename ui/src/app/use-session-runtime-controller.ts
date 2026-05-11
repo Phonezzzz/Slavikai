@@ -377,9 +377,6 @@ export function useSessionRuntimeController({
     const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
     transportRef.current?.applyLoadedConversation({
       chatMessages: parseMessages((session as { messages?: unknown } | undefined)?.messages),
-      workspaceMessages: parseMessages(
-        (session as { workspace_messages?: unknown } | undefined)?.workspace_messages,
-      ),
       outputContent: parseSessionOutput((outputPayload as { output?: unknown }).output).content,
       files: parseSessionFiles((filesPayload as { files?: unknown }).files),
       artifacts: parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
@@ -420,16 +417,9 @@ export function useSessionRuntimeController({
     const headerSession = response.headers.get(sessionHeader);
     const payloadSession = extractSessionIdFromPayload(payload);
     const nextSession = (headerSession && headerSession.trim()) || payloadSession || null;
-    const session = (
-      payload as {
-        session?: { messages?: unknown; workspace_messages?: unknown; selected_model?: unknown };
-      }
-    ).session;
+    const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
     transportRef.current?.applyLoadedConversation({
       chatMessages: parseMessages(session?.messages),
-      workspaceMessages: parseMessages(
-        (session as { workspace_messages?: unknown } | undefined)?.workspace_messages,
-      ),
       outputContent: parseSessionOutput((session as { output?: unknown } | undefined)?.output).content,
       files: parseSessionFiles((session as { files?: unknown } | undefined)?.files),
       artifacts: parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
