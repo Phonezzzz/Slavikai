@@ -118,6 +118,10 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         memory_companion_db_path: str | None = None,
         memory_inbox_db_path: str | None = None,
         canonical_atoms_db_path: str | None = None,
+        embeddings_provider: Literal["local", "openai"] = "local",
+        embeddings_local_model: str = "all-MiniLM-L6-v2",
+        embeddings_openai_model: str = "text-embedding-3-small",
+        embeddings_openai_api_key: str | None = None,
     ) -> None:
         self.main_config = main_config
         self.main_api_key = main_api_key
@@ -157,7 +161,13 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             else CategorizedMemoryStore()
         )
         self._memory_inbox_writer = MemoryInboxWriter(self._memory_inbox_store, self.memory_config)
-        self.vectors = VectorIndex("memory/vectors.db")
+        self.vectors = VectorIndex(
+            "memory/vectors.db",
+            provider=embeddings_provider,
+            local_model=embeddings_local_model,
+            openai_model=embeddings_openai_model,
+            openai_api_key=embeddings_openai_api_key,
+        )
         self._canonical_store = (
             CanonicalAtomStore(canonical_atoms_db_path)
             if canonical_atoms_db_path

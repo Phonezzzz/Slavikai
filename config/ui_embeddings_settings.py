@@ -11,7 +11,7 @@ EmbeddingsProvider = Literal["local", "openai"]
 DEFAULT_UI_SETTINGS_PATH: Final[Path] = (
     Path(__file__).resolve().parent.parent / ".run" / "ui_settings.json"
 )
-DEFAULT_EMBEDDINGS_PROVIDER: Final[EmbeddingsProvider] = "local"
+DEFAULT_EMBEDDINGS_PROVIDER: Final[EmbeddingsProvider] = "openai"
 DEFAULT_LOCAL_EMBEDDINGS_MODEL: Final[str] = "all-MiniLM-L6-v2"
 DEFAULT_OPENAI_EMBEDDINGS_MODEL: Final[str] = "text-embedding-3-small"
 

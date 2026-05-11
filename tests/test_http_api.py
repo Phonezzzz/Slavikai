@@ -646,6 +646,22 @@ def test_agent_init_accepts_runtime_provider_model() -> None:
     assert agent.main_config.model == "gryphe/mythomax-l2-13b"
 
 
+def test_agent_init_accepts_embeddings_provider_config() -> None:
+    from core.agent import Agent
+
+    agent = Agent(
+        brain=DummyBrain("ok"),
+        embeddings_provider="openai",
+        embeddings_local_model="all-MiniLM-L6-v2",
+        embeddings_openai_model="text-embedding-3-small",
+        embeddings_openai_api_key="openai-test-key",
+    )
+
+    assert agent.vectors.provider == "openai"
+    assert agent.vectors.model_name == "text-embedding-3-small"
+    assert agent.vectors.openai_api_key == "openai-test-key"
+
+
 def test_agent_init_with_external_brain_does_not_resolve_file_main() -> None:
     from core.agent import Agent
 

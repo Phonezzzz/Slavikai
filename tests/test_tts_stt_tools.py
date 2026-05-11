@@ -25,10 +25,12 @@ class DummyHttp:
         self.error = error
         self.called = False
         self.last_kwargs = {}
+        self.calls: list[dict[str, object]] = []
 
     def post_bytes(self, url, **kwargs):  # noqa: ANN001
         self.called = True
         self.last_kwargs = dict(kwargs)
+        self.calls.append(dict(kwargs))
         return HttpResult(
             ok=self.ok,
             data=self.payload if self.payload is not None else b"audio",
@@ -74,6 +76,39 @@ def test_tts_tool_writes_file(tmp_path, monkeypatch) -> None:
     headers = http.last_kwargs.get("headers")
     assert isinstance(headers, dict)
     assert headers.get("Authorization") == "Bearer key"
+
+
+def test_tts_tool_splits_long_text_into_provider_sized_chunks(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    http = DummyHttp(payload=b"audio")
+    tool = TtsTool(http, TtsConfig(format="mp3", max_input_chars=1000, max_request_chars=120))
+    text = " ".join(f"sentence-{index}" for index in range(80))
+
+    result = tool.handle(ToolRequest(name="tts", args={"text": text}))
+
+    assert result.ok
+    assert len(http.calls) > 1
+    for call in http.calls:
+        payload = call.get("json")
+        assert isinstance(payload, dict)
+        chunk = payload.get("input")
+        assert isinstance(chunk, str)
+        assert 0 < len(chunk) <= 120
+    assert result.data.get("chunks") == len(http.calls)
+    file_path = Path(result.data.get("file_path"))
+    assert file_path.read_bytes() == b"audio" * len(http.calls)
+
+
+def test_tts_tool_rejects_text_above_total_limit(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    http = DummyHttp(payload=b"audio")
+    tool = TtsTool(http, TtsConfig(max_input_chars=20, max_request_chars=10))
+
+    result = tool.handle(ToolRequest(name="tts", args={"text": "x" * 21}))
+
+    assert not result.ok
+    assert result.error == "Текст для озвучки превышает лимит 20 символов."
+    assert not http.called
 
 
 def test_tts_tool_requires_openai_api_key(monkeypatch) -> None:

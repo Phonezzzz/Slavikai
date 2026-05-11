@@ -92,9 +92,16 @@ def create_app(
             agent_factory = getattr(module, "Agent", None)
             if not callable(agent_factory):
                 raise RuntimeError("Agent class not found in core.agent")
+            embeddings_settings = api._load_embeddings_settings()
             return cast(
                 "AgentProtocol",
-                agent_factory(main_config=runtime_model_state.peek_global_main()),
+                agent_factory(
+                    main_config=runtime_model_state.peek_global_main(),
+                    embeddings_provider=embeddings_settings.provider,
+                    embeddings_local_model=embeddings_settings.local_model,
+                    embeddings_openai_model=embeddings_settings.openai_model,
+                    embeddings_openai_api_key=api._resolve_provider_api_key("openai"),
+                ),
             )
 
         app["agent"] = None

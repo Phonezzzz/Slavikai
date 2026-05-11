@@ -12,7 +12,8 @@ class TtsConfig:
     endpoint: str = "https://api.openai.com/v1/audio/speech"
     format: str = "mp3"
     timeout: int = 20
-    max_input_chars: int = 4096
+    max_input_chars: int = 32_000
+    max_request_chars: int = 4096
 
     def resolve_api_key(self) -> str | None:
         if self.api_key and self.api_key.strip():
