@@ -12,7 +12,6 @@ import {
 import type {
   AutoState,
   DecisionRespondChoice,
-  ModeTransitionsContract,
   PlanEnvelope,
   SessionMode,
   TaskExecutionState,
@@ -22,29 +21,12 @@ import type { CanvasMessage } from '../../app/components/canvas';
 import { MessageRenderer } from '../messages';
 import type { RenderableMessage } from '../messages';
 import { TtsAudioPlayer, useTtsAudioPlayer } from '../audio';
-import { PlanPanel } from '../../app/components/plan-panel';
-
-export type WorkspaceContextChip = {
-  key: string;
-  label: string;
-  enabled: boolean;
-  onToggle: () => void;
-};
 
 type WorkspaceAssistantPanelProps = {
-  contextChips: WorkspaceContextChip[];
   mode: SessionMode;
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
-  modeTransitions: ModeTransitionsContract | null;
-  modeBusy: boolean;
-  modeError: string | null;
-  onChangeMode: (mode: SessionMode) => Promise<void>;
-  onPlanDraft: (goal: string) => Promise<void>;
-  onPlanApprove: () => Promise<void>;
-  onPlanExecute: () => Promise<void>;
-  onPlanCancel: () => Promise<void>;
   decision: UiDecision | null | undefined;
   decisionBusy: boolean;
   decisionError: string | null;
@@ -58,19 +40,10 @@ type WorkspaceAssistantPanelProps = {
 };
 
 export function WorkspaceAssistantPanel({
-  contextChips,
   mode,
   activePlan,
   activeTask,
   autoState,
-  modeTransitions,
-  modeBusy,
-  modeError,
-  onChangeMode,
-  onPlanDraft,
-  onPlanApprove,
-  onPlanExecute,
-  onPlanCancel,
   decision,
   decisionBusy,
   decisionError,
@@ -165,45 +138,19 @@ export function WorkspaceAssistantPanel({
     <section className="min-h-0 border-r border-[#1f1f24] bg-[#0d0d11] flex flex-col overflow-hidden">
       <div className="h-9 border-b border-[#1f1f24] px-3 flex items-center gap-2 text-[12px] text-[#9a9aa3]">
         <Bot className="h-3.5 w-3.5 text-[#f59e0b]" />
-        AI Assistant
+        Session Activity
       </div>
 
-      <div className="border-b border-[#1f1f24] px-3 py-2 flex flex-wrap gap-2">
-        {contextChips.length === 0 ? (
-          <span className="text-[11px] text-[#666]">No context available.</span>
-        ) : (
-          contextChips.map((chip) => (
-            <button
-              key={chip.key}
-              onClick={chip.onToggle}
-              className={`rounded-full border px-2 py-0.5 text-[11px] ${
-                chip.enabled
-                  ? 'border-[#2f5dff] bg-[#1a2348] text-[#c8d7ff]'
-                  : 'border-[#2a2a31] bg-[#111117] text-[#888893]'
-              }`}
-              title={chip.label}
-            >
-              {chip.label}
-            </button>
-          ))
-        )}
+      <div className="border-b border-[#1f1f24] bg-[#0f0f14] px-3 py-2 text-[11px] text-[#8a8a94]">
+        <div className="flex items-center justify-between gap-2">
+          <span>mode: {mode}</span>
+          <span>plan: {activePlan?.status ?? 'none'}</span>
+        </div>
+        <div className="mt-1 flex items-center justify-between gap-2">
+          <span>task: {activeTask?.status ?? 'none'}</span>
+          <span>auto: {autoState?.status ?? 'idle'}</span>
+        </div>
       </div>
-
-      <PlanPanel
-        mode={mode}
-        plan={activePlan}
-        task={activeTask}
-        autoState={autoState}
-        modeTransitions={modeTransitions}
-        busy={modeBusy}
-        error={modeError}
-        showModeControls={false}
-        onChangeMode={onChangeMode}
-        onDraft={onPlanDraft}
-        onApprove={onPlanApprove}
-        onExecute={onPlanExecute}
-        onCancel={onPlanCancel}
-      />
 
       <div className="flex-1 min-h-0 overflow-auto px-3 py-3 space-y-2" data-scrollbar="always">
         {renderItems.length === 0 ? (

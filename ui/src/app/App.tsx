@@ -683,14 +683,6 @@ export default function App() {
               activePlan={runtime.activePlan}
               activeTask={runtime.activeTask}
               autoState={runtime.autoState}
-              modeTransitions={runtime.modeTransitions}
-              modeBusy={runtime.modeBusy}
-              modeError={runtime.modeError}
-              onChangeMode={runtime.handleChangeMode}
-              onPlanDraft={runtime.handlePlanDraft}
-              onPlanApprove={runtime.handlePlanApprove}
-              onPlanExecute={runtime.handlePlanExecute}
-              onPlanCancel={runtime.handlePlanCancel}
               decision={runtime.pendingDecision}
               decisionBusy={runtime.decisionBusy}
               decisionError={runtime.decisionError}

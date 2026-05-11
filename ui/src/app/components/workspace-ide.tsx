@@ -5,7 +5,6 @@ import type * as Monaco from 'monaco-editor';
 import type {
   AutoState,
   DecisionRespondChoice,
-  ModeTransitionsContract,
   PlanEnvelope,
   SessionMode,
   TaskExecutionState,
@@ -23,10 +22,7 @@ import {
   WorkspaceEditorPane,
   type WorkspaceOpenFileTab,
 } from '../../features/workspace/workspace-editor-pane';
-import {
-  WorkspaceAssistantPanel,
-  type WorkspaceContextChip,
-} from '../../features/workspace/workspace-assistant-panel';
+import { WorkspaceAssistantPanel } from '../../features/workspace/workspace-assistant-panel';
 import { WorkspaceExplorer } from '../../features/workspace/workspace-explorer';
 import {
   WorkspaceQuickOpen,
@@ -43,7 +39,6 @@ import { useWorkspaceLayout } from '../../features/workspace/use-workspace-layou
 import {
   deleteWorkspaceFile,
   fetchWorkspaceFile,
-  fetchWorkspaceGitDiff,
   fetchWorkspaceTree,
   postWorkspaceFileCreate,
   postWorkspaceFileMove,
@@ -54,9 +49,6 @@ import {
   postWorkspaceCommandRunnerRun,
   putWorkspaceFile,
 } from '../../features/workspace/workspace-api';
-import {
-  buildWorkspaceContextChips,
-} from '../../features/workspace/workspace-context';
 
 type WorkspaceIdeProps = {
   sessionId: string | null;
@@ -77,14 +69,6 @@ type WorkspaceIdeProps = {
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
-  modeTransitions: ModeTransitionsContract | null;
-  modeBusy?: boolean;
-  modeError?: string | null;
-  onChangeMode: (mode: SessionMode) => Promise<void>;
-  onPlanDraft: (goal: string) => Promise<void>;
-  onPlanApprove: () => Promise<void>;
-  onPlanExecute: () => Promise<void>;
-  onPlanCancel: () => Promise<void>;
   decision?: UiDecision | null;
   decisionBusy?: boolean;
   decisionError?: string | null;
@@ -118,14 +102,6 @@ export function WorkspaceIde({
   activePlan,
   activeTask,
   autoState,
-  modeTransitions,
-  modeBusy = false,
-  modeError = null,
-  onChangeMode,
-  onPlanDraft,
-  onPlanApprove,
-  onPlanExecute,
-  onPlanCancel,
   decision,
   decisionBusy = false,
   decisionError = null,
@@ -144,7 +120,6 @@ export function WorkspaceIde({
   const [openFiles, setOpenFiles] = useState<WorkspaceOpenFileTab[]>([]);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [editorSaving, setEditorSaving] = useState(false);
-  const [selectionText, setSelectionText] = useState('');
 
   const [terminalLines, setTerminalLines] = useState<string[]>([
     `[${terminalTimestamp()}] Command runner ready.`,
@@ -152,17 +127,10 @@ export function WorkspaceIde({
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalBusy, setTerminalBusy] = useState(false);
 
-  const [includeOpenTabs, setIncludeOpenTabs] = useState(true);
-  const [includeSelection, setIncludeSelection] = useState(true);
-  const [includeGitDiff, setIncludeGitDiff] = useState(true);
-  const [includeTerminal, setIncludeTerminal] = useState(true);
-
   const [rootPickerOpen, setRootPickerOpen] = useState(false);
   const [rootInput, setRootInput] = useState('');
   const [rootBusy, setRootBusy] = useState(false);
   const [indexing, setIndexing] = useState(false);
-  const [gitDiffLoading, setGitDiffLoading] = useState(false);
-  const [gitDiff, setGitDiff] = useState('');
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [quickOpenQuery, setQuickOpenQuery] = useState('');
   const [quickOpenLoading, setQuickOpenLoading] = useState(false);
@@ -219,20 +187,6 @@ export function WorkspaceIde({
     [quickOpenItems, quickOpenQuery, recentPaths],
   );
 
-  const lastTerminalOutput = useMemo(() => {
-    for (let index = terminalLines.length - 1; index >= 0; index -= 1) {
-      const line = terminalLines[index].trim();
-      if (!line) {
-        continue;
-      }
-      if (line.startsWith('[') && line.includes(']')) {
-        continue;
-      }
-      return line;
-    }
-    return '';
-  }, [terminalLines]);
-
   useEffect(() => {
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [terminalLines]);
@@ -256,7 +210,6 @@ export function WorkspaceIde({
     setActiveExplorerPath(null);
     setLoadingTreePaths(new Set());
     setTreeMeta(null);
-    setSelectionText('');
     setQuickOpenOpen(false);
     setQuickOpenQuery('');
     setQuickOpenPartial(false);
@@ -320,7 +273,6 @@ export function WorkspaceIde({
     previousDecisionStatusRef.current = currentStatus;
     if (previousStatus === 'pending' && currentStatus !== 'pending') {
       requestTreeLoad(undefined, 'decision_resume');
-      void loadGitDiff();
       void refreshOpenTabsFromDisk();
     }
   }, [decision?.status]);
@@ -539,24 +491,9 @@ export function WorkspaceIde({
     setQuickOpenOpen(false);
   };
 
-  const loadGitDiff = async (): Promise<void> => {
-    if (!sessionId) {
-      setGitDiff('');
-      return;
-    }
-    setGitDiffLoading(true);
-    try {
-      setGitDiff(await fetchWorkspaceGitDiff(requestHeaders));
-    } catch {
-      setGitDiff('');
-    } finally {
-      setGitDiffLoading(false);
-    }
-  };
 
   useEffect(() => {
     requestTreeLoad(undefined, 'session_init');
-    void loadGitDiff();
   }, [refreshToken, sessionId]);
 
   useEffect(() => {
@@ -785,7 +722,6 @@ export function WorkspaceIde({
       );
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] saved: ${activeTab.path}`]);
       requestTreeLoad(undefined, 'save');
-      void loadGitDiff();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to save file.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
@@ -820,7 +756,6 @@ export function WorkspaceIde({
         next.push(`[${terminalTimestamp()}] exit=${result.exitCode}`);
         return next;
       });
-      void loadGitDiff();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to run file.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
@@ -890,7 +825,6 @@ export function WorkspaceIde({
       setOpenFiles([]);
       setActiveFileId(null);
       requestTreeLoad(undefined, 'root_change');
-      void loadGitDiff();
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] Computer root: ${appliedRoot}`]);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to change Computer root.';
@@ -937,7 +871,6 @@ export function WorkspaceIde({
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] created: ${nextPath}`]);
       setActiveExplorerPath(nextPath);
       requestTreeLoad(undefined, 'create');
-      void loadGitDiff();
       void openFileInTab(nextPath);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create file.';
@@ -984,7 +917,6 @@ export function WorkspaceIde({
         ),
       );
       requestTreeLoad(undefined, 'rename');
-      void loadGitDiff();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to rename path.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
@@ -1030,7 +962,6 @@ export function WorkspaceIde({
         ),
       );
       requestTreeLoad(undefined, 'move');
-      void loadGitDiff();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to move path.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
@@ -1072,7 +1003,6 @@ export function WorkspaceIde({
         setActiveExplorerPath(null);
       }
       requestTreeLoad(undefined, 'delete');
-      void loadGitDiff();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to delete path.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
@@ -1081,30 +1011,7 @@ export function WorkspaceIde({
 
   const handleEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
-    editor.onDidChangeCursorSelection(() => {
-      const model = editor.getModel();
-      const selection = editor.getSelection();
-      const selected =
-        model && selection ? model.getValueInRange(selection) : '';
-      setSelectionText(selected.trim());
-    });
   };
-
-  const aiContextChips: WorkspaceContextChip[] = buildWorkspaceContextChips({
-    openFilesCount: openFiles.length,
-    includeOpenTabs,
-    onToggleOpenTabs: () => setIncludeOpenTabs((prev) => !prev),
-    selectionText,
-    includeSelection,
-    onToggleSelection: () => setIncludeSelection((prev) => !prev),
-    gitDiff,
-    gitDiffLoading,
-    includeGitDiff,
-    onToggleGitDiff: () => setIncludeGitDiff((prev) => !prev),
-    lastTerminalOutput,
-    includeTerminal,
-    onToggleTerminal: () => setIncludeTerminal((prev) => !prev),
-  });
 
   const terminalPendingText = isDecisionBlocking
     ? 'Ожидает подтверждения решения. Отправка временно заблокирована.'
@@ -1127,9 +1034,6 @@ export function WorkspaceIde({
         onToggleRootPicker={() => setRootPickerOpen((prev) => !prev)}
         onReindex={() => {
           void handleReindex();
-        }}
-        onRefreshGitDiff={() => {
-          void loadGitDiff();
         }}
         onOpenRepositoryPanel={onOpenRepositoryPanel}
         onOpenQuickOpen={openQuickOpen}
@@ -1200,19 +1104,10 @@ export function WorkspaceIde({
         ) : null}
 
         <WorkspaceAssistantPanel
-          contextChips={aiContextChips}
           mode={mode}
           activePlan={activePlan}
           activeTask={activeTask}
           autoState={autoState}
-          modeTransitions={modeTransitions}
-          modeBusy={modeBusy}
-          modeError={modeError}
-          onChangeMode={onChangeMode}
-          onPlanDraft={onPlanDraft}
-          onPlanApprove={onPlanApprove}
-          onPlanExecute={onPlanExecute}
-          onPlanCancel={onPlanCancel}
           decision={decision}
           decisionBusy={decisionBusy}
           decisionError={decisionError}

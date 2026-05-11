@@ -3,7 +3,6 @@ import type { CanvasMessage } from './canvas';
 import type {
   AutoState,
   DecisionRespondChoice,
-  ModeTransitionsContract,
   PlanEnvelope,
   SessionMode,
   TaskExecutionState,
@@ -24,9 +23,6 @@ type WorkspaceSessionScreenProps = {
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
   autoState: AutoState | null;
-  modeTransitions: ModeTransitionsContract | null;
-  modeBusy: boolean;
-  modeError: string | null;
   decision: UiDecision | null;
   decisionBusy: boolean;
   decisionError: string | null;
@@ -36,11 +32,6 @@ type WorkspaceSessionScreenProps = {
   onOpenSessionDrawer: () => void;
   onOpenRepositoryPanel: () => void;
   onApplyWorkspaceRoot: (workspaceRoot: string) => void;
-  onChangeMode: (mode: SessionMode) => Promise<void>;
-  onPlanDraft: (goal: string) => Promise<void>;
-  onPlanApprove: () => Promise<void>;
-  onPlanExecute: () => Promise<void>;
-  onPlanCancel: () => Promise<void>;
   onDecisionRespond: (
     choice: DecisionRespondChoice,
     editedAction?: Record<string, unknown> | null,
@@ -61,9 +52,6 @@ export function WorkspaceSessionScreen({
   activePlan,
   activeTask,
   autoState,
-  modeTransitions,
-  modeBusy,
-  modeError,
   decision,
   decisionBusy,
   decisionError,
@@ -73,11 +61,6 @@ export function WorkspaceSessionScreen({
   onOpenSessionDrawer,
   onOpenRepositoryPanel,
   onApplyWorkspaceRoot,
-  onChangeMode,
-  onPlanDraft,
-  onPlanApprove,
-  onPlanExecute,
-  onPlanCancel,
   onDecisionRespond,
 }: WorkspaceSessionScreenProps) {
   return (
@@ -99,14 +82,6 @@ export function WorkspaceSessionScreen({
       activePlan={activePlan}
       activeTask={activeTask}
       autoState={autoState}
-      modeTransitions={modeTransitions}
-      modeBusy={modeBusy}
-      modeError={modeError}
-      onChangeMode={onChangeMode}
-      onPlanDraft={onPlanDraft}
-      onPlanApprove={onPlanApprove}
-      onPlanExecute={onPlanExecute}
-      onPlanCancel={onPlanCancel}
       decision={decision}
       decisionBusy={decisionBusy}
       decisionError={decisionError}

@@ -1,4 +1,4 @@
-import { ArrowLeft, FolderGit2, RefreshCcw, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeft, FolderGit2, SlidersHorizontal } from 'lucide-react';
 
 import { compactPath } from './workspace-helpers';
 
@@ -17,7 +17,6 @@ type WorkspaceToolbarProps = {
   onOpenSessionDrawer: () => void;
   onToggleRootPicker: () => void;
   onReindex: () => void;
-  onRefreshGitDiff: () => void;
   onOpenRepositoryPanel: () => void;
   onOpenQuickOpen: () => void;
   onRootInputChange: (value: string) => void;
@@ -39,7 +38,6 @@ export function WorkspaceToolbar({
   onOpenSessionDrawer,
   onToggleRootPicker,
   onReindex,
-  onRefreshGitDiff,
   onOpenRepositoryPanel,
   onOpenQuickOpen,
   onRootInputChange,
@@ -108,13 +106,6 @@ export function WorkspaceToolbar({
           <span className={`text-[11px] ${sessionSafeMode ? 'text-amber-300' : 'text-emerald-300'}`}>
             Session safe mode: {sessionSafeMode ? 'ON' : 'OFF'}
           </span>
-          <button
-            onClick={onRefreshGitDiff}
-            className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2 py-1 text-[12px] text-[#bdbdc6] hover:bg-[#181820]"
-            title="Refresh git diff"
-          >
-            <RefreshCcw className="h-3.5 w-3.5" />
-          </button>
           <button
             onClick={onOpenRepositoryPanel}
             className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2 py-1 text-[12px] text-[#bdbdc6] hover:bg-[#181820]"
