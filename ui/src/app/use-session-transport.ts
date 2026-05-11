@@ -211,6 +211,7 @@ export function useSessionTransport({
       display?: unknown;
       trace_id?: unknown;
       mwv_report?: unknown;
+      computer_events?: unknown;
     };
 
     const lane: MessageLane = 'chat';

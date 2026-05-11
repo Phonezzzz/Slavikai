@@ -13,6 +13,7 @@ from core.agent_routing import AgentRoutingMixin
 from core.agent_tools import AgentToolsMixin
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.auto_agent import AutoAgent
+from core.computer_activity_log import ComputerActivityLog
 from core.decision.handler import DecisionHandler
 from core.decision.models import DecisionPacket
 from core.mwv.manager import ManagerRuntime
@@ -225,6 +226,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.workspace_selection: str | None = None
         self._workspace_diff_baselines: dict[str, str] = {}
         self._workspace_diffs: dict[str, WorkspaceDiffEntry] = {}
+        self._computer_log = ComputerActivityLog()
 
     def _review_answer(self, answer: str) -> str:
         return answer

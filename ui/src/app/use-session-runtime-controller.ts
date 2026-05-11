@@ -32,6 +32,7 @@ import {
 import type { SessionTransportBridge } from './session-bridges';
 import type {
   AutoState,
+  ComputerActivityEvent,
   DecisionRespondChoice,
   ModeTransitionsContract,
   PlanEnvelope,
@@ -75,6 +76,7 @@ export type SessionRuntimeControllerResult = {
   decisionError: string | null;
   sessionSecuritySummary: SessionSecuritySummary;
   workspaceRoot: string;
+  computerEvents: ComputerActivityEvent[];
   modeBusy: boolean;
   modeError: string | null;
   handleSelectConversation: (sessionId: string) => Promise<void>;
@@ -286,10 +288,29 @@ export function useSessionRuntimeController({
   const [activeTask, setActiveTask] = useState<TaskExecutionState | null>(null);
   const [autoState, setAutoState] = useState<AutoState | null>(null);
   const [modeTransitions, setModeTransitions] = useState<ModeTransitionsContract | null>(null);
+  const [computerEvents, setComputerEvents] = useState<ComputerActivityEvent[]>([]);
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
   const [lastModelApplied, setLastModelApplied] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+
+  const parseComputerEvents = (value: unknown): ComputerActivityEvent[] => {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value
+      .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+      .map((item) => ({
+        kind: typeof item.kind === 'string' ? item.kind : 'tool_started',
+        tool: typeof item.tool === 'string' ? item.tool : '',
+        ts: typeof item.ts === 'number' ? item.ts : 0,
+        ok: typeof item.ok === 'boolean' ? item.ok : undefined,
+        path: typeof item.path === 'string' ? item.path : undefined,
+        command: typeof item.command === 'string' ? item.command : undefined,
+        error: typeof item.error === 'string' ? item.error : undefined,
+        duration_ms: typeof item.duration_ms === 'number' ? item.duration_ms : undefined,
+      }));
+  };
 
   const applyRuntimePayload = (payload: unknown) => {
     const body = payload as {
@@ -300,6 +321,7 @@ export function useSessionRuntimeController({
       active_task?: unknown;
       auto_state?: unknown;
       mode_transitions?: unknown;
+      computer_events?: unknown;
     };
     if (body.decision !== undefined) {
       setPendingDecision(parseUiDecision(body.decision));
@@ -324,6 +346,9 @@ export function useSessionRuntimeController({
     }
     if (body.mode_transitions !== undefined) {
       setModeTransitions(parseModeTransitions(body.mode_transitions));
+    }
+    if (body.computer_events !== undefined) {
+      setComputerEvents(parseComputerEvents(body.computer_events));
     }
   };
 
@@ -398,6 +423,9 @@ export function useSessionRuntimeController({
     setModeTransitions(
       parseModeTransitions((session as { mode_transitions?: unknown } | undefined)?.mode_transitions),
     );
+    setComputerEvents(
+      parseComputerEvents((session as { computer_events?: unknown } | undefined)?.computer_events),
+    );
     const parsedSelectedModel = parseSelectedModel(session?.selected_model);
     setSelectedModel(parsedSelectedModel);
     return parsedSelectedModel;
@@ -436,6 +464,9 @@ export function useSessionRuntimeController({
     setAutoState(parseAutoState((session as { auto_state?: unknown } | undefined)?.auto_state));
     setModeTransitions(
       parseModeTransitions((session as { mode_transitions?: unknown } | undefined)?.mode_transitions),
+    );
+    setComputerEvents(
+      parseComputerEvents((session as { computer_events?: unknown } | undefined)?.computer_events),
     );
     setSelectedModel(sessionModel);
     if (nextSession) {
@@ -853,6 +884,7 @@ export function useSessionRuntimeController({
     decisionError,
     sessionSecuritySummary,
     workspaceRoot,
+    computerEvents,
     modeBusy,
     modeError,
     handleSelectConversation,

@@ -671,6 +671,7 @@ export default function App() {
               sessionYoloActive={runtime.sessionSecuritySummary.yoloActive}
               sessionSafeMode={runtime.sessionSecuritySummary.safeMode}
               messages={[]}
+              computerEvents={runtime.computerEvents}
               statusMessage={statusMessage}
               onBackToChat={() => {
                 overlays.setRepositoryPanelOpen(false);

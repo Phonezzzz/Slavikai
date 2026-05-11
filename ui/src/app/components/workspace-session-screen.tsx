@@ -2,6 +2,7 @@ import { WorkspaceIde } from './workspace-ide';
 import type { CanvasMessage } from './canvas';
 import type {
   AutoState,
+  ComputerActivityEvent,
   DecisionRespondChoice,
   PlanEnvelope,
   SessionMode,
@@ -18,6 +19,7 @@ type WorkspaceSessionScreenProps = {
   sessionYoloActive: boolean;
   sessionSafeMode: boolean;
   messages: CanvasMessage[];
+  computerEvents: ComputerActivityEvent[];
   statusMessage: string | null;
   mode: SessionMode;
   activePlan: PlanEnvelope | null;
@@ -47,6 +49,7 @@ export function WorkspaceSessionScreen({
   sessionYoloActive,
   sessionSafeMode,
   messages,
+  computerEvents,
   statusMessage,
   mode,
   activePlan,
@@ -73,6 +76,7 @@ export function WorkspaceSessionScreen({
       sessionYoloActive={sessionYoloActive}
       sessionSafeMode={sessionSafeMode}
       messages={messages}
+      computerEvents={computerEvents}
       statusMessage={statusMessage}
       onBackToChat={onBackToChat}
       onOpenSessionDrawer={onOpenSessionDrawer}

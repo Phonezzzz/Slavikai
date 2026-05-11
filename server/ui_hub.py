@@ -65,6 +65,7 @@ class _SessionListSortableItem(TypedDict):
 
 
 DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+MAX_COMPUTER_EVENTS = 200
 DEFAULT_MAX_SESSIONS = 200
 DEFAULT_MAX_MESSAGES_PER_SESSION = 500
 DEFAULT_SUBSCRIBER_QUEUE_MAXSIZE = 256
@@ -249,6 +250,7 @@ class _SessionState:
     active_plan: dict[str, JSONValue] | None = None
     active_task: dict[str, JSONValue] | None = None
     auto_state: dict[str, JSONValue] | None = None
+    computer_events: list[dict[str, JSONValue]] = field(default_factory=list)
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
 
@@ -805,6 +807,7 @@ class UIHub:
                 "active_plan": dict(state.active_plan) if state.active_plan is not None else None,
                 "active_task": dict(state.active_task) if state.active_task is not None else None,
                 "auto_state": dict(state.auto_state) if state.auto_state is not None else None,
+                "computer_events": list(state.computer_events),
             }
 
     async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
@@ -813,6 +816,28 @@ class UIHub:
             if state is None or state.decision_packet is None:
                 return None
             return dict(state.decision_packet)
+
+    async def get_computer_events(self, session_id: str) -> list[dict[str, JSONValue]]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return []
+            return list(state.computer_events)
+
+    async def append_computer_events(
+        self,
+        session_id: str,
+        events: list[dict[str, JSONValue]],
+    ) -> None:
+        if not events:
+            return
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return
+            state.computer_events.extend(events)
+            if len(state.computer_events) > MAX_COMPUTER_EVENTS:
+                state.computer_events = state.computer_events[-MAX_COMPUTER_EVENTS:]
 
     async def get_workspace_root(self, session_id: str) -> str | None:
         async with self._lock:

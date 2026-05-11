@@ -17,6 +17,7 @@ from core.approval_policy import (
     ApprovalRequest,
     ApprovalRequired,
 )
+from core.computer_activity_log import ComputerActivityLog
 from core.decision.handler import DecisionContext
 from core.decision.models import DecisionPacket
 from core.mwv.models import (
@@ -125,6 +126,7 @@ class AgentToolsMixin:
         _workspace_diff_baselines: dict[str, str]
         _workspace_diffs: dict[str, WorkspaceDiffEntry]
         _last_user_input: str | None
+        _computer_log: ComputerActivityLog
 
         def _build_brain(self) -> Brain: ...
         def remember_explicit_text(
@@ -376,14 +378,28 @@ class AgentToolsMixin:
             enforce_plan_guard=bool(getattr(self, "runtime_plan_guard_enabled", False)),
         )
 
+        computer_log: ComputerActivityLog | None = getattr(self, "_computer_log", None)
+
+        def _combined_pre_call(request: ToolRequest) -> object | None:
+            main_ctx = pre_call(request) if pre_call else None
+            if computer_log is not None:
+                computer_log.pre_call(request)
+            return main_ctx
+
         def _post_call(request: ToolRequest, result: ToolResult, context: object | None) -> None:
             if post_call:
                 post_call(request, result, context)
+            if computer_log is not None:
+                computer_log.post_call(request, result, context)
             self._track_tool_error(request, result)
+
+        combined_pre: Callable[[ToolRequest], object | None] | None
+        has_pre = pre_call is not None or computer_log is not None
+        combined_pre = _combined_pre_call if has_pre else None
 
         return ToolGateway(
             self.tool_registry,
-            pre_call=pre_call,
+            pre_call=combined_pre,
             post_call=_post_call,
             approval_context=self._approval_context(safe_mode_override=safe_mode_override),
             log_event=self.tracer.log,
@@ -537,6 +553,12 @@ class AgentToolsMixin:
         if "tools" in flags or "filesystem" in flags:
             return "medium"
         return "low"
+
+    def drain_computer_events(self) -> list[dict[str, JSONValue]]:
+        computer_log: ComputerActivityLog | None = getattr(self, "_computer_log", None)
+        if computer_log is None:
+            return []
+        return computer_log.drain()
 
     def consume_workspace_diffs(self) -> list[WorkspaceDiffEntry]:
         diffs = list(self._workspace_diffs.values())

@@ -1,6 +1,17 @@
 export type ChatRole = 'user' | 'assistant' | 'system';
 export type MessageLane = 'chat' | 'workspace';
 
+export type ComputerActivityEvent = {
+  kind: string;
+  tool: string;
+  ts: number;
+  ok?: boolean;
+  path?: string;
+  command?: string;
+  error?: string;
+  duration_ms?: number;
+};
+
 export type MwvReportUi = {
   route?: string;
   trace_id?: string | null;

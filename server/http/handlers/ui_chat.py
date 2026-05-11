@@ -955,6 +955,15 @@ async def _handle_ui_send_impl(
                         normalized_progress = _normalize_auto_state(item)
                         if normalized_progress is not None:
                             auto_progress_states.append(normalized_progress)
+            drain_computer = getattr(agent, "drain_computer_events", None)
+            if callable(drain_computer):
+                raw_computer_events = drain_computer()
+                if isinstance(raw_computer_events, list) and raw_computer_events:
+                    drained_computer: list[dict[str, JSONValue]] = [
+                        item for item in raw_computer_events if isinstance(item, dict)
+                    ]
+                    if drained_computer and session_id:
+                        await hub.append_computer_events(session_id, drained_computer)
             ui_decision = _normalize_ui_decision(
                 decision,
                 session_id=session_id,
@@ -1062,6 +1071,7 @@ async def _handle_ui_send_impl(
             current_decision = await hub.get_session_decision(session_id)
             current_model = await hub.get_session_model(session_id) or dict(selected_model)
             current_workflow = await hub.get_session_workflow(session_id)
+            computer_events_blocking = await hub.get_computer_events(session_id)
             response_payload_blocking_decision: dict[str, JSONValue] = {
                 "session_id": session_id,
                 "lane": lane,
@@ -1084,6 +1094,7 @@ async def _handle_ui_send_impl(
                 "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
                 "active_task": _normalize_task_payload(current_workflow.get("active_task")),
                 "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+                "computer_events": computer_events_blocking,
             }
             await _complete_idempotency(response_payload_blocking_decision, status=200)
             response = json_response(response_payload_blocking_decision)
@@ -1178,6 +1189,7 @@ async def _handle_ui_send_impl(
         current_decision = await hub.get_session_decision(session_id)
         current_model = await hub.get_session_model(session_id) or dict(selected_model)
         current_workflow = await hub.get_session_workflow(session_id)
+        computer_events_final = await hub.get_computer_events(session_id)
         response_payload_final: dict[str, JSONValue] = {
             "session_id": session_id,
             "lane": lane,
@@ -1200,6 +1212,7 @@ async def _handle_ui_send_impl(
             "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
             "active_task": _normalize_task_payload(current_workflow.get("active_task")),
             "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+            "computer_events": computer_events_final,
         }
         await _complete_idempotency(response_payload_final, status=200)
         response = json_response(

@@ -4,6 +4,7 @@ import type * as Monaco from 'monaco-editor';
 
 import type {
   AutoState,
+  ComputerActivityEvent,
   DecisionRespondChoice,
   PlanEnvelope,
   SessionMode,
@@ -59,6 +60,7 @@ type WorkspaceIdeProps = {
   sessionYoloActive: boolean;
   sessionSafeMode: boolean;
   messages: CanvasMessage[];
+  computerEvents?: ComputerActivityEvent[];
   statusMessage?: string | null;
   onBackToChat: () => void;
   onOpenSessionDrawer: () => void;
@@ -92,6 +94,7 @@ export function WorkspaceIde({
   sessionYoloActive,
   sessionSafeMode,
   messages,
+  computerEvents = [],
   statusMessage,
   onBackToChat,
   onOpenSessionDrawer,
@@ -1113,6 +1116,7 @@ export function WorkspaceIde({
           decisionError={decisionError}
           onDecisionRespond={onDecisionRespond}
           messages={messages}
+          computerEvents={computerEvents}
           terminalPendingText={terminalPendingText}
           onSendFeedback={onSendFeedback}
         />

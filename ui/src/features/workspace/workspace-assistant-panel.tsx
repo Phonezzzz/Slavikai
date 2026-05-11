@@ -11,6 +11,7 @@ import {
 
 import type {
   AutoState,
+  ComputerActivityEvent,
   DecisionRespondChoice,
   PlanEnvelope,
   SessionMode,
@@ -35,6 +36,7 @@ type WorkspaceAssistantPanelProps = {
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
   messages: CanvasMessage[];
+  computerEvents?: ComputerActivityEvent[];
   terminalPendingText: string | null;
   onSendFeedback?: (interactionId: string, rating: 'good' | 'bad') => Promise<boolean>;
 };
@@ -49,6 +51,7 @@ export function WorkspaceAssistantPanel({
   decisionError,
   onDecisionRespond,
   messages,
+  computerEvents = [],
   terminalPendingText,
   onSendFeedback,
 }: WorkspaceAssistantPanelProps) {
@@ -151,6 +154,27 @@ export function WorkspaceAssistantPanel({
           <span>auto: {autoState?.status ?? 'idle'}</span>
         </div>
       </div>
+
+      {computerEvents.length > 0 ? (
+        <div className="border-b border-[#1f1f24] bg-[#0a0a0f] px-3 py-2 max-h-40 overflow-auto space-y-0.5">
+          {computerEvents.slice(-20).map((ev, idx) => (
+            <div
+              key={`${ev.ts}-${idx}`}
+              className={`flex items-center gap-2 text-[10px] font-mono ${ev.ok === false ? 'text-red-400' : 'text-[#6a6a75]'}`}
+            >
+              <span className={`shrink-0 w-16 ${ev.ok === false ? 'text-red-400' : 'text-[#5a8a5a]'}`}>
+                {ev.kind}
+              </span>
+              <span className="truncate text-[#8a8a94]">
+                {ev.path ?? ev.command ?? ev.tool}
+              </span>
+              {ev.duration_ms !== undefined ? (
+                <span className="shrink-0 text-[#555]">{ev.duration_ms}ms</span>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="flex-1 min-h-0 overflow-auto px-3 py-3 space-y-2" data-scrollbar="always">
         {renderItems.length === 0 ? (
