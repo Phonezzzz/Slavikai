@@ -55,12 +55,34 @@
 - В `main` только `git merge --ff-only`.
 - После merge обязательно вернуться в `main`.
 - Если что-то неясно — остановиться и запросить решение у человека.
+## Anti-pseudo audit перед implementation
+
+Перед implementation каждого PR worker обязан выполнить mini non-mutating audit не только по файлам/entrypoints, но и по признакам pseudo-runtime / pseudo-agent behavior.
+
+Проверить изменяемый контур на:
+
+- regex/prose extraction вместо explicit structured input / ToolRequest / ToolSpec;
+- classifier/router, который принимает runtime decision вместо основного runtime/tool loop;
+- fallback path, который обходит основной runtime;
+- adapter/compatibility/migration layer без явного разрешения;
+- tests, которые проверяют только итоговый эффект, но не проверяют механизм;
+- direct file/db/tool action в Python вместо ToolGateway / explicit tool call;
+- lane/type discriminator, который протекает как domain model;
+- legacy entrypoint, который остаётся reachable после нового path;
+- duplicate runtime path, где новый path есть, но старый всё ещё используется production-кодом.
+
+Правило:
+
+- если найденный pseudo-path входит в scope текущего PR — удалить/исправить его в рамках PR;
+- если исправление требует архитектурного решения вне scope — остановиться и вернуть BLOCKED report;
+- не добавлять adapters/fallbacks/compatibility/migrations “чтобы тесты прошли” без явного разрешения.
 
 ## Язык (обязательно)
 
 - Все ответы, планы, объяснения и комментарии — на русском.
 - Английский допускается только в коде, командах, логах, именах файлов и точных цитатах ошибок/документации.
 - Размышления оформлять как: **Краткий план (RU)** + **Проверки/риски (RU)**.
+
 
 ## Workflow (кратко)
 

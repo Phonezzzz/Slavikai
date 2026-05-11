@@ -114,3 +114,122 @@
 - `AGENTS.md` и документы из его раздела **Canonical rules** являются обязательными для любой задачи.
 - Фактическое поведение должно соответствовать “живым” документам (`architecture/Architecture`, `for-humans/COMMANDS`, `workflow/CONTRIBUTING`).
 - Плановые/исторические документы должны быть явно помечены или перенесены в архив, чтобы не смешиваться с актуальными правилами.
+
+## Anti-pseudo audit
+
+### Цель
+
+Каждый implementation PR должен проверять не только список изменяемых файлов, но и риск архитектурной подмены: ситуации, где поведение выглядит как agent/runtime, но фактически выполняется через legacy wrapper, regex, classifier, fallback или прямое Python-действие в обход основного runtime.
+
+Это правило обязательно перед implementation каждого PR и является частью mini non-mutating audit.
+
+### Что считать pseudo-runtime / pseudo-agent behavior
+
+Worker обязан проверить изменяемый контур на следующие признаки:
+
+1. **Regex/prose extraction вместо structured contract**
+
+   Запрещён runtime, где intent/target/action вытаскиваются из обычного текста через regex, string matching или эвристики, если по архитектуре должен использоваться explicit structured input:
+
+   - `ToolRequest`;
+   - `ToolSpec`;
+   - JSON schema;
+   - typed command/payload;
+   - explicit tool call.
+
+2. **Classifier/router как runtime decision**
+
+   Запрещено использовать classifier/router как основной механизм выбора tool/action/runtime, если для этого уже существует основной runtime/tool loop.
+
+   Classifier может быть только guard/block layer, если это явно указано в архитектуре.
+
+3. **Fallback path в обход основного runtime**
+
+   Запрещены fallback-и, которые silently обходят основной путь:
+
+   - bypass tool loop;
+   - bypass ToolGateway;
+   - bypass verifier;
+   - bypass approval;
+   - bypass structured tool call.
+
+4. **Adapter/compatibility/migration без явного разрешения**
+
+   Не добавлять compatibility layers, adapters, aliases, migrations или dual-support “на всякий случай”.
+
+   Если без такого слоя текущие tests/runtime не проходят — это не разрешение на самостоятельное добавление слоя. Нужно остановиться и вернуть BLOCKED report.
+
+5. **Tests проверяют эффект, но не механизм**
+
+   Если тест проверяет только итоговый эффект, например “файл изменился”, но не проверяет, что изменение прошло через нужный механизм, worker обязан усилить/исправить тест в scope PR.
+
+   Пример плохой защиты:
+
+   - test passes because file changed;
+   - but file was changed direct Python append, not через ToolGateway/tool call.
+
+6. **Direct action вместо ToolGateway / explicit tool call**
+
+   В runtime-контуре agent/MWV/auto/workspace запрещено выполнять file/db/tool действия напрямую, если по архитектуре действие должно идти через:
+
+   - explicit tool call;
+   - ToolGateway;
+   - tool observation;
+   - verifier/approval layer.
+
+7. **`lane` / type discriminator как domain model**
+
+   Legacy discriminator вроде `lane` не должен управлять runtime storage/API/frontend flow, если планом предусмотрен physical split.
+
+   Допустимо временно видеть такой marker только во время audit/deletion, но не как новый или сохранённый domain contract.
+
+8. **Reachable legacy entrypoint**
+
+   Если новый path добавлен, но старый production entrypoint остаётся reachable, это считается незавершённым PR или BLOCKED-состоянием.
+
+9. **Duplicate runtime path**
+
+   Запрещена ситуация, где новый runtime существует, но production-код всё ещё может выполнять тот же сценарий через старый legacy path.
+
+### Обязательное поведение worker
+
+Перед implementation PR worker обязан:
+
+1. выполнить mini non-mutating audit;
+2. отдельно проверить признаки pseudo-runtime из этого раздела;
+3. выписать найденные pseudo-paths;
+4. определить, входят ли они в scope текущего PR.
+
+Если pseudo-path входит в scope текущего PR:
+
+- удалить его;
+- заменить на канонический runtime/tool path;
+- обновить tests так, чтобы они защищали механизм, а не только итоговый эффект.
+
+Если исправление требует архитектурного решения вне scope:
+
+- остановиться;
+- не продолжать следующий PR;
+- не импровизировать;
+- вернуть BLOCKED report.
+
+### BLOCKED report
+
+BLOCKED report должен включать:
+
+1. PR / branch;
+2. где найден pseudo-path;
+3. факт из кода;
+4. почему это архитектурная подмена;
+5. какое архитектурное решение требуется;
+6. варианты решения;
+7. рекомендацию;
+8. что уже изменено;
+9. какие tests/checks запускались;
+10. текущее состояние `git status --short`.
+
+### Запрет
+
+Worker не должен добавлять adapters/fallbacks/compatibility/migrations только ради прохождения тестов.
+
+Если тесты требуют такой слой, а он не был явно разрешён заданием, это BLOCKED, а не повод писать новый compatibility-код.
