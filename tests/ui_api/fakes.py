@@ -539,6 +539,12 @@ class UIReportAgent(DummyAgent):
         )
 
 
+class UIReportOnlyAgent(DummyAgent):
+    def respond(self, messages) -> str:
+        del messages
+        return 'MWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
+
+
 class ToolCallCaptureAgent(DummyAgent):
     def __init__(self, trace_log: Path, tool_log: Path) -> None:
         super().__init__()

@@ -157,21 +157,19 @@ def _split_response_and_report(response_text: str) -> tuple[str, dict[str, JSONV
     if marker_index < 0:
         return response_text, None
 
+    clean_text = response_text[:marker_index].rstrip()
     report_raw = response_text[marker_index + len(MWV_REPORT_PREFIX) :].strip()
     if not report_raw:
-        return response_text, None
+        return clean_text, None
 
     parsed_report = safe_json_loads(report_raw)
     if not isinstance(parsed_report, dict):
-        return response_text, None
+        return clean_text, None
 
-    clean_text = response_text[:marker_index].rstrip()
     normalized_report: dict[str, JSONValue] = {}
     for key, value in parsed_report.items():
         normalized_report[str(key)] = _normalize_json_value(value)
 
-    if not clean_text:
-        return response_text, normalized_report
     return clean_text, normalized_report
 
 

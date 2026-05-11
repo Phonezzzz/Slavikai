@@ -143,6 +143,12 @@ class ReportAgent(DummyAgent):
         )
 
 
+class ReportOnlyAgent(DummyAgent):
+    def respond(self, messages) -> str:
+        super().respond(messages)
+        return 'MWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
+
+
 async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr("server.http_api.TRACE_LOG", trace_path)
     app = create_app(
@@ -410,6 +416,42 @@ def test_chat_completions_strips_mwv_report_from_content(monkeypatch, tmp_path) 
             message = first.get("message")
             assert isinstance(message, dict)
             assert message.get("content") == "ok"
+            meta = payload.get("slavik_meta")
+            assert isinstance(meta, dict)
+            report = meta.get("mwv_report")
+            assert isinstance(report, dict)
+            assert report.get("route") == "chat"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_chat_completions_strips_report_only_response_from_content(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = ReportOnlyAgent(trace_path)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            choices = payload.get("choices")
+            assert isinstance(choices, list)
+            assert choices
+            first = choices[0]
+            assert isinstance(first, dict)
+            message = first.get("message")
+            assert isinstance(message, dict)
+            assert message.get("content") == ""
             meta = payload.get("slavik_meta")
             assert isinstance(meta, dict)
             report = meta.get("mwv_report")

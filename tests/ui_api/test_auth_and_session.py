@@ -796,6 +796,43 @@ def test_ui_chat_send_strips_mwv_report_block() -> None:
     asyncio.run(run())
 
 
+def test_ui_chat_send_strips_report_only_mwv_body() -> None:
+    async def run() -> None:
+        client = await _create_client(UIReportOnlyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Ping"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            report = payload.get("mwv_report")
+            assert isinstance(report, dict)
+            assert report.get("route") == "chat"
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert messages
+            last = messages[-1]
+            assert isinstance(last, dict)
+            content = last.get("content")
+            assert content == ""
+            output_payload = payload.get("output")
+            assert isinstance(output_payload, dict)
+            output_content = output_payload.get("content")
+            assert output_content in (None, "")
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_chat_send_long_code_stays_in_chat_without_artifact() -> None:
     async def run() -> None:
         client = await _create_client(LongCodeAgent())
