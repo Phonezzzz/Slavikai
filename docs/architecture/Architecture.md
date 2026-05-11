@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-23.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-24.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -20,12 +20,16 @@ append-comment edits напрямую; выполнение идёт через 
 После PR-21 HTTP send handlers разделены: chat и workspace endpoints читают payload
 сами и передают lane во внутренний runtime явно. После PR-23 frontend вызывает
 `handleSendChat`/`handleSendWorkspace` и грузит chat/workspace messages из session snapshot
-без `/history?lane=workspace`. Часть старого runtime ещё остаётся legacy-обвязкой.
+без `/history?lane=workspace`. После PR-24 memory/policy-feedback surface вынесен из
+`core/agent.py` в `core/agent_memory.py::AgentMemoryMixin` без изменения runtime behavior.
+Часть старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
 - **Core** (`core/*`)
   - Оркестрация: `Agent` + mixins.
+  - `core/agent.py` теперь остаётся bootstrap/configuration shell для `Agent`.
+  - Memory/policy-feedback surface: `core/agent_memory.py::AgentMemoryMixin`.
   - Tool loop: `core/tool_loop.py` вызывает `Brain.generate(..., tools=...)`, исполняет
     `tool_calls` через `ToolGateway` и добавляет `role="tool"` сообщения.
   - Chat integration: `runtime_mode=ask` может использовать только описанные read-capability
@@ -175,8 +179,9 @@ append-comment edits напрямую; выполнение идёт через 
 
 ## Legacy, который нельзя расширять
 
-- `core/agent*.py` остаются крупной mixin-обвязкой и должны постепенно сжиматься вокруг
-  `AgentToolLoop`/`ToolGateway`, а не получать новые ветки.
+- `core/agent_mwv.py`, `core/agent_tools.py` и `core/agent_routing.py` остаются крупной
+  mixin-обвязкой и должны постепенно сжиматься вокруг `AgentToolLoop`/`ToolGateway`, а не
+  получать новые ветки.
 - `classify_request(...)` всё ещё используется в legacy `plan|act` routing; новые
   tool-capabilities не должны добавляться через keyword router.
 - `lane` не должен оставаться domain discriminator. После storage split он допускается

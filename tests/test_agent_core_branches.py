@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.agent import SAFE_MODE_TOOLS_OFF, Agent
+from core.agent_memory import AgentMemoryMixin
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage, ToolRequest, ToolResult
@@ -18,6 +19,17 @@ def _dummy_tool(ok: bool, output: str = "done") -> ToolResult:
     if ok:
         return ToolResult.success({"output": output})
     return ToolResult.failure("fail")
+
+
+def test_agent_uses_memory_mixin_for_memory_surface(tmp_path: Path) -> None:
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+
+    assert isinstance(agent, AgentMemoryMixin)
+    assert agent.get_recent_feedback_events() == []
 
 
 def test_image_commands_success_and_error(tmp_path: Path) -> None:

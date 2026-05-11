@@ -1,12 +1,12 @@
-# Legacy Cleanup Roadmap After PR-23
+# Legacy Cleanup Roadmap After PR-24
 
-Этот roadmap описывает оставшуюся расчистку legacy после PR-23. Он не объявляет
+Этот roadmap описывает оставшуюся расчистку legacy после PR-24. Он не объявляет
 будущие PR уже реализованными: текущая фактическая архитектура описана в
 `Architecture.md`, целевые границы — в `ARCH_CANON.md`.
 
 ## Already implemented
 
-- PR-0..PR-23 находятся в `main`.
+- PR-0..PR-24 находятся в `main`.
 - Документация разложена по `docs/architecture`, `docs/agent`, `docs/for-humans`,
   `docs/workflow`, `docs/archive`.
 - `AgentToolLoop` и native tool-calling contract существуют:
@@ -37,6 +37,8 @@
 - Frontend send flow разделён на `handleSendChat` и `handleSendWorkspace`; request body
   больше не использует `lane` как selector, а workspace history берётся из session
   snapshot вместо `/history?lane=workspace`.
+- `core/agent.py` больше не содержит memory/policy-feedback surface: этот контур вынесен
+  в `core/agent_memory.py::AgentMemoryMixin` без изменения runtime behavior.
 
 ## Known legacy
 
@@ -46,8 +48,9 @@
   storage/domain/frontend discriminator.
 - `server/http/handlers/ui_chat.py` всё ещё содержит общий внутренний send runtime, но
   HTTP entrypoints уже не используют shared `payload_override` path.
-- `server/ui_hub.py`, `use-session-runtime-controller.ts`, `use-session-transport.ts` и
-  `workspace-ide.tsx` остаются крупными монолитами.
+- `core/agent_mwv.py`, `core/agent_tools.py`, `core/agent_routing.py`, `server/ui_hub.py`,
+  `use-session-runtime-controller.ts`, `use-session-transport.ts` и `workspace-ide.tsx`
+  остаются крупными монолитами.
 
 ## Cleanup workflow
 
@@ -130,9 +133,11 @@ BLOCKED report должен включать:
    - Разделить frontend chat/workspace runtime hooks/transports.
    - `lane` не должен управлять frontend runtime flow.
 
-10. PR-24 `pr-agent-core-decompose`
+10. PR-24 `pr-agent-core-decompose` — done
     - Сжать `core/agent*.py` вокруг отдельных runtimes.
     - Новые capabilities добавляются через registry/schema, не через routing branches.
+    - Первый срез: memory/policy-feedback surface вынесен из `core/agent.py` в
+      `AgentMemoryMixin`; routing/MWV/tool-loop behavior не менялся.
 
 11. PR-25 `pr-decision-gateway-cleanup`
     - Свести decision cleanup к gateway approval/stop layer.
