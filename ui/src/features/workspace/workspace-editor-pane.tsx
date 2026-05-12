@@ -27,6 +27,7 @@ type WorkspaceEditorPaneProps = {
   terminalInput: string;
   terminalInputDisabled: boolean;
   terminalEndRef: RefObject<HTMLDivElement>;
+  readOnly?: boolean;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onRunActiveFile: () => void;
@@ -51,6 +52,7 @@ export function WorkspaceEditorPane({
   terminalInput,
   terminalInputDisabled,
   terminalEndRef,
+  readOnly = false,
   onSelectTab,
   onCloseTab,
   onRunActiveFile,
@@ -110,14 +112,16 @@ export function WorkspaceEditorPane({
             <Play className="h-3.5 w-3.5" />
             Run
           </button>
-          <button
-            onClick={onSaveActiveFile}
-            disabled={!hasUnsavedChanges || editorSaving || isDecisionBlocking}
-            className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2 py-1 text-[12px] text-[#bdbdc6] disabled:opacity-50"
-          >
-            <Save className="h-3.5 w-3.5" />
-            {editorSaving ? 'Saving...' : 'Save'}
-          </button>
+          {!readOnly ? (
+            <button
+              onClick={onSaveActiveFile}
+              disabled={!hasUnsavedChanges || editorSaving || isDecisionBlocking}
+              className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2 py-1 text-[12px] text-[#bdbdc6] disabled:opacity-50"
+            >
+              <Save className="h-3.5 w-3.5" />
+              {editorSaving ? 'Saving...' : 'Save'}
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -137,6 +141,7 @@ export function WorkspaceEditorPane({
               wordWrap: 'off',
               renderLineHighlight: 'all',
               scrollBeyondLastLine: false,
+              readOnly,
             }}
           />
         ) : (

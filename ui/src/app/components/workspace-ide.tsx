@@ -1065,6 +1065,7 @@ export function WorkspaceIde({
               expandedNodes={expandedNodes}
               activePath={activeTab?.path ?? null}
               activeExplorerPath={activeExplorerPath}
+              readOnly={!sessionYoloActive}
               onToggleNode={(node, key, expanded) => {
                 setExpandedNodes((prev) => {
                   const next = new Set(prev);
@@ -1141,6 +1142,7 @@ export function WorkspaceIde({
           terminalInput={terminalInput}
           terminalInputDisabled={!sessionId || terminalBusy || isDecisionBlocking}
           terminalEndRef={terminalEndRef}
+          readOnly={!sessionYoloActive}
           onSelectTab={setActiveFileId}
           onCloseTab={closeTab}
           onRunActiveFile={() => {

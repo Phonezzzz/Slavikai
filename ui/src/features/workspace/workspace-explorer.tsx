@@ -20,6 +20,7 @@ type WorkspaceExplorerProps = {
   expandedNodes: Set<string>;
   activePath: string | null;
   activeExplorerPath: string | null;
+  readOnly?: boolean;
   onToggleNode: (node: WorkspaceNode, key: string, expanded: boolean) => void;
   onSelectPath: (path: string | null) => void;
   onOpenFile: (path: string) => void;
@@ -38,6 +39,7 @@ export function WorkspaceExplorer({
   expandedNodes,
   activePath,
   activeExplorerPath,
+  readOnly = false,
   onToggleNode,
   onSelectPath,
   onOpenFile,
@@ -164,39 +166,41 @@ export function WorkspaceExplorer({
     <aside className="min-h-0 border-r border-[#1f1f24] bg-[#0d0d11] flex flex-col overflow-hidden">
       <div className="h-9 flex items-center justify-between gap-2 px-3 border-b border-[#1f1f24]">
         <span className="text-[11px] uppercase tracking-wider text-[#686873]">Explorer</span>
-        <div className="flex items-center gap-1 text-[11px]">
-          <button
-            onClick={onCreateFile}
-            className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21]"
-            title="Create file"
-          >
-            New
-          </button>
-          <button
-            onClick={() => onRenamePath(activeExplorerPath)}
-            className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21] disabled:opacity-50"
-            disabled={!activeExplorerPath}
-            title="Rename selected path"
-          >
-            Rename
-          </button>
-          <button
-            onClick={() => onMovePath(activeExplorerPath)}
-            className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21] disabled:opacity-50"
-            disabled={!activeExplorerPath}
-            title="Move selected path"
-          >
-            Move
-          </button>
-          <button
-            onClick={() => onDeletePath(activeExplorerPath)}
-            className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#ef8f8f] hover:bg-[#2a1717] disabled:opacity-50"
-            disabled={!activeExplorerPath}
-            title="Delete selected path"
-          >
-            Del
-          </button>
-        </div>
+        {!readOnly ? (
+          <div className="flex items-center gap-1 text-[11px]">
+            <button
+              onClick={onCreateFile}
+              className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21]"
+              title="Create file"
+            >
+              New
+            </button>
+            <button
+              onClick={() => onRenamePath(activeExplorerPath)}
+              className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21] disabled:opacity-50"
+              disabled={!activeExplorerPath}
+              title="Rename selected path"
+            >
+              Rename
+            </button>
+            <button
+              onClick={() => onMovePath(activeExplorerPath)}
+              className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21] disabled:opacity-50"
+              disabled={!activeExplorerPath}
+              title="Move selected path"
+            >
+              Move
+            </button>
+            <button
+              onClick={() => onDeletePath(activeExplorerPath)}
+              className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#ef8f8f] hover:bg-[#2a1717] disabled:opacity-50"
+              disabled={!activeExplorerPath}
+              title="Delete selected path"
+            >
+              Del
+            </button>
+          </div>
+        ) : null}
       </div>
       {treeTruncated ? (
         <div
