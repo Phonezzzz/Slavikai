@@ -7,6 +7,7 @@ from typing import Literal, cast
 from config.memory_config import MemoryConfig, load_memory_config
 from config.shell_config import DEFAULT_SHELL_CONFIG_PATH
 from config.tools_config import ToolsConfig, load_tools_config, save_tools_config
+from core.agent_computer import AgentComputerRuntime
 from core.agent_memory import AgentMemoryMixin
 from core.agent_mwv import AgentMWVMixin
 from core.agent_routing import AgentRoutingMixin
@@ -238,6 +239,9 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         events = [dict(item) for item in self._auto_progress_events]
         self._auto_progress_events.clear()
         return events
+
+    def make_computer_runtime(self) -> AgentComputerRuntime:
+        return AgentComputerRuntime(gateway=self._build_tool_gateway())
 
     def _build_brain(self) -> Brain:
         if self._brain_manager:

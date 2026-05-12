@@ -30,3 +30,14 @@ class AgentComputerRuntime:
 
     def run_command(self, command: str) -> ToolResult:
         return self.gateway.call(ToolRequest("workspace_terminal_run", {"command": command}))
+
+    def git_diff(self, path: str = "") -> ToolResult:
+        cmd = f"git diff -- {path}" if path else "git diff"
+        return self.gateway.call(ToolRequest("workspace_terminal_run", {"command": cmd}))
+
+    def run_tests(self, path: str = "") -> ToolResult:
+        cmd = f"pytest {path}" if path else "pytest"
+        return self.gateway.call(ToolRequest("workspace_terminal_run", {"command": cmd}))
+
+    def check(self) -> ToolResult:
+        return self.gateway.call(ToolRequest("workspace_terminal_run", {"command": "make check"}))

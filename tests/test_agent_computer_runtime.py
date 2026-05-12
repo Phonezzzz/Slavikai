@@ -102,3 +102,61 @@ def test_each_method_calls_gateway_exactly_once(
 
     computer.run_command("echo hi")
     assert gateway.call.call_count == 5
+
+
+def test_git_diff_with_path_calls_git_diff_path(
+    computer: AgentComputerRuntime, gateway: MagicMock
+) -> None:
+    computer.git_diff("src/foo.py")
+    gateway.call.assert_called_once_with(
+        ToolRequest("workspace_terminal_run", {"command": "git diff -- src/foo.py"})
+    )
+
+
+def test_git_diff_no_path_calls_git_diff(
+    computer: AgentComputerRuntime, gateway: MagicMock
+) -> None:
+    computer.git_diff()
+    gateway.call.assert_called_once_with(
+        ToolRequest("workspace_terminal_run", {"command": "git diff"})
+    )
+
+
+def test_run_tests_with_path_calls_pytest_path(
+    computer: AgentComputerRuntime, gateway: MagicMock
+) -> None:
+    computer.run_tests("tests/test_foo.py")
+    gateway.call.assert_called_once_with(
+        ToolRequest("workspace_terminal_run", {"command": "pytest tests/test_foo.py"})
+    )
+
+
+def test_run_tests_no_path_calls_pytest(computer: AgentComputerRuntime, gateway: MagicMock) -> None:
+    computer.run_tests()
+    gateway.call.assert_called_once_with(
+        ToolRequest("workspace_terminal_run", {"command": "pytest"})
+    )
+
+
+def test_check_calls_make_check(computer: AgentComputerRuntime, gateway: MagicMock) -> None:
+    computer.check()
+    gateway.call.assert_called_once_with(
+        ToolRequest("workspace_terminal_run", {"command": "make check"})
+    )
+
+
+def test_make_computer_runtime_returns_runtime_with_gateway() -> None:
+    from core.agent import Agent
+
+    gateway_mock = MagicMock()
+
+    class _StubAgent:
+        def _build_tool_gateway(self) -> MagicMock:
+            return gateway_mock
+
+        make_computer_runtime = Agent.make_computer_runtime
+
+    stub = _StubAgent()
+    runtime = stub.make_computer_runtime()
+    assert isinstance(runtime, AgentComputerRuntime)
+    assert runtime.gateway is gateway_mock
