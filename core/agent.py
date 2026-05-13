@@ -15,6 +15,7 @@ from core.agent_tools import AgentToolsMixin
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.auto_agent import AutoAgent
 from core.computer_activity_log import ComputerActivityLog
+from core.computer_backend import LocalComputerBackend
 from core.decision.handler import DecisionHandler
 from core.decision.models import DecisionPacket
 from core.mwv.manager import ManagerRuntime
@@ -241,7 +242,8 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         return events
 
     def make_computer_runtime(self) -> AgentComputerRuntime:
-        return AgentComputerRuntime(gateway=self._build_tool_gateway())
+        backend = LocalComputerBackend(gateway=self._build_tool_gateway())
+        return AgentComputerRuntime(backend=backend)
 
     def _build_brain(self) -> Brain:
         if self._brain_manager:

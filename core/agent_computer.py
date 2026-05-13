@@ -2,42 +2,40 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.tool_gateway import ToolGateway
-from shared.models import ToolRequest, ToolResult
+from core.computer_backend import ComputerBackend
+from shared.models import ToolResult
 
 
 @dataclass
 class AgentComputerRuntime:
-    """Facade over existing workspace tools via ToolGateway.
+    """Backend-agnostic facade for Computer operations.
 
-    Each method maps a named Computer operation to a ToolRequest and delegates
-    through the gateway. No new tools are registered, no new runtime paths exist.
+    Callers use this class without knowing whether execution is local,
+    containerised, or sandboxed. The backend decides the execution path.
     """
 
-    gateway: ToolGateway
+    backend: ComputerBackend
 
     def list_files(self, path: str = "") -> ToolResult:
-        return self.gateway.call(ToolRequest("workspace_list", {"path": path}))
+        return self.backend.list_files(path)
 
     def read_file(self, path: str) -> ToolResult:
-        return self.gateway.call(ToolRequest("workspace_read", {"path": path}))
+        return self.backend.read_file(path)
 
     def write_file(self, path: str, content: str) -> ToolResult:
-        return self.gateway.call(ToolRequest("workspace_write", {"path": path, "content": content}))
+        return self.backend.write_file(path, content)
 
     def apply_patch(self, path: str, patch: str) -> ToolResult:
-        return self.gateway.call(ToolRequest("workspace_patch", {"path": path, "patch": patch}))
+        return self.backend.apply_patch(path, patch)
 
     def run_command(self, command: str) -> ToolResult:
-        return self.gateway.call(ToolRequest("workspace_terminal_run", {"command": command}))
+        return self.backend.run_command(command)
 
     def git_diff(self, path: str = "") -> ToolResult:
-        cmd = f"git diff -- {path}" if path else "git diff"
-        return self.gateway.call(ToolRequest("workspace_terminal_run", {"command": cmd}))
+        return self.backend.git_diff(path)
 
     def run_tests(self, path: str = "") -> ToolResult:
-        cmd = f"pytest {path}" if path else "pytest"
-        return self.gateway.call(ToolRequest("workspace_terminal_run", {"command": cmd}))
+        return self.backend.run_tests(path)
 
     def check(self) -> ToolResult:
-        return self.gateway.call(ToolRequest("workspace_terminal_run", {"command": "make check"}))
+        return self.backend.check()
