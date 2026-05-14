@@ -158,9 +158,12 @@ def test_local_backend_holds_gateway(backend: LocalComputerBackend, gateway: Mag
 # ── Agent.make_computer_runtime wires LocalComputerBackend ───────────────────
 
 
-def test_make_computer_runtime_returns_runtime_with_local_backend() -> None:
+def test_make_computer_runtime_returns_runtime_with_local_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from core.agent import Agent
 
+    monkeypatch.delenv("SLAVIK_COMPUTER_BACKEND", raising=False)
     gateway_mock = MagicMock()
 
     class _StubAgent:

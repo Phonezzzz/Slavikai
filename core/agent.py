@@ -4,6 +4,7 @@ import logging
 import uuid
 from typing import Literal, cast
 
+from config.computer_backend_config import resolve_computer_backend_config
 from config.memory_config import MemoryConfig, load_memory_config
 from config.shell_config import DEFAULT_SHELL_CONFIG_PATH
 from config.tools_config import ToolsConfig, load_tools_config, save_tools_config
@@ -15,7 +16,8 @@ from core.agent_tools import AgentToolsMixin
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.auto_agent import AutoAgent
 from core.computer_activity_log import ComputerActivityLog
-from core.computer_backend import LocalComputerBackend
+from core.computer_backend import ComputerBackend, LocalComputerBackend
+from core.container_computer_backend import ContainerComputerBackend
 from core.decision.handler import DecisionHandler
 from core.decision.models import DecisionPacket
 from core.mwv.manager import ManagerRuntime
@@ -242,7 +244,17 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         return events
 
     def make_computer_runtime(self) -> AgentComputerRuntime:
-        backend = LocalComputerBackend(gateway=self._build_tool_gateway())
+        cfg = resolve_computer_backend_config()
+        backend: ComputerBackend
+        if cfg.mode == "container":
+            backend = ContainerComputerBackend(
+                image=cfg.container_image,
+                project_root=WORKSPACE_ROOT,
+                container_workspace=cfg.container_workspace,
+                runtime=cfg.container_engine,
+            )
+        else:
+            backend = LocalComputerBackend(gateway=self._build_tool_gateway())
         return AgentComputerRuntime(backend=backend)
 
     def _build_brain(self) -> Brain:
