@@ -294,6 +294,8 @@ class ToolRegistry:
         tool_name: str,
         capability: ToolCapability,
     ) -> str | None:
+        if self._mode == "ask" and capability != "read":
+            return "ASK_READ_ONLY_BLOCK: ask-режим допускает только read-only инструменты."
         if self._mode == "plan" and capability != "read":
             return "PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only инструменты."
         if self._mode not in {"act", "auto"} or not self._enforce_plan_guard:

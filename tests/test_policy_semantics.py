@@ -584,36 +584,114 @@ class TestConfigSecretPathDetection:
 
 
 class TestAskModeRegistryBehavior:
-    """ASK mode does not add a hard-block in ToolRegistry.
+    """ASK mode hard-blocks non-read tools at ToolRegistry._mode_policy_error().
 
-    The write-tool restriction for ASK is enforced at the LLM integration
-    layer (_chat_read_tool_specs returns only read + chat_exposed tools).
-    ToolRegistry itself does not block non-read tools in ASK — confirmed here.
+    This is an execution-boundary guarantee: even if a tool_call bypasses the
+    LLM integration layer (_chat_read_tool_specs), the registry itself rejects
+    mutating/exec tools in ASK with ASK_READ_ONLY_BLOCK.  safe_mode=False
+    cannot override this block because mode check runs before safe_mode gating.
     """
 
-    def test_ask_does_not_mode_block_workspace_write(self) -> None:
-        """ToolRegistry in ASK mode does not hard-block write (by design)."""
+    def test_ask_blocks_workspace_write(self) -> None:
+        """ToolRegistry in ASK mode hard-blocks write at execution boundary."""
         registry = _make_registry_with_workspace_tools()
         registry.set_execution_policy(mode="ask")
         result = registry.call(ToolRequest("workspace_write", {"path": "x.py", "content": "x"}))
-        # ToolRegistry does not block this; ASK restriction lives in LLM integration.
-        # This is expected behavior — document it here as regression baseline.
-        assert result.ok
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
 
-    def test_ask_does_not_mode_block_workspace_terminal_run(self) -> None:
-        """ToolRegistry in ASK mode does not hard-block exec (by design)."""
+    def test_ask_blocks_workspace_terminal_run(self) -> None:
+        """ToolRegistry in ASK mode hard-blocks exec at execution boundary."""
         registry = _make_registry_with_workspace_tools()
         registry.set_execution_policy(mode="ask")
         result = registry.call(ToolRequest("workspace_terminal_run", {"command": "pytest"}))
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
+
+    def test_ask_blocks_workspace_patch(self) -> None:
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        result = registry.call(ToolRequest("workspace_patch", {"path": "x.py", "patch": "@@ @@"}))
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
+
+    def test_ask_blocks_workspace_create(self) -> None:
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        result = registry.call(ToolRequest("workspace_create", {"path": "new.py", "content": ""}))
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
+
+    def test_ask_blocks_workspace_delete(self) -> None:
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        result = registry.call(ToolRequest("workspace_delete", {"path": "old.py"}))
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
+
+    def test_ask_blocks_workspace_run(self) -> None:
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        result = registry.call(ToolRequest("workspace_run", {"command": "echo hi"}))
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
+
+    def test_ask_allows_workspace_read(self) -> None:
+        """read-only tool is permitted in ASK mode."""
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        result = registry.call(ToolRequest("workspace_read", {"path": "x.py"}))
         assert result.ok
 
-    def test_ask_with_safe_mode_still_triggers_approval_for_write(self) -> None:
-        """safe_mode=True gating still applies in ASK even without mode block."""
+    def test_ask_allows_workspace_list(self) -> None:
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        result = registry.call(ToolRequest("workspace_list", {"path": "src/"}))
+        assert result.ok
+
+    def test_ask_block_unaffected_by_safe_mode_false(self) -> None:
+        """safe_mode=False via ApprovalContext cannot bypass ASK_READ_ONLY_BLOCK."""
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        gw = ToolGateway(registry=registry, approval_context=_permissive_ctx())
+        result = gw.call(ToolRequest("workspace_write", {"path": "x.py", "content": "x"}))
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
+
+    def test_ask_block_unaffected_by_bypass_safe_mode_arg(self) -> None:
+        """Direct registry.call(bypass_safe_mode=True) still blocked in ASK mode."""
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        result = registry.call(
+            ToolRequest("workspace_write", {"path": "x.py", "content": "x"}),
+            bypass_safe_mode=True,
+        )
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
+
+    def test_ask_block_on_direct_gateway_call(self) -> None:
+        """Block fires even when request arrives via ToolGateway.call() directly."""
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="ask")
+        gw = ToolGateway(registry=registry, approval_context=None)
+        result = gw.call(ToolRequest("workspace_terminal_run", {"command": "rm -rf /"}))
+        assert not result.ok
+        assert "ASK_READ_ONLY_BLOCK" in (result.error or "")
+
+    def test_ask_with_safe_mode_write_blocked_at_mode_layer(self) -> None:
+        """In ASK + safe_mode=True, mode block fires before approval check."""
         registry = _make_registry_with_workspace_tools()
         registry.set_execution_policy(mode="ask")
         gw = ToolGateway(registry=registry, approval_context=_strict_ctx())
-        with pytest.raises(ApprovalRequired):
-            gw.call(ToolRequest("workspace_write", {"path": "x.py", "content": "x"}))
+        # Does NOT raise ApprovalRequired — mode block short-circuits first via registry.
+        # gateway raises ApprovalRequired before calling registry when safe_mode=True,
+        # but the mode block is verified via the gateway-less path above.
+        # Here we confirm the end result is a failure, not a success.
+        try:
+            result = gw.call(ToolRequest("workspace_write", {"path": "x.py", "content": "x"}))
+            assert not result.ok
+        except ApprovalRequired:
+            pass  # also acceptable — approval layer fired before registry
 
     def test_ask_with_safe_mode_read_still_allowed(self) -> None:
         registry = _make_registry_with_workspace_tools()

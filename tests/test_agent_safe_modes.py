@@ -33,6 +33,7 @@ def test_safe_mode_off_allows_tools(tmp_path: Path) -> None:
     dummy = DummyTool()
     registry.register("web", dummy, enabled=True)
     registry.apply_safe_mode(False)
+    registry.set_execution_policy(mode="act")
     agent.tool_registry = registry
 
     result = agent.tool_registry.call(ToolRequest(name="web", args={}))
@@ -51,6 +52,7 @@ def test_safe_mode_on_blocks_web_shell(tmp_path: Path) -> None:
     registry.register("web", dummy, enabled=True)
     registry.register("shell", dummy, enabled=True)
     registry.apply_safe_mode(True)
+    registry.set_execution_policy(mode="act")
     agent.tool_registry = registry
 
     res_web = agent.tool_registry.call(ToolRequest(name="web", args={}))
