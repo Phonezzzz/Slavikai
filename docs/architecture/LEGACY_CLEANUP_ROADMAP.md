@@ -30,13 +30,11 @@
 - UI message storage физически разделён на `chat_messages` и `workspace_messages`.
   Старая local DB/schema с `ui_messages` destructive reset/recreate, без migrations,
   import/export adapters, backward compatibility или compatibility layers.
-- Chat/workspace send handlers разделены: каждый endpoint читает payload сам, выбирает
-  свой lane явно и отклоняет cross-lane payloads.
-- Legacy `/ui/api/events/stream` route удалён. Доступны только split streams:
-  `/ui/api/chat/events/{session_id}` и `/ui/api/workspace/events/{session_id}`.
-- Frontend send flow разделён на `handleSendChat` и `handleSendWorkspace`; request body
-  больше не использует `lane` как selector, а workspace history берётся из session
-  snapshot вместо `/history?lane=workspace`.
+- `/ui/api/workspace/send` и `/ui/api/workspace/events/{session_id}` удалены. Workspace
+  не является conversational endpoint. `/ui/api/chat/send` — единственный send.
+- Legacy `/ui/api/events/stream` route удалён. Chat SSE — `/ui/api/chat/events/{session_id}`.
+- Frontend send flow использует только `handleSendChat`; `handleSendWorkspace` удалён.
+  Workspace history берётся из session snapshot.
 - `core/agent.py` больше не содержит memory/policy-feedback surface: этот контур вынесен
   в `core/agent_memory.py::AgentMemoryMixin` без изменения runtime behavior.
 - Tool failure threshold больше не создаёт отдельный `DecisionPacket(tool_fail)` и не
@@ -46,6 +44,14 @@
   `useWorkspaceLayout`, quick-open index/filter/recent-path logic вынесена в
   `workspace-quick-open-index.ts`. Это первый срез без redesign и без изменения
   workspace runtime/API behavior.
+- (PR-07..PR-12 текущей серии) Workspace переименован в **Computer** как UI inspector/runtime
+  для текущей chat session. Добавлены `AgentComputerRuntime` facade, `ComputerBackend`
+  Protocol, `LocalComputerBackend` (default через `Agent.make_computer_runtime()`),
+  `ContainerComputerBackend` (opt-in/inactive; тесты через `FakeContainerRunner`).
+  `workspace_messages` в session hub заменён `computer_events` для Computer activity log.
+  Computer UI read-only по умолчанию; правки файлов разблокируются только при `sessionYoloActive`.
+  Session controls переведены на единый источник. MWV report blocks скрыты из chat body.
+  `git_diff`, `run_tests`, `check` добавлены в `AgentComputerRuntime`.
 
 ## Known legacy
 

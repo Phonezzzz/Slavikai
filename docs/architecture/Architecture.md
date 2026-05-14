@@ -1,6 +1,6 @@
 # Architecture — SlavikAI current runtime
 
-Этот документ фиксирует **текущее фактическое устройство** системы после PR-26.
+Этот документ фиксирует **текущее фактическое устройство** системы после PR-12 текущей серии.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
@@ -17,16 +17,17 @@ PR-18 MWV/CodingTask worker не извлекает target path из prose и н
 append-comment edits напрямую; выполнение идёт через explicit `ToolRequest` и
 `ToolGateway`. После PR-20 UI message storage физически разделён на `chat_messages` и
 `workspace_messages`; старая локальная DB с `ui_messages` destructive reset/recreate.
-После PR-21 HTTP send handlers разделены: chat и workspace endpoints читают payload
-сами и передают lane во внутренний runtime явно. После PR-23 frontend вызывает
-`handleSendChat`/`handleSendWorkspace` и грузит chat/workspace messages из session snapshot
-без `/history?lane=workspace`. После PR-24 memory/policy-feedback surface вынесен из
-`core/agent.py` в `core/agent_memory.py::AgentMemoryMixin` без изменения runtime behavior.
-После PR-25 repeated tool failures больше не создают отдельный `DecisionPacket(tool_fail)`;
-они остаются observability/candidate сигналом после gateway call. После PR-26
-workspace IDE начал декомпозицию: layout/resize state и quick-open index/filter logic
-вынесены из `workspace-ide.tsx` в feature-модули. Часть старого runtime ещё остаётся
-legacy-обвязкой.
+После PR-21 HTTP send handler для chat остался единственным (`/ui/api/chat/send`);
+workspace/send endpoint удалён. После PR-23 frontend использует только `handleSendChat`;
+workspace history берётся из session snapshot. После PR-24 memory/policy-feedback surface
+вынесен из `core/agent.py` в `core/agent_memory.py::AgentMemoryMixin`. После PR-25
+repeated tool failures больше не создают отдельный `DecisionPacket(tool_fail)`. После
+PR-26 workspace IDE начал декомпозицию: layout/resize state и quick-open index/filter logic
+вынесены из `workspace-ide.tsx` в feature-модули.
+После PR-07..PR-12 (текущей серии) Workspace переименован в **Computer** как UI
+inspector/runtime для текущей chat session. Добавлены `AgentComputerRuntime`, `ComputerBackend`
+Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in/inactive).
+Часть старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
 
@@ -65,15 +66,33 @@ legacy-обвязкой.
   - Descriptor: `name`, `description`, `parameters_schema`, capability/risk classes.
   - Журнал вызовов: `logs/tool_calls.log`.
   - Terminal: `tools/terminal_tool.py`, режимы `oneshot|pty`.
+- **Agent Computer** (`core/agent_computer.py`, `core/computer_backend.py`, `core/container_computer_backend.py`)
+  - Computer — это **inspector/runtime для текущей chat session**, а не отдельный чат.
+  - Chat остаётся единственной conversational entrypoint. Computer не имеет assistant
+    composer и не является новым chat lane.
+  - `AgentComputerRuntime` — backend-agnostic facade; методы: `list_files`, `read_file`,
+    `write_file`, `apply_patch`, `run_command`, `git_diff`, `run_tests`, `check`.
+  - `ComputerBackend` — `@runtime_checkable` Protocol, определяет те же 8 методов.
+  - `LocalComputerBackend` — default implementation; делегирует операции через `ToolGateway`.
+    `Agent.make_computer_runtime()` создаёт его по умолчанию.
+  - `ContainerComputerBackend` — **opt-in/inactive** alternative; запускает команды через
+    `docker/podman run --rm`; в тестах используется `FakeContainerRunner` вместо реального
+    Docker daemon. По умолчанию не включён; `LocalComputerBackend` остаётся default.
+  - Computer UI read-only по умолчанию; ручные правки файлов (New/Rename/Move/Del/Save)
+    разблокируются только при `sessionYoloActive`.
+  - Computer activity log (`ComputerActivityLog`) хранится в `computer_events` в session hub,
+    не в `workspace_messages`.
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
   - UI message storage физически разделён: `chat_messages` для chat-сообщений и
-    `workspace_messages` для workspace-сообщений.
+    `workspace_messages` как legacy internal table. `workspace_messages` — не
+    "workspace chat lane", а остаток storage split (PR-20); новый Computer activity
+    идёт в отдельный `computer_events` в session state hub.
   - Физическая таблица `ui_messages` больше не является текущей схемой. При обнаружении
     старой local DB с `ui_messages` storage делает destructive reset/recreate schema.
   - Локальная `.run/ui_sessions.db`, старые sessions/chats/history disposable by default.
-  - `lane` может ещё встречаться в runtime/API/frontend как временный legacy marker до
-    PR-21/PR-23, но не является storage/domain discriminator.
+  - `lane` может ещё встречаться в runtime/storage как временный legacy marker, но не
+    является domain discriminator. `lane="computer"` не существует и не должен появляться.
 
 ## Маршрутизация запроса (current legacy runtime)
 
@@ -124,16 +143,21 @@ legacy-обвязкой.
 
 - Sessions/folders: `/ui/api/folders`, `/ui/api/sessions`, `/ui/api/sessions/{session_id}`.
 - Workflow: `/ui/api/mode`, `/ui/api/plan/*`, `/ui/api/runtime/init`.
-- Chat: `/ui/api/chat/send`, `/ui/api/chat/events/{session_id}`.
-- Workspace: `/ui/api/workspace/send`, `/ui/api/workspace/events/{session_id}`, `/ui/api/workspace/*`.
-- `/ui/api/chat/send` принимает только chat-запросы; `/ui/api/workspace/send` принимает
-  только workspace-запросы. Cross-lane payloads отклоняются.
-- Legacy `/ui/api/events/stream` удалён из routes. Новый код использует split
-  chat/workspace endpoints.
-- Frontend send flow использует отдельные `handleSendChat` и `handleSendWorkspace`.
-  Runtime controller больше не загружает workspace history через `/history?lane=workspace`.
-- Workspace IDE всё ещё имеет крупный controller-компонент, но layout/resize state
-  живёт в `useWorkspaceLayout`, а quick-open indexing/filtering — в
+- Chat (единственный conversational entrypoint): `/ui/api/chat/send`, `/ui/api/chat/events/{session_id}`.
+- Workspace file operations (Computer inspector): `/ui/api/workspace/root`,
+  `/ui/api/workspace/tree`, `/ui/api/workspace/file`, `/ui/api/workspace/file/create`,
+  `/ui/api/workspace/file/rename`, `/ui/api/workspace/file/move`,
+  `/ui/api/workspace/patch`, `/ui/api/workspace/run`,
+  `/ui/api/workspace/terminal/run`, `/ui/api/workspace/git-diff`,
+  `/ui/api/workspace/index`.
+- `/ui/api/workspace/send` и `/ui/api/workspace/events/{session_id}` **не существуют** —
+  удалены; workspace не является conversational endpoint.
+- `/ui/api/computer/send` **не существует** и не должен появляться.
+- Legacy `/ui/api/events/stream` удалён из routes.
+- Frontend send flow использует только `handleSendChat`; `handleSendWorkspace` удалён.
+  Runtime controller загружает workspace history из session snapshot.
+- Computer (workspace-ide.tsx) всё ещё имеет крупный controller-компонент, но layout/resize
+  state живёт в `useWorkspaceLayout`, а quick-open indexing/filtering — в
   `workspace-quick-open-index.ts`.
 
 ## Backend PTY Terminal API
@@ -193,13 +217,20 @@ legacy-обвязкой.
   tool-capabilities не должны добавляться через keyword router.
 - `lane` не должен оставаться domain discriminator. После storage split он допускается
   только как временный runtime/API/frontend legacy marker для audit/deletion.
+  `lane="computer"` запрещён — не добавлять.
 - `Planner`/`Executor` удалены из runtime entrypoints. Любое возвращение к парсингу prose
   как source of truth для tool args запрещено.
 - Command lane не является способом вызова tools. Только `/trace` и `/end-session`.
+  Computer activity не является command lane.
 - Tool failure threshold не является decision runtime; failures не должны обходить
   gateway/approval через отдельный `DecisionRequired` path.
 - `workspace-ide.tsx` больше не должен снова принимать layout/resize или quick-open
   indexing responsibilities; новые workspace UI изменения должны продолжать выносить
   bounded surfaces в `ui/src/features/workspace/*`.
 - `server/terminal_manager.py` — совместимый alias на `TerminalTool`, не отдельная реализация.
+- Не создавать `/ui/api/computer/send`, `lane="computer"`, или новый conversational
+  entrypoint для Computer. Chat остаётся единственной conversational entrypoint.
+- `ContainerComputerBackend` — opt-in/inactive. Не переключать default на container
+  без явной config/env wiring и отдельного решения. `FakeContainerRunner` —
+  test-only utility, не production backend.
 - Planned cleanup roadmap: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

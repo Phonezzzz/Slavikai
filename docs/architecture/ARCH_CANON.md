@@ -8,16 +8,19 @@
 
 - **Target runtime**: Ask / Plan / Act / Auto, описанные ниже.
 - **Implemented baseline**: tool-calling типы, `AgentToolLoop`, read-only chat tool-loop
-  integration, explicit `PlanStep.tool_args`, debug-only command lane, split chat/workspace
-  send+SSE endpoints, единый `TerminalTool`, auto v1 path через
-  `AgentToolLoop -> ToolGateway -> verifier`, complete runtime tool descriptors, auto без
-  `classify_request(...)`, удалённый legacy auto pipeline entrypoint, MWV/CodingTask
-  execution через explicit `ToolRequest` + `ToolGateway`, destructive physical split UI
-  message storage на `chat_messages` и `workspace_messages`, отдельные chat/workspace
-  send handlers, удалённый legacy event stream route, split frontend send entrypoints,
+  integration, explicit `PlanStep.tool_args`, debug-only command lane, единый chat send
+  endpoint (`/ui/api/chat/send`; `/ui/api/workspace/send` удалён), единый `TerminalTool`,
+  auto v1 path через `AgentToolLoop -> ToolGateway -> verifier`, complete runtime tool
+  descriptors, auto без `classify_request(...)`, удалённый legacy auto pipeline entrypoint,
+  MWV/CodingTask execution через explicit `ToolRequest` + `ToolGateway`, destructive
+  physical split UI message storage на `chat_messages` и `workspace_messages`, удалённый
+  legacy event stream route, frontend использует только `handleSendChat`,
   memory/policy-feedback surface вынесен из `core/agent.py` в `AgentMemoryMixin`,
   tool-fail decision branch удалён, первый срез декомпозиции `workspace-ide.tsx`
-  вынес layout/resize state и quick-open indexing/filtering в feature-модули.
+  вынес layout/resize state и quick-open indexing/filtering в feature-модули,
+  Workspace переименован в Computer (inspector/runtime для chat session), добавлены
+  `AgentComputerRuntime`, `ComputerBackend` Protocol, `LocalComputerBackend` (default),
+  `ContainerComputerBackend` (opt-in/inactive).
 - **Current legacy runtime**: крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой
@@ -173,9 +176,11 @@ Legacy debt после PR-26:
   legacy marker во время audit/deletion и не должен управлять storage/API/frontend flow
   после соответствующих split PR. Frontend send/history flow больше не выбирает endpoint
   через `lane`.
-- Legacy `/ui/api/events/stream` удалён из routes. Workspace-запросы через
-  `/ui/api/chat/send` и chat-запросы через `/ui/api/workspace/send` отклоняются.
-  Целевой путь — split chat/workspace endpoints.
+- Legacy `/ui/api/events/stream` удалён из routes. `/ui/api/workspace/send` и
+  `/ui/api/workspace/events/{session_id}` удалены — workspace не является
+  conversational endpoint. Единственный conversational send — `/ui/api/chat/send`.
+  `/ui/api/workspace/*` остаётся только для file/operation endpoints (tree, file,
+  patch, run, git-diff и т.п.).
 - Primary `local` OpenAI-compatible provider реализует native provider tool calling.
   `xai`, `openrouter`, `inception` явно отклоняют generic `tools`; xAI web search
   остаётся отдельным provider-native режимом.
