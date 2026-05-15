@@ -71,3 +71,62 @@ class ComputerActivityLog:
         events = list(self._events)
         self._events.clear()
         return events
+
+
+def build_computer_activity_summary(
+    events: list[dict[str, JSONValue]],
+) -> dict[str, JSONValue]:
+    """Build a deterministic summary from raw ComputerActivityLog events.
+
+    Pure function — no LLM, no I/O.  Called on the stored computer_events
+    list so the session snapshot can expose it alongside the raw events.
+    """
+    tools_started = 0
+    tools_finished = 0
+    files_read = 0
+    files_written = 0
+    commands_run = 0
+    errors_count = 0
+    latest_error: str | None = None
+    has_diff = False
+    tests_seen = False
+
+    for ev in events:
+        kind = ev.get("kind")
+        ok = ev.get("ok")
+
+        if kind == "tool_started":
+            tools_started += 1
+            continue
+
+        tools_finished += 1
+
+        if kind == "file_read":
+            files_read += 1
+        elif kind == "file_written":
+            files_written += 1
+        elif kind == "command_started":
+            commands_run += 1
+        elif kind == "git_diff_updated":
+            has_diff = True
+        elif kind == "test_result":
+            tests_seen = True
+
+        if ok is False:
+            errors_count += 1
+            err = ev.get("error")
+            if isinstance(err, str) and err:
+                latest_error = err
+
+    return {
+        "total_events": len(events),
+        "tools_started": tools_started,
+        "tools_finished": tools_finished,
+        "files_read": files_read,
+        "files_written": files_written,
+        "commands_run": commands_run,
+        "errors_count": errors_count,
+        "latest_error": latest_error,
+        "has_diff": has_diff,
+        "tests_seen": tests_seen,
+    }

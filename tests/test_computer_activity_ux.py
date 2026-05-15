@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from core.computer_activity_log import ComputerActivityLog
+from core.computer_activity_log import ComputerActivityLog, build_computer_activity_summary
 from core.computer_backend import LocalComputerBackend
 from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop
@@ -483,6 +483,233 @@ def test_hub_append_message_lane_computer_is_rejected() -> None:
         }
         with pytest.raises(ValueError, match="lane must be"):
             await hub.append_message(session_id, raw_msg, lane="chat")  # type: ignore[arg-type]
+
+    asyncio.run(run())
+
+
+# ── PR-18: build_computer_activity_summary ────────────────────────────────────
+
+
+def test_summary_empty_events() -> None:
+    """Empty events → all-zero summary, no errors, no diff."""
+    s = build_computer_activity_summary([])
+    assert s["total_events"] == 0
+    assert s["tools_started"] == 0
+    assert s["tools_finished"] == 0
+    assert s["files_read"] == 0
+    assert s["files_written"] == 0
+    assert s["commands_run"] == 0
+    assert s["errors_count"] == 0
+    assert s["latest_error"] is None
+    assert s["has_diff"] is False
+    assert s["tests_seen"] is False
+
+
+def test_summary_counts_file_read_events() -> None:
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_read", "ts": 1.0},
+        {"kind": "file_read", "tool": "workspace_read", "ts": 1.1, "ok": True},
+        {"kind": "tool_started", "tool": "workspace_read", "ts": 2.0},
+        {"kind": "file_read", "tool": "workspace_read", "ts": 2.1, "ok": True},
+    ]
+    s = build_computer_activity_summary(events)
+    assert s["total_events"] == 4
+    assert s["tools_started"] == 2
+    assert s["tools_finished"] == 2
+    assert s["files_read"] == 2
+    assert s["files_written"] == 0
+
+
+def test_summary_counts_file_written_events() -> None:
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_write", "ts": 1.0},
+        {"kind": "file_written", "tool": "workspace_write", "ts": 1.1, "ok": True},
+        {"kind": "tool_started", "tool": "workspace_patch", "ts": 2.0},
+        {"kind": "file_written", "tool": "workspace_patch", "ts": 2.1, "ok": True},
+    ]
+    s = build_computer_activity_summary(events)
+    assert s["files_written"] == 2
+    assert s["files_read"] == 0
+
+
+def test_summary_counts_command_events() -> None:
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_terminal_run", "ts": 1.0},
+        {
+            "kind": "command_started",
+            "tool": "workspace_terminal_run",
+            "ts": 1.5,
+            "ok": True,
+            "command": "pytest",
+        },
+    ]
+    s = build_computer_activity_summary(events)
+    assert s["commands_run"] == 1
+    assert s["tools_started"] == 1
+    assert s["tools_finished"] == 1
+
+
+def test_summary_errors_count() -> None:
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_read", "ts": 1.0},
+        {
+            "kind": "file_read",
+            "tool": "workspace_read",
+            "ts": 1.1,
+            "ok": False,
+            "error": "file not found",
+        },
+    ]
+    s = build_computer_activity_summary(events)
+    assert s["errors_count"] == 1
+    assert s["latest_error"] == "file not found"
+
+
+def test_summary_latest_error_is_last_one() -> None:
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_read", "ts": 1.0},
+        {"kind": "file_read", "tool": "workspace_read", "ts": 1.1, "ok": False, "error": "first"},
+        {"kind": "tool_started", "tool": "workspace_write", "ts": 2.0},
+        {
+            "kind": "file_written",
+            "tool": "workspace_write",
+            "ts": 2.1,
+            "ok": False,
+            "error": "second",
+        },
+    ]
+    s = build_computer_activity_summary(events)
+    assert s["errors_count"] == 2
+    assert s["latest_error"] == "second"
+
+
+def test_summary_has_diff_flag() -> None:
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_diff", "ts": 1.0},
+        {"kind": "git_diff_updated", "tool": "workspace_diff", "ts": 1.1, "ok": True},
+    ]
+    s = build_computer_activity_summary(events)
+    assert s["has_diff"] is True
+
+
+def test_summary_has_diff_false_by_default() -> None:
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_read", "ts": 1.0},
+        {"kind": "file_read", "tool": "workspace_read", "ts": 1.1, "ok": True},
+    ]
+    s = build_computer_activity_summary(events)
+    assert s["has_diff"] is False
+
+
+def test_summary_tests_seen_flag() -> None:
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_test", "ts": 1.0},
+        {"kind": "test_result", "tool": "workspace_test", "ts": 1.2, "ok": True},
+    ]
+    s = build_computer_activity_summary(events)
+    assert s["tests_seen"] is True
+
+
+def test_summary_is_json_serializable() -> None:
+    import json
+
+    events: list[dict[str, object]] = [
+        {"kind": "tool_started", "tool": "workspace_read", "ts": 1.0},
+        {
+            "kind": "file_read",
+            "tool": "workspace_read",
+            "ts": 1.1,
+            "ok": False,
+            "error": "err",
+        },
+    ]
+    s = build_computer_activity_summary(events)
+    serialised = json.dumps(s)
+    assert json.loads(serialised) == s
+
+
+def test_hub_session_snapshot_includes_computer_summary() -> None:
+    """get_session() returns computer_summary key alongside computer_events."""
+
+    async def run() -> None:
+        hub = UIHub()
+        session_id = await hub.get_or_create_session(None, "p1")
+        events: list[dict[str, object]] = [
+            {"kind": "tool_started", "tool": "workspace_read", "ts": 1.0},
+            {"kind": "file_read", "tool": "workspace_read", "ts": 1.1, "ok": True, "path": "x.py"},
+        ]
+        await hub.append_computer_events(session_id, events)
+        snapshot = await hub.get_session(session_id)
+        assert snapshot is not None
+        assert "computer_summary" in snapshot
+        summary = snapshot["computer_summary"]
+        assert isinstance(summary, dict)
+        assert summary["files_read"] == 1
+        assert summary["errors_count"] == 0
+        assert summary["total_events"] == 2
+
+    asyncio.run(run())
+
+
+def test_hub_get_computer_summary_method() -> None:
+    """get_computer_summary() returns the same summary as from the snapshot."""
+
+    async def run() -> None:
+        hub = UIHub()
+        session_id = await hub.get_or_create_session(None, "p1")
+        await hub.append_computer_events(
+            session_id,
+            [
+                {"kind": "tool_started", "tool": "workspace_write", "ts": 1.0},
+                {
+                    "kind": "file_written",
+                    "tool": "workspace_write",
+                    "ts": 1.1,
+                    "ok": False,
+                    "error": "disk full",
+                },
+            ],
+        )
+        summary = await hub.get_computer_summary(session_id)
+        assert summary["files_written"] == 1
+        assert summary["errors_count"] == 1
+        assert summary["latest_error"] == "disk full"
+
+    asyncio.run(run())
+
+
+def test_hub_computer_summary_absent_session_returns_zero_summary() -> None:
+    """get_computer_summary() for unknown session returns zero summary, no crash."""
+
+    async def run() -> None:
+        hub = UIHub()
+        summary = await hub.get_computer_summary("nonexistent-session")
+        assert summary["total_events"] == 0
+        assert summary["errors_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_summary_not_in_messages() -> None:
+    """computer_summary does not appear inside the messages list."""
+
+    async def run() -> None:
+        hub = UIHub()
+        session_id = await hub.get_or_create_session(None, "p1")
+        await hub.append_computer_events(
+            session_id,
+            [
+                {"kind": "tool_started", "tool": "workspace_read", "ts": 1.0},
+                {"kind": "file_read", "tool": "workspace_read", "ts": 1.1, "ok": True},
+            ],
+        )
+        snapshot = await hub.get_session(session_id)
+        assert snapshot is not None
+        msgs: list[object] = snapshot["messages"]  # type: ignore[assignment]
+        for msg in msgs:
+            assert isinstance(msg, dict)
+            assert "computer_summary" not in msg
+            assert "total_events" not in msg
 
     asyncio.run(run())
 

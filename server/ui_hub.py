@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal, TypedDict, cast
 
+from core.computer_activity_log import build_computer_activity_summary
 from server.ui_session_storage import (
     InMemoryUISessionStorage,
     PersistedFolder,
@@ -808,6 +809,7 @@ class UIHub:
                 "active_task": dict(state.active_task) if state.active_task is not None else None,
                 "auto_state": dict(state.auto_state) if state.auto_state is not None else None,
                 "computer_events": list(state.computer_events),
+                "computer_summary": build_computer_activity_summary(state.computer_events),
             }
 
     async def get_session_decision(self, session_id: str) -> dict[str, JSONValue] | None:
@@ -823,6 +825,13 @@ class UIHub:
             if state is None:
                 return []
             return list(state.computer_events)
+
+    async def get_computer_summary(self, session_id: str) -> dict[str, JSONValue]:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return build_computer_activity_summary([])
+            return build_computer_activity_summary(state.computer_events)
 
     async def append_computer_events(
         self,
