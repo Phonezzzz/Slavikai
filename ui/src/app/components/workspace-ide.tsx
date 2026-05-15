@@ -139,12 +139,15 @@ export function WorkspaceIde({
   const [quickOpenPartial, setQuickOpenPartial] = useState(false);
   const [quickOpenItems, setQuickOpenItems] = useState<WorkspaceQuickOpenItem[]>([]);
   const [recentPaths, setRecentPaths] = useState<string[]>([]);
+  const [computerTab, setComputerTab] = useState<
+    'overview' | 'activity' | 'terminal' | 'changes' | 'checks' | 'environment' | 'files' | 'logs'
+  >('overview');
+
   const {
     terminalHeight,
-    workspaceGridColumns,
+    filesTabColumns,
     workspaceGridRef,
     startExplorerResize,
-    startAssistantResize,
     startTerminalResize,
   } = useWorkspaceLayout({ explorerVisible });
 
@@ -1012,6 +1015,24 @@ export function WorkspaceIde({
   const terminalPendingText = isDecisionBlocking
     ? 'Ожидает подтверждения решения. Отправка временно заблокирована.'
     : null;
+  const COMPUTER_TABS = [
+    { id: 'overview' as const, label: 'Overview' },
+    { id: 'activity' as const, label: 'Activity' },
+    { id: 'terminal' as const, label: 'Terminal' },
+    { id: 'changes' as const, label: 'Changes' },
+    { id: 'checks' as const, label: 'Checks' },
+    { id: 'environment' as const, label: 'Environment' },
+    { id: 'files' as const, label: 'Files' },
+    { id: 'logs' as const, label: 'Logs' },
+  ];
+
+  const tabBtnClass = (id: typeof computerTab) =>
+    `px-3 py-1 text-[11px] rounded-md transition-colors ${
+      computerTab === id
+        ? 'bg-[#1c1c24] text-[#d2d2d9]'
+        : 'text-[#5a5a65] hover:text-[#9a9aa3] hover:bg-[#141418]'
+    }`;
+
   return (
     <div className="h-full min-h-0 flex flex-col bg-[#0a0a0d] text-[#d2d2d9]">
       <WorkspaceToolbar
@@ -1040,118 +1061,220 @@ export function WorkspaceIde({
         onCancelRootPicker={() => setRootPickerOpen(false)}
       />
 
-      <div
-        ref={workspaceGridRef}
-        className="flex-1 min-h-0 grid"
-        style={{
-          gridTemplateColumns: workspaceGridColumns,
-        }}
-      >
-        {explorerVisible ? (
-          <>
-            <WorkspaceExplorer
-              tree={tree}
-              treeLoading={treeLoading}
-              treeError={treeError}
-              loadingTreePaths={loadingTreePaths}
-              treeMeta={treeMeta}
-              expandedNodes={expandedNodes}
-              activePath={activeTab?.path ?? null}
-              activeExplorerPath={activeExplorerPath}
-              readOnly={!sessionYoloActive}
-              onToggleNode={(node, key, expanded) => {
-                setExpandedNodes((prev) => {
-                  const next = new Set(prev);
-                  if (expanded) {
-                    next.delete(key);
-                  } else {
-                    next.add(key);
+      <div className="h-8 border-b border-[#1f1f24] flex items-center px-2 gap-0.5 shrink-0 overflow-x-auto">
+        {COMPUTER_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setComputerTab(tab.id)}
+            className={tabBtnClass(tab.id)}
+            data-computer-tab={tab.id}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 min-h-0">
+        {computerTab === 'overview' && (
+          <WorkspaceAssistantPanel
+            mode={mode}
+            activePlan={activePlan}
+            activeTask={activeTask}
+            autoState={autoState}
+            decision={decision}
+            decisionBusy={decisionBusy}
+            decisionError={decisionError}
+            onDecisionRespond={onDecisionRespond}
+            messages={messages}
+            computerEvents={computerEvents}
+            terminalPendingText={terminalPendingText}
+            onSendFeedback={onSendFeedback}
+          />
+        )}
+
+        {computerTab === 'activity' && (
+          <div className="h-full overflow-auto px-3 py-3 space-y-1" data-computer-tab-content="activity">
+            {computerEvents.length === 0 ? (
+              <div className="text-[12px] text-[#777]">No activity yet.</div>
+            ) : (
+              computerEvents.map((ev, idx) => (
+                <div
+                  key={`${ev.ts}-${idx}`}
+                  className={`flex items-center gap-2 text-[11px] font-mono ${ev.ok === false ? 'text-red-400' : 'text-[#6a6a75]'}`}
+                >
+                  <span className="shrink-0 text-[#5a5a65]">
+                    {new Date(ev.ts).toLocaleTimeString()}
+                  </span>
+                  <span className={`shrink-0 w-20 ${ev.ok === false ? 'text-red-400' : 'text-[#5a8a5a]'}`}>
+                    {ev.kind}
+                  </span>
+                  <span className="truncate text-[#8a8a94]">{ev.path ?? ev.command ?? ev.tool}</span>
+                  {ev.duration_ms !== undefined ? (
+                    <span className="shrink-0 text-[#555]">{ev.duration_ms}ms</span>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {computerTab === 'terminal' && (
+          <div className="h-full flex flex-col" data-computer-tab-content="terminal">
+            <div className="flex-1 overflow-auto px-3 py-2 font-mono text-[11px] text-[#8a8a94]">
+              {terminalLines.map((line, idx) => (
+                <div key={idx} className="whitespace-pre-wrap break-all leading-5">{line}</div>
+              ))}
+              <div ref={terminalEndRef} />
+            </div>
+            {terminalPendingText ? (
+              <div className="border-t border-[#1f1f24] px-3 py-2 text-[11px] text-amber-300">
+                {terminalPendingText}
+              </div>
+            ) : null}
+            <div className="border-t border-[#1f1f24] flex items-center gap-2 px-3 py-2">
+              <span className="text-[#6a6a75] font-mono text-[11px] select-none">$</span>
+              <input
+                value={terminalInput}
+                onChange={(event) => setTerminalInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    void handleTerminalSubmit();
                   }
-                  return next;
-                });
-                if (!expanded && node.type === 'dir' && (node.children?.length ?? 0) === 0 && node.hasChildren) {
-                  requestTreeLoad(node.path, 'expand_dir');
-                }
+                }}
+                disabled={!sessionId || terminalBusy || isDecisionBlocking}
+                placeholder="command..."
+                className="flex-1 bg-transparent outline-none text-[11px] font-mono text-[#c0c0cc] placeholder-[#444] disabled:opacity-50"
+              />
+              {terminalBusy ? (
+                <span className="text-[#6a6a75] text-[10px] shrink-0">running…</span>
+              ) : null}
+            </div>
+          </div>
+        )}
+
+        {computerTab === 'changes' && (
+          <div className="h-full overflow-auto px-3 py-3" data-computer-tab-content="changes">
+            {decision && decision.status === 'pending' ? (
+              <div className="text-[12px] text-[#9a9aa3]">
+                Pending decision: <span className="text-amber-300">{decision.summary}</span>
+              </div>
+            ) : (
+              <div className="text-[12px] text-[#777]">No pending changes.</div>
+            )}
+          </div>
+        )}
+
+        {computerTab === 'checks' && (
+          <div className="h-full px-3 py-3 text-[12px] text-[#777]" data-computer-tab-content="checks">
+            Checks — no data.
+          </div>
+        )}
+
+        {computerTab === 'environment' && (
+          <div className="h-full px-3 py-3 text-[12px] text-[#777]" data-computer-tab-content="environment">
+            Environment — placeholder.
+          </div>
+        )}
+
+        {computerTab === 'files' && (
+          <div
+            ref={workspaceGridRef}
+            className="h-full min-h-0 grid"
+            style={{ gridTemplateColumns: filesTabColumns }}
+            data-computer-tab-content="files"
+          >
+            {explorerVisible ? (
+              <>
+                <WorkspaceExplorer
+                  tree={tree}
+                  treeLoading={treeLoading}
+                  treeError={treeError}
+                  loadingTreePaths={loadingTreePaths}
+                  treeMeta={treeMeta}
+                  expandedNodes={expandedNodes}
+                  activePath={activeTab?.path ?? null}
+                  activeExplorerPath={activeExplorerPath}
+                  readOnly={!sessionYoloActive}
+                  onToggleNode={(node, key, expanded) => {
+                    setExpandedNodes((prev) => {
+                      const next = new Set(prev);
+                      if (expanded) {
+                        next.delete(key);
+                      } else {
+                        next.add(key);
+                      }
+                      return next;
+                    });
+                    if (!expanded && node.type === 'dir' && (node.children?.length ?? 0) === 0 && node.hasChildren) {
+                      requestTreeLoad(node.path, 'expand_dir');
+                    }
+                  }}
+                  onSelectPath={setActiveExplorerPath}
+                  onOpenFile={(path) => {
+                    void openFileInTab(path);
+                  }}
+                  onCreateFile={() => {
+                    void handleCreateFile();
+                  }}
+                  onRenamePath={(path) => {
+                    void handleRenamePath(path);
+                  }}
+                  onMovePath={(path) => {
+                    void handleMovePath(path);
+                  }}
+                  onDeletePath={(path) => {
+                    void handleDeletePath(path);
+                  }}
+                />
+                <button
+                  onMouseDown={startExplorerResize}
+                  className="cursor-col-resize bg-[#121218] hover:bg-[#1b1b23]"
+                  aria-label="Resize explorer"
+                  title="Resize explorer"
+                />
+              </>
+            ) : null}
+            <WorkspaceEditorPane
+              openFiles={openFiles}
+              activeFileId={activeFileId}
+              activeTab={activeTab}
+              hasUnsavedChanges={hasUnsavedChanges}
+              editorSaving={editorSaving}
+              terminalBusy={terminalBusy}
+              isDecisionBlocking={isDecisionBlocking}
+              terminalHeight={terminalHeight}
+              terminalLines={terminalLines}
+              terminalInput={terminalInput}
+              terminalInputDisabled={!sessionId || terminalBusy || isDecisionBlocking}
+              terminalEndRef={terminalEndRef}
+              readOnly={!sessionYoloActive}
+              onSelectTab={setActiveFileId}
+              onCloseTab={closeTab}
+              onRunActiveFile={() => {
+                void handleRunActiveFile();
               }}
-              onSelectPath={setActiveExplorerPath}
-              onOpenFile={(path) => {
-                void openFileInTab(path);
+              onSaveActiveFile={() => {
+                void handleSave();
               }}
-              onCreateFile={() => {
-                void handleCreateFile();
-              }}
-              onRenamePath={(path) => {
-                void handleRenamePath(path);
-              }}
-              onMovePath={(path) => {
-                void handleMovePath(path);
-              }}
-              onDeletePath={(path) => {
-                void handleDeletePath(path);
+              onEditorMount={handleEditorMount}
+              onEditorChange={updateActiveContent}
+              onTerminalResizeStart={startTerminalResize}
+              onTerminalInputChange={setTerminalInput}
+              onTerminalSubmit={() => {
+                void handleTerminalSubmit();
               }}
             />
+          </div>
+        )}
 
-            <button
-              onMouseDown={startExplorerResize}
-              className="cursor-col-resize bg-[#121218] hover:bg-[#1b1b23]"
-              aria-label="Resize explorer"
-              title="Resize explorer"
-            />
-          </>
-        ) : null}
-
-        <WorkspaceAssistantPanel
-          mode={mode}
-          activePlan={activePlan}
-          activeTask={activeTask}
-          autoState={autoState}
-          decision={decision}
-          decisionBusy={decisionBusy}
-          decisionError={decisionError}
-          onDecisionRespond={onDecisionRespond}
-          messages={messages}
-          computerEvents={computerEvents}
-          terminalPendingText={terminalPendingText}
-          onSendFeedback={onSendFeedback}
-        />
-
-        <button
-          onMouseDown={startAssistantResize}
-          className="cursor-col-resize bg-[#121218] hover:bg-[#1b1b23]"
-          aria-label="Resize assistant"
-          title="Resize assistant"
-        />
-
-        <WorkspaceEditorPane
-          openFiles={openFiles}
-          activeFileId={activeFileId}
-          activeTab={activeTab}
-          hasUnsavedChanges={hasUnsavedChanges}
-          editorSaving={editorSaving}
-          terminalBusy={terminalBusy}
-          isDecisionBlocking={isDecisionBlocking}
-          terminalHeight={terminalHeight}
-          terminalLines={terminalLines}
-          terminalInput={terminalInput}
-          terminalInputDisabled={!sessionId || terminalBusy || isDecisionBlocking}
-          terminalEndRef={terminalEndRef}
-          readOnly={!sessionYoloActive}
-          onSelectTab={setActiveFileId}
-          onCloseTab={closeTab}
-          onRunActiveFile={() => {
-            void handleRunActiveFile();
-          }}
-          onSaveActiveFile={() => {
-            void handleSave();
-          }}
-          onEditorMount={handleEditorMount}
-          onEditorChange={updateActiveContent}
-          onTerminalResizeStart={startTerminalResize}
-          onTerminalInputChange={setTerminalInput}
-          onTerminalSubmit={() => {
-            void handleTerminalSubmit();
-          }}
-        />
+        {computerTab === 'logs' && (
+          <div className="h-full overflow-auto px-3 py-2 font-mono text-[11px] text-[#6a6a75]" data-computer-tab-content="logs">
+            {terminalLines.map((line, idx) => (
+              <div key={idx} className="whitespace-pre-wrap break-all leading-5">{line}</div>
+            ))}
+          </div>
+        )}
       </div>
 
       <WorkspaceQuickOpen

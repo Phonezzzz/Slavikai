@@ -139,7 +139,7 @@ export function WorkspaceAssistantPanel({
 
   return (
     <section
-      className="min-h-0 border-r border-[#1f1f24] bg-[#0d0d11] flex flex-col overflow-hidden"
+      className="min-h-0 bg-[#0d0d11] flex flex-col overflow-hidden h-full"
       data-computer-surface="true"
     >
       <div className="h-9 border-b border-[#1f1f24] px-3 flex items-center gap-2 text-[12px]">

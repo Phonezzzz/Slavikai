@@ -1125,3 +1125,96 @@ def test_architecture_md_computer_mode_pivot_cross_reference() -> None:
     text = _read_text("docs/architecture/Architecture.md")
     assert "not a manual IDE" in text or "Computer Mode" in text
     assert "ARCH_CANON" in text
+
+
+# ── PR-24: tabbed Computer Mode surface ──────────────────────────────────────
+
+
+def test_computer_tabs_overview_is_first() -> None:
+    """workspace-ide.tsx must declare Overview as the first tab and default state."""
+    content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    # Default tab state must be 'overview'
+    assert "'overview'" in content or '"overview"' in content
+    # Overview must appear before Files in tab order
+    overview_pos = content.find("'overview'")
+    files_pos = content.find("'files'")
+    assert overview_pos != -1, "overview tab id not found"
+    assert files_pos != -1, "files tab id not found"
+    assert overview_pos < files_pos, "Overview must appear before Files in tab list"
+
+
+def test_computer_tabs_all_canonical_tabs_present() -> None:
+    """workspace-ide.tsx must define all 8 canonical Computer Mode tabs."""
+    content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    required_tabs = [
+        "overview",
+        "activity",
+        "terminal",
+        "changes",
+        "checks",
+        "environment",
+        "files",
+        "logs",
+    ]
+    for tab_id in required_tabs:
+        assert f"'{tab_id}'" in content or f'"{tab_id}"' in content, (
+            f"Computer Mode tab '{tab_id}' not found in workspace-ide.tsx"
+        )
+
+
+def test_computer_tabs_files_tab_has_editor_pane() -> None:
+    """workspace-ide.tsx Files tab must include WorkspaceEditorPane."""
+    content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    assert "WorkspaceEditorPane" in content, "Files tab must render WorkspaceEditorPane"
+    # WorkspaceEditorPane must appear inside the files tab conditional block
+    files_idx = content.find("computerTab === 'files'")
+    editor_after_files = content.find("WorkspaceEditorPane", files_idx)
+    assert files_idx != -1, "files tab conditional not found"
+    assert editor_after_files != -1, "WorkspaceEditorPane not found after files tab conditional"
+
+
+def test_computer_tabs_overview_uses_assistant_panel() -> None:
+    """workspace-ide.tsx Overview tab must render WorkspaceAssistantPanel."""
+    content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    overview_idx = content.find("computerTab === 'overview'")
+    panel_after_overview = content.find("WorkspaceAssistantPanel", overview_idx)
+    assert overview_idx != -1, "overview tab conditional not found"
+    assert panel_after_overview != -1, "WorkspaceAssistantPanel not found in overview tab"
+
+
+def test_computer_tabs_no_new_lane() -> None:
+    """Tab system must not introduce lane='computer' or role='computer'."""
+    content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    assert "lane='computer'" not in content
+    assert 'lane="computer"' not in content
+    assert "role='computer'" not in content
+    assert 'role="computer"' not in content
+
+
+def test_computer_tabs_no_computer_send_endpoint() -> None:
+    """Tab system must not introduce /ui/api/computer/send endpoint."""
+    content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    assert "/ui/api/computer/send" not in content
+
+
+def test_computer_tabs_files_tab_uses_files_tab_columns() -> None:
+    """Files tab grid must use filesTabColumns (not old workspaceGridColumns)."""
+    ide_content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    layout_content = _read_text("ui/src/features/workspace/use-workspace-layout.ts")
+    # filesTabColumns must be exported from the hook
+    assert "filesTabColumns" in layout_content, "useWorkspaceLayout must export filesTabColumns"
+    # workspace-ide.tsx must use filesTabColumns
+    assert "filesTabColumns" in ide_content, "workspace-ide.tsx must use filesTabColumns"
+    # old workspaceGridColumns must no longer be exported from layout hook
+    assert "workspaceGridColumns" not in layout_content, (
+        "workspaceGridColumns must be removed from useWorkspaceLayout (replaced by filesTabColumns)"
+    )
+
+
+def test_computer_tab_data_attributes_present() -> None:
+    """Tab buttons and content areas must carry data-computer-tab attributes for testability."""
+    content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    assert "data-computer-tab=" in content, "Tab buttons must carry data-computer-tab attribute"
+    assert "data-computer-tab-content=" in content, (
+        "Tab content areas must carry data-computer-tab-content attribute"
+    )
