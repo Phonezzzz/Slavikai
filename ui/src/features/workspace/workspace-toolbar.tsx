@@ -1,4 +1,4 @@
-import { ArrowLeft, FolderGit2, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeft, FolderGit2, Monitor, SlidersHorizontal } from 'lucide-react';
 
 import { compactPath } from './workspace-helpers';
 
@@ -68,11 +68,16 @@ export function WorkspaceToolbar({
         </div>
 
         <div className="flex items-center justify-center gap-2">
+          <div className="flex items-center gap-1.5 text-[12px]">
+            <Monitor className="h-3.5 w-3.5 text-[#7c7cff]" />
+            <span className="font-medium text-[#c0c0cc]">Slavik Computer</span>
+          </div>
+          <span className="text-[#333]">·</span>
           <button
             onClick={onToggleRootPicker}
             className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2.5 py-1 text-[12px] text-[#c7c7d0] hover:bg-[#181820]"
           >
-            Open Project Root
+            Project Root
           </button>
           <button
             onClick={onReindex}

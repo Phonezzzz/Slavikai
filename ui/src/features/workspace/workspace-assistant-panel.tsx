@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
 import {
-  Bot,
   Check,
   Copy,
+  Monitor,
   Pause,
   ThumbsDown,
   ThumbsUp,
@@ -138,21 +138,81 @@ export function WorkspaceAssistantPanel({
     'rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40';
 
   return (
-    <section className="min-h-0 border-r border-[#1f1f24] bg-[#0d0d11] flex flex-col overflow-hidden">
-      <div className="h-9 border-b border-[#1f1f24] px-3 flex items-center gap-2 text-[12px] text-[#9a9aa3]">
-        <Bot className="h-3.5 w-3.5 text-[#f59e0b]" />
-        Session Activity
+    <section
+      className="min-h-0 border-r border-[#1f1f24] bg-[#0d0d11] flex flex-col overflow-hidden"
+      data-computer-surface="true"
+    >
+      <div className="h-9 border-b border-[#1f1f24] px-3 flex items-center gap-2 text-[12px]">
+        <Monitor className="h-3.5 w-3.5 text-[#7c7cff]" />
+        <span className="font-medium text-[#d2d2d9]">Computer</span>
+        <span className="text-[#444]">·</span>
+        <span className="text-[#9a9aa3]">Agent Execution Surface</span>
       </div>
 
       <div className="border-b border-[#1f1f24] bg-[#0f0f14] px-3 py-2 text-[11px] text-[#8a8a94]">
         <div className="flex items-center justify-between gap-2">
-          <span>mode: {mode}</span>
-          <span>plan: {activePlan?.status ?? 'none'}</span>
+          <span>
+            mode:{' '}
+            <span className="text-[#b0b0bd]">{mode}</span>
+          </span>
+          <span>
+            plan:{' '}
+            <span
+              className={
+                activePlan?.status === 'running'
+                  ? 'text-[#7c7cff]'
+                  : activePlan?.status === 'completed'
+                    ? 'text-emerald-400'
+                    : activePlan?.status === 'failed'
+                      ? 'text-red-400'
+                      : 'text-[#8a8a94]'
+              }
+            >
+              {activePlan?.status ?? 'none'}
+            </span>
+          </span>
         </div>
         <div className="mt-1 flex items-center justify-between gap-2">
-          <span>task: {activeTask?.status ?? 'none'}</span>
-          <span>auto: {autoState?.status ?? 'idle'}</span>
+          <span>
+            task:{' '}
+            <span
+              className={
+                activeTask?.status === 'running'
+                  ? 'text-[#7c7cff]'
+                  : activeTask?.status === 'completed'
+                    ? 'text-emerald-400'
+                    : activeTask?.status === 'failed'
+                      ? 'text-red-400'
+                      : 'text-[#8a8a94]'
+              }
+            >
+              {activeTask?.status ?? 'none'}
+            </span>
+          </span>
+          <span>
+            auto:{' '}
+            <span
+              className={
+                autoState?.status === 'planning' || autoState?.status === 'coding'
+                  ? 'text-[#7c7cff]'
+                  : autoState?.status === 'completed'
+                    ? 'text-emerald-400'
+                    : autoState?.status?.startsWith('failed')
+                      ? 'text-red-400'
+                      : autoState?.status === 'waiting_approval'
+                        ? 'text-amber-300'
+                        : 'text-[#8a8a94]'
+              }
+            >
+              {autoState?.status ?? 'idle'}
+            </span>
+          </span>
         </div>
+        {autoState?.goal ? (
+          <div className="mt-1 truncate text-[#666]" title={autoState.goal}>
+            goal: {autoState.goal}
+          </div>
+        ) : null}
       </div>
 
       {computerEvents.length > 0 ? (

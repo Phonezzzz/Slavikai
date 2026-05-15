@@ -3,6 +3,7 @@
 Этот документ фиксирует **текущее фактическое устройство** системы после PR-12 текущей серии.
 Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
 Product direction (personal agent computer, роли Chat/Computer, backends) — `ARCH_CANON.md §9`.
+Computer Mode product invariant ("not a manual IDE", live agent execution surface, primary vs secondary surfaces) — `ARCH_CANON.md §9`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
 ## Цель

@@ -216,10 +216,45 @@ Coding — первый validated/testable сценарий, а не архит�
 Архитектура строится вокруг универсального agent-computer контура, в котором Chat
 и Computer выполняют строго разные роли.
 
+### Computer Mode is not a manual IDE
+
+**Computer Mode is a live agent execution surface.**
+
+Computer Mode не является:
+- IDE для ручного редактирования файлов;
+- file manager как primary UX;
+- coding assistant как главный сценарий.
+
+Computer Mode — это поверхность, которая отображает, что agent делает прямо сейчас:
+sandbox/container status, current task, live command/output stream, activity timeline,
+changes/diff, checks/tests, approvals, artifacts.
+
+Explorer/editor/terminal — вторичные inspection tools, доступные по запросу,
+а не главный экран.
+
+### Computer Mode — primary surface
+
+Основной экран Computer отображает:
+
+- sandbox/container status (local/container, idle/running/completed/failed)
+- current task / auto state / plan
+- live activity timeline (agent tool calls, durations, results)
+- changes/diff summary
+- checks/tests summary
+- approvals / pending decisions
+- artifacts
+
+### Computer Mode — secondary details (по запросу)
+
+- terminal / PTY
+- file explorer
+- editor / preview
+- raw logs
+
 ### Роли (фиксированные)
 
 - **Chat** — единственный conversational entrypoint. Пользователь общается только через Chat.
-- **Computer** — inspector/runtime для текущей chat-сессии. Не является вторым чатом,
+- **Computer** — live agent execution surface для текущей chat-сессии. Не является вторым чатом,
   не принимает сообщения от пользователя напрямую, не имеет своего lane.
 - **ComputerBackend** — граница для executable environments. Весь исполняемый код
   проходит через backend, а не напрямую через Python I/O или subprocess.
@@ -232,8 +267,8 @@ Coding — первый validated/testable сценарий, а не архит�
 ### Future backends (направление, не реализованы)
 
 - SSH remote host
-- Browser automation
-- VM / Desktop
+- Browser automation / visual browsing
+- VM / Desktop backend
 
 ### Инварианты (non-negotiable)
 
@@ -241,3 +276,5 @@ Coding — первый validated/testable сценарий, а не архит�
 - Не обходить `ToolGateway`, approval boundary или `ComputerActivityLog` hooks.
 - Новые backends подключаются только через `ComputerBackend` Protocol.
 - Computer-события хранятся отдельно от chat-сообщений; в visible chat не попадают.
+- Explorer/editor не должны быть primary product surface.
+- Нет `/ui/api/computer/send` — Computer не является conversational endpoint.

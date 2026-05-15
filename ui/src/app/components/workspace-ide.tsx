@@ -14,7 +14,6 @@ import type {
 import { getDecisionDisplayState } from '../decision-display';
 import type { CanvasMessage } from './canvas';
 import {
-  findFirstFilePath,
   terminalTimestamp,
   type WorkspaceNode,
   type WorkspaceTreeMeta,
@@ -392,12 +391,6 @@ export function WorkspaceIde({
         );
       } else {
         setTree(parsedTree);
-      }
-      if (isRootLoad && !activeFileId) {
-        const first = findFirstFilePath(parsedTree);
-        if (first) {
-          void openFileInTab(first);
-        }
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {

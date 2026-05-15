@@ -1035,3 +1035,93 @@ def test_execute_commit_stages_only_specified_files() -> None:
     # must not stage everything
     assert " ." not in add_cmd
     assert " -A" not in add_cmd
+
+
+# ── PR-23: Computer Mode is not a manual IDE invariants ──────────────────────
+
+
+def _read_text(rel_path: str) -> str:
+    """Read file relative to repo root."""
+    import pathlib
+
+    return pathlib.Path(rel_path).read_text(encoding="utf-8")
+
+
+def test_arch_canon_computer_mode_not_ide() -> None:
+    """ARCH_CANON.md must state Computer Mode is not a manual IDE."""
+    text = _read_text("docs/architecture/ARCH_CANON.md")
+    assert "not a manual IDE" in text
+    assert "live agent execution surface" in text
+
+
+def test_arch_canon_personal_agent_computer() -> None:
+    """ARCH_CANON.md must describe Slavikai as personal agent computer."""
+    text = _read_text("docs/architecture/ARCH_CANON.md")
+    assert "personal agent computer" in text.lower()
+
+
+def test_arch_canon_computer_primary_secondary_surfaces() -> None:
+    """ARCH_CANON.md must list primary surface items and secondary details."""
+    text = _read_text("docs/architecture/ARCH_CANON.md")
+    assert "primary surface" in text.lower() or "Primary surface" in text
+    assert "secondary" in text.lower()
+    # Primary items
+    assert "activity timeline" in text.lower() or "activity" in text.lower()
+    assert "approvals" in text.lower()
+    # Secondary items
+    assert "editor" in text.lower()
+    assert "terminal" in text.lower()
+
+
+def test_arch_canon_future_backends_marked_not_implemented() -> None:
+    """Future backends (browser, VM/Desktop) must be explicitly marked as not implemented."""
+    text = _read_text("docs/architecture/ARCH_CANON.md")
+    assert "Browser automation" in text or "browser automation" in text
+    assert "VM / Desktop" in text or "VM/Desktop" in text
+    assert "не реализован" in text or "not implemented" in text.lower()
+
+
+def test_arch_canon_no_computer_send_endpoint_invariant() -> None:
+    """ARCH_CANON.md must forbid /ui/api/computer/send."""
+    text = _read_text("docs/architecture/ARCH_CANON.md")
+    assert "/ui/api/computer/send" in text
+
+
+def test_arch_canon_explorer_editor_not_primary_surface() -> None:
+    """ARCH_CANON.md must state explorer/editor must not be primary product surface."""
+    text = _read_text("docs/architecture/ARCH_CANON.md")
+    assert "Explorer/editor" in text or "explorer/editor" in text.lower()
+    assert "primary" in text.lower()
+
+
+def test_computer_ui_has_no_workspace_send_reference() -> None:
+    """Computer UI source files must not reference /ui/api/computer/send."""
+    paths = [
+        "ui/src/app/components/workspace-ide.tsx",
+        "ui/src/app/components/workspace-session-screen.tsx",
+        "ui/src/features/workspace/workspace-assistant-panel.tsx",
+        "ui/src/features/workspace/workspace-toolbar.tsx",
+    ]
+    for path in paths:
+        content = _read_text(path)
+        assert "/ui/api/computer/send" not in content, (
+            f"{path} must not reference /ui/api/computer/send"
+        )
+        assert "handleSendWorkspace" not in content, (
+            f"{path} must not reference handleSendWorkspace"
+        )
+
+
+def test_computer_assistant_panel_no_auto_open_first_file() -> None:
+    """workspace-ide.tsx must not auto-open the first file on tree load (IDE behavior)."""
+    content = _read_text("ui/src/app/components/workspace-ide.tsx")
+    assert "findFirstFilePath" not in content, (
+        "workspace-ide.tsx must not auto-open first file from tree (IDE behavior removed)"
+    )
+
+
+def test_architecture_md_computer_mode_pivot_cross_reference() -> None:
+    """Architecture.md must cross-reference Computer Mode product invariant."""
+    text = _read_text("docs/architecture/Architecture.md")
+    assert "not a manual IDE" in text or "Computer Mode" in text
+    assert "ARCH_CANON" in text
