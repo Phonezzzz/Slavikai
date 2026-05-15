@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from core.agent_computer import build_computer_changes_review_decision
 from core.computer_activity_log import ComputerActivityLog, build_computer_activity_summary
 from core.computer_backend import LocalComputerBackend
 from core.tool_gateway import ToolGateway
@@ -725,3 +726,177 @@ def test_local_backend_read_file_uses_tool_gateway_not_direct_io() -> None:
     result = backend.read_file("README.md")
     assert result.ok
     gateway_mock.call.assert_called_once_with(ToolRequest("workspace_read", {"path": "README.md"}))
+
+
+# ── PR-19: build_computer_changes_review_decision ────────────────────────────
+
+
+def test_changes_review_returns_none_when_no_files() -> None:
+    """No changed files → returns None, no packet emitted."""
+    result = build_computer_changes_review_decision(
+        changed_files=[],
+        diff_summary="some diff",
+        commit_message="fix: something",
+    )
+    assert result is None
+
+
+def test_changes_review_returns_none_when_commit_message_empty() -> None:
+    """Empty commit message → returns None."""
+    result = build_computer_changes_review_decision(
+        changed_files=["src/main.py"],
+        diff_summary="some diff",
+        commit_message="",
+    )
+    assert result is None
+
+
+def test_changes_review_returns_none_when_commit_message_blank() -> None:
+    """Whitespace-only commit message → returns None."""
+    result = build_computer_changes_review_decision(
+        changed_files=["src/main.py"],
+        diff_summary="some diff",
+        commit_message="   ",
+    )
+    assert result is None
+
+
+def test_changes_review_packet_has_required_keys() -> None:
+    """Packet has all required decision keys."""
+    packet = build_computer_changes_review_decision(
+        changed_files=["src/foo.py"],
+        diff_summary="diff --git ...",
+        commit_message="feat: add foo",
+    )
+    assert packet is not None
+    for key in (
+        "id",
+        "kind",
+        "decision_type",
+        "status",
+        "blocking",
+        "reason",
+        "summary",
+        "proposed_action",
+        "options",
+        "default_option_id",
+    ):
+        assert key in packet, f"Missing key: {key}"
+
+
+def test_changes_review_packet_decision_type_is_agent_decision() -> None:
+    packet = build_computer_changes_review_decision(
+        changed_files=["a.py"],
+        diff_summary="",
+        commit_message="fix: x",
+    )
+    assert packet is not None
+    assert packet["decision_type"] == "agent_decision"
+    assert packet["kind"] == "decision"
+    assert packet["status"] == "pending"
+    assert packet["blocking"] is True
+
+
+def test_changes_review_packet_contains_changed_files() -> None:
+    files = ["core/foo.py", "tests/test_foo.py"]
+    packet = build_computer_changes_review_decision(
+        changed_files=files,
+        diff_summary="",
+        commit_message="refactor: foo",
+    )
+    assert packet is not None
+    action = packet["proposed_action"]
+    assert isinstance(action, dict)
+    assert action["changed_files"] == files
+
+
+def test_changes_review_packet_contains_commit_message() -> None:
+    packet = build_computer_changes_review_decision(
+        changed_files=["x.py"],
+        diff_summary="",
+        commit_message="  feat: trimmed  ",
+    )
+    assert packet is not None
+    action = packet["proposed_action"]
+    assert isinstance(action, dict)
+    assert action["proposed_commit_message"] == "feat: trimmed"
+
+
+def test_changes_review_packet_contains_diff_summary() -> None:
+    packet = build_computer_changes_review_decision(
+        changed_files=["x.py"],
+        diff_summary="diff --git a/x.py b/x.py\n+added line",
+        commit_message="chore: update",
+    )
+    assert packet is not None
+    action = packet["proposed_action"]
+    assert isinstance(action, dict)
+    assert action["diff_summary"] == "diff --git a/x.py b/x.py\n+added line"
+
+
+def test_changes_review_packet_has_approve_and_reject_options() -> None:
+    packet = build_computer_changes_review_decision(
+        changed_files=["f.py"],
+        diff_summary="",
+        commit_message="fix: y",
+    )
+    assert packet is not None
+    options = packet["options"]
+    assert isinstance(options, list)
+    option_ids = {opt["id"] for opt in options if isinstance(opt, dict)}
+    assert "approve_once" in option_ids
+    assert "reject" in option_ids
+
+
+def test_changes_review_packet_default_option_is_approve() -> None:
+    packet = build_computer_changes_review_decision(
+        changed_files=["f.py"],
+        diff_summary="",
+        commit_message="fix: z",
+    )
+    assert packet is not None
+    assert packet["default_option_id"] == "approve_once"
+
+
+def test_changes_review_packet_is_json_serializable() -> None:
+    """Packet must be fully JSON-serializable (no datetime, no custom objects)."""
+    packet = build_computer_changes_review_decision(
+        changed_files=["a.py", "b.py"],
+        diff_summary="--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new",
+        commit_message="feat: serialize check",
+    )
+    assert packet is not None
+    serialized = json.dumps(packet)
+    parsed = json.loads(serialized)
+    assert parsed["decision_type"] == "agent_decision"
+
+
+def test_changes_review_packet_id_is_unique() -> None:
+    """Each call generates a distinct packet id."""
+    p1 = build_computer_changes_review_decision(["a.py"], "", "fix: a")
+    p2 = build_computer_changes_review_decision(["a.py"], "", "fix: a")
+    assert p1 is not None
+    assert p2 is not None
+    assert p1["id"] != p2["id"]
+
+
+def test_changes_review_no_commit_side_effect() -> None:
+    """build_computer_changes_review_decision is a pure function — no I/O, no commit."""
+    import subprocess
+
+    before = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    build_computer_changes_review_decision(
+        changed_files=["core/agent_computer.py"],
+        diff_summary="some diff",
+        commit_message="feat: would-be commit",
+    )
+    after = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert before == after, "git log changed — commit side effect detected!"

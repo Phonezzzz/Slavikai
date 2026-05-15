@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 
 from core.computer_backend import ComputerBackend
-from shared.models import ToolResult
+from shared.models import JSONValue, ToolResult
 
 
 @dataclass
@@ -39,3 +40,55 @@ class AgentComputerRuntime:
 
     def check(self) -> ToolResult:
         return self.backend.check()
+
+
+def build_computer_changes_review_decision(
+    changed_files: list[str],
+    diff_summary: str,
+    commit_message: str,
+) -> dict[str, JSONValue] | None:
+    """Build a decision packet for 'changes ready for review'.
+
+    Returns None when there is nothing to review (empty files or blank commit message).
+    Pure function — no I/O, no git, no commit side effects.
+    """
+    if not changed_files or not commit_message.strip():
+        return None
+
+    return {
+        "id": str(uuid.uuid4()),
+        "kind": "decision",
+        "decision_type": "agent_decision",
+        "status": "pending",
+        "blocking": True,
+        "reason": "computer_changes_review",
+        "summary": f"Changes ready to commit: {commit_message.strip()[:72]}",
+        "proposed_action": {
+            "category": "computer_changes_review",
+            "changed_files": changed_files,
+            "diff_summary": diff_summary,
+            "proposed_commit_message": commit_message.strip(),
+        },
+        "options": [
+            {
+                "id": "approve_once",
+                "title": "Commit",
+                "action": "approve",
+                "payload": {},
+                "risk": "low",
+            },
+            {
+                "id": "reject",
+                "title": "Cancel",
+                "action": "reject",
+                "payload": {},
+                "risk": "low",
+            },
+        ],
+        "default_option_id": "approve_once",
+        "context": {},
+        "created_at": None,
+        "expires_at": None,
+        "updated_at": None,
+        "resolved_at": None,
+    }
