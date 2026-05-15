@@ -207,3 +207,37 @@ Legacy debt после PR-26:
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
 
 Roadmap устранения legacy после PR-26: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
+
+## 9) Product direction — Personal Agent Computer
+
+**Slavikai — это personal agent computer, а не IDE и не coding agent.**
+
+Coding — первый validated/testable сценарий, а не архитектурный центр.
+Архитектура строится вокруг универсального agent-computer контура, в котором Chat
+и Computer выполняют строго разные роли.
+
+### Роли (фиксированные)
+
+- **Chat** — единственный conversational entrypoint. Пользователь общается только через Chat.
+- **Computer** — inspector/runtime для текущей chat-сессии. Не является вторым чатом,
+  не принимает сообщения от пользователя напрямую, не имеет своего lane.
+- **ComputerBackend** — граница для executable environments. Весь исполняемый код
+  проходит через backend, а не напрямую через Python I/O или subprocess.
+
+### Текущие backends
+
+- `LocalComputerBackend` — реализован, default.
+- `ContainerComputerBackend` — реализован, opt-in/inactive (SLAVIK_COMPUTER_* env vars).
+
+### Future backends (направление, не реализованы)
+
+- SSH remote host
+- Browser automation
+- VM / Desktop
+
+### Инварианты (non-negotiable)
+
+- Не вводить новые lanes (нет `lane="computer"`, нет `role="computer"`).
+- Не обходить `ToolGateway`, approval boundary или `ComputerActivityLog` hooks.
+- Новые backends подключаются только через `ComputerBackend` Protocol.
+- Computer-события хранятся отдельно от chat-сообщений; в visible chat не попадают.
