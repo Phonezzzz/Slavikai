@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shlex
 import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
 from aiohttp import web
 
+from core.agent_computer import execute_local_commit
 from core.approval_policy import ApprovalRequired
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import AgentProtocol
 from server.http.handlers.ui_chat import handle_ui_send_resume
 from server.http_api import (
     UI_DECISION_RESPONSES,
@@ -43,8 +44,18 @@ from server.http_api import (
     _utc_now_iso,
     _workspace_root_for_session,
 )
-from shared.models import JSONValue
+from shared.models import JSONValue, ToolRequest, ToolResult
 from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
+
+
+class _AgentCallGateway:
+    """Bridges agent.call_tool() to the call(ToolRequest) interface for execute_local_commit."""
+
+    def __init__(self, agent: AgentProtocol) -> None:
+        self._agent = agent
+
+    def call(self, request: ToolRequest) -> ToolResult:
+        return self._agent.call_tool(request.name, dict(request.args))
 
 
 def _mode_transitions_payload(workflow: dict[str, JSONValue]) -> dict[str, JSONValue]:
@@ -1186,26 +1197,12 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "error": "invalid_commit_data",
                 "resume_started": False,
             }
-        files_arg = " ".join(shlex.quote(f) for f in changed_files)
-        add_result = agent.call_tool(
-            "workspace_terminal_run", {"command": f"git add -- {files_arg}"}
-        )
-        if not add_result.ok:
-            return {
-                "ok": False,
-                "source_endpoint": "computer.commit",
-                "data": {"committed": False, "error": add_result.error or "git add failed"},
-                "resume_started": False,
-            }
-        msg_quoted = shlex.quote(commit_msg)
-        commit_result = agent.call_tool(
-            "workspace_terminal_run", {"command": f"git commit -m {msg_quoted}"}
-        )
-        output = commit_result.data.get("output") if isinstance(commit_result.data, dict) else None
+        result = execute_local_commit(commit_msg, changed_files, _AgentCallGateway(agent))
+        output = result.data.get("output") if isinstance(result.data, dict) else None
         return {
-            "ok": commit_result.ok,
+            "ok": result.ok,
             "source_endpoint": "computer.commit",
-            "data": {"committed": commit_result.ok, "output": output},
+            "data": {"committed": result.ok, "output": output},
             "resume_started": False,
         }
 

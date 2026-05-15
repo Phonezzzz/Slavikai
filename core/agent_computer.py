@@ -3,9 +3,9 @@ from __future__ import annotations
 import shlex
 import uuid
 from dataclasses import dataclass
+from typing import Protocol
 
 from core.computer_backend import ComputerBackend
-from core.tool_gateway import ToolGateway
 from shared.models import JSONValue, ToolRequest, ToolResult
 
 
@@ -96,12 +96,22 @@ def build_computer_changes_review_decision(
     }
 
 
+class _CommitBoundary(Protocol):
+    """Structural interface required by execute_local_commit.
+
+    ToolGateway and any thin adapter (e.g. _AgentCallGateway in decision.py)
+    satisfy this protocol without explicit inheritance.
+    """
+
+    def call(self, request: ToolRequest) -> ToolResult: ...
+
+
 def execute_local_commit(
     commit_message: str,
     changed_files: list[str],
-    gateway: ToolGateway,
+    gateway: _CommitBoundary,
 ) -> ToolResult:
-    """Stage changed_files and create a local git commit via ToolGateway.
+    """Stage changed_files and create a local git commit via the gateway boundary.
 
     Validation: returns ToolResult.failure() for blank message or empty files.
     Runs two gateway calls: git add (specific files only), then git commit.
