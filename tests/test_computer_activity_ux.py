@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from core.agent_computer import build_computer_changes_review_decision
+from core.agent_computer import build_computer_changes_review_decision, execute_local_commit
 from core.computer_activity_log import ComputerActivityLog, build_computer_activity_summary
 from core.computer_backend import LocalComputerBackend
 from core.tool_gateway import ToolGateway
@@ -900,3 +900,138 @@ def test_changes_review_no_commit_side_effect() -> None:
         text=True,
     ).stdout.strip()
     assert before == after, "git log changed — commit side effect detected!"
+
+
+# ── PR-20: execute_local_commit ───────────────────────────────────────────────
+
+
+def _ok_gateway(calls_log: list[str] | None = None) -> MagicMock:
+    """Gateway mock that succeeds all calls and optionally logs command strings."""
+    gateway = MagicMock()
+
+    def _call(req: object) -> ToolResult:
+        if calls_log is not None and hasattr(req, "args"):
+            cmd = req.args.get("command", "")
+            if cmd:
+                calls_log.append(cmd)
+        return ToolResult.success({"output": "ok"})
+
+    gateway.call.side_effect = _call
+    return gateway
+
+
+def test_execute_commit_returns_failure_for_blank_message() -> None:
+    """Blank commit_message → ToolResult.failure, no gateway call."""
+    gw = MagicMock()
+    result = execute_local_commit(commit_message="   ", changed_files=["f.py"], gateway=gw)
+    assert not result.ok
+    gw.call.assert_not_called()
+
+
+def test_execute_commit_returns_failure_for_empty_files() -> None:
+    """Empty changed_files → ToolResult.failure, no gateway call."""
+    gw = MagicMock()
+    result = execute_local_commit(commit_message="fix: x", changed_files=[], gateway=gw)
+    assert not result.ok
+    gw.call.assert_not_called()
+
+
+def test_execute_commit_calls_git_add_then_commit() -> None:
+    """Gateway receives git add then git commit, in that order."""
+    calls: list[str] = []
+    gw = _ok_gateway(calls)
+    result = execute_local_commit(
+        commit_message="feat: new feature",
+        changed_files=["core/foo.py"],
+        gateway=gw,
+    )
+    assert result.ok
+    assert len(calls) == 2
+    assert calls[0].startswith("git add")
+    assert calls[1].startswith("git commit")
+
+
+def test_execute_commit_uses_gateway_not_subprocess() -> None:
+    """execute_local_commit routes through ToolGateway, not direct subprocess."""
+    gw = _ok_gateway()
+    execute_local_commit(
+        commit_message="fix: via gateway",
+        changed_files=["x.py"],
+        gateway=gw,
+    )
+    assert gw.call.call_count == 2
+
+
+def test_execute_commit_does_not_call_git_push() -> None:
+    """No git push command is ever issued."""
+    calls: list[str] = []
+    gw = _ok_gateway(calls)
+    execute_local_commit("feat: safe", ["a.py"], gw)
+    for cmd in calls:
+        assert "push" not in cmd.lower(), f"Unexpected push in command: {cmd!r}"
+
+
+def test_execute_commit_does_not_call_git_merge() -> None:
+    """No git merge command is ever issued."""
+    calls: list[str] = []
+    gw = _ok_gateway(calls)
+    execute_local_commit("feat: safe", ["a.py"], gw)
+    for cmd in calls:
+        assert "merge" not in cmd.lower(), f"Unexpected merge in command: {cmd!r}"
+
+
+def test_execute_commit_does_not_call_git_checkout() -> None:
+    """No git checkout command is ever issued."""
+    calls: list[str] = []
+    gw = _ok_gateway(calls)
+    execute_local_commit("feat: safe", ["a.py"], gw)
+    for cmd in calls:
+        assert "checkout" not in cmd.lower(), f"Unexpected checkout in command: {cmd!r}"
+
+
+def test_execute_commit_propagates_add_failure() -> None:
+    """If git add fails, returns that failure and git commit is NOT called."""
+    add_called = False
+    commit_called = False
+
+    def _call(req: object) -> ToolResult:
+        nonlocal add_called, commit_called
+        cmd = req.args.get("command", "") if hasattr(req, "args") else ""
+        if "git add" in cmd:
+            add_called = True
+            return ToolResult.failure("nothing to stage")
+        if "git commit" in cmd:
+            commit_called = True
+            return ToolResult.success({"output": "ok"})
+        return ToolResult.success({})
+
+    gw = MagicMock()
+    gw.call.side_effect = _call
+
+    result = execute_local_commit("fix: something", ["missing.py"], gw)
+    assert not result.ok
+    assert add_called
+    assert not commit_called
+
+
+def test_execute_commit_trims_commit_message() -> None:
+    """Leading/trailing whitespace in commit_message is stripped."""
+    calls: list[str] = []
+    gw = _ok_gateway(calls)
+    execute_local_commit("  feat: trimmed  ", ["f.py"], gw)
+    commit_cmd = next(c for c in calls if "git commit" in c)
+    assert "feat: trimmed" in commit_cmd
+    assert "  feat" not in commit_cmd
+
+
+def test_execute_commit_stages_only_specified_files() -> None:
+    """git add command includes exactly the specified files, not '.' or '-A'."""
+    calls: list[str] = []
+    gw = _ok_gateway(calls)
+    execute_local_commit("chore: specific", ["core/a.py", "tests/test_a.py"], gw)
+    add_cmd = next(c for c in calls if "git add" in c)
+    assert "core/a.py" in add_cmd
+    assert "tests/test_a.py" in add_cmd
+    # must not stage everything
+    assert " ." not in add_cmd
+    assert " -A" not in add_cmd

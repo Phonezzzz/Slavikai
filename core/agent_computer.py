@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import shlex
 import uuid
 from dataclasses import dataclass
 
 from core.computer_backend import ComputerBackend
-from shared.models import JSONValue, ToolResult
+from core.tool_gateway import ToolGateway
+from shared.models import JSONValue, ToolRequest, ToolResult
 
 
 @dataclass
@@ -92,3 +94,32 @@ def build_computer_changes_review_decision(
         "updated_at": None,
         "resolved_at": None,
     }
+
+
+def execute_local_commit(
+    commit_message: str,
+    changed_files: list[str],
+    gateway: ToolGateway,
+) -> ToolResult:
+    """Stage changed_files and create a local git commit via ToolGateway.
+
+    Validation: returns ToolResult.failure() for blank message or empty files.
+    Runs two gateway calls: git add (specific files only), then git commit.
+    No git push, no merge, no checkout — local commit only.
+    """
+    if not commit_message.strip():
+        return ToolResult.failure("commit_message must not be blank")
+    if not changed_files:
+        return ToolResult.failure("changed_files must not be empty")
+
+    files_arg = " ".join(shlex.quote(f) for f in changed_files)
+    add_result = gateway.call(
+        ToolRequest("workspace_terminal_run", {"command": f"git add -- {files_arg}"})
+    )
+    if not add_result.ok:
+        return add_result
+
+    msg_quoted = shlex.quote(commit_message.strip())
+    return gateway.call(
+        ToolRequest("workspace_terminal_run", {"command": f"git commit -m {msg_quoted}"})
+    )
