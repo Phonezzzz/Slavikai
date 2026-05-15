@@ -60,7 +60,7 @@ def build_computer_changes_review_decision(
     return {
         "id": str(uuid.uuid4()),
         "kind": "decision",
-        "decision_type": "agent_decision",
+        "decision_type": "computer_commit",
         "status": "pending",
         "blocking": True,
         "reason": "computer_changes_review",

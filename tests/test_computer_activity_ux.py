@@ -784,14 +784,14 @@ def test_changes_review_packet_has_required_keys() -> None:
         assert key in packet, f"Missing key: {key}"
 
 
-def test_changes_review_packet_decision_type_is_agent_decision() -> None:
+def test_changes_review_packet_decision_type_is_computer_commit() -> None:
     packet = build_computer_changes_review_decision(
         changed_files=["a.py"],
         diff_summary="",
         commit_message="fix: x",
     )
     assert packet is not None
-    assert packet["decision_type"] == "agent_decision"
+    assert packet["decision_type"] == "computer_commit"
     assert packet["kind"] == "decision"
     assert packet["status"] == "pending"
     assert packet["blocking"] is True
@@ -868,7 +868,7 @@ def test_changes_review_packet_is_json_serializable() -> None:
     assert packet is not None
     serialized = json.dumps(packet)
     parsed = json.loads(serialized)
-    assert parsed["decision_type"] == "agent_decision"
+    assert parsed["decision_type"] == "computer_commit"
 
 
 def test_changes_review_packet_id_is_unique() -> None:

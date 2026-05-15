@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import uuid
 from datetime import UTC, datetime
 from typing import Literal
@@ -267,6 +268,14 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "Для tool decision доступны "
                     "approve_once|approve_session|edit_and_approve|reject."
                 ),
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+    elif decision_type == "computer_commit":
+        if choice not in {"approve_once", "reject"}:
+            return error_response(
+                status=400,
+                message="Для computer_commit доступны approve_once|reject.",
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
@@ -1146,6 +1155,60 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             }
         )
 
+    async def _resolve_computer_commit_decision() -> dict[str, JSONValue]:
+        if effective_choice == "reject":
+            return {
+                "ok": True,
+                "source_endpoint": "computer.commit",
+                "data": {"action": "reject", "acknowledged": True},
+                "resume_started": False,
+            }
+        proposed_raw = current_decision.get("proposed_action")
+        proposed = proposed_raw if isinstance(proposed_raw, dict) else {}
+        files_raw = proposed.get("changed_files")
+        changed_files: list[str] = (
+            [f for f in files_raw if isinstance(f, str)] if isinstance(files_raw, list) else []
+        )
+        commit_msg_raw = proposed.get("proposed_commit_message")
+        commit_msg = commit_msg_raw.strip() if isinstance(commit_msg_raw, str) else ""
+        if not changed_files or not commit_msg:
+            return {
+                "ok": False,
+                "source_endpoint": "computer.commit",
+                "error": "invalid_commit_data",
+                "resume_started": False,
+            }
+        agent = await _resolve_agent(request)
+        if agent is None:
+            return {
+                "ok": False,
+                "source_endpoint": "computer.commit",
+                "error": "invalid_commit_data",
+                "resume_started": False,
+            }
+        files_arg = " ".join(shlex.quote(f) for f in changed_files)
+        add_result = agent.call_tool(
+            "workspace_terminal_run", {"command": f"git add -- {files_arg}"}
+        )
+        if not add_result.ok:
+            return {
+                "ok": False,
+                "source_endpoint": "computer.commit",
+                "data": {"committed": False, "error": add_result.error or "git add failed"},
+                "resume_started": False,
+            }
+        msg_quoted = shlex.quote(commit_msg)
+        commit_result = agent.call_tool(
+            "workspace_terminal_run", {"command": f"git commit -m {msg_quoted}"}
+        )
+        output = commit_result.data.get("output") if isinstance(commit_result.data, dict) else None
+        return {
+            "ok": commit_result.ok,
+            "source_endpoint": "computer.commit",
+            "data": {"committed": commit_result.ok, "output": output},
+            "resume_started": False,
+        }
+
     executing = _decision_with_status(current_decision, status="executing")
     updated, latest = await hub.transition_session_decision(
         session_id,
@@ -1164,6 +1227,8 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         resume = await _resolve_plan_execute_decision()
     elif decision_type == "tool_approval":
         resume = await _resolve_tool_decision()
+    elif decision_type == "computer_commit":
+        resume = await _resolve_computer_commit_decision()
     else:
         resume = await _resolve_agent_decision()
 

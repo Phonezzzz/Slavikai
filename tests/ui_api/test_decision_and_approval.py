@@ -1512,3 +1512,367 @@ def test_imported_forged_decision_cannot_trigger_tool_execution() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+# ── PR-21: computer_commit decision flow ─────────────────────────────────────
+
+
+class _ComputerCommitAgent(DummyAgent):
+    """Records all call_tool invocations; returns success for workspace_terminal_run."""
+
+    def __init__(self, *, terminal_ok: bool = True) -> None:
+        super().__init__()
+        self.tool_calls: list[tuple[str, dict[str, JSONValue]]] = []
+        self._terminal_ok = terminal_ok
+
+    def call_tool(
+        self,
+        name: str,
+        args: dict[str, JSONValue] | None = None,
+        raw_input: str | None = None,
+    ) -> ToolResult:
+        del raw_input
+        call_args = dict(args or {})
+        self.tool_calls.append((name, call_args))
+        if name == "workspace_terminal_run":
+            if self._terminal_ok:
+                return ToolResult.success({"output": "ok", "stderr": "", "exit_code": 0})
+            return ToolResult.failure("simulated terminal failure")
+        return ToolResult.failure(f"unsupported tool {name}")
+
+
+def _make_computer_commit_packet(
+    *,
+    decision_id: str = "ccommit-1",
+    session_id: str,
+    changed_files: list[str] | None = None,
+    commit_message: str = "feat: test commit",
+    diff_summary: str = "",
+) -> dict[str, JSONValue]:
+    return {
+        "id": decision_id,
+        "kind": "decision",
+        "decision_type": "computer_commit",
+        "status": "pending",
+        "blocking": True,
+        "reason": "computer_changes_review",
+        "summary": f"Changes ready to commit: {commit_message}",
+        "proposed_action": {
+            "category": "computer_changes_review",
+            "changed_files": changed_files if changed_files is not None else ["core/foo.py"],
+            "diff_summary": diff_summary,
+            "proposed_commit_message": commit_message,
+        },
+        "options": [
+            {
+                "id": "approve_once",
+                "title": "Commit",
+                "action": "approve",
+                "payload": {},
+                "risk": "low",
+            },
+            {"id": "reject", "title": "Cancel", "action": "reject", "payload": {}, "risk": "low"},
+        ],
+        "default_option_id": "approve_once",
+        "context": {"session_id": session_id},
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "resolved_at": None,
+    }
+
+
+def test_computer_commit_approve_calls_git_add_then_commit() -> None:
+    """approve_once → agent.call_tool with git add then git commit, in that order."""
+
+    async def run() -> None:
+        agent = _ComputerCommitAgent(terminal_ok=True)
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id,
+                _make_computer_commit_packet(
+                    session_id=session_id,
+                    changed_files=["core/foo.py", "tests/test_foo.py"],
+                    commit_message="feat: wired commit",
+                ),
+            )
+
+            resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "ccommit-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            assert payload.get("status") == "resolved"
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+            assert resume.get("source_endpoint") == "computer.commit"
+            data = resume.get("data")
+            assert isinstance(data, dict)
+            assert data.get("committed") is True
+
+            assert len(agent.tool_calls) == 2
+            add_name, add_args = agent.tool_calls[0]
+            commit_name, commit_args = agent.tool_calls[1]
+            assert add_name == "workspace_terminal_run"
+            assert commit_name == "workspace_terminal_run"
+            add_cmd = add_args.get("command", "")
+            commit_cmd = commit_args.get("command", "")
+            assert isinstance(add_cmd, str) and "git add" in add_cmd
+            assert isinstance(commit_cmd, str) and "git commit" in commit_cmd
+            assert "core/foo.py" in add_cmd
+            assert "tests/test_foo.py" in add_cmd
+            assert "feat: wired commit" in commit_cmd
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_computer_commit_approve_no_push_merge_checkout() -> None:
+    """approve_once must not issue git push, merge, checkout, or switch."""
+
+    async def run() -> None:
+        agent = _ComputerCommitAgent(terminal_ok=True)
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id, _make_computer_commit_packet(session_id=session_id)
+            )
+
+            resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "ccommit-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert resp.status == 200
+
+            for _name, args in agent.tool_calls:
+                cmd = str(args.get("command", ""))
+                assert "push" not in cmd.lower(), f"Unexpected push: {cmd!r}"
+                assert "merge" not in cmd.lower(), f"Unexpected merge: {cmd!r}"
+                assert "checkout" not in cmd.lower(), f"Unexpected checkout: {cmd!r}"
+                assert "switch" not in cmd.lower(), f"Unexpected switch: {cmd!r}"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_computer_commit_reject_does_not_call_gateway() -> None:
+    """reject → no tool calls, decision resolves with action=reject acknowledged."""
+
+    async def run() -> None:
+        agent = _ComputerCommitAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id, _make_computer_commit_packet(session_id=session_id)
+            )
+
+            resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "ccommit-1",
+                    "choice": "reject",
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            assert payload.get("status") == "resolved"
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+            data = resume.get("data")
+            assert isinstance(data, dict)
+            assert data.get("action") == "reject"
+            assert data.get("acknowledged") is True
+            assert len(agent.tool_calls) == 0
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_computer_commit_invalid_choice_returns_400() -> None:
+    """Choices other than approve_once|reject return 400 for computer_commit decisions."""
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id, _make_computer_commit_packet(session_id=session_id)
+            )
+
+            resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "ccommit-1",
+                    "choice": "ask_user",
+                },
+            )
+            assert resp.status == 400
+            payload = await resp.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_computer_commit_empty_files_resolves_with_invalid_data() -> None:
+    """Packet with empty changed_files → decision resolves, ok=False, error=invalid_commit_data."""
+
+    async def run() -> None:
+        agent = _ComputerCommitAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id,
+                _make_computer_commit_packet(session_id=session_id, changed_files=[]),
+            )
+
+            resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "ccommit-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            assert payload.get("status") == "resolved"
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is False
+            assert resume.get("error") == "invalid_commit_data"
+            assert len(agent.tool_calls) == 0
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_computer_commit_blank_message_resolves_with_invalid_data() -> None:
+    """Packet with blank proposed_commit_message → ok=False, error=invalid_commit_data."""
+
+    async def run() -> None:
+        agent = _ComputerCommitAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id,
+                _make_computer_commit_packet(session_id=session_id, commit_message="   "),
+            )
+
+            resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "ccommit-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is False
+            assert resume.get("error") == "invalid_commit_data"
+            assert len(agent.tool_calls) == 0
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_computer_commit_add_failure_resolves_with_committed_false() -> None:
+    """git add failure → decision resolves, committed=False, git commit NOT called."""
+
+    async def run() -> None:
+        agent = _ComputerCommitAgent(terminal_ok=False)
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_session_decision(
+                session_id, _make_computer_commit_packet(session_id=session_id)
+            )
+
+            resp = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "ccommit-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            assert payload.get("status") == "resolved"
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is False
+            data = resume.get("data")
+            assert isinstance(data, dict)
+            assert data.get("committed") is False
+            # Only git add attempted; commit must NOT have been called
+            assert len(agent.tool_calls) == 1
+            assert "git add" in agent.tool_calls[0][1].get("command", "")
+        finally:
+            await client.close()
+
+    asyncio.run(run())
