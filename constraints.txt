@@ -113,9 +113,7 @@ multidict==6.7.1
     #   aiohttp
     #   yarl
 mypy==1.19.1
-    # via
-    #   -r requirements.in
-    #   pyside6-stubs
+    # via -r requirements.in
 mypy-extensions==1.1.0
     # via mypy
 networkx==3.6.1
@@ -199,18 +197,6 @@ pygments==2.19.2
     #   -r requirements.in
     #   pytest
     #   rich
-pyside6==6.10.2
-    # via
-    #   -r requirements.in
-    #   pyside6-stubs
-pyside6-addons==6.10.2
-    # via pyside6
-pyside6-essentials==6.10.2
-    # via
-    #   pyside6
-    #   pyside6-addons
-pyside6-stubs==6.7.3.0
-    # via -r requirements.in
 pytest==9.0.2
     # via
     #   -r requirements.in
@@ -261,11 +247,6 @@ shellingham==1.5.4
     # via
     #   huggingface-hub
     #   typer
-shiboken6==6.10.2
-    # via
-    #   pyside6
-    #   pyside6-addons
-    #   pyside6-essentials
 six==1.17.0
     # via python-dateutil
 sympy==1.14.0
