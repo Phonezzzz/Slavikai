@@ -99,7 +99,7 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
 ## Маршрутизация запроса (current legacy runtime)
 
 1. Сообщение, начинающееся с `/`, идёт в command lane (`handle_tool_command`) и не проходит через MWV.
-   - Разрешены только debug-команды `/trace` и `/end-session`. Подробнее — `docs/for-humans/COMMANDS.md`.
+   - Разрешены только debug-команды `/trace` и `/end-session`. Подробнее — `docs/agent/COMMAND_LANE_POLICY.md`.
 2. Для обычного текста:
    - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
    - `runtime_mode=auto` — сразу запуск auto v1
@@ -235,4 +235,3 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
 - `ContainerComputerBackend` — opt-in/inactive. Не переключать default на container
   без явной config/env wiring и отдельного решения. `FakeContainerRunner` —
   test-only utility, не production backend.
-- Planned cleanup roadmap: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.

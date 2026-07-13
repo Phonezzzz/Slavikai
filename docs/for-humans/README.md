@@ -2,5 +2,5 @@
 
 Пользовательские и эксплуатационные документы.
 
-- `COMMANDS.md` — команды агента.
+- `../agent/COMMAND_LANE_POLICY.md` — политика командного режима.
 - `DEPLOYMENT.md` — production/deployment заметки.

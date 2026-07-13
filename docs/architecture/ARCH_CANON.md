@@ -206,8 +206,6 @@ Legacy debt после PR-26:
 - slash-команды для обычных tools;
 - отдельная server-only реализация PTY терминала рядом с one-shot runner.
 
-Roadmap устранения legacy после PR-26: `docs/architecture/LEGACY_CLEANUP_ROADMAP.md`.
-
 ## 9) Product direction — Personal Agent Computer
 
 **Slavikai — это personal agent computer, а не IDE и не coding agent.**

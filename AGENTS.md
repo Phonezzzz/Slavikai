@@ -24,10 +24,9 @@
 ## Contextual references (читать по релевантности)
 
 - `docs/architecture/Architecture.md`
-- `docs/for-humans/COMMANDS.md`
+- `docs/agent/COMMAND_LANE_POLICY.md`
 - `docs/workflow/CONTRIBUTING.md`
 - `docs/agent/MWV_FLOW.md`
-- `docs/archive/README.md` (если нужен исторический контекст)
 
 ## Rules + Context Snapshot (формат)
 
