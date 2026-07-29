@@ -215,7 +215,7 @@ pytest==9.0.2
     # via
     #   -r requirements.in
     #   pytest-cov
-pytest-cov==7.0.0
+pytest-cov==7.1.0
     # via -r requirements.in
 python-dateutil==2.9.0.post0
     # via -r requirements.in
