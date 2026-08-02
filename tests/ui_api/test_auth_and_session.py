@@ -76,7 +76,7 @@ def test_ui_models_summary_returns_provider_shell_without_fetch(monkeypatch) -> 
             providers = payload.get("providers")
             assert isinstance(providers, list)
             names = {item.get("provider") for item in providers if isinstance(item, dict)}
-            assert names == {"local", "openrouter", "xai", "inception"}
+            assert names == {"local", "openrouter", "xai", "inception", "deepseek"}
             for item in providers:
                 assert isinstance(item, dict)
                 assert item.get("models") == []

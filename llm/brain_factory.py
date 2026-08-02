@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from llm.brain_base import Brain
+from llm.deepseek_brain import DeepSeekBrain
 from llm.inception_brain import InceptionBrain
 from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
@@ -21,4 +22,6 @@ def create_brain(config: ModelConfig, api_key: str | None = None) -> Brain:
         )
     if config.provider == "inception":
         return InceptionBrain(api_key=api_key or config.api_key, default_config=config)
+    if config.provider == "deepseek":
+        return DeepSeekBrain(api_key=api_key or config.api_key, default_config=config)
     raise ValueError(f"Неизвестный провайдер модели: {config.provider}")

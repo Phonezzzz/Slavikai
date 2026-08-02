@@ -79,7 +79,8 @@ def test_ui_settings_endpoint() -> None:
             providers = settings.get("providers")
             assert isinstance(providers, list)
             provider_names = {item.get("provider") for item in providers if isinstance(item, dict)}
-            assert provider_names == {"local", "openrouter", "xai", "inception", "openai"}
+            expected = {"local", "openrouter", "xai", "inception", "openai", "deepseek"}
+            assert provider_names == expected
             for provider in providers:
                 assert isinstance(provider, dict)
                 assert "api_key_value" not in provider

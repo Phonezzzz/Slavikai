@@ -25,13 +25,14 @@ from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
 from llm.types import ModelConfig
 from shared.models import JSONValue
 
-SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local", "inception"}
+SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local", "inception", "deepseek"}
 API_KEY_SETTINGS_PROVIDERS: Final[set[str]] = {
     "xai",
     "openrouter",
     "local",
     "inception",
     "openai",
+    "deepseek",
 }
 PROVIDER_API_KEY_ENV: Final[dict[str, str]] = {
     "xai": "XAI_API_KEY",
@@ -39,9 +40,11 @@ PROVIDER_API_KEY_ENV: Final[dict[str, str]] = {
     "local": "LOCAL_LLM_API_KEY",
     "inception": "INCEPTION_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
 }
 XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
 OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
+DEEPSEEK_MODELS_ENDPOINT: Final[str] = "https://api.deepseek.com/models"
 INCEPTION_DEFAULT_API_BASE: Final[str] = "https://api.inceptionlabs.ai/v1"
 OPENAI_STT_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_TTS_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/speech"
@@ -94,6 +97,8 @@ def _build_model_config(provider: str, model_id: str) -> ModelConfig:
         return ModelConfig(provider="local", model=model_id)
     if provider == "inception":
         return ModelConfig(provider="inception", model=model_id)
+    if provider == "deepseek":
+        return ModelConfig(provider="deepseek", model=model_id)
     raise ValueError(f"Неизвестный провайдер: {provider}")
 
 
@@ -133,6 +138,8 @@ def _provider_models_endpoint(provider: str) -> str:
         return _local_models_endpoint()
     if provider == "inception":
         return _inception_models_endpoint()
+    if provider == "deepseek":
+        return DEEPSEEK_MODELS_ENDPOINT
     raise ValueError(f"Неизвестный провайдер: {provider}")
 
 
@@ -160,6 +167,11 @@ def _provider_auth_headers(
         api_key = _resolve_provider_api_key("inception", ui_settings_path=ui_settings_path)
         if not api_key:
             return {}, "Не задан INCEPTION_API_KEY (env)."
+        return {"Authorization": f"Bearer {api_key}"}, None
+    if provider == "deepseek":
+        api_key = _resolve_provider_api_key("deepseek", ui_settings_path=ui_settings_path)
+        if not api_key:
+            return {}, "Не задан DEEPSEEK_API_KEY (env)."
         return {"Authorization": f"Bearer {api_key}"}, None
     return {}, f"Неизвестный провайдер: {provider}"
 
@@ -658,6 +670,21 @@ def _provider_settings_payload(
             ),
             "endpoint": _inception_models_endpoint(),
             **_runtime_status("inception"),
+        },
+        {
+            "provider": "deepseek",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "api_key_set": _resolve_provider_api_key(
+                "deepseek",
+                ui_settings_path=ui_settings_path,
+            )
+            is not None,
+            "api_key_source": _provider_api_key_source(
+                "deepseek",
+                ui_settings_path=ui_settings_path,
+            ),
+            "endpoint": DEEPSEEK_MODELS_ENDPOINT,
+            **_runtime_status("deepseek"),
         },
         {
             "provider": "openai",
