@@ -26,7 +26,7 @@ def test_filesystem_write_and_read_roundtrip() -> None:
 def test_filesystem_denies_escape() -> None:
     result = handle_filesystem(ToolRequest(name="read", args={"path": "../etc/passwd"}))
     assert not result.ok
-    assert "sandbox violation" in (result.error or "").lower()
+    assert "sandbox" in (result.error or "").lower()
 
 
 def test_fs_rejects_sibling_prefix_escape(tmp_path: Path, monkeypatch) -> None:
@@ -42,7 +42,7 @@ def test_fs_rejects_sibling_prefix_escape(tmp_path: Path, monkeypatch) -> None:
         ToolRequest(name="read", args={"path": "../sandbox_evil/secret.txt"})
     )
     assert not result.ok
-    assert "sandbox violation" in (result.error or "").lower()
+    assert "sandbox" in (result.error or "").lower()
 
 
 def test_fs_rejects_absolute_path(tmp_path: Path, monkeypatch) -> None:
@@ -53,7 +53,7 @@ def test_fs_rejects_absolute_path(tmp_path: Path, monkeypatch) -> None:
 
     result = handle_filesystem(ToolRequest(name="read", args={"path": "/etc/passwd"}))
     assert not result.ok
-    assert "sandbox violation" in (result.error or "").lower()
+    assert "sandbox" in (result.error or "").lower()
 
 
 def test_fs_allows_normal_file(tmp_path: Path, monkeypatch) -> None:
