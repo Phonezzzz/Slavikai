@@ -4,19 +4,13 @@ from pathlib import Path
 from typing import Final
 
 from shared.models import ToolRequest, ToolResult
+from shared.sandbox import normalize_sandbox_path
 
 SANDBOX_ROOT: Final[Path] = Path("sandbox").resolve()
 MAX_READ_BYTES: Final[int] = 512_000  # ~500 KB
 MAX_WRITE_BYTES: Final[int] = 1_000_000  # ~1 MB
 
 SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
-
-
-def _normalize_path(raw_path: str) -> Path:
-    candidate = (SANDBOX_ROOT / raw_path).resolve()
-    if not str(candidate).startswith(str(SANDBOX_ROOT)):
-        raise ValueError("Путь вне песочнице (sandbox) запрещён.")
-    return candidate
 
 
 def handle_filesystem(request: ToolRequest) -> ToolResult:
@@ -33,7 +27,7 @@ def handle_filesystem(request: ToolRequest) -> ToolResult:
 
     try:
         if name == "list":
-            target_dir = _normalize_path(path_value or ".")
+            target_dir = normalize_sandbox_path(path_value or ".", SANDBOX_ROOT)
             if not target_dir.exists():
                 return ToolResult.failure(f"Каталог не найден: {path_value}")
             if not target_dir.is_dir():
@@ -45,7 +39,7 @@ def handle_filesystem(request: ToolRequest) -> ToolResult:
             )
 
         if name == "read":
-            target_file = _normalize_path(path_value)
+            target_file = normalize_sandbox_path(path_value, SANDBOX_ROOT)
             if not target_file.exists() or not target_file.is_file():
                 return ToolResult.failure(f"Файл не найден: {path_value}")
             size = target_file.stat().st_size
@@ -60,7 +54,7 @@ def handle_filesystem(request: ToolRequest) -> ToolResult:
             )
 
         if name == "write":
-            target_file = _normalize_path(path_value)
+            target_file = normalize_sandbox_path(path_value, SANDBOX_ROOT)
             content = str(args.get("content", "") or "")
             if len(content.encode("utf-8")) > MAX_WRITE_BYTES:
                 return ToolResult.failure("Лимит записи превышен (макс 1 МБ).")
