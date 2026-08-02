@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from io import BytesIO
+from pathlib import Path
 
 from PIL import Image
 
@@ -101,3 +102,42 @@ def test_image_analyze_valid_base64(monkeypatch) -> None:
     assert result.ok
     assert result.data.get("width") == 8
     assert result.data.get("height") == 8
+
+
+def test_image_analyze_rejects_outside_sandbox(tmp_path: Path) -> None:
+    sandbox_root = (tmp_path / "sandbox").resolve()
+    sandbox_root.mkdir(parents=True)
+    evil_dir = tmp_path / "outside"
+    evil_dir.mkdir(parents=True)
+    img = Image.new("RGB", (4, 4), color="#ff0000")
+    evil_file = evil_dir / "evil.png"
+    img.save(str(evil_file), format="PNG")
+
+    tool = ImageAnalyzeTool(sandbox_root=sandbox_root)
+    result = tool.handle(ToolRequest(name="img_analyze", args={"path": "../outside/evil.png"}))
+    assert not result.ok
+    assert "sandbox" in (result.error or "").lower()
+
+
+def test_image_analyze_rejects_absolute_path(tmp_path: Path) -> None:
+    sandbox_root = (tmp_path / "sandbox").resolve()
+    sandbox_root.mkdir(parents=True)
+
+    tool = ImageAnalyzeTool(sandbox_root=sandbox_root)
+    result = tool.handle(ToolRequest(name="img_analyze", args={"path": "/etc/passwd"}))
+    assert not result.ok
+    assert "sandbox" in (result.error or "").lower()
+
+
+def test_image_analyze_allows_sandbox_png(tmp_path: Path) -> None:
+    sandbox_root = (tmp_path / "sandbox").resolve()
+    sandbox_root.mkdir(parents=True)
+    img = Image.new("RGB", (4, 4), color="#00ff00")
+    png_path = sandbox_root / "ok.png"
+    img.save(str(png_path), format="PNG")
+
+    tool = ImageAnalyzeTool(sandbox_root=sandbox_root)
+    result = tool.handle(ToolRequest(name="img_analyze", args={"path": "ok.png"}))
+    assert result.ok, result.error
+    assert result.data.get("width") == 4
+    assert result.data.get("height") == 4

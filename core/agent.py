@@ -51,7 +51,7 @@ from shared.models import (
     ToolResult,
     WorkspaceDiffEntry,
 )
-from tools.filesystem_tool import FilesystemTool
+from tools.filesystem_tool import SANDBOX_ROOT, FilesystemTool
 from tools.http_client import HttpClient
 from tools.image_analyze_tool import ImageAnalyzeTool
 from tools.image_generate_tool import ImageGenerateTool
@@ -316,7 +316,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         )
         register_tool(
             "image_analyze",
-            ImageAnalyzeTool(),
+            ImageAnalyzeTool(sandbox_root=SANDBOX_ROOT),
             enabled=self.tools_enabled.get("image_analyze", False),
             capability="read",
         )
