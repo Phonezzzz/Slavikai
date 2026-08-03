@@ -7,7 +7,6 @@ from typing import Final
 
 import requests
 
-from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage
@@ -135,13 +134,16 @@ class DeepSeekBrain(Brain):
 
     def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
         system_messages: list[LLMMessage] = []
-        if config.thinking_enabled:
-            system_messages.append(LLMMessage(role="system", content=THINKING_PROMPT))
         if config.system_prompt:
             system_messages.append(LLMMessage(role="system", content=config.system_prompt))
         if not system_messages:
             return messages
         return [*system_messages, *messages]
+
+    def _build_thinking(self, config: ModelConfig) -> dict[str, JSONValue] | None:
+        if config.thinking_enabled:
+            return {"type": "enabled"}
+        return {"type": "disabled"}
 
     def generate(
         self,
@@ -158,6 +160,9 @@ class DeepSeekBrain(Brain):
             ],
             "temperature": cfg.temperature,
         }
+        thinking = self._build_thinking(cfg)
+        if thinking is not None:
+            payload["thinking"] = thinking
         if tools:
             payload["tools"] = [_tool_spec_to_provider_dict(tool) for tool in tools]
             payload["tool_choice"] = "auto"
@@ -219,7 +224,7 @@ class DeepSeekBrain(Brain):
         tools: list[ToolSpec] | None = None,
     ) -> Iterator[str]:
         if tools:
-            raise RuntimeError("DeepSeek streaming does not support native tool calls.")
+            raise RuntimeError("Стриминг SlavikAI не поддерживает native tool calls.")
         cfg = self._resolve_config(config)
         headers = self._build_headers()
         payload = {
@@ -230,6 +235,9 @@ class DeepSeekBrain(Brain):
             "temperature": cfg.temperature,
             "stream": True,
         }
+        thinking = self._build_thinking(cfg)
+        if thinking is not None:
+            payload["thinking"] = thinking
         if cfg.max_tokens is not None:
             payload["max_tokens"] = cfg.max_tokens
         if cfg.top_p is not None:

@@ -10,8 +10,8 @@ interface SettingsProps {
 }
 
 type SettingsTab = 'assistant' | 'appearance' | 'composer' | 'memory' | 'data' | 'diagnostics';
-type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai';
-type ModelProvider = 'xai' | 'openrouter' | 'local' | 'inception';
+type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai' | 'deepseek';
+type ModelProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'deepseek';
 type ApiKeySource = 'env' | 'missing';
 type EmbeddingsProvider = 'local' | 'openai';
 type ImportMode = 'replace' | 'merge';
@@ -72,7 +72,7 @@ type ImportPreview = {
 const DEFAULT_SYSTEM_PROMPT =
   'You are SlavikAI, a helpful AI assistant with MWV architecture.';
 
-const API_KEY_PROVIDERS: ApiKeyProvider[] = ['xai', 'openrouter', 'local', 'inception', 'openai'];
+const API_KEY_PROVIDERS: ApiKeyProvider[] = ['xai', 'openrouter', 'local', 'inception', 'openai', 'deepseek'];
 
 const PROVIDER_LABELS: Record<ApiKeyProvider, string> = {
   xai: 'xAI',
@@ -80,6 +80,7 @@ const PROVIDER_LABELS: Record<ApiKeyProvider, string> = {
   local: 'Local',
   inception: 'Inception',
   openai: 'OpenAI',
+  deepseek: 'DeepSeek',
 };
 
 const RESPONSE_STYLE_OPTIONS = [
@@ -190,6 +191,16 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     last_checked_at: null,
   },
   {
+    provider: 'deepseek',
+    api_key_env: 'DEEPSEEK_API_KEY',
+    api_key_set: false,
+    api_key_source: 'missing',
+    endpoint: 'https://api.deepseek.com/models',
+    api_key_valid: null,
+    last_check_error: null,
+    last_checked_at: null,
+  },
+  {
     provider: 'inception',
     api_key_env: 'INCEPTION_API_KEY',
     api_key_set: false,
@@ -217,16 +228,17 @@ const DEFAULT_PROVIDER_RUNTIME: ProviderRuntimeByModel = {
   openrouter: null,
   local: null,
   inception: null,
+  deepseek: null,
 };
 
 const isApiKeyProvider = (value: unknown): value is ApiKeyProvider =>
-  value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception' || value === 'openai';
+  value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception' || value === 'openai' || value === 'deepseek';
 
 const isApiKeySource = (value: unknown): value is ApiKeySource =>
   value === 'env' || value === 'missing';
 
 const isModelProvider = (value: unknown): value is ModelProvider =>
-  value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception';
+  value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception' || value === 'deepseek';
 
 const isEmbeddingsProvider = (value: unknown): value is EmbeddingsProvider =>
   value === 'local' || value === 'openai';

@@ -82,11 +82,12 @@ const POLICY_OPTIONS: Array<{
 ];
 
 const DANGER_CONFIRMATION_PHRASE = 'YOLO';
-const PROVIDER_ORDER = ['local', 'xai', 'inception', 'openrouter'];
+const PROVIDER_ORDER = ['local', 'xai', 'inception', 'deepseek', 'openrouter'];
 const PROVIDER_LABELS: Record<string, string> = {
   local: 'Local',
   xai: 'xAI',
   inception: 'Inception',
+  deepseek: 'DeepSeek',
   openrouter: 'OpenRouter',
 };
 

@@ -43,8 +43,30 @@ class AgentToolLoop:
         for iteration in range(1, self.max_iterations + 1):
             result = brain.generate(history, config=config, tools=tools)
             final_text = result.text
-            if result.text:
-                history.append(LLMMessage(role="assistant", content=result.text))
+
+            assistant_tool_calls: list[dict[str, JSONValue]] | None = None
+            if result.tool_calls:
+                assistant_tool_calls = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
+                    }
+                    for tc in result.tool_calls
+                ]
+
+            history.append(
+                LLMMessage(
+                    role="assistant",
+                    content=result.text,
+                    tool_calls=assistant_tool_calls,
+                    reasoning_content=result.reasoning,
+                )
+            )
+
             if not result.tool_calls:
                 return AgentToolLoopResult(
                     text=final_text,

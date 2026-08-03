@@ -45,11 +45,17 @@ class LLMMessage:
     role: Literal["system", "user", "assistant", "tool"]
     content: str
     tool_call_id: str | None = None
+    tool_calls: list[dict[str, JSONValue]] | None = None
+    reasoning_content: str | None = None
 
-    def to_provider_dict(self) -> dict[str, str]:
-        payload = {"role": self.role, "content": self.content}
+    def to_provider_dict(self) -> dict[str, JSONValue]:
+        payload: dict[str, JSONValue] = {"role": self.role, "content": self.content}
         if self.tool_call_id is not None:
             payload["tool_call_id"] = self.tool_call_id
+        if self.tool_calls is not None:
+            payload["tool_calls"] = self.tool_calls
+        if self.reasoning_content is not None:
+            payload["reasoning_content"] = self.reasoning_content
         return payload
 
 
