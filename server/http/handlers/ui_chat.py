@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
 from typing import Literal
 
@@ -12,6 +13,11 @@ from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
 from llm.types import ModelConfig
+from server.http.common.chat_cancellation import (
+    ActiveChatGeneration,
+    ChatCancellationRegistry,
+    ChatGenerationAlreadyActive,
+)
 from server.http.common.chat_payload import (
     _extract_decision_payload,
     _normalize_trace_id,
@@ -72,6 +78,39 @@ from tools.workspace_tools import set_workspace_root as set_runtime_workspace_ro
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
 MessageLane = Literal["chat", "workspace"]
+
+_STREAM_EXHAUSTED = object()
+
+
+class _ChatGenerationCancelled(RuntimeError):
+    pass
+
+
+def _next_stream_item(iterator: Iterator[object]) -> object:
+    try:
+        return next(iterator)
+    except StopIteration:
+        return _STREAM_EXHAUSTED
+
+
+async def _iterate_stream_in_thread(
+    iterator: Iterator[object],
+    cancellation_token: asyncio.Event,
+) -> AsyncIterator[object]:
+    try:
+        while True:
+            if cancellation_token.is_set():
+                return
+            item = await asyncio.to_thread(_next_stream_item, iterator)
+            if item is _STREAM_EXHAUSTED:
+                return
+            if cancellation_token.is_set():
+                return
+            yield item
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            await asyncio.to_thread(close)
 
 
 def _normalize_message_lane(value: object, *, default: MessageLane = "chat") -> MessageLane:
@@ -267,6 +306,7 @@ async def _handle_ui_send_impl(
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
     idempotency_store: IdempotencyStore = request.app["idempotency_store"]
+    cancellation_registry: ChatCancellationRegistry = request.app["chat_cancellation_registry"]
 
     agent = None
     session_id: str | None = None
@@ -276,6 +316,7 @@ async def _handle_ui_send_impl(
     idempotency_key: str | None = None
     idempotency_fingerprint: str | None = None
     idempotency_active = False
+    active_generation: ActiveChatGeneration | None = None
 
     async def _complete_idempotency(payload: dict[str, JSONValue], *, status: int) -> None:
         if (
@@ -605,6 +646,21 @@ async def _handle_ui_send_impl(
             response.headers[UI_SESSION_HEADER] = session_id
             return response
 
+        chat_stream_id = uuid.uuid4().hex
+        try:
+            active_generation = await cancellation_registry.start(
+                session_id=session_id,
+                stream_id=chat_stream_id,
+            )
+        except ChatGenerationAlreadyActive:
+            await _abort_idempotency()
+            return error_response(
+                status=409,
+                message="Для этой сессии уже выполняется генерация.",
+                error_type="invalid_request_error",
+                code="chat_generation_in_progress",
+            )
+
         await hub.set_session_status(session_id, "busy")
         status_opened = True
         await _publish_agent_activity(
@@ -709,8 +765,8 @@ async def _handle_ui_send_impl(
         ui_decision: dict[str, JSONValue] | None = None
         latest_auto_state: dict[str, JSONValue] | None = auto_state
         auto_progress_states: list[dict[str, JSONValue]] = []
-        chat_stream_id = uuid.uuid4().hex
         live_stream_sent = False
+        generation_cancelled = False
         set_runtime_workspace_root(session_root)
         async with agent_lock:
             previous_trace_id = _normalize_trace_id(
@@ -768,8 +824,24 @@ async def _handle_ui_send_impl(
                 try:
                     stream_error_message: str | None = None
                     stream_done_received = False
-                    for stream_item in respond_stream_method(llm_messages):
+                    stream_iterator = iter(
+                        respond_stream_method(
+                            llm_messages,
+                            cancellation_token=active_generation.token,
+                        )
+                    )
+                    async for stream_item in _iterate_stream_in_thread(
+                        stream_iterator,
+                        active_generation.token,
+                    ):
+                        if active_generation.token.is_set():
+                            generation_cancelled = True
+                            break
                         if isinstance(stream_item, Done):
+                            if stream_item.finish_reason == "cancelled":
+                                generation_cancelled = True
+                                active_generation.token.set()
+                                continue
                             stream_done_received = True
                             continue
                         if isinstance(stream_item, Error):
@@ -891,6 +963,10 @@ async def _handle_ui_send_impl(
                                 live_stream_sent = True
                                 await asyncio.sleep(0.005)
                         pending_chat_chunks = []
+                    if active_generation.token.is_set():
+                        generation_cancelled = True
+                    if generation_cancelled:
+                        raise _ChatGenerationCancelled
                     if not stream_done_received:
                         raise RuntimeError("respond_stream ended without Done event")
                     pending_preview = "".join(pending_chat_chunks).strip()
@@ -930,6 +1006,17 @@ async def _handle_ui_send_impl(
                         response_raw = f"[Ошибка ответа: {stream_error_message}]"
                     else:
                         response_raw = stream_text
+                except _ChatGenerationCancelled:
+                    pending_chat_chunks = []
+                    if chat_content_stream_open:
+                        await _publish_chat_stream_done(
+                            hub,
+                            session_id=session_id,
+                            stream_id=chat_stream_id,
+                            lane=lane,
+                        )
+                        chat_content_stream_open = False
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Live stream failed",
@@ -1274,6 +1361,51 @@ async def _handle_ui_send_impl(
             detail=lane,
         )
         return response
+    except _ChatGenerationCancelled:
+        if session_id is None:
+            raise
+        await _publish_agent_activity(
+            hub,
+            session_id=session_id,
+            phase="agent.respond.cancelled",
+            detail=lane,
+        )
+        messages = await hub.get_messages(session_id, lane="chat")
+        workspace_messages = await hub.get_messages(session_id, lane="workspace")
+        output_payload = await hub.get_session_output(session_id)
+        files_payload = await hub.get_session_files(session_id)
+        artifacts_payload = await hub.get_session_artifacts(session_id) if lane == "chat" else []
+        current_decision = await hub.get_session_decision(session_id)
+        current_model = await hub.get_session_model(session_id) or dict(selected_model)
+        current_workflow = await hub.get_session_workflow(session_id)
+        response_payload_cancelled: dict[str, JSONValue] = {
+            "session_id": session_id,
+            "lane": lane,
+            "cancelled": True,
+            "messages": messages,
+            "workspace_messages": workspace_messages,
+            "output": output_payload,
+            "files": files_payload or [],
+            "artifacts": artifacts_payload or [],
+            "display": {
+                "target": "chat",
+                "artifact_id": None,
+                "forced": False,
+            },
+            "decision": _normalize_ui_decision(current_decision, session_id=session_id),
+            "selected_model": current_model,
+            "trace_id": None,
+            "approval_request": None,
+            "mwv_report": None,
+            "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
+            "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
+            "active_task": _normalize_task_payload(current_workflow.get("active_task")),
+            "auto_state": _normalize_auto_state(current_workflow.get("auto_state")),
+        }
+        await _complete_idempotency(response_payload_cancelled, status=200)
+        response = json_response(response_payload_cancelled)
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response
     except Exception:  # noqa: BLE001
         error = True
         resolved_trace_id = trace_id or _normalize_trace_id(
@@ -1310,8 +1442,12 @@ async def _handle_ui_send_impl(
         )
     finally:
         set_runtime_workspace_root(None)
-        if status_opened and session_id is not None and not error:
-            await hub.set_session_status(session_id, "ok")
+        try:
+            if status_opened and session_id is not None and not error:
+                await hub.set_session_status(session_id, "ok")
+        finally:
+            if active_generation is not None:
+                await cancellation_registry.finish(active_generation)
 
 
 async def _read_ui_send_payload(request: web.Request) -> dict[str, JSONValue] | web.Response:
@@ -1358,6 +1494,53 @@ async def handle_ui_chat_send(request: web.Request) -> web.Response:
     if lane_error is not None:
         return lane_error
     return await _handle_ui_send_impl(request, payload=payload, lane="chat")
+
+
+async def handle_ui_chat_cancel(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    resolved_session_id, session_error = await _resolve_ui_session_id_for_principal(
+        request,
+        hub,
+    )
+    if session_error is not None:
+        return session_error
+    if resolved_session_id is None:
+        return _session_forbidden_response()
+
+    registry: ChatCancellationRegistry = request.app["chat_cancellation_registry"]
+    result = await registry.request_cancel(resolved_session_id)
+    if result is None:
+        return error_response(
+            status=409,
+            message="В этой сессии нет активной генерации.",
+            error_type="invalid_request_error",
+            code="chat_generation_not_active",
+        )
+    for close_error in result.close_errors:
+        logger.warning(
+            "Provider resource close failed during chat cancellation: %s",
+            close_error,
+            extra={"session_id": resolved_session_id},
+        )
+    try:
+        await asyncio.wait_for(result.generation.finished.wait(), timeout=10)
+    except TimeoutError:
+        return error_response(
+            status=504,
+            message="Генерация не подтвердила остановку вовремя.",
+            error_type="timeout_error",
+            code="chat_cancellation_timeout",
+        )
+
+    response = json_response(
+        {
+            "session_id": resolved_session_id,
+            "stream_id": result.generation.stream_id,
+            "cancelled": True,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = resolved_session_id
+    return response
 
 
 async def handle_ui_send_resume(

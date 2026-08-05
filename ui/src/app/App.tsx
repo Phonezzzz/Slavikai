@@ -625,6 +625,7 @@ export default function App() {
             pendingMessage={transport.pendingCanvasMessage}
             streamingAssistantMessage={transport.streamingAssistantCanvasMessage}
             sending={transport.sending}
+            cancelling={transport.cancelling}
             modelLabel={modelLabel}
             modelProvider={runtime.selectedModel?.provider ?? null}
             statusMessage={statusMessage}
@@ -638,6 +639,7 @@ export default function App() {
             decisionBusy={runtime.decisionBusy}
             decisionError={runtime.decisionError}
             onSendMessage={transport.handleSendChat}
+            onCancelSend={transport.handleCancelChat}
             onSendFeedback={handleSendFeedback}
             onOpenSessionDrawer={() => overlays.setSessionDrawerOpen(true)}
             onToggleForceCanvasNext={() => overlays.setForceCanvasNext((prev) => !prev)}

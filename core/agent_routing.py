@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
+import asyncio
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Literal
 
@@ -10,6 +11,7 @@ from core.mwv.models import StopReasonCode
 from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
 from core.tool_loop import AgentToolLoop
+from llm.cancellation import GenerationCancelled, cancellation_requested
 from llm.stream_model import Done, Error, StreamEvent, TextDelta, Usage
 from llm.types import LLMResult, ToolSpec, WebSearchEvidence
 from shared.models import LLMMessage, ToolRequest, ToolResult
@@ -275,7 +277,14 @@ class AgentRoutingMixin:
                 self._append_short_term([LLMMessage(role="assistant", content=error_text)])
             return error_text
 
-    def respond_stream(self, messages: list[LLMMessage]) -> Iterator[StreamEvent]:
+    def respond_stream(
+        self,
+        messages: list[LLMMessage],
+        cancellation_token: asyncio.Event | None = None,
+    ) -> Iterator[StreamEvent]:
+        if cancellation_requested(cancellation_token):
+            yield Done(finish_reason="cancelled")
+            return
         if not messages:
             self.last_stream_response_raw = "[Пустое сообщение]"
             yield from _text_response_events("[Пустое сообщение]")
@@ -317,6 +326,7 @@ class AgentRoutingMixin:
                     messages,
                     last_content,
                     record_in_history,
+                    cancellation_token,
                 )
                 return
             if runtime_mode == "auto":
@@ -375,6 +385,7 @@ class AgentRoutingMixin:
                 messages,
                 last_content,
                 record_in_history,
+                cancellation_token,
             )
         except ApprovalRequired as exc:
             response = self._handle_approval_required(
@@ -520,6 +531,7 @@ class AgentRoutingMixin:
         messages: list[LLMMessage],
         last_content: str,
         record_in_history: bool,
+        cancellation_token: asyncio.Event | None = None,
     ) -> Iterator[StreamEvent]:
         try:
             self.tracer.log("reasoning_start", "Потоковая генерация ответа моделью")
@@ -541,6 +553,9 @@ class AgentRoutingMixin:
                 and web_evidence.provider == "local"
                 and not web_evidence.executed
             ):
+                if cancellation_requested(cancellation_token):
+                    yield Done(finish_reason="cancelled")
+                    return
                 blocked_text = self._web_search_not_executed(web_evidence)
                 yield TextDelta(text=blocked_text)
                 response_text = self._finalize_chat_response(
@@ -555,7 +570,26 @@ class AgentRoutingMixin:
             collected_text = ""
             brain = self._get_main_brain()
             if web_evidence.requested and web_evidence.provider == "xai_native":
-                reply = brain.generate(messages_with_context)
+                if cancellation_requested(cancellation_token):
+                    yield Done(finish_reason="cancelled")
+                    return
+                generate_cancellable = getattr(brain, "generate_cancellable", None)
+                try:
+                    if cancellation_token is not None and callable(generate_cancellable):
+                        reply = generate_cancellable(
+                            messages_with_context,
+                            config=self.main_config,
+                            cancellation_token=cancellation_token,
+                        )
+                    else:
+                        reply = brain.generate(messages_with_context)
+                except GenerationCancelled:
+                    yield Done(finish_reason="cancelled")
+                    self.last_stream_response_raw = None
+                    return
+                if cancellation_requested(cancellation_token):
+                    yield Done(finish_reason="cancelled")
+                    return
                 web_evidence = self._merge_llm_web_search_evidence(web_evidence, reply)
                 collected_text = reply.text
                 blocked = self._web_search_block_reason(collected_text, web_evidence)
@@ -573,7 +607,11 @@ class AgentRoutingMixin:
                     messages=messages_with_context,
                     tools=tool_specs,
                     config=self.main_config,
+                    cancellation_token=cancellation_token,
                 )
+                if tool_loop_result.cancelled:
+                    self.last_stream_response_raw = None
+                    return
                 collected_text = tool_loop_result.text
                 if tool_loop_result.tool_calls:
                     self.tracer.log(
@@ -593,10 +631,18 @@ class AgentRoutingMixin:
                     )
                     self.last_stream_response_raw = error_text
                     return
+            if cancellation_requested(cancellation_token):
+                yield Done(finish_reason="cancelled")
+                self.last_stream_response_raw = None
+                return
             reviewed = self._review_answer(collected_text)
             blocked = self._web_search_block_reason(reviewed, web_evidence)
             if blocked is not None:
                 reviewed = blocked
+            if cancellation_requested(cancellation_token):
+                yield Done(finish_reason="cancelled")
+                self.last_stream_response_raw = None
+                return
             self.tracer.log("reasoning_end", "Ответ получен", {"reply_preview": reviewed[:120]})
             response_text = self._finalize_chat_response(
                 last_content=last_content,

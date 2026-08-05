@@ -51,6 +51,7 @@ export type SessionTransportResult = {
   sessionArtifacts: SessionArtifactRecord[];
   streamingContentByArtifactId: Record<string, string>;
   sending: boolean;
+  cancelling: boolean;
   pendingUserMessage: PendingUserMessage | null;
   pendingSessionId: string | null;
   chatStreamingState: ChatStreamState | null;
@@ -59,6 +60,7 @@ export type SessionTransportResult = {
   streamingAssistantCanvasMessage: CanvasMessage | null;
   artifacts: Artifact[];
   handleSendChat: (payload: CanvasSendPayload) => Promise<boolean>;
+  handleCancelChat: () => Promise<boolean>;
   bridge: SessionTransportBridge;
 };
 
@@ -159,6 +161,7 @@ export function useSessionTransport({
   const [sessionArtifacts, setSessionArtifacts] = useState<SessionArtifactRecord[]>([]);
   const [streamingContentByArtifactId, setStreamingContentByArtifactId] = useState<Record<string, string>>({});
   const [sending, setSending] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
@@ -172,6 +175,7 @@ export function useSessionTransport({
     setPendingUserMessage(null);
     setPendingSessionId(null);
     setChatStreamingState(null);
+    setCancelling(false);
   };
 
   const applyLoadedConversation = (snapshot: {
@@ -502,6 +506,35 @@ export function useSessionTransport({
     }
   };
 
+  const handleCancelChat = async (): Promise<boolean> => {
+    if (!selectedConversation || !sending || cancelling) {
+      return false;
+    }
+    setCancelling(true);
+    try {
+      const response = await fetch('/ui/api/chat/cancel', {
+        method: 'POST',
+        headers: {
+          [sessionHeader]: selectedConversation,
+        },
+      });
+      const responsePayload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(responsePayload, 'Failed to stop generation.'));
+      }
+      setChatStreamingState(null);
+      setSending(false);
+      onStatusMessage(null);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to stop generation.';
+      onStatusMessage(message);
+      return false;
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   const pendingForChat =
     pendingSessionId === selectedConversation && pendingUserMessage?.lane === 'chat'
       ? pendingUserMessage
@@ -530,6 +563,7 @@ export function useSessionTransport({
     sessionArtifacts,
     streamingContentByArtifactId,
     sending,
+    cancelling,
     pendingUserMessage,
     pendingSessionId,
     chatStreamingState,
@@ -538,6 +572,7 @@ export function useSessionTransport({
     streamingAssistantCanvasMessage,
     artifacts,
     handleSendChat,
+    handleCancelChat,
     bridge: {
       applyLoadedConversation,
       applySessionPayload,

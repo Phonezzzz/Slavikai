@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Protocol, cast
 
 import requests
@@ -11,6 +11,7 @@ from aiohttp import web
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import RunContext, TaskPacket
+from llm.stream_model import StreamEvent
 from llm.types import ModelConfig
 from server.http.common.responses import error_response as _error_response
 from server.http.common.ui_settings import _build_model_config
@@ -73,6 +74,12 @@ class AgentProtocol(Protocol):
     ) -> None: ...
 
     def respond(self, messages: list[LLMMessage]) -> str: ...
+
+    def respond_stream(
+        self,
+        messages: list[LLMMessage],
+        cancellation_token: asyncio.Event | None = None,
+    ) -> Iterator[StreamEvent]: ...
 
     def update_tools_enabled(self, state: dict[str, bool]) -> None: ...
     def apply_runtime_tools_enabled(self, state: dict[str, bool]) -> None: ...

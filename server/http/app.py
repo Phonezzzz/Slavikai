@@ -19,6 +19,7 @@ from config.http_server_config import (
 )
 from config.model_store import load_model_configs
 from server import http_api as api
+from server.http.common.chat_cancellation import ChatCancellationRegistry
 from server.http.common.idempotency import IdempotencyStore
 from server.http.common.runtime_contract import AgentProtocol, SessionApprovalStore
 from server.http.common.runtime_model_state import (
@@ -61,6 +62,13 @@ def _load_project_dotenv() -> None:
 async def _close_terminal_manager(app: web.Application) -> None:
     manager: TerminalTool = app["terminal_manager"]
     await manager.shutdown()
+
+
+async def _close_chat_generations(app: web.Application) -> None:
+    registry: ChatCancellationRegistry = app["chat_cancellation_registry"]
+    errors = await registry.shutdown()
+    for error in errors:
+        logger.warning("Chat cancellation cleanup failed: %s", error)
 
 
 def create_app(
@@ -112,11 +120,13 @@ def create_app(
     app["agent_lock"] = asyncio.Lock()
     app["session_store"] = SessionApprovalStore()
     app["idempotency_store"] = IdempotencyStore()
+    app["chat_cancellation_registry"] = ChatCancellationRegistry()
     app["terminal_manager"] = TerminalTool()
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )
     app["ui_hub"] = UIHub(storage=resolved_ui_storage)
+    app.on_cleanup.append(_close_chat_generations)
     app.on_cleanup.append(_close_terminal_manager)
     dist_path = api.PROJECT_ROOT / "ui" / "dist"
     app["ui_dist_path"] = dist_path

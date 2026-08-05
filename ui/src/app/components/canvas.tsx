@@ -26,6 +26,7 @@ import {
   LoaderCircle,
   X,
   FileText,
+  Square,
 } from "lucide-react";
 
 import BrainLogo from "../../assets/brain.png";
@@ -74,7 +75,9 @@ interface CanvasProps {
   pendingMessage?: CanvasMessage | null;
   streamingAssistantMessage?: CanvasMessage | null;
   sending?: boolean;
+  cancelling?: boolean;
   onSendMessage?: (payload: CanvasSendPayload) => Promise<boolean> | boolean | void;
+  onCancelSend?: () => Promise<boolean> | boolean | void;
   onSendFeedback?: (interactionId: string, rating: "good" | "bad") => Promise<boolean>;
   className?: string;
   modelName?: string;
@@ -236,7 +239,9 @@ export function Canvas({
   pendingMessage = null,
   streamingAssistantMessage = null,
   sending = false,
+  cancelling = false,
   onSendMessage,
+  onCancelSend,
   onSendFeedback,
   className = "",
   modelName = "Model not selected",
@@ -1034,24 +1039,42 @@ export function Canvas({
             {/* Send button */}
             <button
               onClick={() => {
+                if (sending) {
+                  void onCancelSend?.();
+                  return;
+                }
                 void handleSend();
               }}
               disabled={
-                (!inputValue.trim() && composerAttachments.length === 0)
-                || sending
-                || isTranscribing
-                || composerBlocked
+                sending
+                  ? cancelling || !onCancelSend
+                  : (!inputValue.trim() && composerAttachments.length === 0)
+                    || isTranscribing
+                    || composerBlocked
               }
               className={`p-1.5 rounded-lg transition-all cursor-pointer ${
-                (inputValue.trim() || composerAttachments.length > 0)
-                && !sending
-                && !isTranscribing
-                && !composerBlocked
-                  ? "bg-[#6366f1] hover:bg-[#5558e6] text-white"
-                  : "bg-[#1b1b20] text-[#555]"
+                sending
+                  ? cancelling
+                    ? "bg-[#1b1b20] text-[#555]"
+                    : "bg-rose-600 hover:bg-rose-500 text-white"
+                  : (inputValue.trim() || composerAttachments.length > 0)
+                    && !isTranscribing
+                    && !composerBlocked
+                    ? "bg-[#6366f1] hover:bg-[#5558e6] text-white"
+                    : "bg-[#1b1b20] text-[#555]"
               }`}
+              title={sending ? (cancelling ? "Stopping..." : "Stop generation") : "Send"}
+              aria-label={sending ? (cancelling ? "Stopping generation" : "Stop generation") : "Send"}
             >
-              <Send className="w-4 h-4" />
+              {sending ? (
+                cancelling ? (
+                  <LoaderCircle className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Square className="w-4 h-4 fill-current" />
+                )
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
             </button>
           </div>
 

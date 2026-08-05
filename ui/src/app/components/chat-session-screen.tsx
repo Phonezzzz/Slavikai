@@ -10,6 +10,7 @@ type ChatSessionScreenProps = {
   pendingMessage: CanvasMessage | null;
   streamingAssistantMessage: CanvasMessage | null;
   sending: boolean;
+  cancelling: boolean;
   modelLabel: string;
   modelProvider: string | null;
   statusMessage: string | null;
@@ -23,6 +24,7 @@ type ChatSessionScreenProps = {
   decisionBusy: boolean;
   decisionError: string | null;
   onSendMessage: (payload: CanvasSendPayload) => Promise<boolean>;
+  onCancelSend: () => Promise<boolean>;
   onSendFeedback: (interactionId: string, rating: 'good' | 'bad') => Promise<boolean>;
   onOpenSessionDrawer: () => void;
   onToggleForceCanvasNext: () => void;
@@ -41,6 +43,7 @@ export function ChatSessionScreen({
   pendingMessage,
   streamingAssistantMessage,
   sending,
+  cancelling,
   modelLabel,
   modelProvider,
   statusMessage,
@@ -54,6 +57,7 @@ export function ChatSessionScreen({
   decisionBusy,
   decisionError,
   onSendMessage,
+  onCancelSend,
   onSendFeedback,
   onOpenSessionDrawer,
   onToggleForceCanvasNext,
@@ -72,7 +76,9 @@ export function ChatSessionScreen({
           pendingMessage={pendingMessage}
           streamingAssistantMessage={streamingAssistantMessage}
           sending={sending}
+          cancelling={cancelling}
           onSendMessage={onSendMessage}
+          onCancelSend={onCancelSend}
           onSendFeedback={onSendFeedback}
           modelName={modelLabel}
           modelProvider={modelProvider}

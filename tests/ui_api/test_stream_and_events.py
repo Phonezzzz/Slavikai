@@ -594,8 +594,8 @@ def test_session_ownership_enforced_for_stream_workspace_decision_delete_files_o
 
 def test_chat_stream_supports_replace_mode_chunks() -> None:
     class ReplaceStreamAgent(DummyAgent):
-        def respond_stream(self, messages):  # noqa: ANN001
-            del messages
+        def respond_stream(self, messages, cancellation_token=None):  # noqa: ANN001
+            del messages, cancellation_token
             yield TextDelta(text="hel", mode="replace")
             yield TextDelta(text="hello " * 20, mode="replace")
             self.last_stream_response_raw = "hello " * 20
@@ -655,8 +655,8 @@ def test_chat_stream_serializes_typed_tool_and_usage_events() -> None:
             super().__init__()
             self.last_stream_response_raw: str | None = None
 
-        def respond_stream(self, messages):  # noqa: ANN001
-            del messages
+        def respond_stream(self, messages, cancellation_token=None):  # noqa: ANN001
+            del messages, cancellation_token
             call = ToolCall(
                 id="call-1",
                 name="workspace_read",
@@ -727,8 +727,8 @@ def test_invalid_stream_contract_does_not_repeat_agent_request() -> None:
             super().__init__()
             self.respond_calls = 0
 
-        def respond_stream(self, messages):  # noqa: ANN001
-            del messages
+        def respond_stream(self, messages, cancellation_token=None):  # noqa: ANN001
+            del messages, cancellation_token
             yield "legacy chunk"
 
         def respond(self, messages) -> str:  # noqa: ANN001

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Generator
 from dataclasses import dataclass, field
 
 from core.tool_gateway import ToolGateway
 from llm.brain_base import Brain
+from llm.cancellation import cancellation_requested
 from llm.stream_model import (
     Done,
     Error,
@@ -30,6 +32,7 @@ class AgentToolLoopResult:
     tool_calls: list[ExecutedToolCall] = field(default_factory=list)
     iterations: int = 0
     error: str | None = None
+    cancelled: bool = False
 
 
 class AgentToolLoop:
@@ -96,21 +99,49 @@ class AgentToolLoop:
         messages: list[LLMMessage],
         tools: list[ToolSpec],
         config: ModelConfig | None = None,
+        cancellation_token: asyncio.Event | None = None,
     ) -> Generator[StreamEvent, None, AgentToolLoopResult]:
         history = list(messages)
         executed: list[ExecutedToolCall] = []
         visible_text = ""
 
         for iteration in range(1, self.max_iterations + 1):
+            if cancellation_requested(cancellation_token):
+                yield Done(finish_reason="cancelled")
+                return AgentToolLoopResult(
+                    text=visible_text,
+                    messages=history,
+                    tool_calls=executed,
+                    iterations=iteration - 1,
+                    cancelled=True,
+                )
             iteration_text = ""
             pending_calls: list[ToolCall] = []
             stream_error: str | None = None
             stream_tools = tools if tools else None
-            for event in brain.generate_stream_events(
-                history,
-                config=config,
-                tools=stream_tools,
-            ):
+            if cancellation_token is None:
+                provider_events = brain.generate_stream_events(
+                    history,
+                    config=config,
+                    tools=stream_tools,
+                )
+            else:
+                provider_events = brain.generate_stream_events(
+                    history,
+                    config=config,
+                    tools=stream_tools,
+                    cancellation_token=cancellation_token,
+                )
+            for event in provider_events:
+                if cancellation_requested(cancellation_token):
+                    yield Done(finish_reason="cancelled")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        cancelled=True,
+                    )
                 if isinstance(event, TextDelta):
                     if event.mode == "replace":
                         iteration_text = event.text
@@ -128,8 +159,27 @@ class AgentToolLoop:
                     yield event
                     continue
                 if isinstance(event, Done):
+                    if event.finish_reason == "cancelled":
+                        yield event
+                        return AgentToolLoopResult(
+                            text=visible_text,
+                            messages=history,
+                            tool_calls=executed,
+                            iterations=iteration,
+                            cancelled=True,
+                        )
                     continue
                 yield event
+
+            if cancellation_requested(cancellation_token):
+                yield Done(finish_reason="cancelled")
+                return AgentToolLoopResult(
+                    text=visible_text,
+                    messages=history,
+                    tool_calls=executed,
+                    iterations=iteration,
+                    cancelled=True,
+                )
 
             if stream_error is not None:
                 yield Done(finish_reason="error")
@@ -158,9 +208,27 @@ class AgentToolLoop:
                 )
 
             for tool_call in pending_calls:
+                if cancellation_requested(cancellation_token):
+                    yield Done(finish_reason="cancelled")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        cancelled=True,
+                    )
                 tool_result = gateway.call(
                     ToolRequest(name=tool_call.name, args=dict(tool_call.arguments))
                 )
+                if cancellation_requested(cancellation_token):
+                    yield Done(finish_reason="cancelled")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        cancelled=True,
+                    )
                 executed_call = ExecutedToolCall(call=tool_call, result=tool_result)
                 executed.append(executed_call)
                 history.append(

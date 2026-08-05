@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Iterator
@@ -9,6 +10,12 @@ import requests
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
+from llm.cancellation import (
+    GenerationCancelled,
+    bind_cancellation_resource,
+    cancellation_requested,
+    iter_cancellable,
+)
 from llm.stream_model import (
     StreamEvent,
     iter_openai_sse_events,
@@ -326,6 +333,7 @@ class XAiBrain(Brain):
         messages: list[LLMMessage],
         cfg: ModelConfig,
         headers: dict[str, str],
+        cancellation_token: asyncio.Event | None = None,
     ) -> LLMResult:
         payload: dict[str, JSONValue] = {
             "model": cfg.model,
@@ -345,14 +353,31 @@ class XAiBrain(Brain):
                 "tools_sent": ["web_search"],
             },
         )
-        response = requests.post(
-            endpoint,
-            json=payload,
-            headers=headers,
-            timeout=DEFAULT_TIMEOUT,
-        )
-        response.raise_for_status()
-        data_json = response.json()
+        if cancellation_requested(cancellation_token):
+            raise GenerationCancelled("xAI Responses request cancelled")
+        if cancellation_token is None:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=DEFAULT_TIMEOUT,
+            )
+        else:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=DEFAULT_TIMEOUT,
+                stream=True,
+            )
+        try:
+            with bind_cancellation_resource(cancellation_token, response):
+                response.raise_for_status()
+                data_json = response.json()
+        except Exception as exc:
+            if cancellation_requested(cancellation_token):
+                raise GenerationCancelled("xAI Responses request cancelled") from exc
+            raise
         if not isinstance(data_json, dict):
             raise RuntimeError("Некорректный ответ xAI Responses API.")
         data: dict[str, JSONValue] = data_json
@@ -403,18 +428,43 @@ class XAiBrain(Brain):
             web_search_evidence=evidence,
         )
 
+    def generate_cancellable(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None = None,
+        *,
+        cancellation_token: asyncio.Event,
+    ) -> LLMResult:
+        """Cancellable contour for the non-streaming xAI Responses web-search API."""
+        cfg = self._resolve_config(config)
+        if not cfg.web_search_enabled:
+            raise RuntimeError("generate_cancellable is reserved for xAI web search.")
+        return self._generate_with_responses_web_search(
+            messages,
+            cfg,
+            self._build_headers(cfg),
+            cancellation_token,
+        )
+
     def generate_stream_events(
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
+        cancellation_token: asyncio.Event | None = None,
     ) -> Iterator[StreamEvent]:
+        if cancellation_requested(cancellation_token):
+            yield from iter_cancellable((), cancellation_token=cancellation_token)
+            return
         if tools:
             raise RuntimeError("xAI provider supports web_search only, not generic native tools.")
         cfg = self._resolve_config(config)
         if cfg.web_search_enabled:
             result = self.generate(messages, config=cfg)
-            yield from stream_events_from_result(result)
+            yield from iter_cancellable(
+                stream_events_from_result(result),
+                cancellation_token=cancellation_token,
+            )
             return
 
         headers = self._build_headers(cfg)
@@ -438,9 +488,13 @@ class XAiBrain(Brain):
             timeout=DEFAULT_TIMEOUT,
             stream=True,
         )
-        response.raise_for_status()
-        response.encoding = "utf-8"
-        yield from iter_openai_sse_events(response.iter_lines(decode_unicode=True))
+        with bind_cancellation_resource(cancellation_token, response):
+            response.raise_for_status()
+            response.encoding = "utf-8"
+            yield from iter_cancellable(
+                iter_openai_sse_events(response.iter_lines(decode_unicode=True)),
+                cancellation_token=cancellation_token,
+            )
 
     def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
         system_messages: list[LLMMessage] = []

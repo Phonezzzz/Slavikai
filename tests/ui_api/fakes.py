@@ -262,8 +262,8 @@ class TracedStreamingAgent(DummyAgent):
         self.last_chat_interaction_id = trace_id
         return trace_id
 
-    def respond_stream(self, messages):
-        del messages
+    def respond_stream(self, messages, cancellation_token=None):
+        del messages, cancellation_token
         self._next_trace_id()
         yield TextDelta(text="Hello")
         yield TextDelta(text=" ")
@@ -298,8 +298,8 @@ class StreamNamedFileArtifactsAgent(DummyAgent):
         super().__init__()
         self.last_stream_response_raw: str | None = None
 
-    def respond_stream(self, messages):
-        del messages
+    def respond_stream(self, messages, cancellation_token=None):
+        del messages, cancellation_token
         parts = [
             "Вот мини-приложение.\n\n",
             "Код (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n",
@@ -322,8 +322,8 @@ class LateNamedFileStreamAgent(DummyAgent):
         super().__init__()
         self.last_stream_response_raw: str | None = None
 
-    def respond_stream(self, messages):
-        del messages
+    def respond_stream(self, messages, cancellation_token=None):
+        del messages, cancellation_token
         intro = "Это подготовка результата для пользователя. " * 8
         tail = "\nКод (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n"
         yield TextDelta(text=intro)

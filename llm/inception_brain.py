@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Iterator
 from typing import Final
@@ -8,6 +9,11 @@ import requests
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
+from llm.cancellation import (
+    bind_cancellation_resource,
+    cancellation_requested,
+    iter_cancellable,
+)
 from llm.stream_model import StreamEvent, StreamTextMode, iter_openai_sse_events
 from llm.types import (
     LLMResult,
@@ -146,7 +152,11 @@ class InceptionBrain(Brain):
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
+        cancellation_token: asyncio.Event | None = None,
     ) -> Iterator[StreamEvent]:
+        if cancellation_requested(cancellation_token):
+            yield from iter_cancellable((), cancellation_token=cancellation_token)
+            return
         if tools:
             raise RuntimeError("Inception provider does not support native tools.")
         cfg = self._resolve_config(config)
@@ -160,12 +170,16 @@ class InceptionBrain(Brain):
             timeout=DEFAULT_TIMEOUT,
             stream=True,
         )
-        response.raise_for_status()
-        response.encoding = "utf-8"
-        yield from iter_openai_sse_events(
-            response.iter_lines(decode_unicode=True),
-            text_mode=stream_mode,
-        )
+        with bind_cancellation_resource(cancellation_token, response):
+            response.raise_for_status()
+            response.encoding = "utf-8"
+            yield from iter_cancellable(
+                iter_openai_sse_events(
+                    response.iter_lines(decode_unicode=True),
+                    text_mode=stream_mode,
+                ),
+                cancellation_token=cancellation_token,
+            )
 
     def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
         system_messages: list[LLMMessage] = []
