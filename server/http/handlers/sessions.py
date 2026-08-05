@@ -505,6 +505,47 @@ async def handle_ui_session_history_get(request: web.Request) -> web.Response:
     return json_response({"session_id": session_id, "lane": lane, "messages": messages})
 
 
+async def handle_ui_session_messages_last_delete(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return error_response(
+            status=400,
+            message="session_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    ownership_error = await _ensure_session_owned(request, hub, session_id)
+    if ownership_error is not None:
+        return ownership_error
+    removed = await hub.delete_last_message_pair(session_id, lane="chat")
+    if removed is None:
+        return error_response(
+            status=404,
+            message="Session not found.",
+            error_type="invalid_request_error",
+            code="session_not_found",
+        )
+    if not removed:
+        return error_response(
+            status=409,
+            message="Последняя пара user+assistant не найдена.",
+            error_type="invalid_request_error",
+            code="last_message_pair_not_found",
+        )
+    messages = await hub.get_messages(session_id, lane="chat")
+    response = json_response(
+        {
+            "session_id": session_id,
+            "lane": "chat",
+            "removed_message_ids": [item.get("message_id") for item in removed],
+            "messages": messages,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
 async def handle_ui_session_output_get(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
     session_id = request.match_info.get("session_id", "").strip()

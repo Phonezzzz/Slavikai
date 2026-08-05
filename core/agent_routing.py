@@ -12,6 +12,7 @@ from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
 from core.tool_loop import AgentToolLoop
 from llm.cancellation import GenerationCancelled, cancellation_requested
+from llm.retry import visible_provider_error
 from llm.stream_model import Done, Error, StreamEvent, TextDelta, Usage
 from llm.types import LLMResult, ToolSpec, WebSearchEvidence
 from shared.models import LLMMessage, ToolRequest, ToolResult
@@ -268,7 +269,8 @@ class AgentRoutingMixin:
         except Exception as exc:
             self.logger.exception("Agent.respond error: %s", exc)
             self.tracer.log("error", f"Ошибка Agent.respond: {exc}")
-            error_text = f"[Ошибка ответа: {exc}]"
+            _, visible_message, _ = visible_provider_error(exc)
+            error_text = f"[{visible_message}]"
             try:
                 self._log_chat_interaction(raw_input=last_content, response_text=error_text)
             except Exception as log_exc:  # noqa: BLE001
@@ -398,9 +400,10 @@ class AgentRoutingMixin:
         except Exception as exc:
             self.logger.exception("Agent.respond_stream error: %s", exc)
             self.tracer.log("error", f"Ошибка Agent.respond_stream: {exc}")
-            error_text = f"[Ошибка ответа: {exc}]"
+            error_code, visible_message, _ = visible_provider_error(exc)
+            error_text = f"[{visible_message}]"
             self.last_stream_response_raw = error_text
-            yield Error(message=str(exc), code="agent_stream_error")
+            yield Error(message=visible_message, code=error_code)
             yield Done(finish_reason="error")
 
     def _run_chat_response(

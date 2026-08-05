@@ -141,6 +141,18 @@ const createStreamingAssistantMessage = (
   };
 };
 
+const extractGenerationErrorMessage = (payload: unknown): string | null => {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const generationError = (payload as { generation_error?: unknown }).generation_error;
+  if (!generationError || typeof generationError !== 'object') {
+    return null;
+  }
+  const message = (generationError as { message?: unknown }).message;
+  return typeof message === 'string' && message.trim() ? message.trim() : null;
+};
+
 export function useSessionTransport({
   sessionHeader,
   selectedConversation,
@@ -457,6 +469,25 @@ export function useSessionTransport({
     const forceCanvasForRequest = forceCanvasNext;
     setSending(true);
     try {
+      if (payload.regenerateLast === true) {
+        const encodedSessionId = encodeURIComponent(selectedConversation);
+        const deleteResponse = await fetch(
+          `/ui/api/sessions/${encodedSessionId}/messages/last`,
+          {
+            method: 'DELETE',
+            headers: {
+              [sessionHeader]: selectedConversation,
+            },
+          },
+        );
+        const deletePayload: unknown = await deleteResponse.json();
+        if (!deleteResponse.ok) {
+          throw new Error(
+            extractErrorMessage(deletePayload, 'Failed to remove the previous response.'),
+          );
+        }
+        applySessionPayload(deletePayload, { applyDisplay: false });
+      }
       const response = await fetch('/ui/api/chat/send', {
         method: 'POST',
         headers: {
@@ -489,7 +520,7 @@ export function useSessionTransport({
       setChatStreamingState(null);
       applySessionPayload(responsePayload, { applyDisplay: true });
       await loadSessions();
-      onStatusMessage(null);
+      onStatusMessage(extractGenerationErrorMessage(responsePayload));
       if (forceCanvasForRequest) {
         consumeForceCanvasNext();
       }

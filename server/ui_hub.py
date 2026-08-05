@@ -1280,6 +1280,55 @@ class UIHub:
         self._publish_to_subscribers(subscribers, event)
         return dict(normalized_message)
 
+    async def delete_last_message_pair(
+        self,
+        session_id: str,
+        *,
+        lane: MessageLane = "chat",
+    ) -> list[dict[str, JSONValue]] | None:
+        normalized_lane = _normalize_message_lane(lane)
+        event: dict[str, JSONValue] | None = None
+        subscribers: list[_SubscriberState] = []
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            lane_indices = [
+                index
+                for index, message in enumerate(state.messages)
+                if _normalize_message_lane(message.get("lane"), default="chat") == normalized_lane
+            ]
+            if len(lane_indices) < 2:
+                return []
+            user_index, assistant_index = lane_indices[-2:]
+            user_message = state.messages[user_index]
+            assistant_message = state.messages[assistant_index]
+            if user_message.get("role") != "user" or assistant_message.get("role") != "assistant":
+                return []
+            user_id = user_message.get("message_id")
+            parent_id = assistant_message.get("parent_user_message_id")
+            if parent_id is not None and parent_id != user_id:
+                return []
+            removed = [dict(user_message), dict(assistant_message)]
+            del state.messages[assistant_index]
+            del state.messages[user_index]
+            state.updated_at = _utc_iso_now()
+            self._persist_session_locked(session_id)
+            self._prune_sessions_locked(keep_session_id=session_id)
+            subscribers = list(state.subscribers.values())
+            event = self._build_event(
+                "messages.removed",
+                {
+                    "session_id": session_id,
+                    "lane": normalized_lane,
+                    "message_ids": [user_id, assistant_message.get("message_id")],
+                },
+            )
+            self._append_event_record_locked(state, event)
+        if event is not None:
+            self._publish_to_subscribers(subscribers, event)
+        return removed
+
     async def subscribe(self, session_id: str) -> asyncio.Queue[dict[str, JSONValue]]:
         queue: asyncio.Queue[dict[str, JSONValue]] = asyncio.Queue(
             maxsize=self._subscriber_queue_maxsize

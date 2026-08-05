@@ -68,6 +68,7 @@ export type CanvasSendPayload = {
   content: string;
   attachments?: CanvasComposerAttachment[];
   webSearch?: boolean;
+  regenerateLast?: boolean;
 };
 
 interface CanvasProps {
@@ -293,6 +294,10 @@ export function Canvas({
     }
     return items;
   }, [messages, pendingMessage, streamingAssistantMessage]);
+  const latestAssistantMessageId = useMemo(
+    () => [...messages].reverse().find((item) => item.role === "assistant")?.messageId ?? null,
+    [messages],
+  );
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -573,6 +578,7 @@ export function Canvas({
     void onSendMessage?.({
       content: source.content.trim(),
       attachments: source.attachments ?? [],
+      regenerateLast: true,
     });
   };
 
@@ -787,7 +793,11 @@ export function Canvas({
                     feedbackRating={feedbackRating}
                     feedbackBusy={feedbackBusyMessageId === msg.messageId}
                     sending={sending}
-                    canRefresh={msg.role === "assistant" && !!msg.parentUserMessageId}
+                    canRefresh={
+                      msg.role === "assistant"
+                      && !!msg.parentUserMessageId
+                      && msg.messageId === latestAssistantMessageId
+                    }
                     canFeedback={canFeedback}
                     onCopy={() => {
                       void handleCopyMessage(msg);

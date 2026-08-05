@@ -123,6 +123,14 @@ def _normalize_message_lane(value: object, *, default: MessageLane = "chat") -> 
     return default
 
 
+def _generation_error_kind(code: str) -> str:
+    if code == "provider_network_error":
+        return "network"
+    if code == "provider_timeout":
+        return "timeout"
+    return "model"
+
+
 def _inception_runtime_config_for_lane(config: ModelConfig, lane: MessageLane) -> ModelConfig:
     if config.provider != "inception":
         return config
@@ -765,6 +773,7 @@ async def _handle_ui_send_impl(
         ui_decision: dict[str, JSONValue] | None = None
         latest_auto_state: dict[str, JSONValue] | None = auto_state
         auto_progress_states: list[dict[str, JSONValue]] = []
+        generation_error: dict[str, JSONValue] | None = None
         live_stream_sent = False
         generation_cancelled = False
         set_runtime_workspace_root(session_root)
@@ -823,6 +832,7 @@ async def _handle_ui_send_impl(
                 chat_content_stream_open = False
                 try:
                     stream_error_message: str | None = None
+                    stream_error_code: str | None = None
                     stream_done_received = False
                     stream_iterator = iter(
                         respond_stream_method(
@@ -846,6 +856,7 @@ async def _handle_ui_send_impl(
                             continue
                         if isinstance(stream_item, Error):
                             stream_error_message = stream_item.message
+                            stream_error_code = stream_item.code
                         if isinstance(stream_item, StreamEvent) and not isinstance(
                             stream_item,
                             TextDelta,
@@ -967,6 +978,13 @@ async def _handle_ui_send_impl(
                         generation_cancelled = True
                     if generation_cancelled:
                         raise _ChatGenerationCancelled
+                    if stream_error_message is not None:
+                        resolved_error_code = stream_error_code or "provider_model_error"
+                        generation_error = {
+                            "code": resolved_error_code,
+                            "kind": _generation_error_kind(resolved_error_code),
+                            "message": stream_error_message,
+                        }
                     if not stream_done_received:
                         raise RuntimeError("respond_stream ended without Done event")
                     pending_preview = "".join(pending_chat_chunks).strip()
@@ -1024,6 +1042,11 @@ async def _handle_ui_send_impl(
                         extra={"session_id": session_id, "error": str(exc)},
                     )
                     stream_error = Error(message=str(exc), code="stream_contract_error")
+                    generation_error = {
+                        "code": stream_error.code,
+                        "kind": "model",
+                        "message": stream_error.message,
+                    }
                     if not chat_content_stream_open:
                         await _publish_chat_stream_start(
                             hub,
@@ -1343,6 +1366,7 @@ async def _handle_ui_send_impl(
             "trace_id": trace_id,
             "approval_request": approval_request,
             "mwv_report": mwv_report,
+            "generation_error": generation_error,
             "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
             "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
             "active_task": _normalize_task_payload(current_workflow.get("active_task")),

@@ -14,6 +14,7 @@ from llm.cancellation import (
     cancellation_requested,
     iter_cancellable,
 )
+from llm.retry import request_with_retry
 from llm.stream_model import StreamEvent, iter_openai_sse_events
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage
@@ -161,13 +162,15 @@ class DeepSeekBrain(Brain):
         if cfg.top_p is not None:
             payload["top_p"] = cfg.top_p
 
-        response = requests.post(
-            DEEPSEEK_ENDPOINT,
-            json=payload,
-            headers=headers,
-            timeout=DEFAULT_TIMEOUT,
+        response = request_with_retry(
+            lambda: requests.post(
+                DEEPSEEK_ENDPOINT,
+                json=payload,
+                headers=headers,
+                timeout=DEFAULT_TIMEOUT,
+            ),
+            provider="deepseek",
         )
-        response.raise_for_status()
         data_json = response.json()
         if not isinstance(data_json, dict):
             raise RuntimeError("Некорректный ответ DeepSeek API.")

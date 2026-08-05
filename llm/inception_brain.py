@@ -14,6 +14,7 @@ from llm.cancellation import (
     cancellation_requested,
     iter_cancellable,
 )
+from llm.retry import request_with_retry
 from llm.stream_model import StreamEvent, StreamTextMode, iter_openai_sse_events
 from llm.types import (
     LLMResult,
@@ -109,13 +110,15 @@ class InceptionBrain(Brain):
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_payload(messages, cfg, stream=False)
-        response = requests.post(
-            self.base_url,
-            json=payload,
-            headers=headers,
-            timeout=DEFAULT_TIMEOUT,
+        response = request_with_retry(
+            lambda: requests.post(
+                self.base_url,
+                json=payload,
+                headers=headers,
+                timeout=DEFAULT_TIMEOUT,
+            ),
+            provider="inception",
         )
-        response.raise_for_status()
         data_json = response.json()
         if not isinstance(data_json, dict):
             raise RuntimeError("Некорректный ответ Inception.")

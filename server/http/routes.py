@@ -74,6 +74,10 @@ def register_routes(app: web.Application) -> None:
         "/ui/api/sessions/{session_id}/history",
         sessions.handle_ui_session_history_get,
     )
+    app.router.add_delete(
+        "/ui/api/sessions/{session_id}/messages/last",
+        sessions.handle_ui_session_messages_last_delete,
+    )
     app.router.add_get(
         "/ui/api/sessions/{session_id}/output",
         sessions.handle_ui_session_output_get,
