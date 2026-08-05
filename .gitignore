@@ -36,6 +36,7 @@ sandbox/**/*.wav
 # UI/local artifacts
 .anima/
 config/model_config.json
+config/api_keys.json
 config/memory.json
 config/tools.json
 Agent_IDE UI/

@@ -9,10 +9,10 @@ interface SettingsProps {
   onSaved?: () => void;
 }
 
-type SettingsTab = 'assistant' | 'appearance' | 'composer' | 'memory' | 'data' | 'diagnostics';
+type SettingsTab = 'api' | 'assistant' | 'appearance' | 'composer' | 'memory' | 'data' | 'diagnostics';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai' | 'deepseek';
 type ModelProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'deepseek';
-type ApiKeySource = 'env' | 'missing';
+type ApiKeySource = 'env' | 'file' | 'missing';
 type EmbeddingsProvider = 'local' | 'openai';
 type ImportMode = 'replace' | 'merge';
 type AppearanceTheme = 'default' | 'oled';
@@ -21,6 +21,7 @@ type ProviderSettings = {
   provider: ApiKeyProvider;
   api_key_env: string;
   api_key_set: boolean;
+  api_key_stored: boolean;
   api_key_source: ApiKeySource;
   endpoint: string;
   api_key_valid: boolean | null;
@@ -74,6 +75,24 @@ const DEFAULT_SYSTEM_PROMPT =
 
 const API_KEY_PROVIDERS: ApiKeyProvider[] = ['xai', 'openrouter', 'local', 'inception', 'openai', 'deepseek'];
 
+const EMPTY_API_KEYS: Record<ApiKeyProvider, string> = {
+  xai: '',
+  openrouter: '',
+  local: '',
+  inception: '',
+  openai: '',
+  deepseek: '',
+};
+
+const EMPTY_PROVIDER_DIRTY: Record<ApiKeyProvider, boolean> = {
+  xai: false,
+  openrouter: false,
+  local: false,
+  inception: false,
+  openai: false,
+  deepseek: false,
+};
+
 const PROVIDER_LABELS: Record<ApiKeyProvider, string> = {
   xai: 'xAI',
   openrouter: 'OpenRouter',
@@ -112,6 +131,7 @@ const RESPONSE_STYLE_OPTIONS = [
 ];
 
 const TAB_ITEMS: Array<{ id: SettingsTab; title: string }> = [
+  { id: 'api', title: 'API Keys' },
   { id: 'assistant', title: 'Assistant' },
   { id: 'appearance', title: 'Appearance' },
   { id: 'composer', title: 'Composer' },
@@ -154,6 +174,7 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     provider: 'xai',
     api_key_env: 'XAI_API_KEY',
     api_key_set: false,
+    api_key_stored: false,
     api_key_source: 'missing',
     endpoint: 'https://api.x.ai/v1/models',
     api_key_valid: null,
@@ -164,6 +185,7 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     provider: 'openrouter',
     api_key_env: 'OPENROUTER_API_KEY',
     api_key_set: false,
+    api_key_stored: false,
     api_key_source: 'missing',
     endpoint: 'https://openrouter.ai/api/v1/models',
     api_key_valid: null,
@@ -174,6 +196,7 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     provider: 'local',
     api_key_env: 'LOCAL_LLM_API_KEY',
     api_key_set: false,
+    api_key_stored: false,
     api_key_source: 'missing',
     endpoint: 'http://localhost:11434/v1/models',
     api_key_valid: null,
@@ -184,6 +207,7 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     provider: 'openai',
     api_key_env: 'OPENAI_API_KEY',
     api_key_set: false,
+    api_key_stored: false,
     api_key_source: 'missing',
     endpoint: 'https://api.openai.com/v1/audio/transcriptions',
     api_key_valid: null,
@@ -194,6 +218,7 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     provider: 'deepseek',
     api_key_env: 'DEEPSEEK_API_KEY',
     api_key_set: false,
+    api_key_stored: false,
     api_key_source: 'missing',
     endpoint: 'https://api.deepseek.com/models',
     api_key_valid: null,
@@ -204,6 +229,7 @@ const DEFAULT_PROVIDER_SETTINGS: ProviderSettings[] = [
     provider: 'inception',
     api_key_env: 'INCEPTION_API_KEY',
     api_key_set: false,
+    api_key_stored: false,
     api_key_source: 'missing',
     endpoint: 'https://api.inceptionlabs.ai/v1/models',
     api_key_valid: null,
@@ -235,7 +261,7 @@ const isApiKeyProvider = (value: unknown): value is ApiKeyProvider =>
   value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception' || value === 'openai' || value === 'deepseek';
 
 const isApiKeySource = (value: unknown): value is ApiKeySource =>
-  value === 'env' || value === 'missing';
+  value === 'env' || value === 'file' || value === 'missing';
 
 const isModelProvider = (value: unknown): value is ModelProvider =>
   value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception' || value === 'deepseek';
@@ -378,6 +404,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
       const apiKeyEnv = (item as { api_key_env?: unknown }).api_key_env;
       const endpoint = (item as { endpoint?: unknown }).endpoint;
       const apiKeySet = (item as { api_key_set?: unknown }).api_key_set;
+      const apiKeyStored = (item as { api_key_stored?: unknown }).api_key_stored;
       const sourceRaw = (item as { api_key_source?: unknown }).api_key_source;
       const apiKeyValid = (item as { api_key_valid?: unknown }).api_key_valid;
       const lastCheckError = (item as { last_check_error?: unknown }).last_check_error;
@@ -387,6 +414,8 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
         api_key_env: typeof apiKeyEnv === 'string' && apiKeyEnv.trim() ? apiKeyEnv : current?.api_key_env || '',
         endpoint: typeof endpoint === 'string' && endpoint.trim() ? endpoint : current?.endpoint || '',
         api_key_set: typeof apiKeySet === 'boolean' ? apiKeySet : current?.api_key_set || false,
+        api_key_stored:
+          typeof apiKeyStored === 'boolean' ? apiKeyStored : current?.api_key_stored || false,
         api_key_source: isApiKeySource(sourceRaw) ? sourceRaw : current?.api_key_source || 'missing',
         api_key_valid: typeof apiKeyValid === 'boolean' ? apiKeyValid : current?.api_key_valid ?? null,
         last_check_error:
@@ -485,7 +514,20 @@ const sourceLabel = (source: ApiKeySource): string => {
   if (source === 'env') {
     return 'Environment';
   }
+  if (source === 'file') {
+    return 'Saved file';
+  }
   return 'Missing';
+};
+
+const providerKeyPlaceholder = (provider: ProviderSettings): string => {
+  if (provider.api_key_stored) {
+    return '•••••••••••• (saved)';
+  }
+  if (provider.api_key_source === 'env') {
+    return `${provider.api_key_env} is active; enter a backup file key`;
+  }
+  return `Enter ${PROVIDER_LABELS[provider.provider]} API key`;
 };
 
 const formatThresholdPreset = (value: number): string => `${Math.round(value / 1000)}k`;
@@ -583,6 +625,10 @@ export function Settings({
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('assistant');
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
+  const [apiKeys, setApiKeys] = useState<Record<ApiKeyProvider, string>>(EMPTY_API_KEYS);
+  const [providerDirty, setProviderDirty] = useState<Record<ApiKeyProvider, boolean>>(
+    EMPTY_PROVIDER_DIRTY,
+  );
   const [ttsBackend, setTtsBackend] = useState<TtsBackendSettings>(DEFAULT_TTS_BACKEND);
   const [providerRuntime, setProviderRuntime] = useState<ProviderRuntimeByModel>(DEFAULT_PROVIDER_RUNTIME);
   const [providerRuntimeLoading, setProviderRuntimeLoading] = useState(false);
@@ -621,6 +667,8 @@ export function Settings({
 
   const applyParsedSettings = (parsed: ParsedSettings): void => {
     setProviders(parsed.providers);
+    setApiKeys({ ...EMPTY_API_KEYS });
+    setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
     setTtsBackend(parsed.ttsBackend);
     setTone(parsed.tone);
     setSystemPrompt(parsed.systemPrompt);
@@ -682,7 +730,18 @@ export function Settings({
     setSaving(true);
     setStatus(null);
     try {
-      const payload = {
+      const providersPayload: Record<string, { api_key: string } | null> = {};
+      let hasProviderChanges = false;
+      for (const provider of API_KEY_PROVIDERS) {
+        if (!providerDirty[provider]) {
+          continue;
+        }
+        const apiKey = apiKeys[provider].trim();
+        providersPayload[provider] = apiKey ? { api_key: apiKey } : null;
+        hasProviderChanges = true;
+      }
+
+      const payload: Record<string, unknown> = {
         personalization: {
           tone: tone.trim() || 'balanced',
           system_prompt: systemPrompt,
@@ -706,6 +765,9 @@ export function Settings({
           },
         },
       };
+      if (hasProviderChanges) {
+        payload.providers = providersPayload;
+      }
       const response = await fetch('/ui/api/settings', {
         method: 'POST',
         headers: {
@@ -907,6 +969,111 @@ export function Settings({
                 <div className="min-h-0 flex-1 overflow-y-auto p-6" data-scrollbar="auto">
                   {status ? <div className="mb-4 text-sm text-zinc-300">{status}</div> : null}
                   {loading ? <div className="text-sm text-zinc-400">Loading settings...</div> : null}
+
+                  {!loading && activeTab === 'api' ? (
+                    <div className="space-y-6">
+                      <SectionCard
+                        title="Provider API keys"
+                        description="Keys are validated before they are saved to config/api_keys.json. Environment variables always take priority."
+                        scope="Global"
+                      >
+                        <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-zinc-400">
+                          Saved values remain masked and are never returned by the settings API. Leave a field untouched to keep its current value.
+                        </div>
+                        <div className="space-y-4">
+                          {providers.map((provider) => (
+                            <div
+                              key={provider.provider}
+                              className="rounded-xl border border-zinc-800 bg-zinc-950 p-4"
+                            >
+                              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                  <div className="font-medium text-zinc-100">
+                                    {PROVIDER_LABELS[provider.provider]}
+                                  </div>
+                                  <div className="mt-1 font-mono text-xs text-zinc-500">
+                                    {provider.api_key_env}
+                                  </div>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span
+                                    className={`rounded-md px-2 py-1 text-xs font-medium ${
+                                      provider.api_key_set
+                                        ? 'bg-emerald-500/20 text-emerald-300'
+                                        : 'bg-amber-500/20 text-amber-300'
+                                    }`}
+                                  >
+                                    {provider.api_key_set ? 'key available' : 'key missing'}
+                                  </span>
+                                  <span className="rounded-md bg-zinc-800 px-2 py-1 text-xs text-zinc-300">
+                                    {sourceLabel(provider.api_key_source)}
+                                  </span>
+                                  {providerDirty[provider.provider] ? (
+                                    <span className="rounded-md bg-sky-500/20 px-2 py-1 text-xs text-sky-300">
+                                      unsaved
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <div className="flex flex-col gap-2 sm:flex-row">
+                                <input
+                                  type="password"
+                                  autoComplete="new-password"
+                                  aria-label={`${PROVIDER_LABELS[provider.provider]} API key`}
+                                  value={apiKeys[provider.provider]}
+                                  onChange={(event) => {
+                                    const value = event.target.value;
+                                    setApiKeys((current) => ({
+                                      ...current,
+                                      [provider.provider]: value,
+                                    }));
+                                    setProviderDirty((current) => ({
+                                      ...current,
+                                      [provider.provider]: true,
+                                    }));
+                                  }}
+                                  placeholder={providerKeyPlaceholder(provider)}
+                                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                                />
+                                {provider.api_key_stored ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setApiKeys((current) => ({
+                                        ...current,
+                                        [provider.provider]: '',
+                                      }));
+                                      setProviderDirty((current) => ({
+                                        ...current,
+                                        [provider.provider]: true,
+                                      }));
+                                    }}
+                                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
+                                  >
+                                    Remove saved key
+                                  </button>
+                                ) : null}
+                              </div>
+                              {provider.api_key_source === 'env' ? (
+                                <div className="mt-2 text-xs text-zinc-500">
+                                  {provider.api_key_env} overrides any key saved in the file.
+                                </div>
+                              ) : null}
+                              {provider.last_check_error ? (
+                                <div className="mt-2 text-xs text-rose-300">
+                                  {provider.last_check_error}
+                                </div>
+                              ) : provider.api_key_valid === true ? (
+                                <div className="mt-2 text-xs text-emerald-300">
+                                  The saved key passed provider validation.
+                                </div>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </SectionCard>
+                    </div>
+                  ) : null}
 
                   {!loading && activeTab === 'assistant' ? (
                     <div className="space-y-6">
@@ -1172,7 +1339,7 @@ export function Settings({
                               <div className="mt-2 text-xs text-zinc-400">
                                 {provider === 'local'
                                   ? 'Uses a local sentence-transformer model.'
-                                  : 'Uses OPENAI_API_KEY from the environment.'}
+                                  : 'Uses the OpenAI key from the environment or API Keys settings.'}
                               </div>
                             </button>
                           ))}
@@ -1291,12 +1458,12 @@ export function Settings({
                     <div className="space-y-6">
                       <SectionCard
                         title="Read-only diagnostics"
-                        description="Connection and environment status for providers and audio backends."
+                        description="Connection status for providers and audio backends."
                         scope="Read only"
                       >
                         <div className="flex items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
                           <div className="text-sm text-zinc-300">
-                            These values come from environment variables and runtime checks. They cannot be edited in the UI.
+                            Runtime checks use environment keys first, then keys saved under API Keys.
                           </div>
                           <button
                             type="button"

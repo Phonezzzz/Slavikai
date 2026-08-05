@@ -262,13 +262,13 @@ def test_user_plane_settings_allows_only_supported_fields(monkeypatch) -> None:
     asyncio.run(run())
 
 
-def test_ui_settings_update_rejects_providers_payload() -> None:
+def test_ui_settings_update_rejects_unknown_provider() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
             response = await client.post(
                 "/ui/api/settings",
-                json={"providers": {"xai": {"api_key": "xai-secret"}}},
+                json={"providers": {"unknown": {"api_key": "not-used"}}},
             )
             assert response.status == 400
             payload = await response.json()
@@ -343,7 +343,7 @@ def test_ui_settings_no_api_key_leak(monkeypatch, tmp_path) -> None:
                 assert isinstance(provider, dict)
                 assert "api_key_value" not in provider
                 source = provider.get("api_key_source")
-                assert source in {"env", "missing"}
+                assert source in {"env", "file", "missing"}
         finally:
             await client.close()
 

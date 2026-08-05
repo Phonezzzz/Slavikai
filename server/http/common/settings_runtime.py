@@ -15,6 +15,7 @@ from shared.models import JSONValue
 @dataclass(frozen=True)
 class SettingsRuntimeBindings:
     ui_settings_path_getter: Callable[[], Path]
+    api_keys_path_getter: Callable[[], Path]
     load_memory_config_fn: Callable[[], MemoryConfig]
     save_memory_config_fn: Callable[[MemoryConfig], None]
     load_tools_config_fn: Callable[[], ToolsConfig]
@@ -23,10 +24,13 @@ class SettingsRuntimeBindings:
     def _ui_settings_path(self) -> Path:
         return self.ui_settings_path_getter()
 
+    def _api_keys_path(self) -> Path:
+        return self.api_keys_path_getter()
+
     def provider_auth_headers(self, provider: str) -> tuple[dict[str, str], str | None]:
         return ui_settings._provider_auth_headers(
             provider,
-            ui_settings_path=self._ui_settings_path(),
+            api_keys_path=self._api_keys_path(),
         )
 
     def fetch_provider_models(
@@ -37,7 +41,7 @@ class SettingsRuntimeBindings:
     ) -> tuple[list[str], str | None]:
         return ui_settings._fetch_provider_models(
             provider,
-            ui_settings_path=self._ui_settings_path(),
+            api_keys_path=self._api_keys_path(),
             allow_local_fallback=allow_local_fallback,
         )
 
@@ -120,10 +124,10 @@ class SettingsRuntimeBindings:
         )
 
     def load_provider_api_keys(self) -> dict[str, str]:
-        return ui_settings._load_provider_api_keys(ui_settings_path=self._ui_settings_path())
+        return ui_settings._load_provider_api_keys(api_keys_path=self._api_keys_path())
 
     def save_provider_api_keys(self, api_keys: dict[str, str]) -> None:
-        ui_settings._save_provider_api_keys(api_keys, ui_settings_path=self._ui_settings_path())
+        ui_settings._save_provider_api_keys(api_keys, api_keys_path=self._api_keys_path())
 
     def drop_legacy_provider_api_keys(self) -> bool:
         return ui_settings._drop_legacy_provider_api_keys(ui_settings_path=self._ui_settings_path())
@@ -137,6 +141,9 @@ class SettingsRuntimeBindings:
     ) -> None:
         ui_settings._save_provider_runtime_checks(checks, ui_settings_path=self._ui_settings_path())
 
+    def validate_provider_api_key(self, provider: str, api_key: str) -> str | None:
+        return ui_settings._validate_provider_api_key(provider, api_key)
+
     def resolve_provider_api_key(
         self,
         provider: str,
@@ -146,7 +153,7 @@ class SettingsRuntimeBindings:
         return ui_settings._resolve_provider_api_key(
             provider,
             settings_api_keys=settings_api_keys,
-            ui_settings_path=self._ui_settings_path(),
+            api_keys_path=self._api_keys_path(),
         )
 
     def provider_api_key_source(
@@ -154,15 +161,18 @@ class SettingsRuntimeBindings:
         provider: str,
         *,
         settings_api_keys: dict[str, str] | None = None,
-    ) -> Literal["env", "missing"]:
+    ) -> Literal["env", "file", "missing"]:
         return ui_settings._provider_api_key_source(
             provider,
             settings_api_keys=settings_api_keys,
-            ui_settings_path=self._ui_settings_path(),
+            api_keys_path=self._api_keys_path(),
         )
 
     def provider_settings_payload(self) -> list[dict[str, JSONValue]]:
-        return ui_settings._provider_settings_payload(ui_settings_path=self._ui_settings_path())
+        return ui_settings._provider_settings_payload(
+            ui_settings_path=self._ui_settings_path(),
+            api_keys_path=self._api_keys_path(),
+        )
 
     def build_settings_payload(self) -> dict[str, JSONValue]:
         tone, system_prompt = self.load_personalization_settings()
@@ -202,7 +212,7 @@ class SettingsRuntimeBindings:
                     "yolo_armed_at": yolo_armed_at,
                 },
                 "audio": {
-                    "tts": ui_settings._tts_settings_payload(),
+                    "tts": ui_settings._tts_settings_payload(api_keys_path=self._api_keys_path()),
                 },
                 "providers": self.provider_settings_payload(),
             },

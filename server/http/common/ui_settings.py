@@ -8,6 +8,11 @@ from typing import Final, Literal
 
 import requests
 
+from config.api_keys import (
+    DEFAULT_API_KEYS_PATH,
+    load_api_keys,
+    save_api_keys,
+)
 from config.memory_config import load_memory_config
 from config.tools_config import (
     DEFAULT_TOOLS_STATE,
@@ -45,11 +50,13 @@ PROVIDER_API_KEY_ENV: Final[dict[str, str]] = {
 XAI_MODELS_ENDPOINT: Final[str] = "https://api.x.ai/v1/models"
 OPENROUTER_MODELS_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/models"
 DEEPSEEK_MODELS_ENDPOINT: Final[str] = "https://api.deepseek.com/models"
+OPENAI_MODELS_ENDPOINT: Final[str] = "https://api.openai.com/v1/models"
 INCEPTION_DEFAULT_API_BASE: Final[str] = "https://api.inceptionlabs.ai/v1"
 OPENAI_STT_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_TTS_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/speech"
 MODEL_FETCH_TIMEOUT: Final[int] = 20
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parents[3] / ".run" / "ui_settings.json"
+API_KEYS_PATH: Final[Path] = DEFAULT_API_KEYS_PATH
 DEFAULT_UI_TONE: Final[str] = "balanced"
 INDEX_ENABLED_ENV: Final[str] = "SLAVIK_INDEX_ENABLED"
 DEFAULT_LONG_PASTE_TO_FILE_ENABLED: Final[bool] = True
@@ -146,32 +153,32 @@ def _provider_models_endpoint(provider: str) -> str:
 def _provider_auth_headers(
     provider: str,
     *,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
+    api_keys_path: Path = API_KEYS_PATH,
 ) -> tuple[dict[str, str], str | None]:
     if provider == "xai":
-        api_key = _resolve_provider_api_key("xai", ui_settings_path=ui_settings_path)
+        api_key = _resolve_provider_api_key("xai", api_keys_path=api_keys_path)
         if not api_key:
-            return {}, "Не задан XAI_API_KEY (env)."
+            return {}, "Не задан XAI_API_KEY или сохранённый xAI API-ключ."
         return {"Authorization": f"Bearer {api_key}"}, None
     if provider == "openrouter":
-        api_key = _resolve_provider_api_key("openrouter", ui_settings_path=ui_settings_path)
+        api_key = _resolve_provider_api_key("openrouter", api_keys_path=api_keys_path)
         if not api_key:
-            return {}, "Не задан OPENROUTER_API_KEY (env)."
+            return {}, "Не задан OPENROUTER_API_KEY или сохранённый OpenRouter API-ключ."
         return {"Authorization": f"Bearer {api_key}"}, None
     if provider == "local":
-        api_key = _resolve_provider_api_key("local", ui_settings_path=ui_settings_path)
+        api_key = _resolve_provider_api_key("local", api_keys_path=api_keys_path)
         if not api_key:
             return {}, None
         return {"Authorization": f"Bearer {api_key}"}, None
     if provider == "inception":
-        api_key = _resolve_provider_api_key("inception", ui_settings_path=ui_settings_path)
+        api_key = _resolve_provider_api_key("inception", api_keys_path=api_keys_path)
         if not api_key:
-            return {}, "Не задан INCEPTION_API_KEY (env)."
+            return {}, "Не задан INCEPTION_API_KEY или сохранённый Inception API-ключ."
         return {"Authorization": f"Bearer {api_key}"}, None
     if provider == "deepseek":
-        api_key = _resolve_provider_api_key("deepseek", ui_settings_path=ui_settings_path)
+        api_key = _resolve_provider_api_key("deepseek", api_keys_path=api_keys_path)
         if not api_key:
-            return {}, "Не задан DEEPSEEK_API_KEY (env)."
+            return {}, "Не задан DEEPSEEK_API_KEY или сохранённый DeepSeek API-ключ."
         return {"Authorization": f"Bearer {api_key}"}, None
     return {}, f"Неизвестный провайдер: {provider}"
 
@@ -199,12 +206,12 @@ def _parse_models_payload(payload: object) -> list[str]:
 def _fetch_provider_models(
     provider: str,
     *,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
+    api_keys_path: Path = API_KEYS_PATH,
     allow_local_fallback: bool = True,
 ) -> tuple[list[str], str | None]:
     if provider == "inception":
         docs_models = list(INCEPTION_DOCS_MODELS)
-        headers, _ = _provider_auth_headers(provider, ui_settings_path=ui_settings_path)
+        headers, _ = _provider_auth_headers(provider, api_keys_path=api_keys_path)
         if headers:
             try:
                 url = _provider_models_endpoint(provider)
@@ -227,7 +234,7 @@ def _fetch_provider_models(
         url = _provider_models_endpoint(provider)
     except ValueError as exc:
         return [], str(exc)
-    headers, auth_error = _provider_auth_headers(provider, ui_settings_path=ui_settings_path)
+    headers, auth_error = _provider_auth_headers(provider, api_keys_path=api_keys_path)
     if auth_error:
         return [], auth_error
     try:
@@ -485,19 +492,22 @@ def _save_tools_state(state: dict[str, bool]) -> None:
 
 def _load_provider_api_keys(
     *,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
+    api_keys_path: Path = API_KEYS_PATH,
 ) -> dict[str, str]:
-    del ui_settings_path
-    return {}
+    return load_api_keys(path=api_keys_path)
 
 
 def _save_provider_api_keys(
     api_keys: dict[str, str],
     *,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
+    api_keys_path: Path = API_KEYS_PATH,
 ) -> None:
-    del api_keys
-    _drop_legacy_provider_api_keys(ui_settings_path=ui_settings_path)
+    supported = {
+        provider: api_key
+        for provider, api_key in api_keys.items()
+        if provider in API_KEY_SETTINGS_PROVIDERS
+    }
+    save_api_keys(supported, path=api_keys_path)
 
 
 def _drop_legacy_provider_api_keys(
@@ -575,31 +585,72 @@ def _resolve_provider_api_key(
     provider: str,
     *,
     settings_api_keys: dict[str, str] | None = None,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
+    api_keys_path: Path = API_KEYS_PATH,
 ) -> str | None:
-    del settings_api_keys, ui_settings_path
-    return _load_provider_env_api_key(provider)
+    env_key = _load_provider_env_api_key(provider)
+    if env_key is not None:
+        return env_key
+    saved = (
+        settings_api_keys
+        if settings_api_keys is not None
+        else _load_provider_api_keys(api_keys_path=api_keys_path)
+    )
+    saved_key = saved.get(provider, "").strip()
+    return saved_key or None
 
 
 def _provider_api_key_source(
     provider: str,
     *,
     settings_api_keys: dict[str, str] | None = None,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
-) -> Literal["env", "missing"]:
-    del settings_api_keys, ui_settings_path
+    api_keys_path: Path = API_KEYS_PATH,
+) -> Literal["env", "file", "missing"]:
     if _load_provider_env_api_key(provider) is not None:
         return "env"
+    saved = (
+        settings_api_keys
+        if settings_api_keys is not None
+        else _load_provider_api_keys(api_keys_path=api_keys_path)
+    )
+    if saved.get(provider, "").strip():
+        return "file"
     return "missing"
+
+
+def _validate_provider_api_key(provider: str, api_key: str) -> str | None:
+    normalized_key = api_key.strip()
+    if provider not in API_KEY_SETTINGS_PROVIDERS:
+        return f"Неизвестный provider: {provider}."
+    if not normalized_key:
+        return f"API-ключ для {provider} не должен быть пустым."
+    try:
+        endpoint = (
+            OPENAI_MODELS_ENDPOINT if provider == "openai" else _provider_models_endpoint(provider)
+        )
+        response = requests.get(
+            endpoint,
+            headers={"Authorization": f"Bearer {normalized_key}"},
+            timeout=MODEL_FETCH_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+        status_suffix = f" (HTTP {status_code})" if status_code is not None else ""
+        return f"API-ключ для {provider} отклонён провайдером{status_suffix}."
+    except requests.RequestException as exc:
+        return f"Не удалось проверить API-ключ для {provider}: {exc}."
+    return None
 
 
 def _provider_settings_payload(
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
+    api_keys_path: Path = API_KEYS_PATH,
 ) -> list[dict[str, JSONValue]]:
     local_endpoint = (
         os.getenv("LOCAL_LLM_URL", DEFAULT_LOCAL_ENDPOINT).strip() or DEFAULT_LOCAL_ENDPOINT
     )
+    saved_api_keys = _load_provider_api_keys(api_keys_path=api_keys_path)
     runtime_checks = _load_provider_runtime_checks(ui_settings_path=ui_settings_path)
 
     def _runtime_status(provider: str) -> dict[str, JSONValue]:
@@ -613,100 +664,71 @@ def _provider_settings_payload(
             "last_checked_at": checked_raw if isinstance(checked_raw, str) else None,
         }
 
+    def _key_status(provider: str) -> dict[str, JSONValue]:
+        return {
+            "api_key_set": _resolve_provider_api_key(
+                provider,
+                settings_api_keys=saved_api_keys,
+                api_keys_path=api_keys_path,
+            )
+            is not None,
+            "api_key_stored": bool(saved_api_keys.get(provider, "").strip()),
+            "api_key_source": _provider_api_key_source(
+                provider,
+                settings_api_keys=saved_api_keys,
+                api_keys_path=api_keys_path,
+            ),
+        }
+
     return [
         {
             "provider": "xai",
             "api_key_env": "XAI_API_KEY",
-            "api_key_set": _resolve_provider_api_key("xai", ui_settings_path=ui_settings_path)
-            is not None,
-            "api_key_source": _provider_api_key_source(
-                "xai",
-                ui_settings_path=ui_settings_path,
-            ),
+            **_key_status("xai"),
             "endpoint": XAI_MODELS_ENDPOINT,
             **_runtime_status("xai"),
         },
         {
             "provider": "openrouter",
             "api_key_env": "OPENROUTER_API_KEY",
-            "api_key_set": _resolve_provider_api_key(
-                "openrouter",
-                ui_settings_path=ui_settings_path,
-            )
-            is not None,
-            "api_key_source": _provider_api_key_source(
-                "openrouter",
-                ui_settings_path=ui_settings_path,
-            ),
+            **_key_status("openrouter"),
             "endpoint": OPENROUTER_MODELS_ENDPOINT,
             **_runtime_status("openrouter"),
         },
         {
             "provider": "local",
             "api_key_env": "LOCAL_LLM_API_KEY",
-            "api_key_set": _resolve_provider_api_key(
-                "local",
-                ui_settings_path=ui_settings_path,
-            )
-            is not None,
-            "api_key_source": _provider_api_key_source(
-                "local",
-                ui_settings_path=ui_settings_path,
-            ),
+            **_key_status("local"),
             "endpoint": local_endpoint,
             **_runtime_status("local"),
         },
         {
             "provider": "inception",
             "api_key_env": "INCEPTION_API_KEY",
-            "api_key_set": _resolve_provider_api_key(
-                "inception",
-                ui_settings_path=ui_settings_path,
-            )
-            is not None,
-            "api_key_source": _provider_api_key_source(
-                "inception",
-                ui_settings_path=ui_settings_path,
-            ),
+            **_key_status("inception"),
             "endpoint": _inception_models_endpoint(),
             **_runtime_status("inception"),
         },
         {
             "provider": "deepseek",
             "api_key_env": "DEEPSEEK_API_KEY",
-            "api_key_set": _resolve_provider_api_key(
-                "deepseek",
-                ui_settings_path=ui_settings_path,
-            )
-            is not None,
-            "api_key_source": _provider_api_key_source(
-                "deepseek",
-                ui_settings_path=ui_settings_path,
-            ),
+            **_key_status("deepseek"),
             "endpoint": DEEPSEEK_MODELS_ENDPOINT,
             **_runtime_status("deepseek"),
         },
         {
             "provider": "openai",
             "api_key_env": "OPENAI_API_KEY",
-            "api_key_set": _resolve_provider_api_key(
-                "openai",
-                ui_settings_path=ui_settings_path,
-            )
-            is not None,
-            "api_key_source": _provider_api_key_source(
-                "openai",
-                ui_settings_path=ui_settings_path,
-            ),
+            **_key_status("openai"),
             "endpoint": OPENAI_STT_ENDPOINT,
             **_runtime_status("openai"),
         },
     ]
 
 
-def _tts_settings_payload() -> dict[str, JSONValue]:
+def _tts_settings_payload(*, api_keys_path: Path = API_KEYS_PATH) -> dict[str, JSONValue]:
     config = TtsConfig()
-    api_key = config.resolve_api_key()
+    api_key = _resolve_provider_api_key("openai", api_keys_path=api_keys_path)
     model = config.resolve_model()
     voice = config.resolve_voice()
     format_value = config.resolve_format()
@@ -725,6 +747,7 @@ def _tts_settings_payload() -> dict[str, JSONValue]:
 def _build_settings_payload(
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
+    api_keys_path: Path = API_KEYS_PATH,
 ) -> dict[str, JSONValue]:
     tone, system_prompt = _load_personalization_settings(ui_settings_path=ui_settings_path)
     appearance_theme = _load_appearance_settings(ui_settings_path=ui_settings_path)
@@ -767,8 +790,11 @@ def _build_settings_payload(
                 "yolo_armed_at": yolo_armed_at,
             },
             "audio": {
-                "tts": _tts_settings_payload(),
+                "tts": _tts_settings_payload(api_keys_path=api_keys_path),
             },
-            "providers": _provider_settings_payload(ui_settings_path=ui_settings_path),
+            "providers": _provider_settings_payload(
+                ui_settings_path=ui_settings_path,
+                api_keys_path=api_keys_path,
+            ),
         },
     }

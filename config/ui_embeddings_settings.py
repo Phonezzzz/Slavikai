@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast
 
+from config.api_keys import DEFAULT_API_KEYS_PATH, load_api_keys
+
 EmbeddingsProvider = Literal["local", "openai"]
 
 DEFAULT_UI_SETTINGS_PATH: Final[Path] = (
@@ -115,7 +117,13 @@ def save_ui_embeddings_settings(
     _save_ui_settings_blob(payload, path)
 
 
-def resolve_openai_api_key(path: Path = DEFAULT_UI_SETTINGS_PATH) -> str | None:
+def resolve_openai_api_key(
+    path: Path = DEFAULT_UI_SETTINGS_PATH,
+    *,
+    api_keys_path: Path = DEFAULT_API_KEYS_PATH,
+) -> str | None:
     del path
     env_key = os.getenv("OPENAI_API_KEY", "").strip()
-    return env_key or None
+    if env_key:
+        return env_key
+    return load_api_keys(path=api_keys_path).get("openai")

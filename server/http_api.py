@@ -165,6 +165,7 @@ OPENAI_STT_ENDPOINT: Final[str] = _ui_settings.OPENAI_STT_ENDPOINT
 MODEL_FETCH_TIMEOUT: Final[int] = _ui_settings.MODEL_FETCH_TIMEOUT
 UI_PROJECT_COMMANDS: Final[set[str]] = {"find", "index", "github_import"}
 UI_SETTINGS_PATH: Final[Path] = _ui_settings.UI_SETTINGS_PATH
+API_KEYS_PATH: Final[Path] = _ui_settings.API_KEYS_PATH
 DEFAULT_UI_TONE: Final[str] = _ui_settings.DEFAULT_UI_TONE
 INDEX_ENABLED_ENV: Final[str] = _ui_settings.INDEX_ENABLED_ENV
 DEFAULT_LONG_PASTE_TO_FILE_ENABLED: Final[bool] = _ui_settings.DEFAULT_LONG_PASTE_TO_FILE_ENABLED
@@ -241,6 +242,7 @@ def _requests_module() -> RequestsModuleProtocol:
 
 _SETTINGS_RUNTIME = settings_runtime.SettingsRuntimeBindings(
     ui_settings_path_getter=lambda: UI_SETTINGS_PATH,
+    api_keys_path_getter=lambda: API_KEYS_PATH,
     load_memory_config_fn=lambda: load_memory_config(),
     save_memory_config_fn=lambda config: save_memory_config(config),
     load_tools_config_fn=lambda: load_tools_config(),
@@ -270,6 +272,7 @@ _save_provider_api_keys = _SETTINGS_RUNTIME.save_provider_api_keys
 _drop_legacy_provider_api_keys = _SETTINGS_RUNTIME.drop_legacy_provider_api_keys
 _load_provider_runtime_checks = _SETTINGS_RUNTIME.load_provider_runtime_checks
 _save_provider_runtime_checks = _SETTINGS_RUNTIME.save_provider_runtime_checks
+_validate_provider_api_key = _SETTINGS_RUNTIME.validate_provider_api_key
 _resolve_provider_api_key = _SETTINGS_RUNTIME.resolve_provider_api_key
 _provider_api_key_source = _SETTINGS_RUNTIME.provider_api_key_source
 _provider_settings_payload = _SETTINGS_RUNTIME.provider_settings_payload

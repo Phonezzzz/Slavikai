@@ -47,7 +47,9 @@ class TtsTool:
             )
         api_key = self.config.resolve_api_key()
         if not api_key:
-            return ToolResult.failure("OpenAI API key не задан для TTS (env OPENAI_API_KEY).")
+            return ToolResult.failure(
+                "OpenAI API key не задан для TTS (env или Settings → API Keys)."
+            )
 
         headers = {
             "Authorization": f"Bearer {api_key}",

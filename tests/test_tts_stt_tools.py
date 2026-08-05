@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from config.api_keys import save_api_keys
 from config.stt_config import SttConfig
 from config.tts_config import TtsConfig
+from config.ui_embeddings_settings import resolve_openai_api_key
 from shared.models import ToolRequest
 from tools.http_client import HttpResult
 from tools.stt_tool import SttTool
@@ -111,12 +113,23 @@ def test_tts_tool_rejects_text_above_total_limit(monkeypatch) -> None:
     assert not http.called
 
 
-def test_tts_tool_requires_openai_api_key(monkeypatch) -> None:
+def test_tts_tool_requires_openai_api_key(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    tool = TtsTool(DummyHttp())
+    tool = TtsTool(DummyHttp(), TtsConfig(api_keys_path=tmp_path / "api_keys.json"))
     result = tool.handle(ToolRequest(name="tts", args={"text": "hello"}))
     assert not result.ok
-    assert result.error == "OpenAI API key не задан для TTS (env OPENAI_API_KEY)."
+    assert result.error == "OpenAI API key не задан для TTS (env или Settings → API Keys)."
+
+
+def test_audio_tools_use_saved_openai_api_key(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("STT_API_KEY", raising=False)
+    api_keys_path = tmp_path / "api_keys.json"
+    save_api_keys({"openai": "saved-openai-key"}, path=api_keys_path)
+
+    assert TtsConfig(api_keys_path=api_keys_path).resolve_api_key() == "saved-openai-key"
+    assert SttConfig(api_keys_path=api_keys_path).resolve_api_key() == "saved-openai-key"
+    assert resolve_openai_api_key(api_keys_path=api_keys_path) == "saved-openai-key"
 
 
 def test_tts_tool_rejects_invalid_format(monkeypatch) -> None:

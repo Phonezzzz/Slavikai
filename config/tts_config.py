@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from config.api_keys import DEFAULT_API_KEYS_PATH, load_api_keys
 
 
 @dataclass
@@ -14,12 +17,15 @@ class TtsConfig:
     timeout: int = 20
     max_input_chars: int = 32_000
     max_request_chars: int = 4096
+    api_keys_path: Path = DEFAULT_API_KEYS_PATH
 
     def resolve_api_key(self) -> str | None:
+        env_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if env_key:
+            return env_key
         if self.api_key and self.api_key.strip():
             return self.api_key.strip()
-        env_key = os.getenv("OPENAI_API_KEY", "").strip()
-        return env_key or None
+        return load_api_keys(path=self.api_keys_path).get("openai")
 
     def resolve_model(self) -> str:
         env_model = os.getenv("OPENAI_TTS_MODEL", "").strip()
