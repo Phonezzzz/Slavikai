@@ -199,3 +199,65 @@ def test_canonical_atom_store_migrates_existing_db_with_pinned_column(tmp_path) 
     atom = store.get_by_stable_key("fact:old")
     assert atom is not None
     assert atom.pinned is False
+
+
+def test_delete_atom_marks_deprecated_excluded_from_list(tmp_path) -> None:
+    db_path = tmp_path / "atoms.db"
+    store = CanonicalAtomStore(str(db_path))
+
+    store.create_atom(
+        atom_id="a-del-1",
+        stable_key="fact:to_delete",
+        claim_type=ClaimType.FACT,
+        value_json={"text": "secret"},
+        confidence=0.9,
+        summary_text="fact:to_delete",
+        support_count=1,
+        contradict_count=0,
+        status=AtomStatus.ACTIVE,
+        last_seen_at=utc_now_iso(),
+    )
+    assert store.get_by_stable_key("fact:to_delete") is not None
+
+    deleted = store.delete_atom("fact:to_delete")
+    assert deleted is not None
+    assert deleted.status == AtomStatus.DEPRECATED
+
+    active = store.list_atoms(statuses={AtomStatus.ACTIVE})
+    assert all(a.stable_key != "fact:to_delete" for a in active)
+
+
+def test_update_atom_new_value_replaces_old(tmp_path) -> None:
+    db_path = tmp_path / "atoms.db"
+    store = CanonicalAtomStore(str(db_path))
+
+    store.create_atom(
+        atom_id="a-upd-1",
+        stable_key="pref:lang",
+        claim_type=ClaimType.PREFERENCE,
+        value_json={"value": "python"},
+        confidence=0.8,
+        summary_text="pref:lang=python",
+        support_count=1,
+        contradict_count=0,
+        status=AtomStatus.ACTIVE,
+        last_seen_at=utc_now_iso(),
+    )
+
+    store.create_atom(
+        atom_id="a-upd-2",
+        stable_key="pref:lang",
+        claim_type=ClaimType.PREFERENCE,
+        value_json={"value": "rust"},
+        confidence=0.9,
+        summary_text="pref:lang=rust",
+        support_count=2,
+        contradict_count=0,
+        status=AtomStatus.ACTIVE,
+        last_seen_at=utc_now_iso(),
+    )
+
+    updated = store.get_by_stable_key("pref:lang")
+    assert updated is not None
+    assert updated.value_json == {"value": "rust"}
+    assert updated.confidence == 0.9

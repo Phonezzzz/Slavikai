@@ -150,6 +150,15 @@ class MemoryManager:
         )
         self.save(record)
 
+    def delete(self, record_id: str) -> bool:
+        """Удалить запись памяти по id. Возвращает True если запись существовала."""
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM memory WHERE id = ?",
+                (record_id,),
+            )
+            return cur.rowcount > 0
+
     def close(self) -> None:
         self.conn.close()
 

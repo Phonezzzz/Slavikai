@@ -53,3 +53,57 @@ def test_user_pref_and_project_fact(tmp_path) -> None:
     facts = manager.get_project_facts("projA")
     assert len(facts) == 1
     assert "FastAPI" in facts[0].content
+
+
+def test_memory_delete_removes_record(tmp_path) -> None:
+    db_path = tmp_path / "mem.db"
+    manager = MemoryManager(str(db_path))
+    manager.save(
+        MemoryRecord(
+            id="del-1",
+            content="to be deleted",
+            tags=["temp"],
+            timestamp="2024-01-01",
+            kind=MemoryKind.NOTE,
+        )
+    )
+    assert len(manager.search("deleted")) == 1
+
+    deleted = manager.delete("del-1")
+    assert deleted is True
+    assert len(manager.search("deleted")) == 0
+
+
+def test_memory_delete_nonexistent_returns_false(tmp_path) -> None:
+    db_path = tmp_path / "mem.db"
+    manager = MemoryManager(str(db_path))
+
+    deleted = manager.delete("no-such-id")
+    assert deleted is False
+
+
+def test_memory_update_replaces_old_value(tmp_path) -> None:
+    db_path = tmp_path / "mem.db"
+    manager = MemoryManager(str(db_path))
+    manager.save(
+        MemoryRecord(
+            id="update-1",
+            content="old value",
+            tags=["test"],
+            timestamp="2024-01-01",
+            kind=MemoryKind.NOTE,
+        )
+    )
+    manager.save(
+        MemoryRecord(
+            id="update-1",
+            content="new value",
+            tags=["test"],
+            timestamp="2024-01-02",
+            kind=MemoryKind.NOTE,
+        )
+    )
+
+    results = manager.search("value", kind=MemoryKind.NOTE)
+    assert len(results) == 1
+    assert results[0].content == "new value"

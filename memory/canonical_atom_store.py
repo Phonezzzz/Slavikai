@@ -244,6 +244,16 @@ class CanonicalAtomStore:
         )
         return self.upsert(resolved)
 
+    def delete_atom(self, stable_key: str) -> CanonicalAtom | None:
+        """Soft-delete: устанавливает статус DEPRECATED.
+
+        Атом не возвращается в list_atoms по умолчанию.
+        """
+        return self.resolve_conflict(
+            stable_key=stable_key,
+            resolution=AtomStatus.DEPRECATED,
+        )
+
     def _row_to_atom(self, row: sqlite3.Row) -> CanonicalAtom:
         value_raw = row["value_json"]
         value_parsed = safe_json_loads(value_raw) if isinstance(value_raw, str) else None
