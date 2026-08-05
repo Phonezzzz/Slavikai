@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from core.agent import Agent
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
@@ -55,12 +57,20 @@ def test_agent_remember_command_is_not_command_lane_tool(tmp_path: Path) -> None
     assert atom is None
 
 
-def test_agent_end_session_command_saves_canonical_summary(tmp_path: Path) -> None:
+def test_agent_end_session_command_saves_canonical_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     agent = Agent(
         brain=SimpleBrain(),
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
         canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    monkeypatch.setattr(
+        agent._atom_embedding_index,
+        "sync_atom",
+        lambda _atom: None,
     )
     agent.short_term.extend(
         [

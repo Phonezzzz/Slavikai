@@ -6,7 +6,9 @@ __pycache__/
 
 # Virtual environments
 venv/
+venv-prod/
 .venv/
+.venv-lock/
 .env
 sandbox/project/
 

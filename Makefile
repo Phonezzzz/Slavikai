@@ -6,11 +6,18 @@ MAKEFLAGS += --warn-undefined-variables
 
 .DEFAULT_GOAL := help
 
-PYTHON ?= python3
+PYTHON ?= python3.12
 VENV_DIR ?= venv
+PROD_VENV_DIR ?= venv-prod
+PROD_VENV_PY := $(PROD_VENV_DIR)/bin/python
+LOCK_VENV_DIR := .venv-lock
 VENV_PY := $(VENV_DIR)/bin/python
 VENV_PIP := $(VENV_PY) -m pip
 VENV_RUFF := $(VENV_DIR)/bin/ruff
+LOCK_PY := $(LOCK_VENV_DIR)/bin/python
+LOCK_PIP := $(LOCK_PY) -m pip
+LOCK_COMPILE := $(LOCK_VENV_DIR)/bin/pip-compile
+LOCK_SYNC := $(LOCK_VENV_DIR)/bin/pip-sync
 
 RUN_DIR ?= .run
 APP_PID_FILE := $(RUN_DIR)/slavikai-ui.pid
@@ -25,9 +32,11 @@ help:
 	@echo "SlavikAI Core"
 	@echo
 	@echo "Setup:"
-	@echo "  make venv            Create venv/ and install requirements"
-	@echo "  make deps-compile    Generate requirements.txt and constraints.txt from requirements.in"
-	@echo "  make deps-sync       Sync venv packages to requirements.txt lock"
+	@echo "  make venv            Create venv/ and install requirements + dev tools"
+	@echo "  make venv-prod       Create venv-prod/ and install only production deps"
+	@echo "  make venv-embeddings Install embeddings (torch, sentence-transformers) into venv/"
+	@echo "  make deps-compile    Generate lock files from *.in via .venv-lock/pip-compile"
+	@echo "  make deps-sync       Sync venv/ to requirements.txt (pip-sync, removes extras)"
 	@echo "  make activate        Print venv activation command"
 	@echo "  make shell           Open an interactive shell with venv activated"
 	@echo
@@ -74,24 +83,56 @@ help:
 $(VENV_PY):
 	$(PYTHON) -m venv "$(VENV_DIR)"
 
+$(PROD_VENV_DIR)/bin/python:
+	$(PYTHON) -m venv "$(PROD_VENV_DIR)"
+
+$(LOCK_PY):
+	$(PYTHON) -m venv "$(LOCK_VENV_DIR)"
+	$(LOCK_PIP) install --upgrade 'pip==24.0'
+	$(LOCK_PIP) install 'pip-tools==7.6.0'
+
 $(VENV_DIR)/.installed: requirements.txt constraints.txt $(VENV_PY)
 	$(VENV_PIP) install --upgrade pip
 	$(VENV_PIP) install -r requirements.txt -c constraints.txt
 	@touch "$(VENV_DIR)/.installed"
 
+$(VENV_DIR)/.installed-dev: requirements-dev.txt $(VENV_PY)
+	$(VENV_PIP) install --upgrade pip
+	$(VENV_PIP) install -r requirements-dev.txt -c requirements.txt
+	@touch "$(VENV_DIR)/.installed-dev"
+
+$(VENV_DIR)/.installed-embeddings: requirements-embeddings.txt $(VENV_PY)
+	$(VENV_PIP) install --upgrade pip
+	$(VENV_PIP) install -r requirements-embeddings.txt -c requirements.txt
+	@touch "$(VENV_DIR)/.installed-embeddings"
+
+$(PROD_VENV_DIR)/.installed: requirements.txt constraints.txt $(PROD_VENV_DIR)/bin/python
+	$(PROD_VENV_DIR)/bin/python -m pip install --upgrade pip
+	$(PROD_VENV_DIR)/bin/python -m pip install -r requirements.txt -c constraints.txt
+	@touch "$(PROD_VENV_DIR)/.installed"
+
 .PHONY: venv
-venv: $(VENV_DIR)/.installed
+venv: $(VENV_DIR)/.installed $(VENV_DIR)/.installed-dev
+
+.PHONY: venv-prod
+venv-prod: $(PROD_VENV_DIR)/.installed
+
+.PHONY: venv-dev
+venv-dev: venv $(VENV_DIR)/.installed-dev
+
+.PHONY: venv-embeddings
+venv-embeddings: $(VENV_DIR)/.installed-embeddings
 
 .PHONY: deps-compile
-deps-compile: $(VENV_PY) requirements.in
-	"$(VENV_PIP)" install pip-tools
-	"$(VENV_DIR)/bin/pip-compile" --strip-extras requirements.in --output-file requirements.txt
-	"$(VENV_DIR)/bin/pip-compile" --strip-extras requirements.in --output-file constraints.txt
+deps-compile: $(LOCK_PY) requirements.in requirements-dev.in requirements-embeddings.in
+	$(LOCK_COMPILE) --strip-extras requirements.in --output-file requirements.txt
+	$(LOCK_COMPILE) --strip-extras requirements.in --output-file constraints.txt
+	$(LOCK_COMPILE) --strip-extras requirements-dev.in -c requirements.txt --output-file requirements-dev.txt
+	$(LOCK_COMPILE) --strip-extras requirements-embeddings.in -c requirements.txt --output-file requirements-embeddings.txt
 
 .PHONY: deps-sync
-deps-sync: $(VENV_PY) requirements.txt
-	"$(VENV_PIP)" install pip-tools
-	"$(VENV_DIR)/bin/pip-sync" requirements.txt
+deps-sync: $(LOCK_PY) requirements.txt requirements-dev.txt
+	$(LOCK_SYNC) --python-executable "$(VENV_PY)" requirements.txt requirements-dev.txt
 
 .PHONY: activate
 activate: $(VENV_PY)
@@ -212,16 +253,16 @@ run: venv
 	"$(VENV_PY)" -m server
 
 .PHONY: run-prod
-run-prod: venv
-	SLAVIK_HTTP_HOST="$(PROD_HOST)" SLAVIK_HTTP_PORT="$(PROD_PORT)" "$(VENV_PY)" -m server
+run-prod: venv-prod
+	SLAVIK_HTTP_HOST="$(PROD_HOST)" SLAVIK_HTTP_PORT="$(PROD_PORT)" "$(PROD_VENV_PY)" -m server
 
 .PHONY: deploy-example
 deploy-example:
-	@echo "Production example:"
-	@echo "  make venv"
-	@echo "  make ui-build"
+	@echo "Production deploy:"
 	@echo "  export XAI_API_KEY=***"
 	@echo "  export SLAVIK_MODEL_WHITELIST='your-model-id'"
+	@echo "  make venv-prod"
+	@echo "  make ui-build"
 	@echo "  make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000"
 
 .PHONY: ui-install

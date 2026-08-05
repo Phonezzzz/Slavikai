@@ -28,6 +28,10 @@ disallow_untyped_defs = true
 disallow_any_generics = true
 exclude = ["venv", ".venv", "build", "dist", "tests", "vendor/openwebui"]
 
+[[tool.mypy.overrides]]
+module = "sentence_transformers"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 addopts = "--cov=core --cov=llm --cov=tools --cov=memory --cov=shared --cov=config --cov-report=term-missing --cov-fail-under=80"
 testpaths = ["tests"]
