@@ -9,7 +9,8 @@ from llm.brain_factory import create_brain
 from llm.inception_brain import InceptionBrain
 from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
-from llm.types import ModelConfig, ToolSpec
+from llm.stream_model import Done, TextDelta
+from llm.types import LLMResult, ModelConfig, ToolSpec
 from llm.xai_brain import XAiBrain
 from shared.models import LLMMessage
 
@@ -403,8 +404,11 @@ def test_xai_stream_web_search_uses_responses_api(monkeypatch) -> None:
     config = ModelConfig(provider="xai", model="xai-model", web_search_enabled=True)
     brain = XAiBrain(api_key="xai-key", default_config=config)
 
-    chunks = list(brain.generate_stream([LLMMessage(role="user", content="latest")]))
-    assert "".join(chunks) == "streamed searched answer"
+    events = list(brain.generate_stream_events([LLMMessage(role="user", content="latest")]))
+    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == (
+        "streamed searched answer"
+    )
+    assert isinstance(events[-1], Done)
     assert calls["url"] == "https://api.x.ai/v1/responses"
     assert calls["json"]["tools"] == [{"type": "web_search"}]
     assert calls["json"]["include"] == ["web_search_call.action.sources"]
@@ -447,7 +451,7 @@ def test_inception_generate_uses_reasoning_defaults(monkeypatch) -> None:
     assert calls["json"]["model"] == "mercury-2"
 
 
-def test_inception_stream_chunks_support_replace_mode(monkeypatch) -> None:
+def test_inception_stream_events_support_replace_mode(monkeypatch) -> None:
     def fake_post(url, json, headers, timeout, stream):  # noqa: ANN001
         del url, headers, timeout
         assert stream is True
@@ -463,9 +467,11 @@ def test_inception_stream_chunks_support_replace_mode(monkeypatch) -> None:
     monkeypatch.setattr("llm.inception_brain.requests.post", fake_post)
     config = ModelConfig(provider="inception", model="mercury-2", diffusing=True)
     brain = InceptionBrain(api_key="inc-key", default_config=config)
-    chunks = list(brain.generate_stream_chunks([LLMMessage(role="user", content="ping")]))
-    assert [chunk.text for chunk in chunks] == ["hel", "hello"]
-    assert [chunk.mode for chunk in chunks] == ["replace", "replace"]
+    events = list(brain.generate_stream_events([LLMMessage(role="user", content="ping")]))
+    deltas = [event for event in events if isinstance(event, TextDelta)]
+    assert [event.text for event in deltas] == ["hel", "hello"]
+    assert [event.mode for event in deltas] == ["replace", "replace"]
+    assert isinstance(events[-1], Done)
 
 
 def test_inception_without_key_raises(monkeypatch) -> None:
@@ -487,14 +493,16 @@ def test_brain_factory_supports_all_known_providers() -> None:
     assert isinstance(inception, InceptionBrain)
 
 
-def test_brain_base_stream_chunks_default_adapter() -> None:
+def test_brain_base_stream_events_default_adapter() -> None:
     class StaticBrain(Brain):
         def generate(self, messages, config=None):  # noqa: ANN001
             del messages, config
-            return type("Result", (), {"text": "abcdef"})()
+            return LLMResult(text="abcdef")
 
     brain = StaticBrain()
-    chunks = list(brain.generate_stream_chunks([LLMMessage(role="user", content="ping")]))
-    assert chunks
-    assert chunks[0].mode == "append"
-    assert "".join(chunk.text for chunk in chunks) == "abcdef"
+    events = list(brain.generate_stream_events([LLMMessage(role="user", content="ping")]))
+    deltas = [event for event in events if isinstance(event, TextDelta)]
+    assert deltas
+    assert deltas[0].mode == "append"
+    assert "".join(event.text for event in deltas) == "abcdef"
+    assert isinstance(events[-1], Done)

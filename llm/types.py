@@ -75,13 +75,3 @@ class BrainRequest:
     messages: list[LLMMessage]
     config: ModelConfig
     tools: list[ToolSpec] | None = None
-
-
-LLMStreamChunkMode = Literal["append", "replace"]
-
-
-@dataclass(frozen=True)
-class LLMStreamChunk:
-    text: str
-    mode: LLMStreamChunkMode = "append"
-    meta: dict[str, JSONValue] | None = None

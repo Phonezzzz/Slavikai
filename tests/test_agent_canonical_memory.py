@@ -7,6 +7,7 @@ from core.agent import Agent
 from core.mwv.models import MWVMessage
 from core.mwv.routing import RouteDecision
 from llm.brain_base import Brain
+from llm.stream_model import Done, TextDelta
 from llm.types import LLMResult
 from shared.models import LLMMessage
 
@@ -116,7 +117,7 @@ def test_agent_explicit_remember_stream_persists_fallback_fact(tmp_path, monkeyp
         )
     )
 
-    assert chunks == ["Запомнил: fact:my_laptop_hostname_is_alpha"]
+    assert chunks == [TextDelta(text="Запомнил: fact:my_laptop_hostname_is_alpha"), Done()]
     assert agent.last_stream_response_raw == "Запомнил: fact:my_laptop_hostname_is_alpha"
     atom = agent._canonical_store.get_by_stable_key("fact:my_laptop_hostname_is_alpha")
     assert atom is not None

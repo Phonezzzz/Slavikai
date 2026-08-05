@@ -8,6 +8,7 @@ from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop
 from llm.brain_factory import create_brain
 from llm.deepseek_brain import DeepSeekBrain
+from llm.stream_model import Done, TextDelta
 from llm.types import LLMMessage, ModelConfig, ToolSpec
 from shared.models import ToolRequest, ToolResult
 from tools.tool_registry import ToolRegistry
@@ -214,13 +215,17 @@ def test_deepseek_streaming(monkeypatch) -> None:
 
     monkeypatch.setattr(requests, "post", lambda *a, **kw: FakeStreamResponse())
     brain = DeepSeekBrain()
-    output = list(
-        brain.generate_stream(
+    events = list(
+        brain.generate_stream_events(
             [LLMMessage(role="user", content="hello")],
             config=DEEPSEEK_CONFIG,
         )
     )
-    assert output == ["Hello", " world"]
+    assert [event.text for event in events if isinstance(event, TextDelta)] == [
+        "Hello",
+        " world",
+    ]
+    assert isinstance(events[-1], Done)
 
 
 def test_deepseek_provider_exposed_in_settings() -> None:
@@ -354,7 +359,7 @@ def test_deepseek_thinking_in_stream(monkeypatch) -> None:
     monkeypatch.setattr(requests, "post", fake_post)
     cfg = ModelConfig(provider="deepseek", model="deepseek-v4-pro", thinking_enabled=True)
     brain = DeepSeekBrain(default_config=cfg)
-    list(brain.generate_stream([LLMMessage(role="user", content="think")]))
+    list(brain.generate_stream_events([LLMMessage(role="user", content="think")]))
     payload = capture.get("json", {})
     assert isinstance(payload, dict)
     assert payload.get("thinking") == {"type": "enabled"}

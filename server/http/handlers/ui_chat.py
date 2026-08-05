@@ -10,7 +10,8 @@ from aiohttp import web
 
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
-from llm.types import LLMStreamChunk, ModelConfig
+from llm.stream_model import Done, Error, StreamEvent, TextDelta
+from llm.types import ModelConfig
 from server.http.common.chat_payload import (
     _extract_decision_payload,
     _normalize_trace_id,
@@ -44,6 +45,7 @@ from server.http_api import (
     _normalize_ui_decision,
     _publish_agent_activity,
     _publish_canvas_stream,
+    _publish_chat_protocol_event,
     _publish_chat_stream_delta,
     _publish_chat_stream_done,
     _publish_chat_stream_from_text,
@@ -764,22 +766,43 @@ async def _handle_ui_send_impl(
                 chat_stream_mode: Literal["pending", "chat"] = "pending"
                 chat_content_stream_open = False
                 try:
+                    stream_error_message: str | None = None
+                    stream_done_received = False
                     for stream_item in respond_stream_method(llm_messages):
-                        delta = ""
-                        delta_mode: Literal["append", "replace"] = "append"
-                        if isinstance(stream_item, str):
-                            delta = stream_item
-                        elif isinstance(stream_item, LLMStreamChunk):
-                            delta = stream_item.text
-                            if stream_item.mode == "replace":
-                                delta_mode = "replace"
-                        elif isinstance(stream_item, dict):
-                            delta_raw = stream_item.get("text")
-                            if isinstance(delta_raw, str):
-                                delta = delta_raw
-                            mode_raw = stream_item.get("mode")
-                            if mode_raw == "replace":
-                                delta_mode = "replace"
+                        if isinstance(stream_item, Done):
+                            stream_done_received = True
+                            continue
+                        if isinstance(stream_item, Error):
+                            stream_error_message = stream_item.message
+                        if isinstance(stream_item, StreamEvent) and not isinstance(
+                            stream_item,
+                            TextDelta,
+                        ):
+                            if not chat_content_stream_open:
+                                chat_stream_mode = "chat"
+                                await _publish_chat_stream_start(
+                                    hub,
+                                    session_id=session_id,
+                                    stream_id=chat_stream_id,
+                                    lane=lane,
+                                )
+                                chat_content_stream_open = True
+                            await _publish_chat_protocol_event(
+                                hub,
+                                session_id=session_id,
+                                stream_id=chat_stream_id,
+                                event=stream_item,
+                                lane=lane,
+                            )
+                            live_stream_sent = True
+                            continue
+                        if not isinstance(stream_item, TextDelta):
+                            raise TypeError(
+                                "respond_stream must yield StreamEvent instances, "
+                                f"got {type(stream_item).__name__}"
+                            )
+                        delta = stream_item.text
+                        delta_mode = stream_item.mode
                         if not delta:
                             continue
                         if delta_mode == "replace":
@@ -868,6 +891,8 @@ async def _handle_ui_send_impl(
                                 live_stream_sent = True
                                 await asyncio.sleep(0.005)
                         pending_chat_chunks = []
+                    if not stream_done_received:
+                        raise RuntimeError("respond_stream ended without Done event")
                     pending_preview = "".join(pending_chat_chunks).strip()
                     if pending_preview and not chat_content_stream_open:
                         chat_stream_mode = "chat"
@@ -901,14 +926,33 @@ async def _handle_ui_send_impl(
                     response_raw_candidate = getattr(agent, "last_stream_response_raw", None)
                     if isinstance(response_raw_candidate, str) and response_raw_candidate.strip():
                         response_raw = response_raw_candidate
+                    elif stream_error_message is not None:
+                        response_raw = f"[Ошибка ответа: {stream_error_message}]"
                     else:
                         response_raw = stream_text
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        "Live stream failed; fallback to regular respond",
+                        "Live stream failed",
                         exc_info=True,
                         extra={"session_id": session_id, "error": str(exc)},
                     )
+                    stream_error = Error(message=str(exc), code="stream_contract_error")
+                    if not chat_content_stream_open:
+                        await _publish_chat_stream_start(
+                            hub,
+                            session_id=session_id,
+                            stream_id=chat_stream_id,
+                            lane=lane,
+                        )
+                        chat_content_stream_open = True
+                    await _publish_chat_protocol_event(
+                        hub,
+                        session_id=session_id,
+                        stream_id=chat_stream_id,
+                        event=stream_error,
+                        lane=lane,
+                    )
+                    live_stream_sent = True
                     if chat_content_stream_open:
                         await _publish_chat_stream_done(
                             hub,
@@ -917,7 +961,11 @@ async def _handle_ui_send_impl(
                             lane=lane,
                         )
                         chat_content_stream_open = False
-                    response_raw = agent.respond(llm_messages)
+                    response_raw_candidate = getattr(agent, "last_stream_response_raw", None)
+                    if isinstance(response_raw_candidate, str) and response_raw_candidate.strip():
+                        response_raw = response_raw_candidate
+                    else:
+                        response_raw = f"[Ошибка ответа: {exc}]"
             else:
                 response_raw = agent.respond(llm_messages)
             response_text, mwv_report = _split_response_and_report(response_raw)

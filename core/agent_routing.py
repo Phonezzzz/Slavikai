@@ -10,7 +10,8 @@ from core.mwv.models import StopReasonCode
 from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
 from core.tool_loop import AgentToolLoop
-from llm.types import LLMResult, LLMStreamChunk, ToolSpec, WebSearchEvidence
+from llm.stream_model import Done, Error, StreamEvent, TextDelta, Usage
+from llm.types import LLMResult, ToolSpec, WebSearchEvidence
 from shared.models import LLMMessage, ToolRequest, ToolResult
 
 if TYPE_CHECKING:
@@ -29,6 +30,12 @@ if TYPE_CHECKING:
     from llm.types import ModelConfig
     from shared.models import JSONValue
     from tools.tool_registry import ToolRegistry
+
+
+def _text_response_events(text: str) -> Iterator[StreamEvent]:
+    if text:
+        yield TextDelta(text=text)
+    yield Done()
 
 
 class AgentRoutingMixin:
@@ -268,10 +275,10 @@ class AgentRoutingMixin:
                 self._append_short_term([LLMMessage(role="assistant", content=error_text)])
             return error_text
 
-    def respond_stream(self, messages: list[LLMMessage]) -> Iterator[str | LLMStreamChunk]:
+    def respond_stream(self, messages: list[LLMMessage]) -> Iterator[StreamEvent]:
         if not messages:
             self.last_stream_response_raw = "[Пустое сообщение]"
-            yield "[Пустое сообщение]"
+            yield from _text_response_events("[Пустое сообщение]")
             return
 
         last_content = messages[-1].content.strip()
@@ -289,7 +296,7 @@ class AgentRoutingMixin:
             if last_content.startswith("/"):
                 result = self.handle_tool_command(last_content)
                 self.last_stream_response_raw = result
-                yield result
+                yield from _text_response_events(result)
                 return
 
             if self.is_explicit_memory_request(last_content):
@@ -301,7 +308,7 @@ class AgentRoutingMixin:
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
                 self.last_stream_response_raw = response
-                yield response
+                yield from _text_response_events(response)
                 return
 
             runtime_mode = getattr(self, "runtime_mode", "ask")
@@ -315,7 +322,7 @@ class AgentRoutingMixin:
             if runtime_mode == "auto":
                 response = self.handle_auto_command(last_content)
                 self.last_stream_response_raw = response
-                yield response
+                yield from _text_response_events(response)
                 return
 
             decision = classify_request(
@@ -333,7 +340,7 @@ class AgentRoutingMixin:
             if decision.skill_decision and decision.skill_decision.status == "deprecated":
                 response = self._format_skill_block(decision.skill_decision)
                 self.last_stream_response_raw = response
-                yield response
+                yield from _text_response_events(response)
                 return
 
             decision_packet = self.decision_handler.evaluate(
@@ -352,7 +359,7 @@ class AgentRoutingMixin:
                     record_in_history=record_in_history,
                 )
                 self.last_stream_response_raw = response
-                yield response
+                yield from _text_response_events(response)
                 return
 
             if decision.route == "mwv":
@@ -361,7 +368,7 @@ class AgentRoutingMixin:
                     self._record_unknown_skill_candidate(last_content, decision)
                 response = self._run_mwv_flow(messages, last_content, decision, record_in_history)
                 self.last_stream_response_raw = response
-                yield response
+                yield from _text_response_events(response)
                 return
 
             yield from self._run_chat_response_stream(
@@ -376,13 +383,14 @@ class AgentRoutingMixin:
                 record_in_history=record_in_history,
             )
             self.last_stream_response_raw = response
-            yield response
+            yield from _text_response_events(response)
         except Exception as exc:
             self.logger.exception("Agent.respond_stream error: %s", exc)
             self.tracer.log("error", f"Ошибка Agent.respond_stream: {exc}")
             error_text = f"[Ошибка ответа: {exc}]"
             self.last_stream_response_raw = error_text
-            yield error_text
+            yield Error(message=str(exc), code="agent_stream_error")
+            yield Done(finish_reason="error")
 
     def _run_chat_response(
         self,
@@ -460,11 +468,14 @@ class AgentRoutingMixin:
         self,
         messages: list[LLMMessage],
     ) -> str | None:
+        brain = self._get_main_brain()
+        if not brain.supports_native_tools:
+            return None
         tool_specs = self._chat_read_tool_specs()
         if not tool_specs:
             return None
         result = AgentToolLoop().run(
-            brain=self._get_main_brain(),
+            brain=brain,
             gateway=self._build_tool_gateway(safe_mode_override=None),
             messages=messages,
             tools=tool_specs,
@@ -509,7 +520,7 @@ class AgentRoutingMixin:
         messages: list[LLMMessage],
         last_content: str,
         record_in_history: bool,
-    ) -> Iterator[LLMStreamChunk]:
+    ) -> Iterator[StreamEvent]:
         try:
             self.tracer.log("reasoning_start", "Потоковая генерация ответа моделью")
             policy_application = self._apply_policies(last_content)
@@ -531,7 +542,7 @@ class AgentRoutingMixin:
                 and not web_evidence.executed
             ):
                 blocked_text = self._web_search_not_executed(web_evidence)
-                yield LLMStreamChunk(text=blocked_text, mode="append")
+                yield TextDelta(text=blocked_text)
                 response_text = self._finalize_chat_response(
                     last_content=last_content,
                     record_in_history=record_in_history,
@@ -539,6 +550,7 @@ class AgentRoutingMixin:
                     response_text=blocked_text,
                 )
                 self.last_stream_response_raw = response_text
+                yield Done()
                 return
             collected_text = ""
             brain = self._get_main_brain()
@@ -550,22 +562,37 @@ class AgentRoutingMixin:
                 if blocked is not None:
                     collected_text = blocked
                 for idx in range(0, len(collected_text), 80):
-                    yield LLMStreamChunk(text=collected_text[idx : idx + 80], mode="append")
+                    yield TextDelta(text=collected_text[idx : idx + 80])
+                if reply.usage is not None:
+                    yield Usage(usage=reply.usage)
             else:
-                for chunk in brain.generate_stream_chunks(messages_with_context):
-                    if not isinstance(chunk, LLMStreamChunk):
-                        continue
-                    delta = chunk.text
-                    if not delta:
-                        continue
-                    mode: Literal["append", "replace"] = (
-                        "replace" if chunk.mode == "replace" else "append"
+                tool_specs = self._chat_read_tool_specs() if brain.supports_streaming_tools else []
+                tool_loop_result = yield from AgentToolLoop().run_stream_events(
+                    brain=brain,
+                    gateway=self._build_tool_gateway(safe_mode_override=None),
+                    messages=messages_with_context,
+                    tools=tool_specs,
+                    config=self.main_config,
+                )
+                collected_text = tool_loop_result.text
+                if tool_loop_result.tool_calls:
+                    self.tracer.log(
+                        "native_tool_loop",
+                        "streaming chat read-only tool loop executed",
+                        {
+                            "tool_calls": len(tool_loop_result.tool_calls),
+                            "iterations": tool_loop_result.iterations,
+                            "tools": [item.call.name for item in tool_loop_result.tool_calls],
+                        },
                     )
-                    if mode == "replace":
-                        collected_text = delta
-                    else:
-                        collected_text = f"{collected_text}{delta}"
-                    yield LLMStreamChunk(text=delta, mode=mode, meta=chunk.meta)
+                if tool_loop_result.error is not None:
+                    error_text = f"[Ошибка модели: {tool_loop_result.error}]"
+                    self._log_chat_interaction(
+                        raw_input=last_content,
+                        response_text=error_text,
+                    )
+                    self.last_stream_response_raw = error_text
+                    return
             reviewed = self._review_answer(collected_text)
             blocked = self._web_search_block_reason(reviewed, web_evidence)
             if blocked is not None:
@@ -578,6 +605,8 @@ class AgentRoutingMixin:
                 response_text=reviewed,
             )
             self.last_stream_response_raw = response_text
+            if web_evidence.requested and web_evidence.provider == "xai_native":
+                yield Done()
             return
         except Exception as exc:  # noqa: BLE001
             self.logger.error("Stream LLM error: %s", exc)

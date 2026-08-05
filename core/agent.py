@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 from config.computer_backend_config import resolve_computer_backend_config
 from config.memory_config import MemoryConfig, load_memory_config
@@ -105,6 +105,9 @@ SAFE_MODE_TOOLS_OFF = {
 }
 MAX_MWV_ATTEMPTS = 3
 SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
+CHAT_EXPOSED_READ_TOOLS: Final[frozenset[str]] = frozenset(
+    {"web", "workspace_list", "workspace_read"}
+)
 
 _COMPAT_EXPORTS = (ManagerRuntime, VerifierRuntime, WORKSPACE_ROOT, MAX_FILE_BYTES)
 
@@ -285,6 +288,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
                 risk_classes=risk_classes,
                 description=metadata.description,
                 parameters_schema=metadata.parameters_schema,
+                chat_exposed=name in CHAT_EXPOSED_READ_TOOLS,
             )
 
         register_tool(

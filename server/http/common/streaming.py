@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Literal, Protocol
 
+from llm.stream_model import (
+    Error,
+    StreamEvent,
+    ToolCallArgumentsDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
+    Usage,
+)
 from shared.models import JSONValue
 
 CHAT_STREAM_CHUNK_SIZE = 80
@@ -99,6 +108,87 @@ async def _publish_chat_stream_done(
             },
         },
     )
+
+
+async def _publish_chat_protocol_event(
+    hub: SessionPublisher,
+    *,
+    session_id: str,
+    stream_id: str,
+    event: StreamEvent,
+    lane: str = "chat",
+) -> None:
+    event_type: str
+    payload: dict[str, JSONValue] = {
+        "session_id": session_id,
+        "stream_id": stream_id,
+        "lane": lane,
+    }
+    if isinstance(event, ToolCallStarted):
+        event_type = "chat.tool.started"
+        payload.update(
+            {
+                "call_id": event.call_id,
+                "name": event.name,
+                "index": event.index,
+            }
+        )
+    elif isinstance(event, ToolCallArgumentsDelta):
+        event_type = "chat.tool.arguments.delta"
+        payload.update(
+            {
+                "call_id": event.call_id,
+                "delta": event.delta,
+                "index": event.index,
+            }
+        )
+    elif isinstance(event, ToolCallCompleted):
+        event_type = "chat.tool.completed"
+        payload.update(
+            {
+                "call_id": event.call.id,
+                "name": event.call.name,
+                "arguments": event.call.arguments,
+                "result": _tool_result_payload(event),
+            }
+        )
+    elif isinstance(event, Usage):
+        event_type = "chat.stream.usage"
+        payload.update(
+            {
+                "prompt_tokens": event.usage.prompt_tokens,
+                "completion_tokens": event.usage.completion_tokens,
+                "total_tokens": event.usage.total_tokens,
+            }
+        )
+    elif isinstance(event, Error):
+        event_type = "chat.stream.error"
+        payload.update({"message": event.message, "code": event.code})
+    else:
+        raise TypeError(f"Unsupported auxiliary stream event: {type(event).__name__}")
+    await hub.publish(session_id, {"type": event_type, "payload": payload})
+
+
+def _tool_result_payload(event: ToolCallCompleted) -> dict[str, JSONValue] | None:
+    result = event.result
+    if result is None:
+        return None
+    return {
+        "ok": result.ok,
+        "error": result.error,
+        "summary": _short_tool_result(result.data, result.error),
+    }
+
+
+def _short_tool_result(data: dict[str, JSONValue], error: str | None) -> str:
+    if error:
+        return error[:240]
+    for key in ("output", "content", "result"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:240]
+    serialized = json.dumps(data, ensure_ascii=False, sort_keys=True)
+    return serialized[:240]
 
 
 async def _publish_chat_stream_from_text(

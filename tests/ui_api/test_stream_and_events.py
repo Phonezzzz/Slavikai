@@ -3,6 +3,17 @@ from __future__ import annotations
 # ruff: noqa: F403,F405
 import pytest
 
+from llm.stream_model import (
+    Done,
+    TextDelta,
+    ToolCallArgumentsDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
+    Usage,
+)
+from llm.types import LLMUsage, ToolCall
+from shared.models import ToolResult
+
 from .fakes import *
 
 
@@ -585,9 +596,10 @@ def test_chat_stream_supports_replace_mode_chunks() -> None:
     class ReplaceStreamAgent(DummyAgent):
         def respond_stream(self, messages):  # noqa: ANN001
             del messages
-            yield {"text": "hel", "mode": "replace"}
-            yield {"text": "hello " * 20, "mode": "replace"}
+            yield TextDelta(text="hel", mode="replace")
+            yield TextDelta(text="hello " * 20, mode="replace")
             self.last_stream_response_raw = "hello " * 20
+            yield Done()
 
         def respond(self, messages) -> str:  # noqa: ANN001
             del messages
@@ -630,6 +642,130 @@ def test_chat_stream_supports_replace_mode_chunks() -> None:
             assert replace_payloads
             assert all(item.get("lane") == "chat" for item in replace_payloads)
             assert replace_payloads[-1].get("delta") == "hello " * 20
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_chat_stream_serializes_typed_tool_and_usage_events() -> None:
+    class TypedStreamAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_stream_response_raw: str | None = None
+
+        def respond_stream(self, messages):  # noqa: ANN001
+            del messages
+            call = ToolCall(
+                id="call-1",
+                name="workspace_read",
+                arguments={"path": "README.md"},
+            )
+            yield ToolCallStarted(call_id=call.id, name=call.name, index=0)
+            yield ToolCallArgumentsDelta(
+                call_id=call.id,
+                delta='{"path":"README.md"}',
+                index=0,
+            )
+            yield ToolCallCompleted(
+                call=call,
+                result=ToolResult.success({"content": "readme text"}),
+            )
+            yield Usage(usage=LLMUsage(3, 4, 7))
+            yield TextDelta(text="Готово")
+            self.last_stream_response_raw = "Готово"
+            yield Done()
+
+    async def run() -> None:
+        client = await _create_client(TypedStreamAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(f"/ui/api/chat/events/{session_id}", timeout=5)
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Прочитай README"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+
+            events = await _read_sse_events(stream_resp, max_events=24)
+            event_types = [event.get("type") for event in events]
+            assert "chat.tool.started" in event_types
+            assert "chat.tool.arguments.delta" in event_types
+            assert "chat.tool.completed" in event_types
+            assert "chat.stream.usage" in event_types
+            assert event_types.count("chat.stream.done") == 1
+            completed = next(
+                event for event in events if event.get("type") == "chat.tool.completed"
+            )
+            payload = completed.get("payload")
+            assert isinstance(payload, dict)
+            assert payload.get("name") == "workspace_read"
+            result = payload.get("result")
+            assert isinstance(result, dict)
+            assert result.get("ok") is True
+            assert result.get("summary") == "readme text"
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_invalid_stream_contract_does_not_repeat_agent_request() -> None:
+    class InvalidStreamAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.respond_calls = 0
+
+        def respond_stream(self, messages):  # noqa: ANN001
+            del messages
+            yield "legacy chunk"
+
+        def respond(self, messages) -> str:  # noqa: ANN001
+            del messages
+            self.respond_calls += 1
+            return "unexpected duplicate response"
+
+    async def run() -> None:
+        agent = InvalidStreamAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(f"/ui/api/chat/events/{session_id}", timeout=5)
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Привет"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+            payload = await send_resp.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assert isinstance(messages[-1], dict)
+            assert "respond_stream must yield StreamEvent" in messages[-1].get("content", "")
+            assert agent.respond_calls == 0
+
+            events = await _read_sse_events(stream_resp, max_events=16)
+            assert any(event.get("type") == "chat.stream.error" for event in events)
+            assert sum(event.get("type") == "chat.stream.done" for event in events) == 1
             stream_resp.close()
         finally:
             await client.close()

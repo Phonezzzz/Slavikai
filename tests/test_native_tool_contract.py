@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
 from core.agent import Agent
 from llm.brain_base import Brain
-from llm.types import LLMResult, LLMStreamChunk, ModelConfig, ToolCall, ToolSpec
+from llm.stream_model import Done, TextDelta, ToolCallCompleted
+from llm.types import LLMResult, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 from tools.tool_descriptors import TOOL_METADATA
 from tools.tool_registry import ToolRegistry
@@ -59,13 +59,19 @@ def test_brain_contract_accepts_tools_for_generate_and_stream() -> None:
     ]
 
     result = brain.generate([LLMMessage(role="user", content="ping")], tools=tools)
-    stream = "".join(brain.generate_stream([LLMMessage(role="user", content="ping")], tools=tools))
+    events = list(
+        brain.generate_stream_events(
+            [LLMMessage(role="user", content="ping")],
+            tools=tools,
+        )
+    )
+    stream = "".join(event.text for event in events if isinstance(event, TextDelta))
 
     assert result.text == "ping:workspace_read"
     assert stream == "ping:workspace_read"
 
 
-def test_brain_stream_chunks_pass_tools_to_generate_stream() -> None:
+def test_stream_events_preserve_tool_calls() -> None:
     class ChunkBrain(Brain):
         def generate(
             self,
@@ -73,26 +79,31 @@ def test_brain_stream_chunks_pass_tools_to_generate_stream() -> None:
             config: ModelConfig | None = None,
             tools: list[ToolSpec] | None = None,
         ) -> LLMResult:
-            del messages, config, tools
-            return LLMResult(text="")
-
-        def generate_stream(
-            self,
-            messages: list[LLMMessage],
-            config: ModelConfig | None = None,
-            tools: list[ToolSpec] | None = None,
-        ) -> Iterator[str]:
             del messages, config
-            yield (tools or [ToolSpec(name="none", description="none")])[0].name
+            tool = (tools or [ToolSpec(name="none", description="none")])[0]
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-stream",
+                        name=tool.name,
+                        arguments={"path": "README.md"},
+                    )
+                ],
+            )
 
-    chunks = list(
-        ChunkBrain().generate_stream_chunks(
+    events = list(
+        ChunkBrain().generate_stream_events(
             [LLMMessage(role="user", content="ping")],
             tools=[ToolSpec(name="workspace_write", description="Write")],
         )
     )
 
-    assert chunks == [LLMStreamChunk(text="workspace_write")]
+    completed = [event for event in events if isinstance(event, ToolCallCompleted)]
+    assert len(completed) == 1
+    assert completed[0].call.name == "workspace_write"
+    assert completed[0].call.arguments == {"path": "README.md"}
+    assert isinstance(events[-1], Done)
 
 
 def test_tool_registry_descriptor_exposes_llm_metadata() -> None:

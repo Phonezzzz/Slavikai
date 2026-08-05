@@ -114,6 +114,7 @@ _split_chat_stream_chunks = _streaming._split_chat_stream_chunks
 _publish_chat_stream_start = _streaming._publish_chat_stream_start
 _publish_chat_stream_delta = _streaming._publish_chat_stream_delta
 _publish_chat_stream_done = _streaming._publish_chat_stream_done
+_publish_chat_protocol_event = _streaming._publish_chat_protocol_event
 _publish_chat_stream_from_text = _streaming._publish_chat_stream_from_text
 _split_canvas_stream_chunks = _streaming._split_canvas_stream_chunks
 TraceGroup = _trace_views.TraceGroup

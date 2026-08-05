@@ -4,6 +4,7 @@ from pathlib import Path
 
 from core.agent import Agent
 from llm.brain_base import Brain
+from llm.stream_model import Done, TextDelta
 from llm.types import LLMResult, ModelConfig
 from shared.models import LLMMessage
 from tests.report_utils import extract_report_block
@@ -151,6 +152,6 @@ def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkey
 
     chunks = list(agent.respond_stream([LLMMessage(role="user", content="image_generate plan")]))
 
-    assert chunks == ["auto-stream:image_generate plan"]
+    assert chunks == [TextDelta(text="auto-stream:image_generate plan"), Done()]
     assert agent.last_stream_response_raw == "auto-stream:image_generate plan"
     assert main.calls == 0

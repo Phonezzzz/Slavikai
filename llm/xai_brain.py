@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 from collections.abc import Iterator
@@ -10,6 +9,11 @@ import requests
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
+from llm.stream_model import (
+    StreamEvent,
+    iter_openai_sse_events,
+    stream_events_from_result,
+)
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolSpec, WebSearchEvidence
 from shared.models import JSONValue, LLMMessage
 
@@ -17,31 +21,6 @@ XAI_ENDPOINT: Final[str] = "https://api.x.ai/v1/chat/completions"
 XAI_RESPONSES_ENDPOINT: Final[str] = "https://api.x.ai/v1/responses"
 DEFAULT_TIMEOUT: Final[int] = 30
 logger = logging.getLogger("SlavikAI.XAiBrain")
-
-
-def _extract_stream_delta(data: dict[str, JSONValue]) -> str:
-    choices_raw = data.get("choices")
-    if not isinstance(choices_raw, list) or not choices_raw:
-        return ""
-    first_choice = choices_raw[0]
-    if not isinstance(first_choice, dict):
-        return ""
-    delta_raw = first_choice.get("delta")
-    if not isinstance(delta_raw, dict):
-        return ""
-    content_raw = delta_raw.get("content")
-    if isinstance(content_raw, str):
-        return content_raw
-    if isinstance(content_raw, list):
-        parts: list[str] = []
-        for item in content_raw:
-            if not isinstance(item, dict):
-                continue
-            text_raw = item.get("text")
-            if isinstance(text_raw, str):
-                parts.append(text_raw)
-        return "".join(parts)
-    return ""
 
 
 def _responses_endpoint_for(chat_endpoint: str) -> str:
@@ -424,24 +403,22 @@ class XAiBrain(Brain):
             web_search_evidence=evidence,
         )
 
-    def generate_stream(
+    def generate_stream_events(
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
-    ) -> Iterator[str]:
+    ) -> Iterator[StreamEvent]:
         if tools:
             raise RuntimeError("xAI provider supports web_search only, not generic native tools.")
         cfg = self._resolve_config(config)
         if cfg.web_search_enabled:
             result = self.generate(messages, config=cfg)
-            chunk_size = 80
-            for idx in range(0, len(result.text), chunk_size):
-                yield result.text[idx : idx + chunk_size]
+            yield from stream_events_from_result(result)
             return
 
         headers = self._build_headers(cfg)
-        payload = {
+        payload: dict[str, JSONValue] = {
             "model": cfg.model,
             "messages": [
                 message.to_provider_dict() for message in self._inject_system(messages, cfg)
@@ -463,25 +440,7 @@ class XAiBrain(Brain):
         )
         response.raise_for_status()
         response.encoding = "utf-8"
-
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if raw_line is None:
-                continue
-            line = raw_line.strip()
-            if not line or not line.startswith("data:"):
-                continue
-            data_part = line.removeprefix("data:").strip()
-            if not data_part or data_part == "[DONE]":
-                continue
-            try:
-                parsed = json.loads(data_part)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            delta = _extract_stream_delta(parsed)
-            if delta:
-                yield delta
+        yield from iter_openai_sse_events(response.iter_lines(decode_unicode=True))
 
     def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
         system_messages: list[LLMMessage] = []

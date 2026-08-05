@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Iterator
 from typing import Final
@@ -9,10 +8,9 @@ import requests
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
+from llm.stream_model import StreamEvent, StreamTextMode, iter_openai_sse_events
 from llm.types import (
     LLMResult,
-    LLMStreamChunk,
-    LLMStreamChunkMode,
     LLMUsage,
     ModelConfig,
     ToolSpec,
@@ -30,32 +28,6 @@ def _build_completions_endpoint(base_url: str) -> str:
     if normalized.endswith("/chat/completions"):
         return normalized
     return f"{normalized.rstrip('/')}/chat/completions"
-
-
-def _extract_stream_delta(data: dict[str, JSONValue]) -> str:
-    choices_raw = data.get("choices")
-    if not isinstance(choices_raw, list) or not choices_raw:
-        return ""
-    for choice in choices_raw:
-        if not isinstance(choice, dict):
-            continue
-        delta_raw = choice.get("delta")
-        if not isinstance(delta_raw, dict):
-            continue
-        content_raw = delta_raw.get("content")
-        if isinstance(content_raw, str):
-            return content_raw
-        if isinstance(content_raw, list):
-            parts: list[str] = []
-            for item in content_raw:
-                if not isinstance(item, dict):
-                    continue
-                text_raw = item.get("text")
-                if isinstance(text_raw, str):
-                    parts.append(text_raw)
-            if parts:
-                return "".join(parts)
-    return ""
 
 
 class InceptionBrain(Brain):
@@ -169,18 +141,18 @@ class InceptionBrain(Brain):
             )
         return LLMResult(text=content, reasoning=reasoning, usage=usage, raw=data)
 
-    def generate_stream_chunks(
+    def generate_stream_events(
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
-    ) -> Iterator[LLMStreamChunk]:
+    ) -> Iterator[StreamEvent]:
         if tools:
             raise RuntimeError("Inception provider does not support native tools.")
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_payload(messages, cfg, stream=True)
-        stream_mode: LLMStreamChunkMode = "replace" if cfg.diffusing else "append"
+        stream_mode: StreamTextMode = "replace" if cfg.diffusing else "append"
         response = requests.post(
             self.base_url,
             json=payload,
@@ -190,35 +162,10 @@ class InceptionBrain(Brain):
         )
         response.raise_for_status()
         response.encoding = "utf-8"
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if raw_line is None:
-                continue
-            line = raw_line.strip()
-            if not line or not line.startswith("data:"):
-                continue
-            data_part = line.removeprefix("data:").strip()
-            if not data_part or data_part == "[DONE]":
-                continue
-            try:
-                parsed = json.loads(data_part)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            delta = _extract_stream_delta(parsed)
-            if not delta:
-                continue
-            yield LLMStreamChunk(text=delta, mode=stream_mode)
-
-    def generate_stream(
-        self,
-        messages: list[LLMMessage],
-        config: ModelConfig | None = None,
-        tools: list[ToolSpec] | None = None,
-    ) -> Iterator[str]:
-        for chunk in self.generate_stream_chunks(messages, config=config, tools=tools):
-            if chunk.text:
-                yield chunk.text
+        yield from iter_openai_sse_events(
+            response.iter_lines(decode_unicode=True),
+            text_mode=stream_mode,
+        )
 
     def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
         system_messages: list[LLMMessage] = []

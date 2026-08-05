@@ -8,6 +8,7 @@ from typing import Final
 import requests
 
 from llm.brain_base import Brain
+from llm.stream_model import StreamEvent, iter_openai_sse_events
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage
 
@@ -84,28 +85,11 @@ def _message_content_to_text(value: JSONValue) -> str:
     return str(value)
 
 
-def _extract_stream_delta(data: dict[str, JSONValue]) -> dict[str, str]:
-    result: dict[str, str] = {}
-    choices_raw = data.get("choices")
-    if not isinstance(choices_raw, list) or not choices_raw:
-        return result
-    first_choice = choices_raw[0]
-    if not isinstance(first_choice, dict):
-        return result
-    delta_raw = first_choice.get("delta")
-    if not isinstance(delta_raw, dict):
-        return result
-    content_raw = delta_raw.get("content")
-    if isinstance(content_raw, str) and content_raw:
-        result["content"] = content_raw
-    reasoning_raw = delta_raw.get("reasoning_content")
-    if isinstance(reasoning_raw, str) and reasoning_raw:
-        result["reasoning"] = reasoning_raw
-    return result
-
-
 class DeepSeekBrain(Brain):
     """Прямой клиент DeepSeek API (OpenAI-compatible)."""
+
+    supports_native_tools = True
+    supports_streaming_tools = True
 
     def __init__(
         self,
@@ -217,17 +201,15 @@ class DeepSeekBrain(Brain):
             tool_calls=tool_calls,
         )
 
-    def generate_stream(
+    def generate_stream_events(
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
-    ) -> Iterator[str]:
-        if tools:
-            raise RuntimeError("Стриминг SlavikAI не поддерживает native tool calls.")
+    ) -> Iterator[StreamEvent]:
         cfg = self._resolve_config(config)
         headers = self._build_headers()
-        payload = {
+        payload: dict[str, JSONValue] = {
             "model": cfg.model,
             "messages": [
                 message.to_provider_dict() for message in self._inject_system(messages, cfg)
@@ -238,6 +220,9 @@ class DeepSeekBrain(Brain):
         thinking = self._build_thinking(cfg)
         if thinking is not None:
             payload["thinking"] = thinking
+        if tools:
+            payload["tools"] = [_tool_spec_to_provider_dict(tool) for tool in tools]
+            payload["tool_choice"] = "auto"
         if cfg.max_tokens is not None:
             payload["max_tokens"] = cfg.max_tokens
         if cfg.top_p is not None:
@@ -252,22 +237,4 @@ class DeepSeekBrain(Brain):
         )
         response.raise_for_status()
         response.encoding = "utf-8"
-
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if raw_line is None:
-                continue
-            line = raw_line.strip()
-            if not line or not line.startswith("data:"):
-                continue
-            data_part = line.removeprefix("data:").strip()
-            if not data_part or data_part == "[DONE]":
-                continue
-            try:
-                parsed = json.loads(data_part)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            delta_info = _extract_stream_delta(parsed)
-            if delta_info.get("content"):
-                yield delta_info["content"]
+        yield from iter_openai_sse_events(response.iter_lines(decode_unicode=True))

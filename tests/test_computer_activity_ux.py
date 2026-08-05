@@ -49,14 +49,6 @@ class _ScriptedBrain(Brain):
             return LLMResult(text="(empty)")
         return self._script.pop(0)
 
-    def generate_stream(
-        self,
-        messages: list[LLMMessage],
-        config: ModelConfig | None = None,
-        tools: list[ToolSpec] | None = None,
-    ) -> None:
-        raise NotImplementedError
-
 
 def _make_registry(tool_name: str, result: ToolResult) -> ToolRegistry:
     registry = ToolRegistry()

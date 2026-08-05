@@ -22,6 +22,8 @@ class SimpleBrain(Brain):
 
 
 class ToolLoopBrain(Brain):
+    supports_native_tools = True
+
     def __init__(self) -> None:
         self.calls = 0
         self.seen_tools: list[ToolSpec] = []
@@ -107,7 +109,7 @@ def test_agent_chat_response_can_use_read_only_native_tool_loop(tmp_path: Path) 
 
     assert "tool loop final" in response
     assert brain.calls == 2
-    assert brain.seen_tools == [
+    assert (
         ToolSpec(
             name="chat_lookup",
             description="Read-only chat lookup",
@@ -117,7 +119,8 @@ def test_agent_chat_response_can_use_read_only_native_tool_loop(tmp_path: Path) 
                 "required": ["query"],
             },
         )
-    ]
+        in brain.seen_tools
+    )
     assert brain.messages_seen[-1][-1].role == "tool"
 
 

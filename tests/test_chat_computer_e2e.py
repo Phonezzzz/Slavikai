@@ -15,7 +15,6 @@ No Docker daemon needed. No FakeContainerRunner. Default backend = LocalComputer
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 
 import pytest
 
@@ -64,16 +63,6 @@ class _ScriptedBrain(Brain):
         if not self._script:
             return LLMResult(text="(no more script)")
         return self._script.pop(0)
-
-    def generate_stream(
-        self,
-        messages: list[LLMMessage],
-        config: ModelConfig | None = None,
-        tools: list[ToolSpec] | None = None,
-    ) -> Iterator[str]:
-        result = self.generate(messages, config=config, tools=tools)
-        if result.text:
-            yield result.text
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────

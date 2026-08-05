@@ -34,6 +34,7 @@ from core.mwv.models import (
     WorkStatus,
 )
 from core.tracer import Tracer
+from llm.stream_model import Done, TextDelta
 from memory.categorized_memory_store import CategorizedMemoryStore
 from server.http_api import _resolve_workspace_root_candidate, create_app
 from server.ui_hub import UIHub
@@ -264,9 +265,10 @@ class TracedStreamingAgent(DummyAgent):
     def respond_stream(self, messages):
         del messages
         self._next_trace_id()
-        yield "Hello"
-        yield " "
-        yield "stream"
+        yield TextDelta(text="Hello")
+        yield TextDelta(text=" ")
+        yield TextDelta(text="stream")
+        yield Done()
 
     def respond(self, messages) -> str:
         del messages
@@ -302,8 +304,10 @@ class StreamNamedFileArtifactsAgent(DummyAgent):
             "Вот мини-приложение.\n\n",
             "Код (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n",
         ]
-        yield from parts
+        for part in parts:
+            yield TextDelta(text=part)
         self.last_stream_response_raw = "".join(parts)
+        yield Done()
 
     def respond(self, messages) -> str:
         del messages
@@ -322,9 +326,10 @@ class LateNamedFileStreamAgent(DummyAgent):
         del messages
         intro = "Это подготовка результата для пользователя. " * 8
         tail = "\nКод (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n"
-        yield intro
-        yield tail
+        yield TextDelta(text=intro)
+        yield TextDelta(text=tail)
         self.last_stream_response_raw = f"{intro}{tail}"
+        yield Done()
 
     def respond(self, messages) -> str:
         del messages
