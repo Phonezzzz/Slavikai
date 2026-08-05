@@ -41,8 +41,13 @@ from shared.policy_models import (
 
 DEFAULT_DB_PATH: Final[Path] = Path("memory/memory_companion.db")
 SCHEMA_VERSION: Final[int] = 4
+MIN_SCHEMA_VERSION: Final[int] = 4
 _SCHEMA_KEY: Final[str] = "schema_version"
 _MAX_TOOL_OUTPUT_PREVIEW_CHARS: Final[int] = 2_000
+
+
+_MIGRATIONS: dict[int, str] = {}
+"""Registry: old_version -> migrator_method_name. Пуст для baseline v4."""
 
 
 class MemoryCompanionSchemaError(RuntimeError):
@@ -856,7 +861,14 @@ class MemoryCompanionStore:
                 self.db_path, f"schema_version is not int: {row[0]!r}"
             ) from exc
 
-        if actual < 1 or actual > SCHEMA_VERSION:
+        if actual < MIN_SCHEMA_VERSION:
+            raise SchemaVersionMismatchError(
+                self.db_path,
+                expected=SCHEMA_VERSION,
+                actual=actual,
+            )
+
+        if actual > SCHEMA_VERSION:
             raise SchemaVersionMismatchError(self.db_path, expected=SCHEMA_VERSION, actual=actual)
 
         if actual < SCHEMA_VERSION:
@@ -881,19 +893,28 @@ class MemoryCompanionStore:
                 raise InvalidMemoryCompanionDbError(self.db_path, f"{table} table is missing.")
 
     def _migrate_schema(self, from_version: int) -> None:
-        backup_path = self.db_path.with_suffix(f".db.v{from_version}.bak")
+        if from_version < MIN_SCHEMA_VERSION:
+            raise SchemaVersionMismatchError(
+                self.db_path, expected=SCHEMA_VERSION, actual=from_version
+            )
+
         import shutil
 
+        backup_path = self.db_path.with_suffix(f".db.v{from_version}.bak")
         shutil.copy2(self.db_path, backup_path)
 
         try:
-            for version in range(from_version, SCHEMA_VERSION):
-                migrator = getattr(self, f"_migrate_v{version}_to_v{version + 1}", None)
-                if migrator is None:
+            version = from_version
+            while version < SCHEMA_VERSION:
+                method_name = _MIGRATIONS.get(version)
+                if method_name is None:
                     raise MemoryCompanionSchemaError(
                         f"No migration defined from v{version} to v{version + 1}"
                     )
+                migrator = getattr(self, method_name)
                 migrator()
+                version += 1
+
             self.conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = ?",
                 (str(SCHEMA_VERSION), _SCHEMA_KEY),
@@ -906,15 +927,6 @@ class MemoryCompanionStore:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA foreign_keys = ON")
             raise
-
-    def _migrate_v1_to_v2(self) -> None:
-        pass
-
-    def _migrate_v2_to_v3(self) -> None:
-        pass
-
-    def _migrate_v3_to_v4(self) -> None:
-        pass
 
     def _insert_chat(self, log: ChatInteractionLog) -> None:
         if log.interaction_kind is not InteractionKind.CHAT:
