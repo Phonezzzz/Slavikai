@@ -34,6 +34,7 @@ import { MessageRenderer } from "../../features/messages";
 import type { RenderableMessage } from "../../features/messages";
 import { TtsAudioPlayer, useTtsAudioPlayer } from "../../features/audio";
 import type { DecisionRespondChoice, MessageRuntimeMeta, UiDecision } from "../types";
+import type { ToolActivity } from "../../features/messages/types";
 import { getDecisionDisplayState } from "../decision-display";
 import { DecisionPanel } from "./decision-panel";
 import {
@@ -56,6 +57,7 @@ export interface CanvasMessage {
   attachments?: Array<{ name: string; mime: string; content: string }>;
   transient?: boolean;
   runtimeMeta?: MessageRuntimeMeta | null;
+  toolActivity?: ToolActivity[] | null;
 }
 
 export type CanvasComposerAttachment = {
@@ -105,6 +107,7 @@ function MessageBubble({ message }: { message: CanvasMessage }) {
     kind: "message",
     message,
     meta: message.runtimeMeta ?? null,
+    toolActivity: message.toolActivity ?? null,
   };
 
   return (

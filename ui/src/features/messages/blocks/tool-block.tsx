@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, Wrench } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, Loader2, Wrench, XCircle } from 'lucide-react';
 
 import { fetchTraceDiagnostics, type TraceDiagnostics } from '../trace-runtime';
 import { DetailsPanel } from './details-panel';
+import type { ToolActivity } from '../types';
 
 type ToolBlockProps = {
   traceId: string;
@@ -10,6 +11,7 @@ type ToolBlockProps = {
   open: boolean;
   onToggle: () => void;
   report: Record<string, unknown> | null;
+  activity?: ToolActivity | null;
 };
 
 const readString = (value: unknown): string | null => {
@@ -43,7 +45,7 @@ const readPayload = (call: Record<string, unknown>): unknown => {
   return null;
 };
 
-export function ToolBlock({ traceId, summary, open, onToggle, report }: ToolBlockProps) {
+export function ToolBlock({ traceId, summary, open, onToggle, report, activity }: ToolBlockProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<TraceDiagnostics | null>(null);
@@ -142,6 +144,72 @@ export function ToolBlock({ traceId, summary, open, onToggle, report }: ToolBloc
       </div>
     );
   }, [diagnostics?.events, diagnostics?.toolCalls, error, loading, report, traceId]);
+
+  const statusIcon = useMemo(() => {
+    if (!activity) return null;
+    switch (activity.status) {
+      case 'running':
+        return <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-400" />;
+      case 'success':
+        return <CheckCircle2 className="h-3.5 w-3.5 text-green-400" />;
+      case 'error':
+        return <XCircle className="h-3.5 w-3.5 text-red-400" />;
+      case 'approval_required':
+        return <AlertTriangle className="h-3.5 w-3.5 text-yellow-400" />;
+      default:
+        return null;
+    }
+  }, [activity]);
+
+  const statusLabel = useMemo(() => {
+    if (!activity) return null;
+    switch (activity.status) {
+      case 'running':
+        return 'running';
+      case 'success':
+        return 'success';
+      case 'error':
+        return 'error';
+      case 'approval_required':
+        return 'approval required';
+      default:
+        return null;
+    }
+  }, [activity]);
+
+  if (activity) {
+    return (
+      <div className="message-diagnostic message-diagnostic--tool message-diagnostic--compact">
+        <div className="message-diagnostic-summary">
+          <div className="message-diagnostic-left">
+            {statusIcon}
+            <span className="message-diagnostic-tool-name">{activity.toolName}</span>
+            <span className="message-diagnostic-divider" />
+            <span className={`message-diagnostic-status message-diagnostic-status--${activity.status}`}>
+              {statusLabel}
+            </span>
+            {activity.summary ? (
+              <>
+                <span className="message-diagnostic-divider" />
+                <span className="message-diagnostic-text">{activity.summary}</span>
+              </>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            onClick={onToggle}
+            className="message-diagnostic-toggle"
+            aria-expanded={open}
+            aria-label={open ? 'Hide tool details' : 'Show tool details'}
+          >
+            <span>Details</span>
+            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+          </button>
+        </div>
+        <DetailsPanel open={open}>{detailBody}</DetailsPanel>
+      </div>
+    );
+  }
 
   return (
     <div className="message-diagnostic message-diagnostic--tool">

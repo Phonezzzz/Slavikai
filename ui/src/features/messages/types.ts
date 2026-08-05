@@ -7,6 +7,15 @@ import type {
 
 export type MessageRenderContext = 'chat' | 'workspace';
 
+export type ToolStatus = 'running' | 'success' | 'error' | 'approval_required';
+
+export type ToolActivity = {
+  callId: string;
+  toolName: string;
+  status: ToolStatus;
+  summary: string | null;
+};
+
 export type RenderableMessageRole = 'user' | 'assistant';
 
 export type RenderableAttachment = {
@@ -33,6 +42,7 @@ export type RenderableMessage =
       kind: 'message';
       message: RenderableUiMessage;
       meta: MessageRuntimeMeta | null;
+      toolActivity?: ToolActivity[] | null;
     }
   | {
       kind: 'decision';
@@ -60,6 +70,7 @@ export type ToolMessageBlock = {
   traceId: string;
   summary: string;
   report: MwvReportUi | null;
+  activity: ToolActivity | null;
 };
 
 export type VerifierMessageBlock = {

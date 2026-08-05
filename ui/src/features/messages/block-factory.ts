@@ -5,6 +5,7 @@ import type {
   MessageRenderContext,
   RenderableMessage,
   TextMessageBlock,
+  ToolActivity,
   VerifierMessageBlock,
 } from './types';
 
@@ -131,6 +132,41 @@ const buildVerifierBlock = (meta: MessageRuntimeMeta | null): VerifierMessageBlo
   };
 };
 
+const buildToolBlocks = (
+  context: MessageRenderContext,
+  runtimeMeta: MessageRuntimeMeta | null,
+  liveActivity: ToolActivity[] | null | undefined,
+) => {
+  const blocks: MessageBlock[] = [];
+
+  if (context === 'chat' && liveActivity && liveActivity.length > 0) {
+    liveActivity.forEach((activity, index) => {
+      blocks.push({
+        kind: 'tool',
+        id: `tool-live-${index}`,
+        traceId: runtimeMeta?.traceId ?? '',
+        summary: activity.summary ?? `${activity.toolName} (${activity.status})`,
+        report: null,
+        activity,
+      });
+    });
+    return blocks;
+  }
+
+  if ((context === 'workspace' || context === 'chat') && runtimeMeta?.traceId) {
+    blocks.push({
+      kind: 'tool',
+      id: 'tool-0',
+      traceId: runtimeMeta.traceId,
+      summary: getToolSummary(runtimeMeta),
+      report: runtimeMeta.mwvReport,
+      activity: null,
+    });
+  }
+
+  return blocks;
+};
+
 export const buildMessageBlocks = (
   context: MessageRenderContext,
   message: RenderableMessage,
@@ -150,14 +186,8 @@ export const buildMessageBlocks = (
   const isFinal = runtimeMeta?.isFinal ?? !message.message.transient;
   const isAssistant = message.message.role === 'assistant';
 
-  if (context === 'workspace' && isAssistant && runtimeMeta?.traceId) {
-    output.push({
-      kind: 'tool',
-      id: 'tool-0',
-      traceId: runtimeMeta.traceId,
-      summary: getToolSummary(runtimeMeta),
-      report: runtimeMeta.mwvReport,
-    });
+  if (isAssistant) {
+    output.push(...buildToolBlocks(context, runtimeMeta, message.toolActivity));
   }
 
   if (context === 'workspace' && isAssistant) {

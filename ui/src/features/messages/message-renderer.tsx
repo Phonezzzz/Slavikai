@@ -110,6 +110,7 @@ export function MessageRenderer({
                   traceId={block.traceId}
                   summary={block.summary}
                   report={block.report}
+                  activity={block.activity}
                   open={Boolean(detailsOpenByKey[key])}
                   onToggle={() => toggleDetails(block.id)}
                 />

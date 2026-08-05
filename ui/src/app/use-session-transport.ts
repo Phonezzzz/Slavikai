@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { Artifact } from './components/artifacts-sidebar';
 import type {
@@ -31,6 +31,7 @@ import type {
   MessageRuntimeMeta,
   SessionSummary,
 } from './types';
+import type { ToolActivity } from '../features/messages/types';
 
 type UseSessionTransportOptions = {
   sessionHeader: string;
@@ -115,6 +116,7 @@ const createPendingCanvasMessage = (
 const createStreamingAssistantMessage = (
   streamingState: ChatStreamState | null,
   lane: MessageLane,
+  toolActivity: ToolActivity[] | null,
 ): CanvasMessage | null => {
   if (!streamingState || !streamingState.content.trim()) {
     return null;
@@ -138,6 +140,7 @@ const createStreamingAssistantMessage = (
       isFinal: false,
       mwvReport: null,
     },
+    toolActivity,
   };
 };
 
@@ -177,6 +180,8 @@ export function useSessionTransport({
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
+  const [toolStreamActivity, setToolStreamActivity] = useState<ToolActivity[]>([]);
+  const toolStreamActivityRef = useRef<ToolActivity[]>([]);
 
   const clearConversationState = () => {
     setChatMessages([]);
@@ -187,6 +192,7 @@ export function useSessionTransport({
     setPendingUserMessage(null);
     setPendingSessionId(null);
     setChatStreamingState(null);
+    setToolStreamActivity([]);
     setCancelling(false);
   };
 
@@ -350,6 +356,9 @@ export function useSessionTransport({
         decision?: unknown;
         workflow?: unknown;
         auto_state?: unknown;
+        call_id?: unknown;
+        name?: unknown;
+        result?: unknown;
       };
       const lane: MessageLane = payload.lane === 'workspace' ? 'workspace' : 'chat';
       if (lane === 'workspace') {
@@ -382,6 +391,52 @@ export function useSessionTransport({
       }
       if (envelope.type === 'chat.stream.done') {
         setChatStreamingState(null);
+        return;
+      }
+      if (envelope.type === 'chat.tool.started') {
+        const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
+        const toolName = typeof payload.name === 'string' ? payload.name : 'tool';
+        if (!callId) {
+          return;
+        }
+        setToolStreamActivity((prev) => {
+          const existing = prev.find((a) => a.callId === callId);
+          if (existing) {
+            return prev;
+          }
+          const next: ToolActivity[] = [
+            ...prev,
+            { callId, toolName, status: 'running', summary: null },
+          ];
+          toolStreamActivityRef.current = next;
+          return next;
+        });
+        return;
+      }
+      if (envelope.type === 'chat.tool.completed') {
+        const callId = typeof payload.call_id === 'string' ? payload.call_id : '';
+        const result =
+          payload.result && typeof payload.result === 'object'
+            ? (payload.result as { ok?: boolean; error?: string; summary?: string })
+            : null;
+        if (!callId) {
+          return;
+        }
+        const ok = result?.ok === true;
+        const summary: string = result?.summary ?? result?.error ?? (ok ? 'completed' : 'failed');
+        const status: ToolActivity['status'] = ok ? 'success' : 'error';
+        setToolStreamActivity((prev) => {
+          const next = prev.map((a) =>
+            a.callId === callId
+              ? { ...a, status, summary }
+              : a,
+          );
+          toolStreamActivityRef.current = next;
+          return next;
+        });
+        return;
+      }
+      if (envelope.type === 'chat.tool.arguments.delta') {
         return;
       }
       if (envelope.type === 'decision.packet') {
@@ -519,6 +574,8 @@ export function useSessionTransport({
       setPendingSessionId(null);
       setChatStreamingState(null);
       applySessionPayload(responsePayload, { applyDisplay: true });
+      setToolStreamActivity([]);
+      toolStreamActivityRef.current = [];
       await loadSessions();
       onStatusMessage(extractGenerationErrorMessage(responsePayload));
       if (forceCanvasForRequest) {
@@ -580,8 +637,8 @@ export function useSessionTransport({
     [pendingForChat],
   );
   const streamingAssistantCanvasMessage = useMemo(
-    () => createStreamingAssistantMessage(chatStreamingState, 'chat'),
-    [chatStreamingState],
+    () => createStreamingAssistantMessage(chatStreamingState, 'chat', toolStreamActivity.length > 0 ? toolStreamActivity : null),
+    [chatStreamingState, toolStreamActivity],
   );
   const artifacts = useMemo(
     () => buildArtifactsFromSources(sessionArtifacts, sessionFiles, streamingContentByArtifactId),

@@ -1039,3 +1039,155 @@ def test_ui_events_stream_stale_last_event_id_emits_resync_required() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_chat_tool_error_publishes_failure_summary() -> None:
+    class ErrorToolAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_stream_response_raw: str | None = None
+
+        def respond_stream(self, messages, cancellation_token=None):  # noqa: ANN001
+            del messages, cancellation_token
+            call = ToolCall(
+                id="call-err",
+                name="shell",
+                arguments={"command": "rm -rf /"},
+            )
+            yield ToolCallStarted(call_id=call.id, name=call.name, index=0)
+            yield ToolCallArgumentsDelta(
+                call_id=call.id,
+                delta='{"command":"rm -rf /"}',
+                index=0,
+            )
+            yield ToolCallCompleted(
+                call=call,
+                result=ToolResult.failure("command not allowed in safe mode"),
+            )
+            yield TextDelta(text="Ошибка")
+            self.last_stream_response_raw = "Ошибка"
+            yield Done()
+
+    async def run() -> None:
+        client = await _create_client(ErrorToolAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(f"/ui/api/chat/events/{session_id}", timeout=5)
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Выполни команду"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+
+            events = await _read_sse_events(stream_resp, max_events=16)
+            event_types = [event.get("type") for event in events]
+            assert "chat.tool.started" in event_types
+            assert "chat.tool.completed" in event_types
+            completed = next(
+                event for event in events if event.get("type") == "chat.tool.completed"
+            )
+            payload = completed.get("payload")
+            assert isinstance(payload, dict)
+            assert payload.get("name") == "shell"
+            result = payload.get("result")
+            assert isinstance(result, dict)
+            assert result.get("ok") is False
+            assert isinstance(result.get("error"), str)
+            assert result.get("summary") == "command not allowed in safe mode"
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_chat_tool_multiple_sequential_calls() -> None:
+    class MultiToolAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_stream_response_raw: str | None = None
+
+        def respond_stream(self, messages, cancellation_token=None):  # noqa: ANN001
+            del messages, cancellation_token
+            call1 = ToolCall(
+                id="call-read",
+                name="workspace_read",
+                arguments={"path": "README.md"},
+            )
+            call2 = ToolCall(
+                id="call-write",
+                name="workspace_write",
+                arguments={"path": "out.txt", "content": "done"},
+            )
+            yield ToolCallStarted(call_id=call1.id, name=call1.name, index=0)
+            yield ToolCallCompleted(
+                call=call1,
+                result=ToolResult.success({"output": "file content here"}),
+            )
+            yield ToolCallStarted(call_id=call2.id, name=call2.name, index=1)
+            yield ToolCallCompleted(
+                call=call2,
+                result=ToolResult.success({}),
+            )
+            yield TextDelta(text="Выполнено два действия")
+            self.last_stream_response_raw = "Выполнено два действия"
+            yield Done()
+
+    async def run() -> None:
+        client = await _create_client(MultiToolAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(f"/ui/api/chat/events/{session_id}", timeout=5)
+            assert stream_resp.status == 200
+            _ = await _read_first_sse_event(stream_resp)
+
+            send_resp = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "Сделай два действия"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert send_resp.status == 200
+
+            events = await _read_sse_events(stream_resp, max_events=24)
+            started = [e for e in events if e.get("type") == "chat.tool.started"]
+            completed = [e for e in events if e.get("type") == "chat.tool.completed"]
+            assert len(started) == 2
+            assert len(completed) == 2
+            started_names = [s.get("payload", {}).get("name") for s in started]
+            assert "workspace_read" in started_names
+            assert "workspace_write" in started_names
+            completed_names = [c.get("payload", {}).get("name") for c in completed]
+            assert "workspace_read" in completed_names
+            assert "workspace_write" in completed_names
+            read_completed = next(
+                c for c in completed if c.get("payload", {}).get("name") == "workspace_read"
+            )
+            read_result = read_completed.get("payload", {}).get("result")
+            assert isinstance(read_result, dict)
+            assert read_result.get("ok") is True
+            assert read_result.get("summary") == "file content here"
+            write_completed = next(
+                c for c in completed if c.get("payload", {}).get("name") == "workspace_write"
+            )
+            write_result = write_completed.get("payload", {}).get("result")
+            assert isinstance(write_result, dict)
+            assert write_result.get("ok") is True
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
