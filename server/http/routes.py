@@ -115,6 +115,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/workspace/root/select", workspace.handle_ui_workspace_root_select)
     app.router.add_post("/ui/api/workspace/index", workspace.handle_ui_workspace_index_run)
     app.router.add_get("/ui/api/workspace/git-diff", workspace.handle_ui_workspace_git_diff)
+    app.router.add_get("/ui/api/workspace/browse", workspace.handle_ui_workspace_browse)
     app.router.add_get("/ui/api/workspace/tree", workspace.handle_ui_workspace_tree)
     app.router.add_get("/ui/api/workspace/file", workspace.handle_ui_workspace_file_get)
     app.router.add_put("/ui/api/workspace/file", workspace.handle_ui_workspace_file_put)

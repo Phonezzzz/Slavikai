@@ -35,6 +35,7 @@ import {
   type QuickOpenIndexCache,
 } from '../../features/workspace/workspace-quick-open-index';
 import { WorkspaceToolbar } from '../../features/workspace/workspace-toolbar';
+import { ProjectPicker } from '../../features/workspace/project-picker';
 import { useWorkspaceLayout } from '../../features/workspace/use-workspace-layout';
 import {
   deleteWorkspaceFile,
@@ -130,9 +131,8 @@ export function WorkspaceIde({
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [gitDiff, setGitDiff] = useState<string | null>(null);
 
-  const [rootPickerOpen, setRootPickerOpen] = useState(false);
-  const [rootInput, setRootInput] = useState('');
-  const [rootBusy, setRootBusy] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [projectRootBusy, setProjectRootBusy] = useState(false);
   const [indexing, setIndexing] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [quickOpenQuery, setQuickOpenQuery] = useState('');
@@ -227,7 +227,7 @@ export function WorkspaceIde({
   }, [sessionId]);
 
   useEffect(() => {
-    setRootInput(workspaceRoot);
+    // workspaceRoot synced from parent; picker reads it directly
   }, [sessionId, workspaceRoot]);
 
   useEffect(() => {
@@ -805,25 +805,29 @@ export function WorkspaceIde({
     }
   };
 
-  const handleSelectRoot = async () => {
-    const nextRoot = rootInput.trim();
-    if (!nextRoot || rootBusy || !sessionId) {
+  const handleApplyProjectRoot = async (nextRoot: string) => {
+    const trimmed = nextRoot.trim();
+    if (!trimmed || projectRootBusy || !sessionId) {
       return;
     }
-    setRootBusy(true);
+    if (trimmed === workspaceRoot.trim()) {
+      setProjectPickerOpen(false);
+      return;
+    }
+    setProjectRootBusy(true);
     try {
-      const result = await postWorkspaceRootSelect(nextRoot, requestHeaders);
+      const result = await postWorkspaceRootSelect(trimmed, requestHeaders);
       if (result.pendingApproval) {
         setTerminalLines((prev) => [
           ...prev,
           `[${terminalTimestamp()}] pending approval: switch Computer root`,
         ]);
-        setRootPickerOpen(false);
+        setProjectPickerOpen(false);
         return;
       }
-      const appliedRoot = result.rootPath.trim() || nextRoot;
+      const appliedRoot = result.rootPath.trim() || trimmed;
       onApplyWorkspaceRoot(appliedRoot);
-      setRootPickerOpen(false);
+      setProjectPickerOpen(false);
       setOpenFiles([]);
       setActiveFileId(null);
       setGitDiff(null);
@@ -833,7 +837,7 @@ export function WorkspaceIde({
       const message = error instanceof Error ? error.message : 'Failed to change Computer root.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
     } finally {
-      setRootBusy(false);
+      setProjectRootBusy(false);
     }
   };
 
@@ -1046,23 +1050,15 @@ export function WorkspaceIde({
         sessionPolicyLabel={sessionPolicyLabel}
         sessionYoloActive={sessionYoloActive}
         sessionSafeMode={sessionSafeMode}
-        rootPickerOpen={rootPickerOpen}
-        rootInput={rootInput}
-        rootBusy={rootBusy}
         statusMessage={statusMessage}
         onBackToChat={onBackToChat}
         onOpenSessionDrawer={onOpenSessionDrawer}
-        onToggleRootPicker={() => setRootPickerOpen((prev) => !prev)}
+        onOpenProjectPicker={() => setProjectPickerOpen(true)}
         onReindex={() => {
           void handleReindex();
         }}
         onOpenRepositoryPanel={onOpenRepositoryPanel}
         onOpenQuickOpen={openQuickOpen}
-        onRootInputChange={setRootInput}
-        onApplyRoot={() => {
-          void handleSelectRoot();
-        }}
-        onCancelRootPicker={() => setRootPickerOpen(false)}
       />
 
       <div className="h-8 border-b border-[#1f1f24] flex items-center px-2 gap-0.5 shrink-0 overflow-x-auto">
@@ -1284,6 +1280,19 @@ export function WorkspaceIde({
           </div>
         )}
       </div>
+
+      {projectPickerOpen ? (
+        <ProjectPicker
+          sessionId={sessionId}
+          sessionHeader={sessionHeader}
+          workspaceRoot={workspaceRoot}
+          loading={projectRootBusy}
+          onApplyRoot={(path) => {
+            void handleApplyProjectRoot(path);
+          }}
+          onClose={() => setProjectPickerOpen(false)}
+        />
+      ) : null}
 
       <WorkspaceQuickOpen
         open={quickOpenOpen}

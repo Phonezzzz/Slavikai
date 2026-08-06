@@ -10,6 +10,7 @@ from core.approval_policy import ApprovalCategory, ApprovalRequired
 from server import http_api as api
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
+from server.http.common.workspace_paths import browse_directories
 from server.http_api import (
     POLICY_PROFILES,
     UI_SESSION_HEADER,
@@ -242,6 +243,40 @@ async def handle_ui_workspace_git_diff(request: web.Request) -> web.Response:
             "diff": diff,
             "error": error,
             "ok": error is None,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_browse(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    path_raw = request.query.get("path", "")
+    _, effective_policy = await _load_effective_session_security(hub=hub, session_id=session_id)
+    profile = _normalize_policy_profile(effective_policy.get("profile"))
+    workspace_root = await _workspace_root_for_session(hub, session_id)
+    try:
+        result = browse_directories(
+            path_raw,
+            policy_profile=profile,
+            workspace_root=workspace_root,
+        )
+    except ValueError as exc:
+        return error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    response = json_response(
+        {
+            "session_id": session_id,
+            **result,
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id

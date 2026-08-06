@@ -9,19 +9,13 @@ type WorkspaceToolbarProps = {
   sessionPolicyLabel: string;
   sessionYoloActive: boolean;
   sessionSafeMode: boolean;
-  rootPickerOpen: boolean;
-  rootInput: string;
-  rootBusy: boolean;
   statusMessage: string | null | undefined;
   onBackToChat: () => void;
   onOpenSessionDrawer: () => void;
-  onToggleRootPicker: () => void;
+  onOpenProjectPicker: () => void;
   onReindex: () => void;
   onOpenRepositoryPanel: () => void;
   onOpenQuickOpen: () => void;
-  onRootInputChange: (value: string) => void;
-  onApplyRoot: () => void;
-  onCancelRootPicker: () => void;
 };
 
 export function WorkspaceToolbar({
@@ -30,19 +24,13 @@ export function WorkspaceToolbar({
   workspaceRoot,
   sessionPolicyLabel,
   sessionSafeMode,
-  rootPickerOpen,
-  rootInput,
-  rootBusy,
   statusMessage,
   onBackToChat,
   onOpenSessionDrawer,
-  onToggleRootPicker,
+  onOpenProjectPicker,
   onReindex,
   onOpenRepositoryPanel,
   onOpenQuickOpen,
-  onRootInputChange,
-  onApplyRoot,
-  onCancelRootPicker,
 }: WorkspaceToolbarProps) {
   const policyBadge = `Session policy: ${sessionPolicyLabel}`;
   const policyClass = sessionPolicyLabel === 'YOLO' ? 'text-red-300' : 'text-[#8f8f98]';
@@ -74,10 +62,13 @@ export function WorkspaceToolbar({
           </div>
           <span className="text-[#333]">·</span>
           <button
-            onClick={onToggleRootPicker}
-            className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2.5 py-1 text-[12px] text-[#c7c7d0] hover:bg-[#181820]"
+            onClick={onOpenProjectPicker}
+            className="inline-flex max-w-[280px] items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2.5 py-1 text-[12px] text-[#c7c7d0] hover:bg-[#181820]"
+            title={workspaceRoot || 'Open project'}
           >
-            Project Root
+            <span className="truncate">
+              {workspaceRoot ? compactPath(workspaceRoot, 40) : 'Open Project'}
+            </span>
           </button>
           <button
             onClick={onReindex}
@@ -120,30 +111,6 @@ export function WorkspaceToolbar({
           </button>
         </div>
       </div>
-
-      {rootPickerOpen ? (
-        <div className="border-b border-[#1f1f24] px-3 py-2 flex items-center gap-2 bg-[#0d0d12]">
-          <input
-            value={rootInput}
-            onChange={(event) => onRootInputChange(event.target.value)}
-            placeholder="/path/to/project/root"
-            className="flex-1 rounded-md border border-[#2a2a31] bg-[#111117] px-3 py-1.5 text-[12px] text-[#d0d0d8] outline-none"
-          />
-          <button
-            onClick={onApplyRoot}
-            disabled={rootBusy || !rootInput.trim()}
-            className="rounded-md border border-[#2a2a31] bg-[#15151b] px-3 py-1.5 text-[12px] text-[#d0d0d8] disabled:opacity-50"
-          >
-            {rootBusy ? 'Applying...' : 'Apply'}
-          </button>
-          <button
-            onClick={onCancelRootPicker}
-            className="rounded-md border border-[#2a2a31] bg-[#111117] px-3 py-1.5 text-[12px] text-[#b3b3bc]"
-          >
-            Cancel
-          </button>
-        </div>
-      ) : null}
 
       {statusMessage ? (
         <div className="border-b border-[#1f1f24] px-3 py-2 text-[12px] text-[#8d8d96]">{statusMessage}</div>

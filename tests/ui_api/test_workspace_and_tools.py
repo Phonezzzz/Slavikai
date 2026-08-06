@@ -680,3 +680,161 @@ def test_ui_project_github_import_runs_after_approval(monkeypatch, tmp_path) -> 
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_workspace_browse_lists_directories_in_sandbox(tmp_path) -> None:
+    sandbox_root = tmp_path / "sandbox"
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    project_a = sandbox_root / "project-a"
+    project_a.mkdir(parents=True, exist_ok=True)
+    project_b = sandbox_root / "project-b"
+    project_b.mkdir(parents=True, exist_ok=True)
+    (sandbox_root / "readme.txt").write_text("hello", encoding="utf-8")
+    (project_a / "main.py").write_text("print(1)", encoding="utf-8")
+    empty_dir = sandbox_root / "empty-dir"
+    empty_dir.mkdir(parents=True, exist_ok=True)
+
+    async def run() -> None:
+        app = create_app(
+            agent=None,
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(sandbox_root))
+
+            browse_resp = await client.get(
+                "/ui/api/workspace/browse",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert browse_resp.status == 200
+            browse_payload = await browse_resp.json()
+            assert browse_payload.get("path") == str(sandbox_root)
+            entries = browse_payload.get("entries")
+            assert isinstance(entries, list)
+            entry_names = [e["name"] for e in entries]
+            assert "project-a" in entry_names
+            assert "project-b" in entry_names
+            assert "empty-dir" in entry_names
+            assert "readme.txt" not in entry_names
+            for entry in entries:
+                assert not entry["name"].startswith(".")
+            assert browse_payload.get("truncated") is False
+            parent = browse_payload.get("parent")
+            assert isinstance(parent, str) or parent is None
+
+            breadcrumbs = browse_payload.get("breadcrumbs")
+            assert isinstance(breadcrumbs, list)
+            assert len(breadcrumbs) >= 1
+
+            sub_resp = await client.get(
+                "/ui/api/workspace/browse?path=project-a",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert sub_resp.status == 200
+            sub_payload = await sub_resp.json()
+            assert sub_payload.get("path") == str(project_a)
+            sub_entries = sub_payload.get("entries")
+            assert isinstance(sub_entries, list)
+            assert sub_entries == []
+            assert sub_payload.get("parent") == str(sandbox_root)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_browse_rejects_outside_sandbox() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            browse_resp = await client.get(
+                "/ui/api/workspace/browse?path=/etc",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert browse_resp.status == 400
+            browse_payload = await browse_resp.json()
+            error = browse_payload.get("error")
+            assert isinstance(error, dict)
+            message = error.get("message")
+            assert isinstance(message, str)
+            assert "разрешённой области" in message or "sandbox" in message.lower()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_workspace_browse_rejects_symlink_escape(tmp_path) -> None:
+    sandbox_root = tmp_path / "sandbox"
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    symlink_target = sandbox_root / "escape-link"
+    symlink_target.symlink_to(outside_dir)
+
+    async def run() -> None:
+        app = create_app(
+            agent=None,
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        )
+        server = TestServer(app)
+        client = TestClient(server, headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(sandbox_root))
+
+            browse_resp = await client.get(
+                "/ui/api/workspace/browse",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert browse_resp.status == 200
+            browse_payload = await browse_resp.json()
+            entries = browse_payload.get("entries")
+            assert isinstance(entries, list)
+            entry_names = [e["name"] for e in entries]
+            assert "escape-link" not in entry_names
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_browse_directories_respects_max_entries(tmp_path) -> None:
+    sandbox_root = tmp_path / "sandbox"
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    for idx in range(250):
+        (sandbox_root / f"dir-{idx:03d}").mkdir(parents=True, exist_ok=True)
+
+    from server.http.common.workspace_paths import browse_directories
+
+    result = browse_directories(
+        str(sandbox_root),
+        policy_profile="yolo",
+        workspace_root=sandbox_root,
+        max_entries=50,
+    )
+    entries = result["entries"]
+    assert len(entries) == 50
+    assert result["truncated"] is True

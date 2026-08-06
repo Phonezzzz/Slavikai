@@ -370,3 +370,53 @@ export const postWorkspaceIndex = async (
     skipped: getNumber(payload, 'skipped') ?? 0,
   };
 };
+
+export type BrowseEntry = {
+  name: string;
+  path: string;
+};
+
+export type BrowseResult = {
+  path: string;
+  parent: string | null;
+  entries: BrowseEntry[];
+  truncated: boolean;
+  breadcrumbs: BrowseEntry[];
+  error?: string;
+};
+
+export const fetchWorkspaceBrowse = async (
+  path: string,
+  headers: Record<string, string>,
+): Promise<BrowseResult> => {
+  const url = '/ui/api/workspace/browse' + (path ? '?path=' + encodeURIComponent(path) : '');
+  const { response, payload } = await fetchJson(url, { headers });
+  if (!response.ok) {
+    throwWorkspaceError(payload, 'Failed to browse directories.');
+  }
+  return {
+    path: getString(payload, 'path') ?? '',
+    parent: getString(payload, 'parent') ?? null,
+    entries: Array.isArray((payload as Record<string, unknown>).entries)
+      ? ((payload as Record<string, unknown>).entries as Array<Record<string, unknown>>)
+        .filter(
+          (e): e is BrowseEntry =>
+            typeof e.name === 'string' && typeof e.path === 'string',
+        )
+      : [],
+    truncated: (payload as Record<string, unknown>).truncated === true,
+    breadcrumbs: Array.isArray(
+      (payload as Record<string, unknown>).breadcrumbs,
+    )
+      ? (
+        (payload as Record<string, unknown>).breadcrumbs as Array<
+          Record<string, unknown>
+        >
+      )
+        .filter(
+          (b): b is BrowseEntry =>
+            typeof b.name === 'string' && typeof b.path === 'string',
+        )
+      : [],
+  };
+};
