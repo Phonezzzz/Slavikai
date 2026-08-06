@@ -610,18 +610,10 @@ def test_ui_decision_respond_project_command_github_import_resumes_clone_and_ind
     def fake_index(relative_path: str) -> tuple[bool, str]:
         return True, "Code=1, Docs=1"
 
-    monkeypatch.setattr(
-        "server.http.handlers.decision._parse_github_import_args", fake_parse
-    )
-    monkeypatch.setattr(
-        "server.http.handlers.decision._resolve_github_target", fake_resolve
-    )
-    monkeypatch.setattr(
-        "server.http.handlers.decision._clone_github_repository", fake_clone
-    )
-    monkeypatch.setattr(
-        "server.http.handlers.decision._index_imported_project", fake_index
-    )
+    monkeypatch.setattr("server.http.handlers.decision._parse_github_import_args", fake_parse)
+    monkeypatch.setattr("server.http.handlers.decision._resolve_github_target", fake_resolve)
+    monkeypatch.setattr("server.http.handlers.decision._clone_github_repository", fake_clone)
+    monkeypatch.setattr("server.http.handlers.decision._index_imported_project", fake_index)
 
     async def run() -> None:
         client = await _create_client(DummyAgent())

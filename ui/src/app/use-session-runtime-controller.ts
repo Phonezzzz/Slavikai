@@ -568,9 +568,29 @@ export function useSessionRuntimeController({
       await loadConversation(sessionId);
       saveLastSessionId(sessionId);
       onStatusMessage(null);
+      _reconcileWorkspaceRoot(sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load selected chat.';
       onStatusMessage(message);
+    }
+  };
+
+  const _reconcileWorkspaceRoot = async (sessionId: string): Promise<void> => {
+    try {
+      const rootResponse = await fetch('/ui/api/workspace/root', {
+        headers: { [sessionHeader]: sessionId },
+      });
+      if (rootResponse.ok) {
+        const rootPayload: unknown = await rootResponse.json();
+        const rootPath = parseWorkspaceRoot(
+          (rootPayload as { root_path?: unknown }).root_path,
+        );
+        if (rootPath) {
+          setWorkspaceRoot(rootPath);
+        }
+      }
+    } catch {
+      // non-critical reconciliation; root already set from session load
     }
   };
 
@@ -587,6 +607,7 @@ export function useSessionRuntimeController({
       setDecisionError(null);
       await loadConversation(nextSession);
       saveLastSessionId(nextSession);
+      _reconcileWorkspaceRoot(nextSession);
       await loadSessions();
       if (!created.selectedModel && providerModels.length > 0) {
         const lastModel = loadLastModel();

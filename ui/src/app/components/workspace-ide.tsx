@@ -128,6 +128,7 @@ export function WorkspaceIde({
   ]);
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalBusy, setTerminalBusy] = useState(false);
+  const [gitDiff, setGitDiff] = useState<string | null>(null);
 
   const [rootPickerOpen, setRootPickerOpen] = useState(false);
   const [rootInput, setRootInput] = useState('');
@@ -222,6 +223,7 @@ export function WorkspaceIde({
     setRecentPaths([]);
     quickOpenFileIndexRef.current = null;
     quickOpenLoadedForRoot.current = null;
+    setGitDiff(null);
   }, [sessionId]);
 
   useEffect(() => {
@@ -504,6 +506,7 @@ export function WorkspaceIde({
     quickOpenFileIndexRef.current = null;
     setQuickOpenItems([]);
     setQuickOpenPartial(false);
+    setGitDiff(null);
   }, [workspaceRoot]);
 
   useEffect(() => {
@@ -823,6 +826,7 @@ export function WorkspaceIde({
       setRootPickerOpen(false);
       setOpenFiles([]);
       setActiveFileId(null);
+      setGitDiff(null);
       requestTreeLoad(undefined, 'root_change');
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] Computer root: ${appliedRoot}`]);
     } catch (error) {
@@ -1159,6 +1163,10 @@ export function WorkspaceIde({
               <div className="text-[12px] text-[#9a9aa3]">
                 Pending decision: <span className="text-amber-300">{decision.summary}</span>
               </div>
+            ) : gitDiff ? (
+              <pre className="text-[11px] font-mono text-[#9a9aa3] whitespace-pre-wrap break-all">
+                {gitDiff}
+              </pre>
             ) : (
               <div className="text-[12px] text-[#777]">No pending changes.</div>
             )}

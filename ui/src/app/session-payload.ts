@@ -244,15 +244,20 @@ export const parseDecisionResumeWorkspaceRoot = (value: unknown): string | null 
     source_endpoint?: unknown;
     data?: unknown;
   };
-  if (candidate.source_endpoint !== 'workspace.root_select') {
-    return null;
-  }
   if (!candidate.data || typeof candidate.data !== 'object') {
     return null;
   }
-  const rootPath = (candidate.data as { root_path?: unknown }).root_path;
-  const normalized = parseWorkspaceRoot(rootPath);
-  return normalized || null;
+  if (candidate.source_endpoint === 'workspace.root_select') {
+    const rootPath = (candidate.data as { root_path?: unknown }).root_path;
+    const normalized = parseWorkspaceRoot(rootPath);
+    return normalized || null;
+  }
+  if (candidate.source_endpoint === 'project.command') {
+    const rootApplied = (candidate.data as { root_applied?: unknown }).root_applied;
+    const normalized = parseWorkspaceRoot(rootApplied);
+    return normalized || null;
+  }
+  return null;
 };
 
 export const parseProviderModels = (value: unknown): ProviderModels[] => {

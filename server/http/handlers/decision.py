@@ -593,9 +593,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     if indexed:
                         response_text = f"GitHub import completed. {index_result}"
                     else:
-                        response_text = (
-                            f"GitHub import completed (index warning: {index_result})"
-                        )
+                        response_text = f"GitHub import completed (index warning: {index_result})"
                 assistant_message = hub.create_message(
                     role="assistant",
                     content=response_text,
