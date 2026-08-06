@@ -14,8 +14,8 @@ type WorkspaceToolbarProps = {
   onOpenSessionDrawer: () => void;
   onOpenProjectPicker: () => void;
   onReindex: () => void;
+  onSwitchToFiles: () => void;
   onOpenRepositoryPanel: () => void;
-  onOpenQuickOpen: () => void;
 };
 
 export function WorkspaceToolbar({
@@ -29,8 +29,8 @@ export function WorkspaceToolbar({
   onOpenSessionDrawer,
   onOpenProjectPicker,
   onReindex,
+  onSwitchToFiles,
   onOpenRepositoryPanel,
-  onOpenQuickOpen,
 }: WorkspaceToolbarProps) {
   const policyBadge = `Session policy: ${sessionPolicyLabel}`;
   const policyClass = sessionPolicyLabel === 'YOLO' ? 'text-red-300' : 'text-[#8f8f98]';
@@ -71,6 +71,12 @@ export function WorkspaceToolbar({
             </span>
           </button>
           <button
+            onClick={onSwitchToFiles}
+            className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2.5 py-1 text-[12px] text-[#c7c7d0] hover:bg-[#181820]"
+          >
+            Files
+          </button>
+          <button
             onClick={onReindex}
             disabled={indexing}
             className="inline-flex items-center gap-1 rounded-md border border-[#2a2a31] bg-[#121217] px-2.5 py-1 text-[12px] text-[#c7c7d0] hover:bg-[#181820] disabled:opacity-50"
@@ -78,20 +84,12 @@ export function WorkspaceToolbar({
             {indexing ? 'Indexing...' : 'Re-index'}
           </button>
           {workspaceRoot ? (
-            <button
-              onClick={onOpenQuickOpen}
-              className="inline-flex max-w-[420px] items-center gap-1 rounded-md border border-[#2a2a31] bg-[#111117] px-2 py-1 text-left text-[11px] text-[#8f8f99] hover:bg-[#171720]"
-              title="Quick Open (Ctrl+Space, Ctrl+D)"
-              aria-label="Quick Open (Ctrl+Space, Ctrl+D)"
-            >
+            <div className="inline-flex max-w-[420px] items-center gap-1 rounded-md border border-[#2a2a31] bg-[#111117] px-2 py-1 text-left text-[11px] text-[#8f8f99]">
               <span className="truncate">{compactPath(workspaceRoot, 60)}</span>
-              <span className="rounded border border-[#32405d] bg-[#182137] px-1 py-0.5 text-[10px] text-[#9ec0ff]">
-                Ctrl+Space
-              </span>
               <span className="rounded border border-[#2d2d39] bg-[#171721] px-1 py-0.5 text-[10px] text-[#9a9aa8]">
-                Ctrl+D
+                Ctrl+P
               </span>
-            </button>
+            </div>
           ) : null}
         </div>
 

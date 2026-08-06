@@ -420,3 +420,130 @@ export const fetchWorkspaceBrowse = async (
       : [],
   };
 };
+
+export type GitFileEntry = {
+  path: string;
+  status: string;
+};
+
+export type GitStatusResult = {
+  ok: boolean;
+  error?: string | null;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  staged: GitFileEntry[];
+  unstaged: GitFileEntry[];
+  untracked: GitFileEntry[];
+  conflicted: GitFileEntry[];
+};
+
+export const fetchWorkspaceGitStatus = async (
+  headers: Record<string, string>,
+): Promise<GitStatusResult> => {
+  const { response, payload } = await fetchJson('/ui/api/workspace/git/status', {
+    headers,
+  });
+  if (!response.ok) {
+    throwWorkspaceError(payload, 'Failed to get git status.');
+  }
+  const data = payload as Record<string, unknown>;
+  const parseEntries = (key: string): GitFileEntry[] =>
+    Array.isArray(data[key])
+      ? (data[key] as Array<Record<string, unknown>>)
+        .filter(
+          (e): e is GitFileEntry =>
+            typeof e.path === 'string' && typeof e.status === 'string',
+        )
+      : [];
+  return {
+    ok: data.ok === true,
+    error: typeof data.error === 'string' ? data.error : null,
+    branch: typeof data.branch === 'string' ? data.branch : null,
+    upstream: typeof data.upstream === 'string' ? data.upstream : null,
+    ahead: typeof data.ahead === 'number' ? data.ahead : 0,
+    behind: typeof data.behind === 'number' ? data.behind : 0,
+    staged: parseEntries('staged'),
+    unstaged: parseEntries('unstaged'),
+    untracked: parseEntries('untracked'),
+    conflicted: parseEntries('conflicted'),
+  };
+};
+
+export const postWorkspaceGitStage = async (
+  paths: string[] | null,
+  all: boolean,
+  headers: Record<string, string>,
+): Promise<{ pendingApproval: boolean; ok: boolean; message: string }> => {
+  const { response, payload } = await fetchJson('/ui/api/workspace/git/stage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(all ? { all: true } : { paths }),
+  });
+  if (response.status === 202) {
+    return { pendingApproval: true, ok: false, message: 'Approval required.' };
+  }
+  if (!response.ok) {
+    throwWorkspaceError(payload, 'Failed to stage files.');
+  }
+  const data = payload as Record<string, unknown>;
+  return {
+    pendingApproval: false,
+    ok: data.ok === true,
+    message: typeof data.message === 'string' ? data.message : '',
+  };
+};
+
+export const postWorkspaceGitUnstage = async (
+  paths: string[] | null,
+  all: boolean,
+  headers: Record<string, string>,
+): Promise<{ pendingApproval: boolean; ok: boolean; message: string }> => {
+  const { response, payload } = await fetchJson(
+    '/ui/api/workspace/git/unstage',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(all ? { all: true } : { paths }),
+    },
+  );
+  if (response.status === 202) {
+    return { pendingApproval: true, ok: false, message: 'Approval required.' };
+  }
+  if (!response.ok) {
+    throwWorkspaceError(payload, 'Failed to unstage files.');
+  }
+  const data = payload as Record<string, unknown>;
+  return {
+    pendingApproval: false,
+    ok: data.ok === true,
+    message: typeof data.message === 'string' ? data.message : '',
+  };
+};
+
+export const postWorkspaceGitCommit = async (
+  message: string,
+  headers: Record<string, string>,
+): Promise<{ pendingApproval: boolean; ok: boolean; message: string }> => {
+  const { response, payload } = await fetchJson(
+    '/ui/api/workspace/git/commit',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ message }),
+    },
+  );
+  if (response.status === 202) {
+    return { pendingApproval: true, ok: false, message: 'Approval required.' };
+  }
+  if (!response.ok) {
+    throwWorkspaceError(payload, 'Failed to commit.');
+  }
+  const data = payload as Record<string, unknown>;
+  return {
+    pendingApproval: false,
+    ok: data.ok === true,
+    message: typeof data.message === 'string' ? data.message : '',
+  };
+};

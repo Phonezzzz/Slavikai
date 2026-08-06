@@ -538,10 +538,7 @@ export function WorkspaceIde({
         return;
       }
 
-      const key = event.key.toLowerCase();
-      const isPrimaryShortcut = event.code === 'Space' || key === ' ';
-      const isSecondaryShortcut = key === 'd';
-      if (!isPrimaryShortcut && !isSecondaryShortcut) {
+      if (event.key.toLowerCase() !== 'p') {
         return;
       }
       event.preventDefault();
@@ -1057,8 +1054,8 @@ export function WorkspaceIde({
         onReindex={() => {
           void handleReindex();
         }}
+        onSwitchToFiles={() => setComputerTab('files')}
         onOpenRepositoryPanel={onOpenRepositoryPanel}
-        onOpenQuickOpen={openQuickOpen}
       />
 
       <div className="h-8 border-b border-[#1f1f24] flex items-center px-2 gap-0.5 shrink-0 overflow-x-auto">

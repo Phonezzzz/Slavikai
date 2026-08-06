@@ -169,7 +169,7 @@ export function RepositoryPanel({
           <div>
             <h3 className="text-sm font-medium text-zinc-100">Import Repository</h3>
             <p className="mt-1 text-xs text-zinc-400">
-              Импорт выполняется через backend command lane и approval lifecycle.
+              Импорт выполняется через approval lifecycle. Подтверждение — в DecisionPanel.
             </p>
           </div>
 

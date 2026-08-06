@@ -10,6 +10,12 @@ from core.approval_policy import ApprovalCategory, ApprovalRequired
 from server import http_api as api
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
+from server.http.common.workspace_git import (
+    git_commit,
+    git_stage,
+    git_status,
+    git_unstage,
+)
 from server.http.common.workspace_paths import browse_directories
 from server.http_api import (
     POLICY_PROFILES,
@@ -277,6 +283,178 @@ async def handle_ui_workspace_browse(request: web.Request) -> web.Response:
         {
             "session_id": session_id,
             **result,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_git_status(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    root_path = await _workspace_root_for_session(hub, session_id)
+    result = git_status(root_path)
+    response = json_response(
+        {
+            "session_id": session_id,
+            "root_path": str(root_path),
+            **result,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def _check_git_write_approval(
+    request: web.Request,
+    hub: UIHub,
+    session_id: str,
+    operation: str,
+    detail: str,
+) -> web.Response | None:
+    from core.approval_policy import ApprovalPrompt, ApprovalRequest
+
+    session_store = request.app["session_store"]
+    agent = await api._resolve_agent(request)
+    if agent is None:
+        return error_response(
+            status=409,
+            message="Model not selected.",
+            error_type="invalid_request_error",
+            code="model_not_selected",
+        )
+    approved_categories = await session_store.get_categories(session_id)
+    required: list[ApprovalCategory] = ["EXEC_ARBITRARY"]
+    missing = [c for c in required if c not in approved_categories]
+    if not missing:
+        return None
+
+    approval_request = ApprovalRequest(
+        category="EXEC_ARBITRARY",
+        required_categories=missing,
+        prompt=ApprovalPrompt(
+            what=f"Git {operation}: {detail}",
+            why="Операция с Git требует прав на изменение файлов.",
+            risk="Модификация рабочей директории и git индекса.",
+            changes=["git index modification"],
+        ),
+        tool=f"workspace_git_{operation}",
+        details={"operation": operation, "detail": detail},
+        session_id=session_id,
+    )
+    approval_payload = api._serialize_approval_request(approval_request)
+    decision = _build_ui_approval_decision(
+        approval_request=approval_payload or {},
+        session_id=session_id,
+        source_endpoint="workspace.git",
+        resume_payload={
+            "operation": operation,
+            "detail": detail,
+        },
+    )
+    await hub.set_session_decision(session_id, decision)
+    return json_response(
+        {
+            "session_id": session_id,
+            "pending_approval": True,
+            "decision": decision,
+        },
+        status=202,
+    )
+
+
+async def handle_ui_workspace_git_stage(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    payload = await request.json() if request.can_read_body else {}
+    paths = payload.get("paths") if isinstance(payload, dict) else None
+    all_files = (payload if isinstance(payload, dict) else {}).get("all", False) is True
+    approval_response = await _check_git_write_approval(
+        request, hub, session_id, "stage", str(paths or "all")
+    )
+    if approval_response is not None:
+        return approval_response
+    root_path = await _workspace_root_for_session(hub, session_id)
+    ok, msg = git_stage(root_path, paths if isinstance(paths, list) else None, all_files=all_files)
+    response = json_response(
+        {
+            "session_id": session_id,
+            "root_path": str(root_path),
+            "ok": ok,
+            "message": msg,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_git_unstage(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    payload = await request.json() if request.can_read_body else {}
+    paths = payload.get("paths") if isinstance(payload, dict) else None
+    all_files = (payload if isinstance(payload, dict) else {}).get("all", False) is True
+    approval_response = await _check_git_write_approval(
+        request, hub, session_id, "unstage", str(paths or "all")
+    )
+    if approval_response is not None:
+        return approval_response
+    root_path = await _workspace_root_for_session(hub, session_id)
+    target_paths: list[str] | None = paths if isinstance(paths, list) else None
+    ok, msg = git_unstage(root_path, target_paths, all_files=all_files)
+    response = json_response(
+        {
+            "session_id": session_id,
+            "root_path": str(root_path),
+            "ok": ok,
+            "message": msg,
+        }
+    )
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response
+
+
+async def handle_ui_workspace_git_commit(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    if session_id is None:
+        return _session_forbidden_response()
+    payload = await request.json() if request.can_read_body else {}
+    message = payload.get("message") if isinstance(payload, dict) else ""
+    if not isinstance(message, str) or not message.strip():
+        return error_response(
+            status=400,
+            message="commit message required",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    approval_response = await _check_git_write_approval(
+        request, hub, session_id, "commit", message[:60]
+    )
+    if approval_response is not None:
+        return approval_response
+    root_path = await _workspace_root_for_session(hub, session_id)
+    ok, msg = git_commit(root_path, message.strip())
+    response = json_response(
+        {
+            "session_id": session_id,
+            "root_path": str(root_path),
+            "ok": ok,
+            "message": msg if ok else f"commit failed: {msg}",
         }
     )
     response.headers[UI_SESSION_HEADER] = session_id
