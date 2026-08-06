@@ -17,12 +17,14 @@ from server.http.handlers.ui_chat import handle_ui_send_resume
 from server.http_api import (
     UI_DECISION_RESPONSES,
     _apply_agent_runtime_state,
+    _clone_github_repository,
     _compile_plan_to_task_packet,
     _decision_categories,
     _decision_mismatch_response,
     _decision_type_value,
     _decision_with_status,
     _ensure_session_owned,
+    _index_imported_project,
     _load_effective_session_security,
     _normalize_auto_state,
     _normalize_json_value,
@@ -31,10 +33,12 @@ from server.http_api import (
     _normalize_policy_profile,
     _normalize_task_payload,
     _normalize_ui_decision,
+    _parse_github_import_args,
     _plan_apply_edit_operation,
     _plan_revision_value,
     _plan_with_status,
     _resolve_agent,
+    _resolve_github_target,
     _resolve_workspace_root_candidate,
     _run_plan_runner,
     _serialize_approval_request,
@@ -542,6 +546,80 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "blocked_step_id": resume_payload.get("blocked_step_id"),
                 },
                 "resume_started": True,
+            }
+
+        if source_endpoint == "project.command":
+            source_request_raw = resume_payload.get("source_request")
+            if not isinstance(source_request_raw, dict):
+                return {
+                    "ok": False,
+                    "error": "resume_payload.source_request is missing.",
+                    "source_endpoint": source_endpoint,
+                }
+            command_raw = source_request_raw.get("command")
+            args_raw = source_request_raw.get("args")
+            if not isinstance(command_raw, str) or not command_raw.strip():
+                return {
+                    "ok": False,
+                    "error": "resume_payload.source_request.command is missing.",
+                    "source_endpoint": source_endpoint,
+                }
+            if not isinstance(args_raw, str):
+                return {
+                    "ok": False,
+                    "error": "resume_payload.source_request.args is missing.",
+                    "source_endpoint": source_endpoint,
+                }
+            command = command_raw.strip()
+            if command == "github_import":
+                try:
+                    repo_url, branch = _parse_github_import_args(args_raw)
+                except ValueError as exc:
+                    return {
+                        "ok": False,
+                        "error": str(exc),
+                        "source_endpoint": source_endpoint,
+                    }
+                target_path, relative_target = _resolve_github_target(repo_url)
+                cloned, clone_result = await _clone_github_repository(
+                    repo_url=repo_url,
+                    branch=branch,
+                    target_path=target_path,
+                )
+                if not cloned:
+                    response_text = f"GitHub import failed: {clone_result}"
+                else:
+                    indexed, index_result = _index_imported_project(relative_target)
+                    if indexed:
+                        response_text = f"GitHub import completed. {index_result}"
+                    else:
+                        response_text = (
+                            f"GitHub import completed (index warning: {index_result})"
+                        )
+                assistant_message = hub.create_message(
+                    role="assistant",
+                    content=response_text,
+                )
+                await hub.append_message(session_id, assistant_message, lane="workspace")
+                if cloned:
+                    await hub.set_workspace_root(session_id, str(target_path))
+                return {
+                    "ok": cloned,
+                    "source_endpoint": source_endpoint,
+                    "data": {
+                        "command": command,
+                        "repo_url": repo_url,
+                        "branch": branch,
+                        "target_path": str(target_path),
+                        "relative_target": relative_target,
+                        "result": response_text,
+                        "root_applied": str(target_path) if cloned else None,
+                    },
+                }
+            return {
+                "ok": False,
+                "error": f"decision_resume_not_supported: project.command '{command}'",
+                "source_endpoint": source_endpoint,
             }
 
         if source_endpoint != "workspace.tool":
