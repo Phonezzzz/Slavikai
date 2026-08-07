@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 
+import { RootReconcileGuard } from './root-reconcile';
 import type { ComposerUiSettings } from './session-payload';
 import {
   extractErrorMessage,
@@ -575,19 +576,22 @@ export function useSessionRuntimeController({
     }
   };
 
-  const reconcileSessionRef = useRef<string | null>(null);
+  const reconcileGuardRef = useRef(new RootReconcileGuard());
 
   const _reconcileWorkspaceRoot = async (sessionId: string): Promise<void> => {
-    reconcileSessionRef.current = sessionId;
+    const generation = reconcileGuardRef.current.begin();
     try {
       const rootResponse = await fetch('/ui/api/workspace/root', {
         headers: { [sessionHeader]: sessionId },
       });
-      if (reconcileSessionRef.current !== sessionId) {
+      if (!reconcileGuardRef.current.isCurrent(generation)) {
         return;
       }
       if (rootResponse.ok) {
         const rootPayload: unknown = await rootResponse.json();
+        if (!reconcileGuardRef.current.isCurrent(generation)) {
+          return;
+        }
         const rootPath = parseWorkspaceRoot(
           (rootPayload as { root_path?: unknown }).root_path,
         );
