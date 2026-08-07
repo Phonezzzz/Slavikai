@@ -309,6 +309,24 @@ async def handle_ui_workspace_git_status(request: web.Request) -> web.Response:
     return response
 
 
+def _normalize_git_paths(paths_raw: object) -> list[str] | None:
+    """Validates git path list: non-empty list of non-empty strings.
+
+    Returns None when the payload must fall back to all-files handling.
+    Raises ValueError for malformed input (non-list, empty list, non-str items).
+    """
+    if paths_raw is None:
+        return None
+    if not isinstance(paths_raw, list) or len(paths_raw) == 0:
+        raise ValueError("paths должен быть непустым списком строк.")
+    normalized: list[str] = []
+    for item in paths_raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("paths должен быть списком непустых строк.")
+        normalized.append(item.strip())
+    return normalized
+
+
 async def _check_git_write_approval(
     request: web.Request,
     hub: UIHub,
@@ -373,22 +391,31 @@ async def handle_ui_workspace_git_stage(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
     payload = await request.json() if request.can_read_body else {}
-    paths = payload.get("paths") if isinstance(payload, dict) else None
+    paths_raw = payload.get("paths") if isinstance(payload, dict) else None
     all_files = (payload if isinstance(payload, dict) else {}).get("all", False) is True
+    try:
+        paths = _normalize_git_paths(paths_raw)
+    except ValueError as exc:
+        return error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
     approval_response = await _check_git_write_approval(
         request,
         hub,
         session_id,
         "stage",
         {
-            "paths": paths if isinstance(paths, list) else None,
+            "paths": paths,
             "all": all_files,
         },
     )
     if approval_response is not None:
         return approval_response
     root_path = await _workspace_root_for_session(hub, session_id)
-    ok, msg = git_stage(root_path, paths if isinstance(paths, list) else None, all_files=all_files)
+    ok, msg = git_stage(root_path, paths, all_files=all_files)
     response = json_response(
         {
             "session_id": session_id,
@@ -409,23 +436,31 @@ async def handle_ui_workspace_git_unstage(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
     payload = await request.json() if request.can_read_body else {}
-    paths = payload.get("paths") if isinstance(payload, dict) else None
+    paths_raw = payload.get("paths") if isinstance(payload, dict) else None
     all_files = (payload if isinstance(payload, dict) else {}).get("all", False) is True
+    try:
+        paths = _normalize_git_paths(paths_raw)
+    except ValueError as exc:
+        return error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
     approval_response = await _check_git_write_approval(
         request,
         hub,
         session_id,
         "unstage",
         {
-            "paths": paths if isinstance(paths, list) else None,
+            "paths": paths,
             "all": all_files,
         },
     )
     if approval_response is not None:
         return approval_response
     root_path = await _workspace_root_for_session(hub, session_id)
-    target_paths: list[str] | None = paths if isinstance(paths, list) else None
-    ok, msg = git_unstage(root_path, target_paths, all_files=all_files)
+    ok, msg = git_unstage(root_path, paths, all_files=all_files)
     response = json_response(
         {
             "session_id": session_id,
