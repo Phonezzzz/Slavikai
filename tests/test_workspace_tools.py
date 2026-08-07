@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import tools.terminal_tool as terminal_tool_module
@@ -345,159 +346,198 @@ def _flatten_paths(tree: list[dict[str, object]]) -> set[str]:
     return collected
 
 
-def test_git_status_parser_ordinary_staged_and_unstaged(tmp_path) -> None:
-    import subprocess
-
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+def _git_init(repo: Path) -> None:
+    repo.mkdir(exist_ok=True)
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
     subprocess.run(
         ["git", "-C", str(repo), "config", "user.email", "test@test"],
-        capture_output=True,
         check=True,
     )
     subprocess.run(
         ["git", "-C", str(repo), "config", "user.name", "test"],
-        capture_output=True,
         check=True,
     )
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True)
+
+
+def _git_commit_all(repo: Path, message: str) -> None:
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", message)
+
+
+def test_git_status_v2_staged_only(tmp_path) -> None:
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    _git_init(repo)
     (repo / "staged.txt").write_text("staged\n")
-    subprocess.run(["git", "-C", str(repo), "add", "staged.txt"], capture_output=True, check=True)
-
-    (repo / "unstaged.txt").write_text("unstaged\n")
-    subprocess.run(["git", "-C", str(repo), "add", "unstaged.txt"], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-m", "initial"],
-        capture_output=True,
-        check=True,
-    )
-    (repo / "unstaged.txt").write_text("modified\n")
-    (repo / "new.txt").write_text("new\n")
-    subprocess.run(["git", "-C", str(repo), "add", "new.txt"], capture_output=True, check=True)
+    _git(repo, "add", "staged.txt")
 
     result = git_status(repo)
     assert result["ok"] is True
-    assert result["branch"] == "main" or result["branch"] == "master"
-    staged_paths = [e["path"] for e in result["staged"]]
-    unstaged_paths = [e["path"] for e in result["unstaged"]]
-    assert "new.txt" in staged_paths
-    assert "unstaged.txt" in unstaged_paths
-    assert len(result["conflicted"]) == 0
+    staged = [e["path"] for e in result["staged"]]
+    assert staged == ["staged.txt"]
+    assert [e["path"] for e in result["unstaged"]] == []
+    assert [e["path"] for e in result["untracked"]] == []
+    assert [e["path"] for e in result["conflicted"]] == []
 
 
-def test_git_status_parser_untracked(tmp_path) -> None:
-    import subprocess
-
+def test_git_status_v2_unstaged_only(tmp_path) -> None:
     from server.http.common.workspace_git import git_status
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
-    (repo / "untracked.txt").write_text("x\n")
+    _git_init(repo)
+    (repo / "file.txt").write_text("v1\n")
+    _git_commit_all(repo, "c1")
+    (repo / "file.txt").write_text("v2\n")
+
     result = git_status(repo)
     assert result["ok"] is True
-    untracked_paths = [e["path"] for e in result["untracked"]]
-    assert "untracked.txt" in untracked_paths
-    assert len(result["staged"]) == 0
-    assert len(result["unstaged"]) == 0
+    assert [e["path"] for e in result["staged"]] == []
+    unstaged = [e["path"] for e in result["unstaged"]]
+    assert unstaged == ["file.txt"]
 
 
-def test_git_status_parser_both_staged_and_unstaged(tmp_path) -> None:
-    import subprocess
-
+def test_git_status_v2_staged_and_unstaged_same_file(tmp_path) -> None:
     from server.http.common.workspace_git import git_status
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.email", "test@test"],
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.name", "test"],
-        capture_output=True,
-        check=True,
-    )
+    _git_init(repo)
     (repo / "dual.txt").write_text("v1\n")
-    subprocess.run(["git", "-C", str(repo), "add", "dual.txt"], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-m", "c1"],
-        capture_output=True,
-        check=True,
-    )
+    _git_commit_all(repo, "c1")
     (repo / "dual.txt").write_text("v2\n")
-    subprocess.run(["git", "-C", str(repo), "add", "dual.txt"], capture_output=True, check=True)
+    _git(repo, "add", "dual.txt")
     (repo / "dual.txt").write_text("v3\n")
 
     result = git_status(repo)
-    staged_paths = [e["path"] for e in result["staged"]]
-    unstaged_paths = [e["path"] for e in result["unstaged"]]
-    assert "dual.txt" in staged_paths
-    assert "dual.txt" in unstaged_paths
+    assert result["ok"] is True
+    staged = [e["path"] for e in result["staged"]]
+    unstaged = [e["path"] for e in result["unstaged"]]
+    assert "dual.txt" in staged
+    assert "dual.txt" in unstaged
 
 
-def test_git_status_parser_rename(tmp_path) -> None:
-    import subprocess
-
+def test_git_status_v2_untracked(tmp_path) -> None:
     from server.http.common.workspace_git import git_status
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.email", "test@test"],
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.name", "test"],
-        capture_output=True,
-        check=True,
-    )
-    (repo / "old.txt").write_text("x\n")
-    subprocess.run(["git", "-C", str(repo), "add", "old.txt"], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-m", "c1"],
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo), "mv", "old.txt", "new.txt"],
-        capture_output=True,
-        check=True,
-    )
+    _git_init(repo)
+    (repo / "untracked.txt").write_text("x\n")
 
     result = git_status(repo)
-    staged_paths = [e["path"] for e in result["staged"]]
-    assert "new.txt" in staged_paths
+    assert result["ok"] is True
+    untracked = [e["path"] for e in result["untracked"]]
+    assert untracked == ["untracked.txt"]
+    assert [e["path"] for e in result["staged"]] == []
+    assert [e["path"] for e in result["unstaged"]] == []
 
 
-def test_git_status_parser_filename_with_spaces(tmp_path) -> None:
-    import subprocess
-
+def test_git_status_v2_conflicted(tmp_path) -> None:
     from server.http.common.workspace_git import git_status
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.email", "test@test"],
+    _git_init(repo)
+    (repo / "c.txt").write_text("base\n")
+    _git_commit_all(repo, "c1")
+    _git(repo, "checkout", "-qb", "side")
+    (repo / "c.txt").write_text("side\n")
+    _git_commit_all(repo, "side")
+    _git(repo, "checkout", "-q", "master")
+    (repo / "c.txt").write_text("master\n")
+    _git_commit_all(repo, "master")
+
+    merge = subprocess.run(
+        ["git", "-C", str(repo), "merge", "side"],
         capture_output=True,
-        check=True,
+        text=True,
+        check=False,
     )
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.name", "test"],
-        capture_output=True,
-        check=True,
-    )
+    assert merge.returncode != 0
+
+    result = git_status(repo)
+    assert result["ok"] is True
+    conflicted = [e["path"] for e in result["conflicted"]]
+    assert "c.txt" in conflicted
+    assert [e["path"] for e in result["staged"]] == []
+    assert [e["path"] for e in result["unstaged"]] == []
+
+
+def test_git_status_v2_rename(tmp_path) -> None:
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    _git_init(repo)
+    (repo / "old.txt").write_text("x\n")
+    _git_commit_all(repo, "c1")
+    _git(repo, "mv", "old.txt", "new.txt")
+
+    result = git_status(repo)
+    assert result["ok"] is True
+    staged = [e["path"] for e in result["staged"]]
+    assert "new.txt" in staged
+
+
+def test_git_status_v2_rename_with_unstaged_modification(tmp_path) -> None:
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    _git_init(repo)
+    (repo / "old.txt").write_text("x\n")
+    _git_commit_all(repo, "c1")
+    _git(repo, "mv", "old.txt", "new.txt")
+    (repo / "new.txt").write_text("modified after rename\n")
+
+    result = git_status(repo)
+    assert result["ok"] is True
+    staged = [e["path"] for e in result["staged"]]
+    unstaged = [e["path"] for e in result["unstaged"]]
+    assert "new.txt" in staged
+    assert "new.txt" in unstaged
+
+
+def test_git_status_v2_filename_with_spaces(tmp_path) -> None:
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    _git_init(repo)
     name = "my file with spaces.txt"
     (repo / name).write_text("x\n")
-    subprocess.run(["git", "-C", str(repo), "add", name], capture_output=True, check=True)
+    _git(repo, "add", "--", name)
 
     result = git_status(repo)
-    staged_paths = [e["path"] for e in result["staged"]]
-    assert name in staged_paths
+    assert result["ok"] is True
+    staged = [e["path"] for e in result["staged"]]
+    assert name in staged
+
+
+def test_git_status_v2_filename_starting_with_dash(tmp_path) -> None:
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    _git_init(repo)
+    name = "-weird.txt"
+    (repo / name).write_text("x\n")
+    _git(repo, "add", "--", name)
+
+    result = git_status(repo)
+    assert result["ok"] is True
+    staged = [e["path"] for e in result["staged"]]
+    assert name in staged
+
+
+def test_git_status_v2_unicode_filename(tmp_path) -> None:
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    _git_init(repo)
+    name = "ünïcode-файл.txt"
+    (repo / name).write_text("x\n")
+    _git(repo, "add", "--", name)
+
+    result = git_status(repo)
+    assert result["ok"] is True
+    staged = [e["path"] for e in result["staged"]]
+    assert name in staged

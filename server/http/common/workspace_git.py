@@ -16,8 +16,37 @@ def _run_git(root: Path, *args: str) -> tuple[str, str, int]:
     return result.stdout, result.stderr, result.returncode
 
 
+def _parse_branch_ab(value: str) -> tuple[int, int]:
+    ahead = 0
+    behind = 0
+    for part in value.split():
+        part = part.strip()
+        if part.startswith("+"):
+            try:
+                ahead = int(part[1:])
+            except ValueError:
+                ahead = 0
+        elif part.startswith("-"):
+            try:
+                behind = int(part[1:])
+            except ValueError:
+                behind = 0
+    return ahead, behind
+
+
+def _git_upstream(root: Path, branch: str | None) -> str | None:
+    if not branch:
+        return None
+    stdout, _, rc = _run_git(
+        root, "for-each-ref", "--format=%(upstream:short)", f"refs/heads/{branch}"
+    )
+    if rc != 0 or not stdout.strip():
+        return None
+    return stdout.strip()
+
+
 def git_status(root: Path) -> dict[str, JSONValue]:
-    stdout, stderr, rc = _run_git(root, "status", "--porcelain", "--branch")
+    stdout, stderr, rc = _run_git(root, "status", "--porcelain=v2", "-z", "--branch")
     if rc != 0:
         return {
             "ok": False,
@@ -41,93 +70,72 @@ def git_status(root: Path) -> dict[str, JSONValue]:
     untracked: list[dict[str, str]] = []
     conflicted: list[dict[str, str]] = []
 
-    for line in stdout.splitlines():
-        if not line:
+    tokens = stdout.split("\0")
+    for token in tokens:
+        if not token:
             continue
 
-        if line.startswith("## "):
-            branch_info = line.removeprefix("## ").strip()
-            if "..." in branch_info:
-                head_part, rest = branch_info.split("...", 1)
-                branch = head_part.strip()
-                upstream_part = rest.strip()
-                if "[" in upstream_part and "]" in upstream_part:
-                    upstream = upstream_part.split("[")[0].strip()
-                    bracket = upstream_part[
-                        upstream_part.index("[") + 1 : upstream_part.rindex("]")
-                    ]
-                    for token in bracket.split(","):
-                        token = token.strip()
-                        if token.startswith("ahead "):
-                            ahead = int(token.removeprefix("ahead ").strip())
-                        elif token.startswith("behind "):
-                            behind = int(token.removeprefix("behind ").strip())
-                else:
-                    upstream = upstream_part.strip()
-            else:
-                branch = branch_info
+        if token.startswith("# branch.head "):
+            branch = token.removeprefix("# branch.head ").strip()
+            continue
+        if token.startswith("# branch.upstream "):
+            upstream = token.removeprefix("# branch.upstream ").strip()
+            continue
+        if token.startswith("# branch.ab "):
+            ahead, behind = _parse_branch_ab(token.removeprefix("# branch.ab "))
+            continue
+        if token.startswith("# "):
             continue
 
-        # porcelain v1: XY PATH for ordinary, R  OLD -> NEW for renames
-        raw = line.rstrip()
-        if len(raw) < 2:
+        if token.startswith("? "):
+            untracked.append({"path": token[2:], "status": "??"})
             continue
 
-        x = raw[0]
-        y = raw[1]
-
-        entry: dict[str, str]
-
-        if raw.startswith("??"):
-            path = raw[3:]
-            untracked.append({"path": path.lstrip(), "status": "??"})
+        if token.startswith("1 "):
+            fields = token.split(" ", 8)
+            if len(fields) < 9:
+                continue
+            xy = fields[1]
+            path = fields[8]
+            x = xy[0]
+            y = xy[1]
+            if x == "U" or y == "U" or (x == "D" and y == "D") or (x == "A" and y == "A"):
+                conflicted.append({"path": path, "status": xy})
+                continue
+            entry = {"path": path, "status": xy}
+            if x in {"M", "A", "D", "R", "C"}:
+                staged.append(entry)
+            if y in {"M", "D"}:
+                unstaged.append(entry)
             continue
 
-        if raw.startswith("!!"):
+        if token.startswith("2 "):
+            fields = token.split(" ", 9)
+            if len(fields) < 10:
+                continue
+            xy = fields[1]
+            path = fields[9]
+            x = xy[0]
+            y = xy[1]
+            if x == "U" or y == "U":
+                conflicted.append({"path": path, "status": xy})
+                continue
+            entry = {"path": path, "status": xy}
+            if x in {"M", "A", "D", "R", "C"}:
+                staged.append(entry)
+            if y in {"M", "D"}:
+                unstaged.append(entry)
             continue
 
-        # rename: "R  old -> new" or "R  "old -> new""
-        if x == "R":
-            rest = raw[3:]
-            if " -> " in rest:
-                parts = rest.split(" -> ", 1)
-                new_path = parts[1].strip()
-                # remove surrounding quotes if present
-                if new_path.startswith('"') and new_path.endswith('"'):
-                    new_path = new_path[1:-1]
-                if y != " ":
-                    unstaged.append({"path": new_path, "status": raw[:2]})
-                else:
-                    staged.append({"path": new_path, "status": raw[:2]})
+        if token.startswith("u "):
+            fields = token.split(" ", 10)
+            if len(fields) < 11:
+                continue
+            conflicted.append({"path": fields[10], "status": fields[1]})
             continue
 
-        # copy: "C  new"
-        if x == "C":
-            path = raw[3:]
-            if path.startswith('"') and path.endswith('"'):
-                path = path[1:-1]
-            staged.append({"path": path, "status": raw[:2]})
-            continue
-
-        # ordinary entry
-        path = raw[3:]
-        # remove surrounding quotes if present
-        if path.startswith('"') and path.endswith('"'):
-            path = path[1:-1]
-        entry = {"path": path, "status": raw[:2]}
-
-        x_staged = x in {"M", "A", "D"}
-        y_unstaged = y in {"M", "D"}
-        has_conflict = x in {"U", "D"} and y in {"U", "A", "D"} or "U" in {x, y}
-
-        if has_conflict:
-            conflicted.append(entry)
-            continue
-
-        if x_staged:
-            staged.append(entry)
-        if y_unstaged:
-            unstaged.append(entry)
+    if upstream is None:
+        upstream = _git_upstream(root, branch)
 
     return {
         "ok": True,
@@ -150,7 +158,7 @@ def git_stage(
     if all_files:
         args.append("--all")
     elif paths:
-        args.extend(paths)
+        args.extend(["--", *paths])
     else:
         return False, "paths or all_files required"
     _, stderr, rc = _run_git(root, *args)
