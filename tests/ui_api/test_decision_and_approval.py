@@ -900,6 +900,11 @@ def test_ui_decision_respond_workspace_git_invalid_paths_rejected(
                 {"paths": []},
                 {"paths": [1, 2]},
                 {"paths": [""]},
+                {"all": "yes"},
+                {"all": 1},
+                {},
+                {"all": False},
+                {"all": True, "paths": ["a.txt"]},
             ):
                 stage_resp = await client.post(
                     "/ui/api/workspace/git/stage",
@@ -910,7 +915,226 @@ def test_ui_decision_respond_workspace_git_invalid_paths_rejected(
                 body = await stage_resp.json()
                 error = body.get("error")
                 assert isinstance(error, dict)
-                assert "список" in str(error.get("message")) or "строк" in str(error.get("message"))
+                assert (
+                    "список" in str(error.get("message"))
+                    or "строк" in str(error.get("message"))
+                    or "boolean" in str(error.get("message"))
+                    or "paths" in str(error.get("message"))
+                )
+                decision_after = await hub.get_session_decision(session_id)
+                assert decision_after is None or decision_after.get("status") != "pending"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_workspace_git_stage_preserves_leading_trailing_spaces(
+    tmp_path,
+) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@test"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "test"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / " leading.txt").write_text("x\n")
+    (repo / "trailing.txt ").write_text("y\n")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(repo))
+
+            stage_resp = await client.post(
+                "/ui/api/workspace/git/stage",
+                headers={"X-Slavik-Session": session_id},
+                json={"paths": [" leading.txt", "trailing.txt "]},
+            )
+            assert stage_resp.status == 202
+            stage_payload = await stage_resp.json()
+            decision = stage_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            respond_payload = await respond.json()
+            resume = respond_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+
+            from server.http.common.workspace_git import git_status
+
+            status = git_status(repo)
+            staged = [e["path"] for e in status["staged"]]
+            assert " leading.txt" in staged
+            assert "trailing.txt " in staged
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_workspace_git_malformed_resume_not_executed(
+    tmp_path,
+) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    (repo / "malformed.txt").write_text("x\n")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(repo))
+
+            decision_payload = {
+                "id": "decision-malformed-resume",
+                "kind": "approval",
+                "decision_type": "tool_approval",
+                "status": "pending",
+                "blocking": True,
+                "reason": "approval_required",
+                "summary": "Git stage (malformed resume)",
+                "proposed_action": {},
+                "options": [],
+                "default_option_id": None,
+                "context": {
+                    "session_id": session_id,
+                    "source_endpoint": "workspace.git",
+                    "resume_payload": {
+                        "operation": "stage",
+                        "paths": "malformed.txt",
+                        "all": False,
+                    },
+                },
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "resolved_at": None,
+            }
+            await hub.set_session_decision(session_id, decision_payload)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-malformed-resume",
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            respond_payload = await respond.json()
+            resume = respond_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is False
+            assert "paths" in str(resume.get("error"))
+
+            from server.http.common.workspace_git import git_status
+
+            status = git_status(repo)
+            staged = [e["path"] for e in status["staged"]]
+            assert "malformed.txt" not in staged
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_workspace_git_works_without_selected_model(
+    tmp_path,
+) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@test"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "test"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / "nomodel.txt").write_text("x\n")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(repo))
+
+            # intentionally NOT selecting a model
+            stage_resp = await client.post(
+                "/ui/api/workspace/git/stage",
+                headers={"X-Slavik-Session": session_id},
+                json={"paths": ["nomodel.txt"]},
+            )
+            assert stage_resp.status == 202
+            stage_payload = await stage_resp.json()
+            decision = stage_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            respond_payload = await respond.json()
+            resume = respond_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+
+            from server.http.common.workspace_git import git_status
+
+            status = git_status(repo)
+            staged = [e["path"] for e in status["staged"]]
+            assert "nomodel.txt" in staged
         finally:
             await client.close()
 

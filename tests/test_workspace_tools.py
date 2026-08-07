@@ -541,3 +541,77 @@ def test_git_status_v2_unicode_filename(tmp_path) -> None:
     assert result["ok"] is True
     staged = [e["path"] for e in result["staged"]]
     assert name in staged
+
+
+def test_git_status_v2_type_change_detected(tmp_path) -> None:
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    _git_init(repo)
+    (repo / "t.txt").write_text("x\n")
+    _git_commit_all(repo, "c1")
+    (repo / "t.txt").unlink()
+    (repo / "t.txt").symlink_to("target.txt")
+    _git(repo, "add", "--", "t.txt")
+
+    result = git_status(repo)
+    assert result["ok"] is True
+    staged = [e["path"] for e in result["staged"]]
+    assert "t.txt" in staged
+    status_xy = next(
+        (e["status"] for e in result["staged"] if e["path"] == "t.txt"),
+        "",
+    )
+    assert status_xy[0] == "T"
+
+
+def test_parse_git_operation_paths_preserves_exact_filename() -> None:
+    from server.http.common.workspace_git import parse_git_operation_paths
+
+    paths, all_flag = parse_git_operation_paths([" leading.txt", "trailing.txt "], None)
+    assert all_flag is False
+    assert paths == [" leading.txt", "trailing.txt "]
+
+
+def test_parse_git_operation_paths_whitespace_only_rejected() -> None:
+    from server.http.common.workspace_git import parse_git_operation_paths
+
+    try:
+        parse_git_operation_paths(["   "], None)
+        raise AssertionError("whitespace-only path must be rejected")
+    except ValueError:
+        pass
+
+
+def test_parse_git_operation_paths_all_true_requires_no_paths() -> None:
+    from server.http.common.workspace_git import parse_git_operation_paths
+
+    paths, all_flag = parse_git_operation_paths(None, True)
+    assert all_flag is True
+    assert paths is None
+
+    try:
+        parse_git_operation_paths(["a.txt"], True)
+        raise AssertionError("all=true with paths must be rejected")
+    except ValueError:
+        pass
+
+
+def test_parse_git_operation_paths_strict_all_validation() -> None:
+    from server.http.common.workspace_git import parse_git_operation_paths
+
+    for bad_all in ("yes", 1):
+        try:
+            parse_git_operation_paths(None, bad_all)
+            raise AssertionError("non-bool all must be rejected")
+        except ValueError:
+            pass
+    for payload_paths, payload_all in ((None, None), (None, False)):
+        try:
+            parse_git_operation_paths(payload_paths, payload_all)
+            raise AssertionError("missing paths and all=false must be rejected")
+        except ValueError:
+            pass
+    paths, all_flag = parse_git_operation_paths(["a.txt", "b.txt"], False)
+    assert all_flag is False
+    assert paths == ["a.txt", "b.txt"]

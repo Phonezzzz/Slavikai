@@ -15,6 +15,7 @@ from server.http.common.workspace_git import (
     git_stage,
     git_status,
     git_unstage,
+    parse_git_operation_paths,
 )
 from server.http.common.workspace_paths import browse_directories
 from server.http_api import (
@@ -309,22 +310,9 @@ async def handle_ui_workspace_git_status(request: web.Request) -> web.Response:
     return response
 
 
-def _normalize_git_paths(paths_raw: object) -> list[str] | None:
-    """Validates git path list: non-empty list of non-empty strings.
-
-    Returns None when the payload must fall back to all-files handling.
-    Raises ValueError for malformed input (non-list, empty list, non-str items).
-    """
-    if paths_raw is None:
-        return None
-    if not isinstance(paths_raw, list) or len(paths_raw) == 0:
-        raise ValueError("paths должен быть непустым списком строк.")
-    normalized: list[str] = []
-    for item in paths_raw:
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError("paths должен быть списком непустых строк.")
-        normalized.append(item.strip())
-    return normalized
+def _normalize_git_paths(paths_raw: object, all_raw: object) -> tuple[list[str] | None, bool]:
+    """Shared strict contract for stage/unstage payloads (see workspace_git)."""
+    return parse_git_operation_paths(paths_raw, all_raw)
 
 
 async def _check_git_write_approval(
@@ -337,14 +325,6 @@ async def _check_git_write_approval(
     from core.approval_policy import ApprovalPrompt, ApprovalRequest
 
     session_store = request.app["session_store"]
-    agent = await api._resolve_agent(request)
-    if agent is None:
-        return error_response(
-            status=409,
-            message="Model not selected.",
-            error_type="invalid_request_error",
-            code="model_not_selected",
-        )
     approved_categories = await session_store.get_categories(session_id)
     required: list[ApprovalCategory] = ["EXEC_ARBITRARY"]
     missing = [c for c in required if c not in approved_categories]
@@ -392,9 +372,9 @@ async def handle_ui_workspace_git_stage(request: web.Request) -> web.Response:
         return _session_forbidden_response()
     payload = await request.json() if request.can_read_body else {}
     paths_raw = payload.get("paths") if isinstance(payload, dict) else None
-    all_files = (payload if isinstance(payload, dict) else {}).get("all", False) is True
+    all_raw = payload.get("all") if isinstance(payload, dict) else None
     try:
-        paths = _normalize_git_paths(paths_raw)
+        paths, all_files = _normalize_git_paths(paths_raw, all_raw)
     except ValueError as exc:
         return error_response(
             status=400,
@@ -437,9 +417,9 @@ async def handle_ui_workspace_git_unstage(request: web.Request) -> web.Response:
         return _session_forbidden_response()
     payload = await request.json() if request.can_read_body else {}
     paths_raw = payload.get("paths") if isinstance(payload, dict) else None
-    all_files = (payload if isinstance(payload, dict) else {}).get("all", False) is True
+    all_raw = payload.get("all") if isinstance(payload, dict) else None
     try:
-        paths = _normalize_git_paths(paths_raw)
+        paths, all_files = _normalize_git_paths(paths_raw, all_raw)
     except ValueError as exc:
         return error_response(
             status=400,

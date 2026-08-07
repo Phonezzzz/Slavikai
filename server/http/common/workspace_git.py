@@ -103,9 +103,9 @@ def git_status(root: Path) -> dict[str, JSONValue]:
                 conflicted.append({"path": path, "status": xy})
                 continue
             entry = {"path": path, "status": xy}
-            if x in {"M", "A", "D", "R", "C"}:
+            if x != ".":
                 staged.append(entry)
-            if y in {"M", "D"}:
+            if y != ".":
                 unstaged.append(entry)
             continue
 
@@ -121,9 +121,9 @@ def git_status(root: Path) -> dict[str, JSONValue]:
                 conflicted.append({"path": path, "status": xy})
                 continue
             entry = {"path": path, "status": xy}
-            if x in {"M", "A", "D", "R", "C"}:
+            if x != ".":
                 staged.append(entry)
-            if y in {"M", "D"}:
+            if y != ".":
                 unstaged.append(entry)
             continue
 
@@ -186,3 +186,43 @@ def git_commit(root: Path, message: str) -> tuple[bool, str]:
     if rc != 0:
         return False, stderr.strip() or "git commit failed"
     return True, "ok"
+
+
+def parse_git_operation_paths(
+    paths_raw: object,
+    all_raw: object,
+) -> tuple[list[str] | None, bool]:
+    """Strict contract validation for stage/unstage payloads.
+
+    Rules:
+    - `all`, если передан, обязан быть boolean;
+    - `paths`, если передан, обязан быть непустым list[str], каждый
+      элемент — непустая строка (проверка через strip, но возвращается
+      ОРИГИНАЛЬНЫЙ filename без модификации);
+    - `all == True` требует отсутствие paths (paths must be None);
+    - `all == False` (или отсутствует) требует валидные paths;
+    - если нет ни all==True, ни paths — ValueError.
+
+    Returns (paths, all_flag). Raises ValueError on malformed input.
+    """
+    all_flag: bool = False
+    if all_raw is not None:
+        if not isinstance(all_raw, bool):
+            raise ValueError("all должен быть boolean.")
+        all_flag = all_raw
+
+    if all_flag:
+        if paths_raw is not None:
+            raise ValueError("Нельзя передавать одновременно all=true и paths.")
+        return None, True
+
+    if paths_raw is None:
+        raise ValueError("Необходимо передать paths (или all=true).")
+    if not isinstance(paths_raw, list) or len(paths_raw) == 0:
+        raise ValueError("paths должен быть непустым списком строк.")
+    normalized: list[str] = []
+    for item in paths_raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("paths должен быть списком непустых строк.")
+        normalized.append(item)
+    return normalized, False

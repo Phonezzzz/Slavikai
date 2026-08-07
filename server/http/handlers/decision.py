@@ -13,7 +13,12 @@ from core.approval_policy import ApprovalRequired
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
-from server.http.common.workspace_git import git_commit, git_stage, git_unstage
+from server.http.common.workspace_git import (
+    git_commit,
+    git_stage,
+    git_unstage,
+    parse_git_operation_paths,
+)
 from server.http.handlers.ui_chat import handle_ui_send_resume
 from server.http_api import (
     UI_DECISION_RESPONSES,
@@ -632,24 +637,14 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             operation = operation_raw.strip()
             session_root = await _workspace_root_for_session(hub, session_id)
 
-            def _resume_paths(paths_raw: object) -> list[str] | None:
-                if paths_raw is None:
-                    return None
-                if not isinstance(paths_raw, list) or len(paths_raw) == 0:
-                    raise ValueError("resume_payload.paths должен быть непустым списком строк.")
-                normalized: list[str] = []
-                for item in paths_raw:
-                    if not isinstance(item, str) or not item.strip():
-                        raise ValueError("resume_payload.paths должен содержать непустые строки.")
-                    normalized.append(item.strip())
-                return normalized
-
             if operation == "stage":
                 try:
-                    paths = _resume_paths(resume_payload.get("paths"))
+                    paths, all_flag = parse_git_operation_paths(
+                        resume_payload.get("paths"),
+                        resume_payload.get("all"),
+                    )
                 except ValueError as exc:
                     return {"ok": False, "error": str(exc), "source_endpoint": source_endpoint}
-                all_flag = resume_payload.get("all") is True
                 ok, msg = git_stage(session_root, paths, all_files=all_flag)
                 return {
                     "ok": ok,
@@ -659,10 +654,12 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
 
             if operation == "unstage":
                 try:
-                    upaths = _resume_paths(resume_payload.get("paths"))
+                    upaths, uall_flag = parse_git_operation_paths(
+                        resume_payload.get("paths"),
+                        resume_payload.get("all"),
+                    )
                 except ValueError as exc:
                     return {"ok": False, "error": str(exc), "source_endpoint": source_endpoint}
-                uall_flag = resume_payload.get("all") is True
                 ok, msg = git_unstage(session_root, upaths, all_files=uall_flag)
                 return {
                     "ok": ok,
