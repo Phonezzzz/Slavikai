@@ -93,6 +93,7 @@ export type SessionRuntimeControllerResult = {
     choice: DecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
     onResume?: (resume: unknown) => void,
+    onRejected?: () => void,
   ) => Promise<void>;
   applyWorkspaceRoot: (workspaceRoot: string) => void;
   refreshSessionSecuritySummary: () => Promise<void>;
@@ -561,6 +562,7 @@ export function useSessionRuntimeController({
     if (!sessionId || sessionId === selectedConversation) {
       return;
     }
+    reconcileGuardRef.current.invalidate();
     setSelectedConversation(sessionId);
     transportRef.current?.clearConversationState();
     setPendingDecision(null);
@@ -605,6 +607,7 @@ export function useSessionRuntimeController({
   };
 
   const handleCreateConversation = async () => {
+    reconcileGuardRef.current.invalidate();
     try {
       const created = await createConversation();
       const nextSession = created.sessionId;
@@ -812,6 +815,7 @@ export function useSessionRuntimeController({
     choice: DecisionRespondChoice,
     editedPayload?: Record<string, unknown> | null,
     onResume?: (resume: unknown) => void,
+    onRejected?: () => void,
   ) => {
     if (!selectedConversation || !pendingDecision) {
       return;
@@ -844,6 +848,9 @@ export function useSessionRuntimeController({
       );
       if (resumedWorkspaceRoot) {
         setWorkspaceRoot(resumedWorkspaceRoot);
+      }
+      if (choice === 'reject') {
+        onRejected?.();
       }
       onResume?.((payload as { resume?: unknown }).resume);
       await loadSessions();
@@ -900,6 +907,12 @@ export function useSessionRuntimeController({
       resyncFetchInFlightRef.current = false;
     };
   }, [selectedConversation]);
+
+  useEffect(() => {
+    return () => {
+      reconcileGuardRef.current.invalidate();
+    };
+  }, []);
 
   return {
     selectedConversation,

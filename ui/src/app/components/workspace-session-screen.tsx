@@ -9,6 +9,7 @@ import type {
   TaskExecutionState,
   UiDecision,
 } from '../types';
+import type { GitDecisionOutcome } from '../use-repository-actions';
 
 type WorkspaceSessionScreenProps = {
   sessionId: string | null;
@@ -29,6 +30,7 @@ type WorkspaceSessionScreenProps = {
   decisionBusy: boolean;
   decisionError: string | null;
   refreshToken: number;
+  gitDecisionOutcome: GitDecisionOutcome | null;
   explorerVisible: boolean;
   onBackToChat: () => void;
   onOpenSessionDrawer: () => void;
@@ -59,6 +61,7 @@ export function WorkspaceSessionScreen({
   decisionBusy,
   decisionError,
   refreshToken,
+  gitDecisionOutcome,
   explorerVisible,
   onBackToChat,
   onOpenSessionDrawer,
@@ -91,6 +94,7 @@ export function WorkspaceSessionScreen({
       decisionError={decisionError}
       onDecisionRespond={onDecisionRespond}
       refreshToken={refreshToken}
+      gitDecisionOutcome={gitDecisionOutcome}
       explorerVisible={explorerVisible}
     />
   );

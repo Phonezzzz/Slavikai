@@ -694,9 +694,11 @@ export default function App() {
                   choice,
                   editedAction,
                   repositoryActions.handleDecisionResume,
+                  repositoryActions.handleDecisionRejected,
                 );
               }}
               refreshToken={repositoryActions.workspaceRefreshToken}
+              gitDecisionOutcome={repositoryActions.gitDecisionOutcome}
               explorerVisible={workspaceExplorerVisible}
             />
           </div>

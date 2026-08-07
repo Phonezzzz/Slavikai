@@ -15,6 +15,10 @@ type GitPanelProps = {
   requestHeaders: Record<string, string>;
   workspaceRoot: string;
   refreshToken: number;
+  decisionOutcome?: {
+    kind: 'success' | 'rejected' | 'failed';
+    message: string;
+  } | null;
 };
 
 export function GitPanel({
@@ -23,6 +27,7 @@ export function GitPanel({
   requestHeaders,
   workspaceRoot,
   refreshToken,
+  decisionOutcome = null,
 }: GitPanelProps) {
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -86,6 +91,17 @@ export function GitPanel({
     setActionMessage(null);
     void loadStatus();
   }, [sessionId, workspaceRoot, refreshToken]);
+
+  useEffect(() => {
+    if (!decisionOutcome) {
+      return;
+    }
+    setPendingApproval(false);
+    setActionMessage(decisionOutcome.message);
+    if (decisionOutcome.kind === 'success') {
+      void loadStatus();
+    }
+  }, [decisionOutcome]);
 
   const handleStage = async (paths: string[] | null, all: boolean) => {
     setActionBusy(true);
@@ -339,6 +355,14 @@ export function GitPanel({
 
           {pendingApproval ? (
             <div className="rounded-md border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
+              {actionMessage}
+            </div>
+          ) : decisionOutcome && decisionOutcome.kind === 'failed' ? (
+            <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+              {actionMessage}
+            </div>
+          ) : decisionOutcome && decisionOutcome.kind === 'rejected' ? (
+            <div className="rounded-md border border-[#2a2a31] bg-[#0d0d12] px-3 py-2 text-[11px] text-[#9a9aa3]">
               {actionMessage}
             </div>
           ) : actionMessage ? (

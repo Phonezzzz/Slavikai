@@ -80,6 +80,10 @@ type WorkspaceIdeProps = {
     editedPayload?: Record<string, unknown> | null,
   ) => Promise<void> | void;
   refreshToken?: number;
+  gitDecisionOutcome?: {
+    kind: 'success' | 'rejected' | 'failed';
+    message: string;
+  } | null;
   explorerVisible: boolean;
 };
 
@@ -111,6 +115,7 @@ export function WorkspaceIde({
   decisionError = null,
   onDecisionRespond,
   refreshToken = 0,
+  gitDecisionOutcome = null,
   explorerVisible,
 }: WorkspaceIdeProps) {
   const [tree, setTree] = useState<WorkspaceNode[]>([]);
@@ -198,11 +203,7 @@ export function WorkspaceIde({
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [terminalLines]);
 
-  useEffect(() => {
-    assistantInitRef.current = false;
-    assistantSeenRef.current = new Set();
-    decisionSeenRef.current = new Set();
-    statusSeenRef.current = null;
+  const resetRootScopedState = () => {
     treeDebounceTimersRef.current.forEach((timerId) => {
       window.clearTimeout(timerId);
     });
@@ -212,11 +213,15 @@ export function WorkspaceIde({
     });
     treeAbortControllersRef.current.clear();
     treeInFlightPathsRef.current.clear();
-    setOpenFiles([]);
-    setActiveFileId(null);
-    setActiveExplorerPath(null);
+    setTree([]);
+    setTreeError(null);
+    setTreeLoading(false);
     setLoadingTreePaths(new Set());
     setTreeMeta(null);
+    setExpandedNodes(new Set());
+    setActiveExplorerPath(null);
+    setOpenFiles([]);
+    setActiveFileId(null);
     setQuickOpenOpen(false);
     setQuickOpenQuery('');
     setQuickOpenPartial(false);
@@ -224,10 +229,27 @@ export function WorkspaceIde({
     setRecentPaths([]);
     quickOpenFileIndexRef.current = null;
     quickOpenLoadedForRoot.current = null;
-  }, [sessionId]);
+    setGitRefreshToken((prev) => prev + 1);
+  };
 
   useEffect(() => {
-    // workspaceRoot synced from parent; picker reads it directly
+    assistantInitRef.current = false;
+    assistantSeenRef.current = new Set();
+    decisionSeenRef.current = new Set();
+    statusSeenRef.current = null;
+  }, [sessionId]);
+
+  const workspaceScopeKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const scopeKey = sessionId ? `${sessionId}\u0000${workspaceRoot}` : null;
+    if (workspaceScopeKeyRef.current === scopeKey) {
+      return;
+    }
+    workspaceScopeKeyRef.current = scopeKey;
+    resetRootScopedState();
+    if (sessionId) {
+      requestTreeLoad(undefined, 'root_change');
+    }
   }, [sessionId, workspaceRoot]);
 
   useEffect(() => {
@@ -497,17 +519,6 @@ export function WorkspaceIde({
   useEffect(() => {
     requestTreeLoad(undefined, 'session_init');
   }, [refreshToken, sessionId]);
-
-  useEffect(() => {
-    const rootKey = workspaceRoot.trim();
-    if (quickOpenLoadedForRoot.current === rootKey) {
-      return;
-    }
-    quickOpenLoadedForRoot.current = null;
-    quickOpenFileIndexRef.current = null;
-    setQuickOpenItems([]);
-    setQuickOpenPartial(false);
-  }, [workspaceRoot]);
 
   useEffect(() => {
     const isEditableTarget = (target: EventTarget | null): boolean => {
@@ -825,9 +836,6 @@ export function WorkspaceIde({
       const appliedRoot = result.rootPath.trim() || trimmed;
       onApplyWorkspaceRoot(appliedRoot);
       setProjectPickerOpen(false);
-      setOpenFiles([]);
-      setActiveFileId(null);
-      requestTreeLoad(undefined, 'root_change');
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] Computer root: ${appliedRoot}`]);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to change Computer root.';
@@ -1157,6 +1165,7 @@ export function WorkspaceIde({
               requestHeaders={requestHeaders}
               workspaceRoot={workspaceRoot}
               refreshToken={gitRefreshToken}
+              decisionOutcome={gitDecisionOutcome}
             />
           </div>
         )}

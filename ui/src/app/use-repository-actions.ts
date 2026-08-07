@@ -5,13 +5,20 @@ import { extractErrorMessage, extractSessionIdFromPayload, parseUiDecision } fro
 import { saveLastSessionId } from './session-storage';
 import type { UiDecision } from './types';
 
+export type GitDecisionOutcome = {
+  kind: 'success' | 'rejected' | 'failed';
+  message: string;
+};
+
 export type RepositoryActionsResult = {
   workspaceRefreshToken: number;
+  gitDecisionOutcome: GitDecisionOutcome | null;
   handleWorkspaceGithubImport: (
     repoUrl: string,
     branch?: string,
   ) => Promise<{ status: 'done' | 'pending'; message?: string | null }>;
   handleDecisionResume: (resume: unknown) => void;
+  handleDecisionRejected: () => void;
 };
 
 type UseRepositoryActionsOptions = {
@@ -36,6 +43,7 @@ export function useRepositoryActions({
   onStatusMessage,
 }: UseRepositoryActionsOptions): RepositoryActionsResult {
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
+  const [gitDecisionOutcome, setGitDecisionOutcome] = useState<GitDecisionOutcome | null>(null);
 
   const handleWorkspaceGithubImport = async (
     repoUrl: string,
@@ -108,6 +116,25 @@ export function useRepositoryActions({
       tool_name?: unknown;
       error?: unknown;
     };
+    if (payload.source_endpoint === 'workspace.git') {
+      setWorkspaceRefreshToken((value) => value + 1);
+      if (payload.ok === true) {
+        setGitDecisionOutcome({
+          kind: 'success',
+          message: 'Git operation completed.',
+        });
+      } else {
+        setGitDecisionOutcome({
+          kind: 'failed',
+          message:
+            typeof payload.error === 'string' && payload.error.trim()
+              ? payload.error
+              : 'Git operation failed.',
+        });
+      }
+      onStatusMessage(null);
+      return;
+    }
     if (payload.source_endpoint !== 'project.command') {
       if (payload.source_endpoint !== 'auto.run') {
         onStatusMessage(null);
@@ -161,9 +188,26 @@ export function useRepositoryActions({
     );
   };
 
+  const handleDecisionRejected = () => {
+    if (pendingDecision?.context) {
+      const context = pendingDecision.context as Record<string, unknown>;
+      if (context.source_endpoint === 'workspace.git') {
+        setGitDecisionOutcome({
+          kind: 'rejected',
+          message: 'Git operation cancelled.',
+        });
+        setWorkspaceRefreshToken((value) => value + 1);
+        return;
+      }
+    }
+    setGitDecisionOutcome(null);
+  };
+
   return {
     workspaceRefreshToken,
+    gitDecisionOutcome,
     handleWorkspaceGithubImport,
     handleDecisionResume,
+    handleDecisionRejected,
   };
 }
