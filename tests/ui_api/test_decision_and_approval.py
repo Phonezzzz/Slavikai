@@ -917,6 +917,83 @@ def test_ui_decision_respond_workspace_git_invalid_paths_rejected(
     asyncio.run(run())
 
 
+def test_ui_decision_respond_workspace_git_reapprove_does_not_run_twice(
+    tmp_path,
+) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    (repo / "once.txt").write_text("x\n")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(repo))
+
+            stage_resp = await client.post(
+                "/ui/api/workspace/git/stage",
+                headers={"X-Slavik-Session": session_id},
+                json={"paths": ["once.txt"]},
+            )
+            assert stage_resp.status == 202
+            stage_payload = await stage_resp.json()
+            decision = stage_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            respond_payload = await respond.json()
+            resume = respond_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+
+            from server.http.common.workspace_git import git_status
+
+            status_after_first = git_status(repo)
+            staged_after_first = [e["path"] for e in status_after_first["staged"]]
+            assert "once.txt" in staged_after_first
+
+            reapprove = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_once",
+                },
+            )
+            assert reapprove.status == 409
+            reapprove_payload = await reapprove.json()
+            error = reapprove_payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") in {"decision_already_resolved", "decision_not_pending"}
+
+            status_after_reapprove = git_status(repo)
+            staged_after_reapprove = [e["path"] for e in status_after_reapprove["staged"]]
+            assert staged_after_reapprove == staged_after_first
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_decision_respond_ignores_client_control_fields_or_rejects() -> None:
     async def run() -> None:
         agent = WorkspaceDecisionAgent()
