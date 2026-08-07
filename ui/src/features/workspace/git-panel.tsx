@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FolderGit2, RefreshCw } from 'lucide-react';
 import {
   fetchWorkspaceGitStatus,
@@ -14,6 +14,7 @@ type GitPanelProps = {
   sessionHeader: string;
   requestHeaders: Record<string, string>;
   workspaceRoot: string;
+  refreshToken: number;
 };
 
 export function GitPanel({
@@ -21,6 +22,7 @@ export function GitPanel({
   sessionHeader: _sessionHeader,
   requestHeaders,
   workspaceRoot,
+  refreshToken,
 }: GitPanelProps) {
   const [status, setStatus] = useState<GitStatusResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -30,12 +32,32 @@ export function GitPanel({
   const [pendingApproval, setPendingApproval] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
+  const statusGenerationRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
   const loadStatus = async () => {
-    if (!sessionId) return;
+    if (!sessionId || !mountedRef.current) return;
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const generation = statusGenerationRef.current + 1;
+    statusGenerationRef.current = generation;
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchWorkspaceGitStatus(requestHeaders);
+      const result = await fetchWorkspaceGitStatus(requestHeaders, controller.signal);
+      if (!mountedRef.current || statusGenerationRef.current !== generation) {
+        return;
+      }
       if (!result.ok && result.error) {
         setError(result.error);
         setStatus(null);
@@ -43,17 +65,27 @@ export function GitPanel({
         setStatus(result);
       }
     } catch (e) {
+      if (!mountedRef.current || statusGenerationRef.current !== generation) {
+        return;
+      }
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        return;
+      }
       const msg = e instanceof Error ? e.message : 'Failed to load git status.';
       setError(msg);
       setStatus(null);
     } finally {
-      setLoading(false);
+      if (mountedRef.current && statusGenerationRef.current === generation) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
+    setPendingApproval(false);
+    setActionMessage(null);
     void loadStatus();
-  }, [sessionId, workspaceRoot]);
+  }, [sessionId, workspaceRoot, refreshToken]);
 
   const handleStage = async (paths: string[] | null, all: boolean) => {
     setActionBusy(true);
@@ -126,6 +158,7 @@ export function GitPanel({
     entries: GitFileEntry[],
     label: string,
     color: string,
+    renderActions?: (entry: GitFileEntry) => React.ReactNode,
   ) =>
     entries.length > 0 ? (
       <div className="mb-2">
@@ -137,8 +170,13 @@ export function GitPanel({
             key={entry.path}
             className="flex items-center justify-between gap-2 text-[11px] text-[#9a9aa3] py-0.5"
           >
-            <span className="truncate font-mono">{entry.path}</span>
-            <span className="text-[#666] shrink-0">{entry.status}</span>
+            <span className="truncate font-mono" title={entry.path}>
+              {entry.path}
+            </span>
+            <span className="flex items-center gap-1 shrink-0">
+              <span className="text-[#666]">{entry.status}</span>
+              {renderActions ? renderActions(entry) : null}
+            </span>
           </div>
         ))}
       </div>
@@ -155,6 +193,20 @@ export function GitPanel({
     ...(status?.unstaged ?? []),
     ...(status?.untracked ?? []),
   ];
+
+  const fileActionButton = (
+    label: string,
+    onClick: () => void,
+    disabled: boolean,
+  ) => (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[10px] text-[#9a9aa3] hover:bg-[#1a1a21] disabled:opacity-50"
+    >
+      {label}
+    </button>
+  );
 
   return (
     <div className="h-full overflow-auto px-3 py-3" data-computer-tab-content="git-panel">
@@ -202,13 +254,41 @@ export function GitPanel({
                 status.staged,
                 'Staged',
                 'text-emerald-300',
+                (entry) =>
+                  fileActionButton(
+                    'Unstage',
+                    () => {
+                      void handleUnstage([entry.path], false);
+                    },
+                    actionBusy,
+                  ),
               )}
               {fileEntry(
                 status.unstaged,
                 'Unstaged',
                 'text-amber-300',
+                (entry) =>
+                  fileActionButton(
+                    'Stage',
+                    () => {
+                      void handleStage([entry.path], false);
+                    },
+                    actionBusy,
+                  ),
               )}
-              {fileEntry(status.untracked, 'Untracked', 'text-[#8f8f98]')}
+              {fileEntry(
+                status.untracked,
+                'Untracked',
+                'text-[#8f8f98]',
+                (entry) =>
+                  fileActionButton(
+                    'Stage',
+                    () => {
+                      void handleStage([entry.path], false);
+                    },
+                    actionBusy,
+                  ),
+              )}
               {fileEntry(status.conflicted, 'Conflicted', 'text-red-400')}
 
               <div className="flex flex-wrap items-center gap-1.5 border-t border-[#1f1f24] pt-2">

@@ -441,9 +441,11 @@ export type GitStatusResult = {
 
 export const fetchWorkspaceGitStatus = async (
   headers: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<GitStatusResult> => {
   const { response, payload } = await fetchJson('/ui/api/workspace/git/status', {
     headers,
+    signal,
   });
   if (!response.ok) {
     throwWorkspaceError(payload, 'Failed to get git status.');

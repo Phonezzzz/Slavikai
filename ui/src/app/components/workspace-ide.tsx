@@ -133,6 +133,7 @@ export function WorkspaceIde({
 
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectRootBusy, setProjectRootBusy] = useState(false);
+  const [gitRefreshToken, setGitRefreshToken] = useState(0);
   const [indexing, setIndexing] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [quickOpenQuery, setQuickOpenQuery] = useState('');
@@ -280,6 +281,7 @@ export function WorkspaceIde({
     if (previousStatus === 'pending' && currentStatus !== 'pending') {
       requestTreeLoad(undefined, 'decision_resume');
       void refreshOpenTabsFromDisk();
+      setGitRefreshToken((prev) => prev + 1);
     }
   }, [decision?.status]);
 
@@ -1154,6 +1156,7 @@ export function WorkspaceIde({
               sessionHeader={sessionHeader}
               requestHeaders={requestHeaders}
               workspaceRoot={workspaceRoot}
+              refreshToken={gitRefreshToken}
             />
           </div>
         )}
