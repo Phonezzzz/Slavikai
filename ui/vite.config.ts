@@ -12,6 +12,11 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    setupFiles: ["src/test-setup.ts"],
+  },
   assetsInclude: ["**/*.svg", "**/*.csv"],
   build: {
     rollupOptions: {
