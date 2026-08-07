@@ -343,3 +343,161 @@ def _flatten_paths(tree: list[dict[str, object]]) -> set[str]:
         for child in node.get("children", []) or []:
             collected.update(_flatten_paths([child]))
     return collected
+
+
+def test_git_status_parser_ordinary_staged_and_unstaged(tmp_path) -> None:
+    import subprocess
+
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@test"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "test"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / "staged.txt").write_text("staged\n")
+    subprocess.run(["git", "-C", str(repo), "add", "staged.txt"], capture_output=True, check=True)
+
+    (repo / "unstaged.txt").write_text("unstaged\n")
+    subprocess.run(["git", "-C", str(repo), "add", "unstaged.txt"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "initial"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / "unstaged.txt").write_text("modified\n")
+    (repo / "new.txt").write_text("new\n")
+    subprocess.run(["git", "-C", str(repo), "add", "new.txt"], capture_output=True, check=True)
+
+    result = git_status(repo)
+    assert result["ok"] is True
+    assert result["branch"] == "main" or result["branch"] == "master"
+    staged_paths = [e["path"] for e in result["staged"]]
+    unstaged_paths = [e["path"] for e in result["unstaged"]]
+    assert "new.txt" in staged_paths
+    assert "unstaged.txt" in unstaged_paths
+    assert len(result["conflicted"]) == 0
+
+
+def test_git_status_parser_untracked(tmp_path) -> None:
+    import subprocess
+
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    (repo / "untracked.txt").write_text("x\n")
+    result = git_status(repo)
+    assert result["ok"] is True
+    untracked_paths = [e["path"] for e in result["untracked"]]
+    assert "untracked.txt" in untracked_paths
+    assert len(result["staged"]) == 0
+    assert len(result["unstaged"]) == 0
+
+
+def test_git_status_parser_both_staged_and_unstaged(tmp_path) -> None:
+    import subprocess
+
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@test"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "test"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / "dual.txt").write_text("v1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "dual.txt"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "c1"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / "dual.txt").write_text("v2\n")
+    subprocess.run(["git", "-C", str(repo), "add", "dual.txt"], capture_output=True, check=True)
+    (repo / "dual.txt").write_text("v3\n")
+
+    result = git_status(repo)
+    staged_paths = [e["path"] for e in result["staged"]]
+    unstaged_paths = [e["path"] for e in result["unstaged"]]
+    assert "dual.txt" in staged_paths
+    assert "dual.txt" in unstaged_paths
+
+
+def test_git_status_parser_rename(tmp_path) -> None:
+    import subprocess
+
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@test"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "test"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / "old.txt").write_text("x\n")
+    subprocess.run(["git", "-C", str(repo), "add", "old.txt"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "c1"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "mv", "old.txt", "new.txt"],
+        capture_output=True,
+        check=True,
+    )
+
+    result = git_status(repo)
+    staged_paths = [e["path"] for e in result["staged"]]
+    assert "new.txt" in staged_paths
+
+
+def test_git_status_parser_filename_with_spaces(tmp_path) -> None:
+    import subprocess
+
+    from server.http.common.workspace_git import git_status
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@test"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "test"],
+        capture_output=True,
+        check=True,
+    )
+    name = "my file with spaces.txt"
+    (repo / name).write_text("x\n")
+    subprocess.run(["git", "-C", str(repo), "add", name], capture_output=True, check=True)
+
+    result = git_status(repo)
+    staged_paths = [e["path"] for e in result["staged"]]
+    assert name in staged_paths

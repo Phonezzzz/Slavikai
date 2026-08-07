@@ -690,6 +690,128 @@ def test_ui_decision_respond_project_command_github_import_resumes_clone_and_ind
     asyncio.run(run())
 
 
+def test_ui_decision_respond_workspace_git_stage_approve_executes(
+    tmp_path,
+) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@test"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "test"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / "to-stage.txt").write_text("data\n")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(repo))
+
+            stage_resp = await client.post(
+                "/ui/api/workspace/git/stage",
+                headers={"X-Slavik-Session": session_id},
+                json={"paths": ["to-stage.txt"]},
+            )
+            assert stage_resp.status == 202
+            stage_payload = await stage_resp.json()
+            decision = stage_payload.get("decision")
+            assert isinstance(decision, dict)
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            respond_payload = await respond.json()
+            resume = respond_payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is True
+            assert resume.get("source_endpoint") == "workspace.git"
+
+            from server.http.common.workspace_git import git_status
+
+            status = git_status(repo)
+            staged = [e["path"] for e in status["staged"]]
+            assert "to-stage.txt" in staged
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_decision_respond_workspace_git_stage_reject_does_nothing(
+    tmp_path,
+) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], capture_output=True, check=True)
+    (repo / "no-stage.txt").write_text("x\n")
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+            await hub.set_workspace_root(session_id, str(repo))
+
+            stage_resp = await client.post(
+                "/ui/api/workspace/git/stage",
+                headers={"X-Slavik-Session": session_id},
+                json={"paths": ["no-stage.txt"]},
+            )
+            assert stage_resp.status == 202
+            stage_payload = await stage_resp.json()
+            decision = stage_payload.get("decision")
+            decision_id = decision.get("id")
+            assert isinstance(decision_id, str)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision_id,
+                    "choice": "reject",
+                },
+            )
+            assert respond.status == 200
+
+            from server.http.common.workspace_git import git_status
+
+            status = git_status(repo)
+            staged = [e["path"] for e in status["staged"]]
+            assert "no-stage.txt" not in staged
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_decision_respond_ignores_client_control_fields_or_rejects() -> None:
     async def run() -> None:
         agent = WorkspaceDecisionAgent()

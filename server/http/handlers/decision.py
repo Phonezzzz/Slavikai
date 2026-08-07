@@ -13,6 +13,7 @@ from core.approval_policy import ApprovalRequired
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
+from server.http.common.workspace_git import git_commit, git_stage, git_unstage
 from server.http.handlers.ui_chat import handle_ui_send_resume
 from server.http_api import (
     UI_DECISION_RESPONSES,
@@ -617,6 +618,60 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             return {
                 "ok": False,
                 "error": f"decision_resume_not_supported: project.command '{command}'",
+                "source_endpoint": source_endpoint,
+            }
+
+        if source_endpoint == "workspace.git":
+            operation_raw = resume_payload.get("operation")
+            if not isinstance(operation_raw, str) or not operation_raw.strip():
+                return {
+                    "ok": False,
+                    "error": "resume_payload.operation is missing.",
+                    "source_endpoint": source_endpoint,
+                }
+            operation = operation_raw.strip()
+            session_root = await _workspace_root_for_session(hub, session_id)
+
+            if operation == "stage":
+                paths_raw = resume_payload.get("paths")
+                all_flag = resume_payload.get("all") is True
+                paths: list[str] | None = paths_raw if isinstance(paths_raw, list) else None
+                ok, msg = git_stage(session_root, paths, all_files=all_flag)
+                return {
+                    "ok": ok,
+                    "source_endpoint": source_endpoint,
+                    "data": {"operation": operation, "message": msg},
+                }
+
+            if operation == "unstage":
+                upaths_raw = resume_payload.get("paths")
+                uall_flag = resume_payload.get("all") is True
+                upaths: list[str] | None = upaths_raw if isinstance(upaths_raw, list) else None
+                ok, msg = git_unstage(session_root, upaths, all_files=uall_flag)
+                return {
+                    "ok": ok,
+                    "source_endpoint": source_endpoint,
+                    "data": {"operation": operation, "message": msg},
+                }
+
+            if operation == "commit":
+                message_raw = resume_payload.get("message")
+                if not isinstance(message_raw, str) or not message_raw.strip():
+                    return {
+                        "ok": False,
+                        "error": "resume_payload.message is missing.",
+                        "source_endpoint": source_endpoint,
+                    }
+                ok, msg = git_commit(session_root, message_raw.strip())
+                return {
+                    "ok": ok,
+                    "source_endpoint": source_endpoint,
+                    "data": {"operation": operation, "message": msg},
+                }
+
+            return {
+                "ok": False,
+                "error": f"decision_resume_not_supported: workspace.git '{operation}'",
                 "source_endpoint": source_endpoint,
             }
 

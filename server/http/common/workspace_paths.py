@@ -81,11 +81,14 @@ def browse_directories(
 
     if policy_profile == "index":
         home_dir = Path.home().resolve()
+        is_inside_home = False
         try:
             candidate.relative_to(home_dir)
-            raise ValueError("Просмотр домашней директории запрещён при index policy.")
+            is_inside_home = True
         except ValueError:
             pass
+        if is_inside_home:
+            raise ValueError("Просмотр домашней директории запрещён при index policy.")
 
     entries: list[dict[str, str]] = []
     try:

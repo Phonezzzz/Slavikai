@@ -575,11 +575,17 @@ export function useSessionRuntimeController({
     }
   };
 
+  const reconcileSessionRef = useRef<string | null>(null);
+
   const _reconcileWorkspaceRoot = async (sessionId: string): Promise<void> => {
+    reconcileSessionRef.current = sessionId;
     try {
       const rootResponse = await fetch('/ui/api/workspace/root', {
         headers: { [sessionHeader]: sessionId },
       });
+      if (reconcileSessionRef.current !== sessionId) {
+        return;
+      }
       if (rootResponse.ok) {
         const rootPayload: unknown = await rootResponse.json();
         const rootPath = parseWorkspaceRoot(

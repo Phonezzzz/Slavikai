@@ -36,6 +36,7 @@ import {
 } from '../../features/workspace/workspace-quick-open-index';
 import { WorkspaceToolbar } from '../../features/workspace/workspace-toolbar';
 import { ProjectPicker } from '../../features/workspace/project-picker';
+import { GitPanel } from '../../features/workspace/git-panel';
 import { useWorkspaceLayout } from '../../features/workspace/use-workspace-layout';
 import {
   deleteWorkspaceFile,
@@ -129,7 +130,6 @@ export function WorkspaceIde({
   ]);
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalBusy, setTerminalBusy] = useState(false);
-  const [gitDiff, setGitDiff] = useState<string | null>(null);
 
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectRootBusy, setProjectRootBusy] = useState(false);
@@ -223,7 +223,6 @@ export function WorkspaceIde({
     setRecentPaths([]);
     quickOpenFileIndexRef.current = null;
     quickOpenLoadedForRoot.current = null;
-    setGitDiff(null);
   }, [sessionId]);
 
   useEffect(() => {
@@ -506,7 +505,6 @@ export function WorkspaceIde({
     quickOpenFileIndexRef.current = null;
     setQuickOpenItems([]);
     setQuickOpenPartial(false);
-    setGitDiff(null);
   }, [workspaceRoot]);
 
   useEffect(() => {
@@ -827,7 +825,6 @@ export function WorkspaceIde({
       setProjectPickerOpen(false);
       setOpenFiles([]);
       setActiveFileId(null);
-      setGitDiff(null);
       requestTreeLoad(undefined, 'root_change');
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] Computer root: ${appliedRoot}`]);
     } catch (error) {
@@ -1151,18 +1148,13 @@ export function WorkspaceIde({
         )}
 
         {computerTab === 'changes' && (
-          <div className="h-full overflow-auto px-3 py-3" data-computer-tab-content="changes">
-            {decision && decision.status === 'pending' ? (
-              <div className="text-[12px] text-[#9a9aa3]">
-                Pending decision: <span className="text-amber-300">{decision.summary}</span>
-              </div>
-            ) : gitDiff ? (
-              <pre className="text-[11px] font-mono text-[#9a9aa3] whitespace-pre-wrap break-all">
-                {gitDiff}
-              </pre>
-            ) : (
-              <div className="text-[12px] text-[#777]">No pending changes.</div>
-            )}
+          <div className="h-full overflow-auto" data-computer-tab-content="changes">
+            <GitPanel
+              sessionId={sessionId}
+              sessionHeader={sessionHeader}
+              requestHeaders={requestHeaders}
+              workspaceRoot={workspaceRoot}
+            />
           </div>
         )}
 

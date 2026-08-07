@@ -314,7 +314,7 @@ async def _check_git_write_approval(
     hub: UIHub,
     session_id: str,
     operation: str,
-    detail: str,
+    resume_payload: dict[str, JSONValue],
 ) -> web.Response | None:
     from core.approval_policy import ApprovalPrompt, ApprovalRequest
 
@@ -337,24 +337,22 @@ async def _check_git_write_approval(
         category="EXEC_ARBITRARY",
         required_categories=missing,
         prompt=ApprovalPrompt(
-            what=f"Git {operation}: {detail}",
+            what=f"Git {operation}",
             why="Операция с Git требует прав на изменение файлов.",
             risk="Модификация рабочей директории и git индекса.",
             changes=["git index modification"],
         ),
         tool=f"workspace_git_{operation}",
-        details={"operation": operation, "detail": detail},
+        details={"operation": operation},
         session_id=session_id,
     )
     approval_payload = api._serialize_approval_request(approval_request)
+    resume: dict[str, JSONValue] = {"operation": operation, **resume_payload}
     decision = _build_ui_approval_decision(
         approval_request=approval_payload or {},
         session_id=session_id,
         source_endpoint="workspace.git",
-        resume_payload={
-            "operation": operation,
-            "detail": detail,
-        },
+        resume_payload=resume,
     )
     await hub.set_session_decision(session_id, decision)
     return json_response(
@@ -378,7 +376,14 @@ async def handle_ui_workspace_git_stage(request: web.Request) -> web.Response:
     paths = payload.get("paths") if isinstance(payload, dict) else None
     all_files = (payload if isinstance(payload, dict) else {}).get("all", False) is True
     approval_response = await _check_git_write_approval(
-        request, hub, session_id, "stage", str(paths or "all")
+        request,
+        hub,
+        session_id,
+        "stage",
+        {
+            "paths": paths if isinstance(paths, list) else None,
+            "all": all_files,
+        },
     )
     if approval_response is not None:
         return approval_response
@@ -407,7 +412,14 @@ async def handle_ui_workspace_git_unstage(request: web.Request) -> web.Response:
     paths = payload.get("paths") if isinstance(payload, dict) else None
     all_files = (payload if isinstance(payload, dict) else {}).get("all", False) is True
     approval_response = await _check_git_write_approval(
-        request, hub, session_id, "unstage", str(paths or "all")
+        request,
+        hub,
+        session_id,
+        "unstage",
+        {
+            "paths": paths if isinstance(paths, list) else None,
+            "all": all_files,
+        },
     )
     if approval_response is not None:
         return approval_response
@@ -443,7 +455,7 @@ async def handle_ui_workspace_git_commit(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
     approval_response = await _check_git_write_approval(
-        request, hub, session_id, "commit", message[:60]
+        request, hub, session_id, "commit", {"message": message.strip()}
     )
     if approval_response is not None:
         return approval_response

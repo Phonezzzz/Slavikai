@@ -838,3 +838,32 @@ def test_browse_directories_respects_max_entries(tmp_path) -> None:
     entries = result["entries"]
     assert len(entries) == 50
     assert result["truncated"] is True
+
+
+def test_browse_directories_index_policy_rejects_home(monkeypatch, tmp_path) -> None:
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    inside_home = fake_home / "projects"
+    inside_home.mkdir(parents=True, exist_ok=True)
+    outside_home = tmp_path / "outside-home"
+    outside_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("server.http.common.workspace_paths.Path.home", lambda: fake_home)
+
+    from server.http.common.workspace_paths import browse_directories
+
+    try:
+        browse_directories(
+            str(inside_home),
+            policy_profile="index",
+            workspace_root=fake_home,
+        )
+        raise AssertionError("index policy must reject home subtree")
+    except ValueError as exc:
+        assert "домашней директории" in str(exc)
+
+    result = browse_directories(
+        str(outside_home),
+        policy_profile="index",
+        workspace_root=tmp_path,
+    )
+    assert result["path"] == str(outside_home)
