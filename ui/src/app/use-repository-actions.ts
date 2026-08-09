@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import type { SessionTransportBridge } from './session-bridges';
 import { extractErrorMessage, extractSessionIdFromPayload, parseUiDecision } from './session-payload';
@@ -44,6 +44,20 @@ export function useRepositoryActions({
 }: UseRepositoryActionsOptions): RepositoryActionsResult {
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
   const [gitDecisionOutcome, setGitDecisionOutcome] = useState<GitDecisionOutcome | null>(null);
+
+  useEffect(() => {
+    setGitDecisionOutcome(null);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (pendingDecision?.status !== 'pending' || !pendingDecision.context) {
+      return;
+    }
+    const context = pendingDecision.context as Record<string, unknown>;
+    if (context.source_endpoint === 'workspace.git') {
+      setGitDecisionOutcome(null);
+    }
+  }, [pendingDecision?.id, pendingDecision?.status]);
 
   const handleWorkspaceGithubImport = async (
     repoUrl: string,
@@ -117,11 +131,21 @@ export function useRepositoryActions({
       error?: unknown;
     };
     if (payload.source_endpoint === 'workspace.git') {
-      setWorkspaceRefreshToken((value) => value + 1);
+      const data = payload.data && typeof payload.data === 'object'
+        ? (payload.data as { message?: unknown; operation?: unknown })
+        : null;
+      const operation = data && typeof data.operation === 'string' && data.operation.trim()
+        ? data.operation.trim()
+        : 'operation';
+      const resultMessage = data && typeof data.message === 'string' && data.message.trim()
+        ? data.message.trim()
+        : null;
       if (payload.ok === true) {
         setGitDecisionOutcome({
           kind: 'success',
-          message: 'Git operation completed.',
+          message: resultMessage && resultMessage !== 'ok'
+            ? resultMessage
+            : `Git ${operation} completed.`,
         });
       } else {
         setGitDecisionOutcome({
@@ -129,7 +153,7 @@ export function useRepositoryActions({
           message:
             typeof payload.error === 'string' && payload.error.trim()
               ? payload.error
-              : 'Git operation failed.',
+              : resultMessage ?? `Git ${operation} failed.`,
         });
       }
       onStatusMessage(null);
@@ -196,7 +220,6 @@ export function useRepositoryActions({
           kind: 'rejected',
           message: 'Git operation cancelled.',
         });
-        setWorkspaceRefreshToken((value) => value + 1);
         return;
       }
     }

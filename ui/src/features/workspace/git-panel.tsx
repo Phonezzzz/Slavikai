@@ -36,6 +36,7 @@ export function GitPanel({
   const [actionBusy, setActionBusy] = useState(false);
   const [pendingApproval, setPendingApproval] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [outcomeKind, setOutcomeKind] = useState<'success' | 'rejected' | 'failed' | null>(null);
 
   const statusGenerationRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -89,6 +90,7 @@ export function GitPanel({
   useEffect(() => {
     setPendingApproval(false);
     setActionMessage(null);
+    setOutcomeKind(null);
     void loadStatus();
   }, [sessionId, workspaceRoot, refreshToken]);
 
@@ -98,6 +100,7 @@ export function GitPanel({
     }
     setPendingApproval(false);
     setActionMessage(decisionOutcome.message);
+    setOutcomeKind(decisionOutcome.kind);
     if (decisionOutcome.kind === 'success') {
       void loadStatus();
     }
@@ -107,6 +110,7 @@ export function GitPanel({
     setActionBusy(true);
     setActionMessage(null);
     setPendingApproval(false);
+    setOutcomeKind(null);
     try {
       const result = await postWorkspaceGitStage(paths, all, requestHeaders);
       if (result.pendingApproval) {
@@ -127,6 +131,7 @@ export function GitPanel({
     setActionBusy(true);
     setActionMessage(null);
     setPendingApproval(false);
+    setOutcomeKind(null);
     try {
       const result = await postWorkspaceGitUnstage(paths, all, requestHeaders);
       if (result.pendingApproval) {
@@ -149,6 +154,7 @@ export function GitPanel({
     setActionBusy(true);
     setActionMessage(null);
     setPendingApproval(false);
+    setOutcomeKind(null);
     try {
       const result = await postWorkspaceGitCommit(msg, requestHeaders);
       if (result.pendingApproval) {
@@ -357,11 +363,11 @@ export function GitPanel({
             <div className="rounded-md border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
               {actionMessage}
             </div>
-          ) : decisionOutcome && decisionOutcome.kind === 'failed' ? (
+          ) : outcomeKind === 'failed' ? (
             <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
               {actionMessage}
             </div>
-          ) : decisionOutcome && decisionOutcome.kind === 'rejected' ? (
+          ) : outcomeKind === 'rejected' ? (
             <div className="rounded-md border border-[#2a2a31] bg-[#0d0d12] px-3 py-2 text-[11px] text-[#9a9aa3]">
               {actionMessage}
             </div>

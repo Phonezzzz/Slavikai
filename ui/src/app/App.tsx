@@ -648,6 +648,7 @@ export default function App() {
                 choice,
                 editedAction,
                 repositoryActions.handleDecisionResume,
+                repositoryActions.handleDecisionRejected,
               );
             }}
             onOpenArtifactPanel={() => {
