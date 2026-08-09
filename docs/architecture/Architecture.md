@@ -202,6 +202,7 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
 - `ruff format --check .`
 - `mypy .`
 - `npm run typecheck` (UI)
+- `npm test` (UI regression tests)
 - `pytest` с покрытием (порог ≥ 80%).
 
 ## Наблюдаемость

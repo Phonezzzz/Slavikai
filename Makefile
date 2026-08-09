@@ -46,8 +46,9 @@ help:
 	@echo "  make format-check    ruff format --check ."
 	@echo "  make type            mypy . (strict, tests excluded by config)"
 	@echo "  make ui-type         npm run typecheck (ui)"
+	@echo "  make ui-test         npm test (ui)"
 	@echo "  make test            pytest (coverage configured in pyproject.toml)"
-	@echo "  make check           canonical project gate: UI guard + lint + format-check + type + ui-type + test"
+	@echo "  make check           canonical project gate: UI guard + lint + format-check + type + ui-type + ui-test + test"
 	@echo "  make ci              skills lint/manifest + pytest -q (temp candidates)"
 	@echo
 	@echo "Git:"
@@ -163,6 +164,10 @@ type: venv
 ui-type:
 	cd ui && npm run typecheck
 
+.PHONY: ui-test
+ui-test:
+	cd ui && npm test
+
 .PHONY: test
 PYTEST_ARGS ?=
 test: venv
@@ -173,7 +178,7 @@ test-behavior: venv
 	"$(VENV_PY)" -m pytest --no-cov -m behavior
 
 .PHONY: check
-check: check-no-legacy-ui lint format-check type ui-type test
+check: check-no-legacy-ui lint format-check type ui-type ui-test test
 
 .PHONY: check-no-legacy-ui
 check-no-legacy-ui:

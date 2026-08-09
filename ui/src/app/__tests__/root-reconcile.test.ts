@@ -1,151 +1,228 @@
-import { describe, expect, it, vi } from 'vitest';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import type { MutableRefObject } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { RootReconcileGuard } from '../root-reconcile';
+import { DEFAULT_COMPOSER_SETTINGS } from '../session-payload';
+import type { SessionTransportBridge } from '../session-bridges';
+import type { SessionSummary } from '../types';
+import { useSessionRuntimeController } from '../use-session-runtime-controller';
 
-type Deferred = {
-  resolve: (value: unknown) => void;
-  reject: (reason: unknown) => void;
-  promise: Promise<unknown>;
-};
-
-const deferred = (): Deferred => {
-  let resolve: Deferred['resolve'] = () => {};
-  let reject: Deferred['reject'] = () => {};
-  const promise = new Promise<unknown>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { resolve, reject, promise };
-};
-
-/**
- * Mirrors the controller flow with the REAL production guard:
- * - switch starts  -> guard.invalidate() synchronously (before any await)
- * - reconcile      -> guard.begin() then await fetch; isCurrent() before setWorkspaceRoot
- * - setWorkspaceRoot only when isCurrent() passes
- */
-const makeReconcileController = () => {
-  const guard = new RootReconcileGuard();
-  const appliedRoots: string[] = [];
-  let currentSession: string | null = null;
-
-  const switchSession = (sessionId: string | null) => {
-    if (sessionId === currentSession) {
-      return;
-    }
-    guard.invalidate();
-    currentSession = sessionId;
+vi.mock('../session-security', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../session-security')>();
+  return {
+    ...actual,
+    loadSessionSecuritySummary: vi.fn(async () => actual.DEFAULT_SESSION_SECURITY_SUMMARY),
   };
-
-  const reconcile = async (
-    _sessionId: string,
-    fetchPromise: Promise<unknown>,
-  ): Promise<void> => {
-    const generation = guard.begin();
-    let payload: unknown = null;
-    try {
-      payload = await fetchPromise;
-    } catch {
-      return;
-    }
-    if (!guard.isCurrent(generation)) {
-      return;
-    }
-    const rootPath =
-      payload && typeof payload === 'object'
-        ? ((payload as { root_path?: unknown }).root_path as string | undefined)
-        : undefined;
-    if (rootPath) {
-      appliedRoots.push(rootPath);
-    }
-  };
-
-  return { appliedRoots, switchSession, reconcile };
-};
-
-describe('RootReconcileGuard (production class, controller flow)', () => {
-  it('applies root when no switch happened', async () => {
-    const controller = makeReconcileController();
-    const fetchA = deferred();
-    controller.switchSession('A');
-    const pending = controller.reconcile('A', fetchA.promise);
-    fetchA.resolve({ root_path: '/root-A' });
-    await pending;
-    expect(controller.appliedRoots).toEqual(['/root-A']);
-  });
-
-  it('A reconcile resolves while B load pending -> A root MUST NOT apply', async () => {
-    const controller = makeReconcileController();
-    const fetchA = deferred();
-    const fetchB = deferred();
-
-    controller.switchSession('A');
-    const reconcileA = controller.reconcile('A', fetchA.promise);
-
-    // user switches to B while A is still in-flight; B's load is pending
-    controller.switchSession('B');
-    const reconcileB = controller.reconcile('B', fetchB.promise);
-
-    // A resolves after B switch began -> stale, must be dropped
-    fetchA.resolve({ root_path: '/root-A-stale' });
-    await reconcileA;
-    expect(controller.appliedRoots).toEqual([]);
-
-    // B resolves -> current, must apply
-    fetchB.resolve({ root_path: '/root-B' });
-    await reconcileB;
-    expect(controller.appliedRoots).toEqual(['/root-B']);
-  });
-
-  it('A -> B -> A reentrant: only the last A reconcile applies', async () => {
-    const controller = makeReconcileController();
-    const fetchA1 = deferred();
-    const fetchB = deferred();
-    const fetchA2 = deferred();
-
-    controller.switchSession('A');
-    const reconcileA1 = controller.reconcile('A', fetchA1.promise);
-
-    controller.switchSession('B');
-    const reconcileB = controller.reconcile('B', fetchB.promise);
-
-    controller.switchSession('A');
-    const reconcileA2 = controller.reconcile('A', fetchA2.promise);
-
-    // stale A1 resolves after switch to B -> dropped
-    fetchA1.resolve({ root_path: '/root-A1-stale' });
-    await reconcileA1;
-    // stale B resolves after switch back to A -> dropped
-    fetchB.resolve({ root_path: '/root-B-stale' });
-    await reconcileB;
-
-    expect(controller.appliedRoots).toEqual([]);
-
-    fetchA2.resolve({ root_path: '/root-A2' });
-    await reconcileA2;
-    expect(controller.appliedRoots).toEqual(['/root-A2']);
-  });
-
-  it('begin() increments generation; isCurrent() tracks latest', () => {
-    const guard = new RootReconcileGuard();
-    const g1 = guard.begin();
-    const g2 = guard.begin();
-    expect(guard.isCurrent(g1)).toBe(false);
-    expect(guard.isCurrent(g2)).toBe(true);
-  });
-
-  it('invalidate() drops any in-flight generation', () => {
-    const guard = new RootReconcileGuard();
-    const g1 = guard.begin();
-    guard.invalidate();
-    expect(guard.isCurrent(g1)).toBe(false);
-  });
 });
 
-describe('controller helper (deterministic deferral)', () => {
-  it('vi.fn integration sanity', () => {
-    const spy = vi.fn();
-    spy('/root');
-    expect(spy).toHaveBeenCalledWith('/root');
+vi.mock('../session-storage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../session-storage')>();
+  return {
+    ...actual,
+    loadLastSessionId: vi.fn(() => 'C'),
+    loadLastModel: vi.fn(() => null),
+    saveLastSessionId: vi.fn(),
+    saveLastModel: vi.fn(),
+  };
+});
+
+type Deferred<T> = {
+  resolve: (value: T) => void;
+  promise: Promise<T>;
+};
+
+const deferred = <T,>(): Deferred<T> => {
+  let resolve: Deferred<T>['resolve'] = () => {};
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { resolve, promise };
+};
+
+const jsonResponse = (payload: unknown): Response =>
+  ({
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    json: async () => payload,
+  }) as Response;
+
+const sessionSummary = (sessionId: string): SessionSummary => ({
+  session_id: sessionId,
+  title: sessionId,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+  message_count: 0,
+  chat_message_count: 0,
+  workspace_message_count: 0,
+  last_message_lane: null,
+});
+
+const sessionPayload = (sessionId: string, workspaceRoot: string) => ({
+  session: {
+    session_id: sessionId,
+    messages: [],
+    artifacts: [],
+    computer_events: [],
+    selected_model: null,
+    workspace_root: workspaceRoot,
+    mode: 'ask',
+    decision: null,
+    active_plan: null,
+    active_task: null,
+    auto_state: null,
+    mode_transitions: null,
+  },
+});
+
+const createHarness = () => {
+  const sessionRequests = new Map<string, Deferred<Response>>();
+  const rootRequests = new Map<string, Deferred<Response>>();
+  const roots = new Map([
+    ['C', '/root-C'],
+    ['A', '/root-A'],
+    ['B', '/root-B'],
+  ]);
+
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    const sessionId = headers.get('X-Test') ?? '';
+
+    if (url === '/ui/api/workspace/root') {
+      const pending = rootRequests.get(sessionId);
+      if (pending) {
+        return pending.promise;
+      }
+      return jsonResponse({ root_path: roots.get(sessionId) ?? '' });
+    }
+
+    const sessionMatch = url.match(/^\/ui\/api\/sessions\/([^/]+)$/);
+    if (sessionMatch) {
+      const requestedSession = decodeURIComponent(sessionMatch[1]);
+      const pending = sessionRequests.get(requestedSession);
+      if (pending) {
+        return pending.promise;
+      }
+      return jsonResponse(
+        sessionPayload(requestedSession, roots.get(requestedSession) ?? ''),
+      );
+    }
+    if (url.endsWith('/output')) {
+      return jsonResponse({ output: null });
+    }
+    if (url.endsWith('/files')) {
+      return jsonResponse({ files: [] });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  const transport: SessionTransportBridge = {
+    applyLoadedConversation: vi.fn(),
+    applySessionPayload: vi.fn(() => ({ lane: 'chat' as const })),
+    clearConversationState: vi.fn(),
+  };
+  const transportRef: MutableRefObject<SessionTransportBridge | null> = {
+    current: transport,
+  };
+  const sessions = ['C', 'A', 'B'].map(sessionSummary);
+  const hook = renderHook(() =>
+    useSessionRuntimeController({
+      sessionHeader: 'X-Test',
+      providerModels: [],
+      loadSessions: vi.fn(async () => sessions),
+      loadModels: vi.fn(async () => []),
+      loadComposerSettings: vi.fn(async () => DEFAULT_COMPOSER_SETTINGS),
+      onStatusMessage: vi.fn(),
+      transportRef,
+    }),
+  );
+
+  return { ...hook, sessionRequests, rootRequests };
+};
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+});
+
+describe('useSessionRuntimeController root reconciliation', () => {
+  it('drops A reconcile as soon as switch to B begins, while B load is pending', async () => {
+    const harness = createHarness();
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));
+
+    const rootA = deferred<Response>();
+    harness.rootRequests.set('A', rootA);
+    await act(async () => {
+      await harness.result.current.handleSelectConversation('A');
+    });
+    expect(harness.result.current.workspaceRoot).toBe('/root-A');
+
+    const sessionB = deferred<Response>();
+    harness.sessionRequests.set('B', sessionB);
+    let switchToB: Promise<void> = Promise.resolve();
+    act(() => {
+      switchToB = harness.result.current.handleSelectConversation('B');
+    });
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('B'));
+
+    await act(async () => {
+      rootA.resolve(jsonResponse({ root_path: '/root-A-stale' }));
+      await rootA.promise;
+      await Promise.resolve();
+    });
+    expect(harness.result.current.workspaceRoot).toBe('/root-A');
+
+    await act(async () => {
+      sessionB.resolve(jsonResponse(sessionPayload('B', '/root-B')));
+      await switchToB;
+    });
+    expect(harness.result.current.workspaceRoot).toBe('/root-B');
+  });
+
+  it('A -> B -> A reentrant switch never applies the stale B load', async () => {
+    const harness = createHarness();
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));
+    await act(async () => {
+      await harness.result.current.handleSelectConversation('A');
+    });
+    expect(harness.result.current.workspaceRoot).toBe('/root-A');
+
+    const sessionB = deferred<Response>();
+    harness.sessionRequests.set('B', sessionB);
+    let switchToB: Promise<void> = Promise.resolve();
+    act(() => {
+      switchToB = harness.result.current.handleSelectConversation('B');
+    });
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('B'));
+
+    const sessionA2 = deferred<Response>();
+    const rootA2 = deferred<Response>();
+    harness.sessionRequests.set('A', sessionA2);
+    harness.rootRequests.set('A', rootA2);
+    let switchBackToA: Promise<void> = Promise.resolve();
+    act(() => {
+      switchBackToA = harness.result.current.handleSelectConversation('A');
+    });
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('A'));
+
+    await act(async () => {
+      sessionB.resolve(jsonResponse(sessionPayload('B', '/root-B-stale')));
+      await switchToB;
+    });
+    expect(harness.result.current.workspaceRoot).toBe('/root-A');
+
+    await act(async () => {
+      sessionA2.resolve(jsonResponse(sessionPayload('A', '/root-A-current')));
+      await switchBackToA;
+    });
+    expect(harness.result.current.workspaceRoot).toBe('/root-A-current');
+
+    await act(async () => {
+      rootA2.resolve(jsonResponse({ root_path: '/root-A-current' }));
+      await rootA2.promise;
+    });
+    expect(harness.result.current.workspaceRoot).toBe('/root-A-current');
   });
 });
