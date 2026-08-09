@@ -275,6 +275,7 @@ export function useSessionRuntimeController({
   transportRef,
 }: UseSessionRuntimeControllerOptions): SessionRuntimeControllerResult {
   const resyncFetchInFlightRef = useRef(false);
+  const reconcileGuardRef = useRef(new RootReconcileGuard());
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [savingModel, setSavingModel] = useState(false);
@@ -364,7 +365,10 @@ export function useSessionRuntimeController({
     setSessionSecuritySummary(summary);
   };
 
-  const loadConversation = async (sessionId: string): Promise<SelectedModel | null> => {
+  const loadConversation = async (
+    sessionId: string,
+    generation: number,
+  ): Promise<SelectedModel | null> => {
     const [sessionResponse, outputResponse, filesResponse] =
       await Promise.all([
         fetch(`/ui/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -402,6 +406,15 @@ export function useSessionRuntimeController({
     }
 
     const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
+    let securitySummary = DEFAULT_SESSION_SECURITY_SUMMARY;
+    try {
+      securitySummary = await loadSessionSecuritySummary(sessionId, sessionHeader);
+    } catch {
+      securitySummary = DEFAULT_SESSION_SECURITY_SUMMARY;
+    }
+    if (!reconcileGuardRef.current.isCurrent(generation)) {
+      return null;
+    }
     transportRef.current?.applyLoadedConversation({
       chatMessages: parseMessages((session as { messages?: unknown } | undefined)?.messages),
       outputContent: parseSessionOutput((outputPayload as { output?: unknown }).output).content,
@@ -410,11 +423,7 @@ export function useSessionRuntimeController({
     });
     setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
     setDecisionError(null);
-    try {
-      await refreshSessionSecuritySummary(sessionId);
-    } catch {
-      setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
-    }
+    setSessionSecuritySummary(securitySummary);
     setWorkspaceRoot(
       parseWorkspaceRoot((session as { workspace_root?: unknown } | undefined)?.workspace_root),
     );
@@ -433,7 +442,7 @@ export function useSessionRuntimeController({
     return parsedSelectedModel;
   };
 
-  const createConversation = async (): Promise<{
+  const createConversation = async (generation: number): Promise<{
     sessionId: string | null;
     selectedModel: SelectedModel | null;
   }> => {
@@ -448,6 +457,20 @@ export function useSessionRuntimeController({
     const payloadSession = extractSessionIdFromPayload(payload);
     const nextSession = (headerSession && headerSession.trim()) || payloadSession || null;
     const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
+    let securitySummary = DEFAULT_SESSION_SECURITY_SUMMARY;
+    if (nextSession) {
+      try {
+        securitySummary = await loadSessionSecuritySummary(nextSession, sessionHeader);
+      } catch {
+        securitySummary = DEFAULT_SESSION_SECURITY_SUMMARY;
+      }
+    }
+    if (!reconcileGuardRef.current.isCurrent(generation)) {
+      return {
+        sessionId: nextSession,
+        selectedModel: parseSelectedModel(session?.selected_model),
+      };
+    }
     transportRef.current?.applyLoadedConversation({
       chatMessages: parseMessages(session?.messages),
       outputContent: parseSessionOutput((session as { output?: unknown } | undefined)?.output).content,
@@ -471,20 +494,13 @@ export function useSessionRuntimeController({
       parseComputerEvents((session as { computer_events?: unknown } | undefined)?.computer_events),
     );
     setSelectedModel(sessionModel);
-    if (nextSession) {
-      try {
-        await refreshSessionSecuritySummary(nextSession);
-      } catch {
-        setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
-      }
-    } else {
-      setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
-    }
+    setSessionSecuritySummary(securitySummary);
     return { sessionId: nextSession, selectedModel: sessionModel };
   };
 
   useEffect(() => {
     let cancelled = false;
+    const generation = reconcileGuardRef.current.begin();
 
     const bootstrap = async () => {
       try {
@@ -500,19 +516,25 @@ export function useSessionRuntimeController({
           nextSession = listedSessions[0].session_id;
         }
         if (!nextSession) {
-          const created = await createConversation();
+          const created = await createConversation(generation);
           nextSession = created.sessionId;
         }
 
-        if (!cancelled) {
+        if (!cancelled && reconcileGuardRef.current.isCurrent(generation)) {
           let selectedFromSession: SelectedModel | null = null;
           if (nextSession) {
             setSelectedConversation(nextSession);
-            selectedFromSession = await loadConversation(nextSession);
+            selectedFromSession = await loadConversation(nextSession, generation);
+            if (!reconcileGuardRef.current.isCurrent(generation)) {
+              return;
+            }
             saveLastSessionId(nextSession);
           }
           const models = await modelsPromise;
           await composerPromise;
+          if (cancelled || !reconcileGuardRef.current.isCurrent(generation)) {
+            return;
+          }
           if (nextSession && !selectedFromSession && !lastModelApplied) {
             const lastModel = loadLastModel();
             if (lastModel && isModelAvailable(lastModel, models)) {
@@ -536,7 +558,7 @@ export function useSessionRuntimeController({
           onStatusMessage(null);
         }
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && reconcileGuardRef.current.isCurrent(generation)) {
           const message = error instanceof Error ? error.message : 'Failed to initialize chat.';
           onStatusMessage(message);
         }
@@ -562,26 +584,32 @@ export function useSessionRuntimeController({
     if (!sessionId || sessionId === selectedConversation) {
       return;
     }
-    reconcileGuardRef.current.invalidate();
+    const generation = reconcileGuardRef.current.begin();
     setSelectedConversation(sessionId);
     transportRef.current?.clearConversationState();
     setPendingDecision(null);
     setDecisionError(null);
     try {
-      await loadConversation(sessionId);
+      await loadConversation(sessionId, generation);
+      if (!reconcileGuardRef.current.isCurrent(generation)) {
+        return;
+      }
       saveLastSessionId(sessionId);
       onStatusMessage(null);
-      _reconcileWorkspaceRoot(sessionId);
+      void _reconcileWorkspaceRoot(sessionId, generation);
     } catch (error) {
+      if (!reconcileGuardRef.current.isCurrent(generation)) {
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to load selected chat.';
       onStatusMessage(message);
     }
   };
 
-  const reconcileGuardRef = useRef(new RootReconcileGuard());
-
-  const _reconcileWorkspaceRoot = async (sessionId: string): Promise<void> => {
-    const generation = reconcileGuardRef.current.begin();
+  const _reconcileWorkspaceRoot = async (
+    sessionId: string,
+    generation: number,
+  ): Promise<void> => {
     try {
       const rootResponse = await fetch('/ui/api/workspace/root', {
         headers: { [sessionHeader]: sessionId },
@@ -607,9 +635,12 @@ export function useSessionRuntimeController({
   };
 
   const handleCreateConversation = async () => {
-    reconcileGuardRef.current.invalidate();
+    const generation = reconcileGuardRef.current.begin();
     try {
-      const created = await createConversation();
+      const created = await createConversation(generation);
+      if (!reconcileGuardRef.current.isCurrent(generation)) {
+        return;
+      }
       const nextSession = created.sessionId;
       if (!nextSession) {
         onStatusMessage('Failed to create chat.');
@@ -618,10 +649,16 @@ export function useSessionRuntimeController({
       setSelectedConversation(nextSession);
       setPendingDecision(null);
       setDecisionError(null);
-      await loadConversation(nextSession);
+      await loadConversation(nextSession, generation);
+      if (!reconcileGuardRef.current.isCurrent(generation)) {
+        return;
+      }
       saveLastSessionId(nextSession);
-      _reconcileWorkspaceRoot(nextSession);
+      void _reconcileWorkspaceRoot(nextSession, generation);
       await loadSessions();
+      if (!reconcileGuardRef.current.isCurrent(generation)) {
+        return;
+      }
       if (!created.selectedModel && providerModels.length > 0) {
         const lastModel = loadLastModel();
         if (lastModel && isModelAvailable(lastModel, providerModels)) {
@@ -644,6 +681,9 @@ export function useSessionRuntimeController({
       }
       onStatusMessage(null);
     } catch (error) {
+      if (!reconcileGuardRef.current.isCurrent(generation)) {
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to create chat.';
       onStatusMessage(message);
     }
@@ -668,14 +708,25 @@ export function useSessionRuntimeController({
       if (selectedConversation === sessionId) {
         if (updatedSessions.length > 0) {
           const nextSession = updatedSessions[0].session_id;
+          const generation = reconcileGuardRef.current.begin();
           setSelectedConversation(nextSession);
-          await loadConversation(nextSession);
+          await loadConversation(nextSession, generation);
+          if (!reconcileGuardRef.current.isCurrent(generation)) {
+            return;
+          }
           saveLastSessionId(nextSession);
         } else {
-          const created = await createConversation();
+          const generation = reconcileGuardRef.current.begin();
+          const created = await createConversation(generation);
+          if (!reconcileGuardRef.current.isCurrent(generation)) {
+            return;
+          }
           if (created.sessionId) {
             setSelectedConversation(created.sessionId);
-            await loadConversation(created.sessionId);
+            await loadConversation(created.sessionId, generation);
+            if (!reconcileGuardRef.current.isCurrent(generation)) {
+              return;
+            }
             await loadSessions();
             saveLastSessionId(created.sessionId);
           } else {

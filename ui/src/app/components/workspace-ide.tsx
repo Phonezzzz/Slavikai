@@ -170,6 +170,8 @@ export function WorkspaceIde({
   const treeInFlightPathsRef = useRef<Set<string>>(new Set());
   const quickOpenFileIndexRef = useRef<QuickOpenIndexCache | null>(null);
   const quickOpenLoadedForRoot = useRef<string | null>(null);
+  const quickOpenAbortControllerRef = useRef<AbortController | null>(null);
+  const rootScopeGenerationRef = useRef(0);
 
   const activeTab = useMemo(
     () => openFiles.find((item) => item.id === activeFileId) ?? null,
@@ -204,6 +206,7 @@ export function WorkspaceIde({
   }, [terminalLines]);
 
   const resetRootScopedState = () => {
+    rootScopeGenerationRef.current += 1;
     treeDebounceTimersRef.current.forEach((timerId) => {
       window.clearTimeout(timerId);
     });
@@ -224,9 +227,12 @@ export function WorkspaceIde({
     setActiveFileId(null);
     setQuickOpenOpen(false);
     setQuickOpenQuery('');
+    setQuickOpenLoading(false);
     setQuickOpenPartial(false);
     setQuickOpenItems([]);
     setRecentPaths([]);
+    quickOpenAbortControllerRef.current?.abort();
+    quickOpenAbortControllerRef.current = null;
     quickOpenFileIndexRef.current = null;
     quickOpenLoadedForRoot.current = null;
     setGitRefreshToken((prev) => prev + 1);
@@ -326,6 +332,9 @@ export function WorkspaceIde({
       });
       treeAbortControllersRef.current.clear();
       treeInFlightPathsRef.current.clear();
+      quickOpenAbortControllerRef.current?.abort();
+      quickOpenAbortControllerRef.current = null;
+      rootScopeGenerationRef.current += 1;
     };
   }, []);
 
@@ -391,6 +400,7 @@ export function WorkspaceIde({
     const abortController = new AbortController();
     treeAbortControllersRef.current.set(requestKey, abortController);
     treeInFlightPathsRef.current.add(requestKey);
+    const scopeGeneration = rootScopeGenerationRef.current;
     const isRootLoad = normalizedPath.length === 0;
     if (isRootLoad) {
       setTreeLoading(true);
@@ -404,6 +414,13 @@ export function WorkspaceIde({
         requestHeaders,
         abortController.signal,
       );
+      if (
+        abortController.signal.aborted
+        || treeAbortControllersRef.current.get(requestKey) !== abortController
+        || rootScopeGenerationRef.current !== scopeGeneration
+      ) {
+        return;
+      }
       if (pendingApproval) {
         setTreeError('Ожидает подтверждения действия для доступа к Computer.');
         setTerminalLines((prev) => [
@@ -421,6 +438,13 @@ export function WorkspaceIde({
         setTree(parsedTree);
       }
     } catch (error) {
+      if (
+        abortController.signal.aborted
+        || treeAbortControllersRef.current.get(requestKey) !== abortController
+        || rootScopeGenerationRef.current !== scopeGeneration
+      ) {
+        return;
+      }
       if (error instanceof DOMException && error.name === 'AbortError') {
         return;
       }
@@ -431,14 +455,17 @@ export function WorkspaceIde({
         setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
       }
     } finally {
-      if (treeAbortControllersRef.current.get(requestKey) === abortController) {
+      if (
+        treeAbortControllersRef.current.get(requestKey) === abortController
+        && rootScopeGenerationRef.current === scopeGeneration
+      ) {
         treeAbortControllersRef.current.delete(requestKey);
-      }
-      treeInFlightPathsRef.current.delete(requestKey);
-      if (isRootLoad) {
-        setTreeLoading(false);
-      } else {
-        setPathLoading(normalizedPath, false);
+        treeInFlightPathsRef.current.delete(requestKey);
+        if (isRootLoad) {
+          setTreeLoading(false);
+        } else {
+          setPathLoading(normalizedPath, false);
+        }
       }
     }
   };
@@ -470,12 +497,24 @@ export function WorkspaceIde({
       setQuickOpenPartial(quickOpenFileIndexRef.current.partial);
       return;
     }
+    quickOpenAbortControllerRef.current?.abort();
+    const abortController = new AbortController();
+    quickOpenAbortControllerRef.current = abortController;
+    const scopeGeneration = rootScopeGenerationRef.current;
     setQuickOpenLoading(true);
     try {
       const { pendingApproval, tree: parsedTree, treeMeta: loadedTreeMeta } = await fetchWorkspaceTree(
         { recursive: true, maxDepth: 12 },
         requestHeaders,
+        abortController.signal,
       );
+      if (
+        abortController.signal.aborted
+        || quickOpenAbortControllerRef.current !== abortController
+        || rootScopeGenerationRef.current !== scopeGeneration
+      ) {
+        return;
+      }
       if (pendingApproval) {
         setTerminalLines((prev) => [
           ...prev,
@@ -495,12 +534,25 @@ export function WorkspaceIde({
       quickOpenFileIndexRef.current = cache;
       quickOpenLoadedForRoot.current = rootKey;
     } catch (error) {
+      if (
+        abortController.signal.aborted
+        || quickOpenAbortControllerRef.current !== abortController
+        || rootScopeGenerationRef.current !== scopeGeneration
+      ) {
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Failed to load quick open file list.';
       setTerminalLines((prev) => [...prev, `[${terminalTimestamp()}] error: ${message}`]);
       setQuickOpenItems([]);
       setQuickOpenPartial(false);
     } finally {
-      setQuickOpenLoading(false);
+      if (
+        quickOpenAbortControllerRef.current === abortController
+        && rootScopeGenerationRef.current === scopeGeneration
+      ) {
+        quickOpenAbortControllerRef.current = null;
+        setQuickOpenLoading(false);
+      }
     }
   };
 
