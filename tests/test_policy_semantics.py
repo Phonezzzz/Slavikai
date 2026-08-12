@@ -581,7 +581,10 @@ class TestConfigSecretPathDetection:
 
     def test_shell_config_path_triggers_fs_config_secrets(self) -> None:
         """shell config_path writes a config file: must be visible to approval."""
-        req = ToolRequest("shell", {"command": "echo hi", "config_path": "config/shell_config.json"})
+        req = ToolRequest(
+            "shell",
+            {"command": "echo hi", "config_path": "config/shell_config.json"},
+        )
         intents = detect_action_intents(req, risk_classes=["execute"])
         categories = {i.category for i in intents}
         assert "FS_CONFIG_SECRETS" in categories, (

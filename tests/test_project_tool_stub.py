@@ -18,6 +18,9 @@ class FakeVectorIndex:
             VectorSearchResult(path=f"{namespace}/file.py", snippet=f"{query} snippet", score=0.9)
         ]
 
+    def close(self) -> None:
+        return
+
 
 def test_project_find_uses_vectors(monkeypatch) -> None:
     monkeypatch.setattr("tools.project_tool.VectorIndex", FakeVectorIndex)

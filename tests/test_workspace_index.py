@@ -44,7 +44,7 @@ def _index(
         "server.http.common.workspace_index.VectorIndex",
         lambda *args, **kwargs: dummy,
     )
-    result = index_workspace_root(
+    index_workspace_root(
         root=root,
         load_embeddings_settings=_load_settings,
         resolve_provider_api_key=lambda provider: None,
