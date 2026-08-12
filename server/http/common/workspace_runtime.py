@@ -82,6 +82,11 @@ def _run_plan_readonly_audit(
             suffix = full_path.suffix.lower()
             if suffix and suffix not in workspace_index_allowed_extensions:
                 continue
+            resolved = full_path.resolve()
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                continue
             try:
                 raw = full_path.read_bytes()
             except Exception:  # noqa: BLE001
