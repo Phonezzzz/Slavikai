@@ -199,6 +199,64 @@ def test_workspace_create_rename_move_delete_file() -> None:
     assert not read_deleted.ok
 
 
+def test_workspace_rename_move_reject_extensionless_targets() -> None:
+    """Rename/Move must not bypass the extension policy enforced by Create/Write."""
+    src = "ext_policy/source.py"
+    CreateFileTool().handle(
+        _make_request("workspace_create", {"path": src, "content": "x", "overwrite": False})
+    )
+
+    rename_extensionless = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": src, "new_path": "ext_policy/README"})
+    )
+    assert not rename_extensionless.ok
+    assert "Расширение файла запрещено" in (rename_extensionless.error or "")
+
+    move_extensionless = MoveFileTool().handle(
+        _make_request("workspace_move", {"from_path": src, "to_path": "ext_policy/notes"})
+    )
+    assert not move_extensionless.ok
+    assert "Расширение файла запрещено" in (move_extensionless.error or "")
+
+    read_still = ReadFileTool().handle(_make_request("workspace_read", {"path": src}))
+    assert read_still.ok
+
+    rename_allowed = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": src, "new_path": "ext_policy/notes.md"})
+    )
+    assert rename_allowed.ok
+    assert (WORKSPACE_ROOT / "ext_policy" / "notes.md").exists()
+
+
+def test_workspace_rename_move_dir_without_extension_allowed() -> None:
+    """Directory rename/move targets keep arbitrary names (extension policy is for files)."""
+    (WORKSPACE_ROOT / "ext_policy_dir" / "nested").mkdir(parents=True, exist_ok=True)
+    CreateFileTool().handle(
+        _make_request(
+            "workspace_create",
+            {"path": "ext_policy_dir/nested/inner.txt", "content": "x", "overwrite": False},
+        )
+    )
+
+    rename_dir = RenameFileTool().handle(
+        _make_request(
+            "workspace_rename",
+            {"old_path": "ext_policy_dir", "new_path": "appdir"},
+        )
+    )
+    assert rename_dir.ok
+    assert (WORKSPACE_ROOT / "appdir" / "nested" / "inner.txt").exists()
+
+    move_dir = MoveFileTool().handle(
+        _make_request(
+            "workspace_move",
+            {"from_path": "appdir/nested", "to_path": "appdir/data"},
+        )
+    )
+    assert move_dir.ok
+    assert (WORKSPACE_ROOT / "appdir" / "data" / "inner.txt").exists()
+
+
 def test_workspace_delete_rejects_root_and_allows_recursive_dir_delete() -> None:
     nested_dir = WORKSPACE_ROOT / "ops" / "to_remove"
     shutil.rmtree(nested_dir, ignore_errors=True)
