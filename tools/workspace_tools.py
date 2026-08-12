@@ -561,8 +561,13 @@ class RunCodeTool:
                 return ToolResult.failure("Можно запускать только .py файлы.")
             if not path.exists():
                 return ToolResult.failure("Файл не найден.")
+            resolved = path.resolve()
+            try:
+                resolved.relative_to(get_workspace_root())
+            except ValueError:
+                return ToolResult.failure("Скрипт вне рабочей директории запрещён.")
             proc = subprocess.run(
-                [sys.executable, str(path)],
+                [sys.executable, str(resolved)],
                 cwd=get_workspace_root(),
                 capture_output=True,
                 text=True,

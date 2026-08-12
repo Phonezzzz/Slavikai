@@ -157,6 +157,27 @@ def test_run_code_success_and_timeout(tmp_path: Path) -> None:
     shutil.rmtree(scripts_dir, ignore_errors=True)
 
 
+def test_run_code_rejects_symlink_escape(tmp_path: Path) -> None:
+    scripts_dir = WORKSPACE_ROOT / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('LEAK')\n", encoding="utf-8")
+    link = scripts_dir / "escape_link.py"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        shutil.rmtree(scripts_dir, ignore_errors=True)
+        return
+    try:
+        result = RunCodeTool(timeout=2).handle(
+            _make_request("workspace_run", {"path": "scripts/escape_link.py"})
+        )
+        assert not result.ok
+        assert "вне рабочей директории" in (result.error or "")
+    finally:
+        shutil.rmtree(scripts_dir, ignore_errors=True)
+
+
 def test_workspace_create_rename_move_delete_file() -> None:
     create_result = CreateFileTool().handle(
         _make_request(
