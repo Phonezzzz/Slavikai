@@ -579,6 +579,22 @@ class TestConfigSecretPathDetection:
         categories = {i.category for i in intents}
         assert "FS_CONFIG_SECRETS" not in categories
 
+    def test_shell_config_path_triggers_fs_config_secrets(self) -> None:
+        """shell config_path writes a config file: must be visible to approval."""
+        req = ToolRequest("shell", {"command": "echo hi", "config_path": "config/shell_config.json"})
+        intents = detect_action_intents(req, risk_classes=["execute"])
+        categories = {i.category for i in intents}
+        assert "FS_CONFIG_SECRETS" in categories, (
+            f"Expected FS_CONFIG_SECRETS for shell config_path, got {categories}"
+        )
+
+    def test_shell_without_config_path_has_no_fs_config_secret(self) -> None:
+        req = ToolRequest("shell", {"command": "echo hi"})
+        intents = detect_action_intents(req, risk_classes=["execute"])
+        categories = {i.category for i in intents}
+        assert "FS_CONFIG_SECRETS" not in categories
+        assert "EXEC_ARBITRARY" in categories
+
 
 # ── ASK mode: ToolRegistry does not hard-block (uses LLM integration layer) ──
 

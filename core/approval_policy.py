@@ -198,6 +198,15 @@ def detect_action_intents(
         command = str(args.get("command") or args.get("path") or "")
         if command.strip():
             intents.extend(_shell_intents(tool, command))
+        config_path = str(args.get("config_path") or "")
+        if config_path:
+            intents.append(
+                _intent(
+                    tool,
+                    "FS_CONFIG_SECRETS",
+                    {"path": config_path, "op": "shell_config_write"},
+                )
+            )
         return _extend_missing_intents(intents, risk_intents)
 
     if tool == "web":
