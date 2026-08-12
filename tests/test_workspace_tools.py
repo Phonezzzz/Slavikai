@@ -201,6 +201,7 @@ def test_workspace_create_rename_move_delete_file() -> None:
 
 def test_workspace_rename_move_reject_extensionless_targets() -> None:
     """Rename/Move must not bypass the extension policy enforced by Create/Write."""
+    shutil.rmtree(WORKSPACE_ROOT / "ext_policy", ignore_errors=True)
     src = "ext_policy/source.py"
     CreateFileTool().handle(
         _make_request("workspace_create", {"path": src, "content": "x", "overwrite": False})
@@ -230,6 +231,8 @@ def test_workspace_rename_move_reject_extensionless_targets() -> None:
 
 def test_workspace_rename_move_dir_without_extension_allowed() -> None:
     """Directory rename/move targets keep arbitrary names (extension policy is for files)."""
+    shutil.rmtree(WORKSPACE_ROOT / "ext_policy_dir", ignore_errors=True)
+    shutil.rmtree(WORKSPACE_ROOT / "appdir", ignore_errors=True)
     (WORKSPACE_ROOT / "ext_policy_dir" / "nested").mkdir(parents=True, exist_ok=True)
     CreateFileTool().handle(
         _make_request(

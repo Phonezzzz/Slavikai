@@ -86,10 +86,33 @@ def index_workspace_root(
         openai_model=embeddings.openai_model,
         openai_api_key=resolve_provider_api_key("openai"),
     )
+    try:
+        return _index_workspace_root_with_index(
+            root=root,
+            vector_index=vector_index,
+            index_enabled_env=index_enabled_env,
+            ignored_dirs=ignored_dirs,
+            allowed_extensions=allowed_extensions,
+            max_file_bytes=max_file_bytes,
+        )
+    finally:
+        vector_index.close()
+
+
+def _index_workspace_root_with_index(
+    *,
+    root: Path,
+    vector_index: VectorIndex,
+    index_enabled_env: str,
+    ignored_dirs: set[str],
+    allowed_extensions: set[str],
+    max_file_bytes: int,
+) -> dict[str, JSONValue]:
     vector_index.ensure_runtime_ready()
     indexed_code = 0
     indexed_docs = 0
     skipped = 0
+    root_resolved = Path(os.path.realpath(root))
     for current_root, dirs, files in os.walk(root):
         dirs[:] = [name for name in dirs if name not in ignored_dirs]
         current = Path(current_root)
@@ -100,6 +123,12 @@ def index_workspace_root(
                 continue
             suffix = full_path.suffix.lower()
             if suffix not in allowed_extensions:
+                skipped += 1
+                continue
+            resolved = full_path.resolve()
+            try:
+                resolved.relative_to(root_resolved)
+            except ValueError:
                 skipped += 1
                 continue
             try:

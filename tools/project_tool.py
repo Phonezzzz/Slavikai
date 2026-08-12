@@ -35,9 +35,6 @@ def _resolve_in_sandbox(path: Path) -> Path:
 
 
 def handle_project_request(request: ToolRequest) -> ToolResult:
-    cmd = str(request.args.get("cmd") or "").strip()
-    args_raw = request.args.get("args") or []
-    args = [str(a) for a in args_raw] if isinstance(args_raw, list) else [str(args_raw)]
     embeddings = load_ui_embeddings_settings()
     index = VectorIndex(
         "memory/vectors.db",
@@ -46,6 +43,16 @@ def handle_project_request(request: ToolRequest) -> ToolResult:
         openai_model=embeddings.openai_model,
         openai_api_key=resolve_openai_api_key(),
     )
+    try:
+        return _dispatch_project_command(request, index)
+    finally:
+        index.close()
+
+
+def _dispatch_project_command(request: ToolRequest, index: VectorIndex) -> ToolResult:
+    cmd = str(request.args.get("cmd") or "").strip()
+    args_raw = request.args.get("args") or []
+    args = [str(a) for a in args_raw] if isinstance(args_raw, list) else [str(args_raw)]
     if cmd == "index":
         try:
             index.ensure_runtime_ready()
