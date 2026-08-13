@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+import config.shell_config as shell_config_module
 from shared.models import ToolRequest
 from tools.shell_tool import ShellConfig, handle_shell_request
 
 
-def test_shell_allowed_command(tmp_path, monkeypatch) -> None:
+def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    config_path = tmp_path / "shell_config.json"
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(shell_config_module, "SHELL_CONFIG_DIR", config_dir)
+    return tmp_path, config_dir
+
+
+def test_shell_allowed_command(tmp_path, monkeypatch) -> None:
+    _, config_dir = _setup(tmp_path, monkeypatch)
     cfg = ShellConfig(
         allowed_commands=["echo"],
         timeout_seconds=2,
@@ -20,21 +30,21 @@ def test_shell_allowed_command(tmp_path, monkeypatch) -> None:
         args={
             "command": "echo hello",
             "shell_config": cfg.__dict__,
-            "config_path": str(config_path),
+            "config_path": "shell_config.json",
         },
     )
     res = handle_shell_request(req)
     assert res.ok
     assert "hello" in str(res.data.get("output"))
+    assert (config_dir / "shell_config.json").exists()
 
 
 def test_shell_blocks_abs_path(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    config_path = tmp_path / "shell_config.json"
+    _, _ = _setup(tmp_path, monkeypatch)
     cfg = ShellConfig(allowed_commands=["ls"], sandbox_root="sandbox")
     req = ToolRequest(
         name="shell",
-        args={"command": "/bin/ls", "shell_config": cfg.__dict__, "config_path": str(config_path)},
+        args={"command": "/bin/ls", "shell_config": cfg.__dict__, "config_path": "cfg.json"},
     )
     res = handle_shell_request(req)
     assert not res.ok
@@ -42,8 +52,7 @@ def test_shell_blocks_abs_path(tmp_path, monkeypatch) -> None:
 
 
 def test_shell_blocks_dangerous_and_chain(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    config_path = tmp_path / "shell_config.json"
+    _setup(tmp_path, monkeypatch)
     cfg = ShellConfig(allowed_commands=["ls"], sandbox_root="sandbox")
     res_rm = handle_shell_request(
         ToolRequest(
@@ -51,7 +60,7 @@ def test_shell_blocks_dangerous_and_chain(tmp_path, monkeypatch) -> None:
             args={
                 "command": "rm -rf /",
                 "shell_config": cfg.__dict__,
-                "config_path": str(config_path),
+                "config_path": "cfg.json",
             },
         )
     )
@@ -61,7 +70,7 @@ def test_shell_blocks_dangerous_and_chain(tmp_path, monkeypatch) -> None:
             args={
                 "command": "ls; whoami",
                 "shell_config": cfg.__dict__,
-                "config_path": str(config_path),
+                "config_path": "cfg.json",
             },
         )
     )
@@ -71,8 +80,7 @@ def test_shell_blocks_dangerous_and_chain(tmp_path, monkeypatch) -> None:
 
 
 def test_shell_timeout(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    config_path = tmp_path / "shell_config.json"
+    _setup(tmp_path, monkeypatch)
     cfg = ShellConfig(
         allowed_commands=["sleep"],
         timeout_seconds=1,
@@ -85,7 +93,7 @@ def test_shell_timeout(tmp_path, monkeypatch) -> None:
             args={
                 "command": "sleep 2",
                 "shell_config": cfg.__dict__,
-                "config_path": str(config_path),
+                "config_path": "cfg.json",
             },
         )
     )
@@ -94,8 +102,7 @@ def test_shell_timeout(tmp_path, monkeypatch) -> None:
 
 
 def test_shell_rejects_absolute_sandbox_root(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    config_path = tmp_path / "shell_config.json"
+    _, _ = _setup(tmp_path, monkeypatch)
     outside_dir = tmp_path / "outside_dir"
     assert not outside_dir.exists()
 
@@ -107,7 +114,11 @@ def test_shell_rejects_absolute_sandbox_root(tmp_path, monkeypatch) -> None:
     )
     req = ToolRequest(
         name="shell",
-        args={"command": "echo hi", "shell_config": cfg.__dict__, "config_path": str(config_path)},
+        args={
+            "command": "echo hi",
+            "shell_config": cfg.__dict__,
+            "config_path": "cfg.json",
+        },
     )
     res = handle_shell_request(req)
     assert not res.ok
@@ -115,8 +126,7 @@ def test_shell_rejects_absolute_sandbox_root(tmp_path, monkeypatch) -> None:
 
 
 def test_shell_rejects_parent_reference_sandbox_root(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    config_path = tmp_path / "shell_config.json"
+    _setup(tmp_path, monkeypatch)
     outside_dir = tmp_path / "outside_dir"
     assert not outside_dir.exists()
 
@@ -128,7 +138,11 @@ def test_shell_rejects_parent_reference_sandbox_root(tmp_path, monkeypatch) -> N
     )
     req = ToolRequest(
         name="shell",
-        args={"command": "echo hi", "shell_config": cfg.__dict__, "config_path": str(config_path)},
+        args={
+            "command": "echo hi",
+            "shell_config": cfg.__dict__,
+            "config_path": "cfg.json",
+        },
     )
     res = handle_shell_request(req)
     assert not res.ok
@@ -136,16 +150,19 @@ def test_shell_rejects_parent_reference_sandbox_root(tmp_path, monkeypatch) -> N
 
 
 def test_shell_uses_defaults_when_config_missing(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    config_path = tmp_path / "missing_shell_config.json"
-    assert not config_path.exists()
+    _, config_dir = _setup(tmp_path, monkeypatch)
+    missing = config_dir / "missing_shell_config.json"
+    assert not missing.exists()
 
     res = handle_shell_request(
-        ToolRequest(name="shell", args={"command": "echo hi", "config_path": str(config_path)})
+        ToolRequest(
+            name="shell",
+            args={"command": "echo hi", "config_path": "missing_shell_config.json"},
+        )
     )
     assert res.ok
     assert "hi" in str(res.data.get("output"))
-    assert not config_path.exists()
+    assert not missing.exists()
 
 
 def test_normalize_shell_sandbox_root_empty_uses_root(tmp_path, monkeypatch) -> None:
@@ -184,8 +201,10 @@ def test_shell_rejects_symlink_sandbox_root(tmp_path, monkeypatch) -> None:
     except OSError:
         pytest.skip("Symlink недоступен в этом окружении.")
     monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", sandbox_root)
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(shell_config_module, "SHELL_CONFIG_DIR", config_dir)
 
-    config_path = tmp_path / "shell_config.json"
     cfg = ShellConfig(
         allowed_commands=["echo"],
         timeout_seconds=2,
@@ -194,7 +213,7 @@ def test_shell_rejects_symlink_sandbox_root(tmp_path, monkeypatch) -> None:
     )
     req = ToolRequest(
         name="shell",
-        args={"command": "echo hi", "shell_config": cfg.__dict__, "config_path": str(config_path)},
+        args={"command": "echo hi", "shell_config": cfg.__dict__, "config_path": "cfg.json"},
     )
     res = handle_shell_request(req)
     assert not res.ok

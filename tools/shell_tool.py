@@ -11,6 +11,7 @@ from config.shell_config import (
     DEFAULT_SHELL_CONFIG_PATH,
     ShellConfig,
     load_shell_config,
+    normalize_shell_config_path,
     save_shell_config,
 )
 from shared.models import ToolRequest, ToolResult
@@ -134,11 +135,14 @@ def handle_shell_request(request: ToolRequest) -> ToolResult:
     config_path_raw = request.args.get("config_path")
     if config_path_raw is not None and not isinstance(config_path_raw, str):
         return ToolResult.failure("config_path должен быть строкой.")
-    config_path = (
-        Path(config_path_raw.strip())
-        if isinstance(config_path_raw, str) and config_path_raw.strip()
-        else DEFAULT_SHELL_CONFIG_PATH
-    )
+    try:
+        config_path = (
+            normalize_shell_config_path(Path(config_path_raw.strip()))
+            if isinstance(config_path_raw, str) and config_path_raw.strip()
+            else DEFAULT_SHELL_CONFIG_PATH
+        )
+    except ValueError as exc:
+        return ToolResult.failure(str(exc))
     if "shell_config" in request.args:
         # горячее применение настроек из UI
         cfg_payload = request.args.get("shell_config")

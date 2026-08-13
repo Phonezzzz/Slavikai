@@ -241,21 +241,40 @@ class VectorIndex:
             "SELECT path, content, embedding, meta FROM vectors WHERE namespace = ?",
             (namespace,),
         )
-        results: list[VectorSearchResult] = []
-        for path, content, emb_blob, meta_json in cur.fetchall():
+        rows = cur.fetchall()
+        if not rows:
+            return []
+        embeddings: list[np.ndarray] = []
+        records: list[tuple[str, str, str | None]] = []
+        for path, content, emb_blob, meta_json in rows:
             embedding = np.frombuffer(emb_blob, dtype=np.float32)
             if query_embedding.shape != embedding.shape:
                 continue
-            denominator = np.linalg.norm(query_embedding) * np.linalg.norm(embedding)
-            if denominator == 0:
+            if np.linalg.norm(embedding) == 0:
                 continue
-            similarity = float(np.dot(query_embedding, embedding) / denominator)
+            embeddings.append(embedding)
+            records.append((path, content, meta_json))
+        if not embeddings:
+            return []
+        query_norm = float(np.linalg.norm(query_embedding))
+        if query_norm == 0:
+            return []
+        matrix = np.stack(embeddings)
+        scores = (matrix @ query_embedding) / (np.linalg.norm(matrix, axis=1) * query_norm)
+        ranked = np.argsort(-scores)[:top_k]
+        results: list[VectorSearchResult] = []
+        for index in ranked:
+            path, content, meta_json = records[int(index)]
             meta = json.loads(meta_json) if meta_json else {}
             results.append(
-                VectorSearchResult(path=path, snippet=content[:200], score=similarity, meta=meta)
+                VectorSearchResult(
+                    path=path,
+                    snippet=content[:200],
+                    score=float(scores[int(index)]),
+                    meta=meta,
+                )
             )
-        results.sort(key=lambda item: item.score, reverse=True)
-        return results[:top_k]
+        return results
 
     def ensure_runtime_ready(self) -> None:
         if self.provider == "local":
@@ -385,3 +404,9 @@ class VectorIndex:
 
     def close(self) -> None:
         self.conn.close()
+
+    def __enter__(self) -> VectorIndex:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()

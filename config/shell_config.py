@@ -7,6 +7,28 @@ from pathlib import Path
 from shared.sandbox import SandboxViolationError, normalize_shell_sandbox_root
 
 DEFAULT_SHELL_CONFIG_PATH = Path("config/shell_config.json")
+SHELL_CONFIG_DIR = Path("config").resolve()
+
+
+def normalize_shell_config_path(path: Path | None, config_dir: Path | None = None) -> Path:
+    """Ограничивает config_path каталогом config/ (запрет абсолютных/../~ путей)."""
+    if path is None:
+        return DEFAULT_SHELL_CONFIG_PATH
+    root = (config_dir or SHELL_CONFIG_DIR).resolve()
+    raw_str = str(path).strip()
+    if not raw_str:
+        return DEFAULT_SHELL_CONFIG_PATH
+    if raw_str.startswith(("~", "\\")):
+        raise ValueError("config_path должен быть относительным путём внутри config/.")
+    if any(part == ".." for part in Path(raw_str).parts):
+        raise ValueError("config_path не может содержать '..'.")
+    candidate = Path(raw_str)
+    candidate = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"config_path выходит за пределы config/: {path}") from exc
+    return candidate
 
 
 @dataclass
@@ -33,7 +55,7 @@ class ShellConfig:
 
 
 def load_shell_config(path: Path | None = None) -> ShellConfig:
-    cfg_path = path or DEFAULT_SHELL_CONFIG_PATH
+    cfg_path = normalize_shell_config_path(path)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     if not cfg_path.exists():
         return ShellConfig()
@@ -57,7 +79,7 @@ def load_shell_config(path: Path | None = None) -> ShellConfig:
 
 
 def save_shell_config(config: ShellConfig, path: Path | None = None) -> None:
-    cfg_path = path or DEFAULT_SHELL_CONFIG_PATH
+    cfg_path = normalize_shell_config_path(path)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         normalize_shell_sandbox_root(config.sandbox_root)

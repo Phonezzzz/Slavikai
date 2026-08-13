@@ -59,10 +59,11 @@ def resolve_github_target(repo_url: str) -> tuple[Path, str]:
     target_root = GITHUB_ROOT / owner
     target_root.mkdir(parents=True, exist_ok=True)
     candidate = target_root / repo_name
-    suffix = 1
-    while candidate.exists():
-        candidate = target_root / f"{repo_name}-{suffix}"
-        suffix += 1
+    if candidate.exists() and not (candidate / ".git").exists():
+        suffix = 1
+        while candidate.exists():
+            candidate = target_root / f"{repo_name}-{suffix}"
+            suffix += 1
     relative_target = candidate.resolve().relative_to(SANDBOX_PROJECT_ROOT)
     return candidate, str(relative_target)
 
@@ -104,6 +105,8 @@ async def clone_github_repository(
     branch: str | None,
     target_path: Path,
 ) -> tuple[bool, str]:
+    if (target_path / ".git").exists():
+        return await refresh_github_repository(branch=branch, target_path=target_path)
     cmd = ["git", "clone", "--depth", "1"]
     if branch:
         cmd.extend(["--branch", branch])
@@ -130,6 +133,40 @@ async def clone_github_repository(
             logger.debug("Failed to cleanup clone target after error", exc_info=True)
         return False, f"Git clone failed: {details}"
     return True, "ok"
+
+
+async def refresh_github_repository(
+    *,
+    branch: str | None,
+    target_path: Path,
+) -> tuple[bool, str]:
+    try:
+        remote_branch = f"origin/{branch}" if branch else "origin/HEAD"
+        fetch_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "-C", str(target_path), "fetch", "--depth", "1", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+        if fetch_result.returncode != 0:
+            details = fetch_result.stderr.strip() or fetch_result.stdout.strip() or "fetch failed"
+            return False, f"Git fetch failed: {details}"
+        reset_result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "-C", str(target_path), "reset", "--hard", remote_branch],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+        if reset_result.returncode != 0:
+            details = reset_result.stderr.strip() or reset_result.stdout.strip() or "reset failed"
+            return False, f"Git reset failed: {details}"
+        return True, "ok"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Git refresh failed: {exc}"
 
 
 def index_imported_project(relative_path: str) -> tuple[bool, str]:

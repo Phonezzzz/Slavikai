@@ -273,9 +273,13 @@ class SQLiteUISessionStorage:
                 FROM ui_sessions
                 """,
             ).fetchall()
+            messages_by_session = self._load_messages_batch(
+                conn,
+                [str(row["session_id"]) for row in rows],
+            )
             for row in rows:
                 session_id = str(row["session_id"])
-                messages = self._load_messages(conn, session_id)
+                messages = messages_by_session.get(session_id, [])
                 sessions.append(
                     PersistedSession(
                         session_id=session_id,
@@ -566,6 +570,62 @@ class SQLiteUISessionStorage:
             if isinstance(row, sqlite3.Row) and row["name"] is not None
         }
         return "ui_messages" in existing_tables
+
+    def _load_messages_batch(
+        self,
+        conn: sqlite3.Connection,
+        session_ids: Sequence[str],
+    ) -> dict[str, list[dict[str, JSONValue]]]:
+        if not session_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in session_ids)
+        rows = conn.execute(
+            f"""
+            SELECT
+                session_id,
+                message_id,
+                'chat' AS lane,
+                role,
+                content,
+                created_at,
+                trace_id,
+                parent_user_message_id,
+                attachments_json
+            FROM chat_messages
+            WHERE session_id IN ({placeholders})
+            UNION ALL
+            SELECT
+                session_id,
+                message_id,
+                'workspace' AS lane,
+                role,
+                content,
+                created_at,
+                trace_id,
+                parent_user_message_id,
+                attachments_json
+            FROM workspace_messages
+            WHERE session_id IN ({placeholders})
+            ORDER BY session_id, created_at ASC
+            """,
+            tuple(session_ids) * 2,
+        ).fetchall()
+        grouped: dict[str, list[dict[str, JSONValue]]] = {}
+        for row in rows:
+            session_id = str(row["session_id"])
+            grouped.setdefault(session_id, []).append(
+                {
+                    "message_id": str(row["message_id"]),
+                    "lane": self._decode_lane(row["lane"]),
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "created_at": str(row["created_at"]),
+                    "trace_id": _optional_str(row["trace_id"]),
+                    "parent_user_message_id": _optional_str(row["parent_user_message_id"]),
+                    "attachments": self._decode_attachments(row["attachments_json"]),
+                }
+            )
+        return grouped
 
     def _load_messages(
         self,
