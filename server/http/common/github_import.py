@@ -59,6 +59,12 @@ def resolve_github_target(repo_url: str) -> tuple[Path, str]:
     target_root = GITHUB_ROOT / owner
     target_root.mkdir(parents=True, exist_ok=True)
     candidate = target_root / repo_name
+    if candidate.exists() and (candidate / ".git").exists():
+        raise ValueError(
+            f"Репозиторий уже импортирован: {candidate}. "
+            "Повторный импорт не выполняется, чтобы не перезаписывать существующие "
+            "изменения. Удалите существующий каталог, если нужно импортировать заново."
+        )
     suffix = 1
     while candidate.exists():
         candidate = target_root / f"{repo_name}-{suffix}"
@@ -104,6 +110,7 @@ async def clone_github_repository(
     branch: str | None,
     target_path: Path,
 ) -> tuple[bool, str]:
+    existed_before = target_path.exists()
     cmd = ["git", "clone", "--depth", "1"]
     if branch:
         cmd.extend(["--branch", branch])
@@ -124,7 +131,7 @@ async def clone_github_repository(
         stdout = result.stdout.strip()
         details = stderr or stdout or "unknown error"
         try:
-            if target_path.exists():
+            if target_path.exists() and not existed_before:
                 shutil.rmtree(target_path, ignore_errors=True)
         except Exception:  # noqa: BLE001
             logger.debug("Failed to cleanup clone target after error", exc_info=True)

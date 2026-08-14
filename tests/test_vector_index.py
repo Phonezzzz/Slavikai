@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from memory.vector_index import VectorIndex
+from shared.models import VectorSearchResult
 
 
 class DummyModel:
@@ -153,3 +154,127 @@ def test_vector_index_local_provider_errors_without_sentence_transformers(
     index = VectorIndex(str(db_path), provider="local", local_model="all-MiniLM-L6-v2")
     with pytest.raises(RuntimeError, match="не смог загрузить локальную модель"):
         index.search("query", namespace="default", top_k=1)
+
+
+class RandomModel:
+    def encode(self, texts):
+        import hashlib
+
+        vectors = []
+        for text in texts:
+            seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "big")
+            rng = np.random.default_rng(seed)
+            vector = rng.normal(size=8).astype(np.float32)
+            vector /= np.linalg.norm(vector)
+            vectors.append(vector)
+        return np.stack(vectors)
+
+
+def test_vector_index_batched_search_matches_reference(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "vec.db"
+    monkeypatch.setattr(
+        "memory.vector_index.VectorIndex._get_model", lambda _self, _name: RandomModel()
+    )
+    index = VectorIndex(str(db_path))
+    for idx in range(20):
+        index.index_text(f"path{idx}", f"content{idx}", namespace="proj")
+
+    query = "find me"
+    batched = index.search(query, namespace="proj", top_k=5)
+
+    cur = index.conn.cursor()
+    cur.execute(
+        "SELECT path, content, embedding, meta FROM vectors WHERE namespace = ?",
+        ("proj",),
+    )
+    query_embedding = RandomModel().encode([query])[0]
+    reference: list[VectorSearchResult] = []
+    for row in cur.fetchall():
+        path, content, emb_blob, meta_json = row
+        embedding = np.frombuffer(emb_blob, dtype=np.float32)
+        if query_embedding.shape != embedding.shape:
+            continue
+        denominator = np.linalg.norm(query_embedding) * np.linalg.norm(embedding)
+        if denominator == 0:
+            continue
+        similarity = float(np.dot(query_embedding, embedding) / denominator)
+        reference.append(
+            VectorSearchResult(path=path, snippet=content[:200], score=similarity, meta={})
+        )
+    reference.sort(key=lambda item: item.score, reverse=True)
+    reference = reference[:5]
+
+    assert [item.path for item in batched] == [item.path for item in reference]
+    for actual, expected in zip(batched, reference, strict=False):
+        assert actual.score == pytest.approx(expected.score, abs=1e-5)
+
+
+def test_vector_index_batched_search_skips_mismatched_and_zero_norm(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "vec.db"
+    monkeypatch.setattr(
+        "memory.vector_index.VectorIndex._get_model", lambda _self, _name: DummyModel()
+    )
+    index = VectorIndex(str(db_path))
+    index.index_text("ok", "content", namespace="proj")
+    with index.conn:
+        index.conn.execute(
+            "INSERT INTO vectors (namespace, path, content, embedding, meta) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("proj", "mismatch", "m", np.zeros(5, dtype=np.float32).tobytes(), "{}"),
+        )
+        index.conn.execute(
+            "INSERT INTO vectors (namespace, path, content, embedding, meta) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("proj", "zero", "z", np.zeros(3, dtype=np.float32).tobytes(), "{}"),
+        )
+
+    results = index.search("query", namespace="proj", top_k=10)
+    assert [item.path for item in results] == ["ok"]
+
+
+def test_vector_index_context_manager_closes_connection(tmp_path, monkeypatch) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "vec.db"
+    monkeypatch.setattr(
+        "memory.vector_index.VectorIndex._get_model", lambda _self, _name: DummyModel()
+    )
+    with VectorIndex(str(db_path)) as index:
+        index.index_text("a", "content", namespace="proj")
+        assert index.conn is not None
+    with pytest.raises(sqlite3.ProgrammingError):
+        index.conn.execute("SELECT 1")
+
+
+def test_vector_index_reconfigure_closes_previous_connection(tmp_path, monkeypatch) -> None:
+    import sqlite3
+
+    from core.agent import Agent
+    from llm.brain_base import Brain
+    from llm.types import LLMResult
+
+    class _Brain(Brain):
+        def generate(self, messages, config=None) -> LLMResult:
+            return LLMResult(text="ok")
+
+    monkeypatch.setattr(
+        "memory.vector_index.VectorIndex._get_model", lambda _self, _name: DummyModel()
+    )
+    agent = Agent(
+        brain=_Brain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+    )
+    old_vectors = agent.vectors
+    old_conn = old_vectors.conn
+    agent.set_embeddings_config(
+        provider="local",
+        local_model="other-model",
+        openai_model="text-embedding-3-small",
+        openai_api_key=None,
+    )
+    new_vectors = agent.vectors
+    assert new_vectors is not old_vectors
+    with pytest.raises(sqlite3.ProgrammingError):
+        old_conn.execute("SELECT 1")
+    new_vectors.close()

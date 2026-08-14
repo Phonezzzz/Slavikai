@@ -19,6 +19,12 @@ class DummyVectorIndex:
     def search(self, query: str, namespace: str = "default", top_k: int = 5):  # noqa: ARG002
         return []
 
+    def __enter__(self) -> DummyVectorIndex:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return
+
 
 def test_project_index_uses_vector_index(tmp_path, monkeypatch) -> None:
     sandbox_root = (tmp_path / "sandbox" / "project").resolve()

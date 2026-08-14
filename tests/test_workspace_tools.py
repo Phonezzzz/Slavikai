@@ -199,6 +199,180 @@ def test_workspace_create_rename_move_delete_file() -> None:
     assert not read_deleted.ok
 
 
+def test_workspace_rename_move_extension_policy(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "ws"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", root.resolve())
+    workspace_tools_module.set_workspace_root(None)
+
+    def write(name: str) -> None:
+        assert (
+            WriteFileTool()
+            .handle(_make_request("workspace_write", {"path": name, "content": "x"}))
+            .ok
+        )
+
+    def exists(name: str) -> bool:
+        return (root / name).exists()
+
+    write("src.txt")
+
+    extensionless = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": "src.txt", "new_path": "notes"})
+    )
+    assert not extensionless.ok
+    assert "расширени" in (extensionless.error or "").lower()
+    assert exists("src.txt")
+
+    write("mv_src.txt")
+    move_extensionless = MoveFileTool().handle(
+        _make_request("workspace_move", {"from_path": "mv_src.txt", "to_path": "sub/notes"})
+    )
+    assert not move_extensionless.ok
+    assert "расширени" in (move_extensionless.error or "").lower()
+
+    disallowed = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": "src.txt", "new_path": "notes.exe"})
+    )
+    assert not disallowed.ok
+
+    write("dot_src.txt")
+    dotfile = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": "dot_src.txt", "new_path": ".env"})
+    )
+    assert not dotfile.ok
+
+    multi_suffix_bad = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": "src.txt", "new_path": "archive.tar.gz"})
+    )
+    assert not multi_suffix_bad.ok
+
+    write("upper_src.txt")
+    uppercase = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": "upper_src.txt", "new_path": "README.TXT"})
+    )
+    assert uppercase.ok
+    assert exists("README.TXT")
+
+    write("multi_src.txt")
+    multi_suffix_ok = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": "multi_src.txt", "new_path": "notes.py.md"})
+    )
+    assert multi_suffix_ok.ok
+
+
+def test_workspace_directory_rename_and_move_not_subject_to_extension_rule(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "ws"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", root.resolve())
+    workspace_tools_module.set_workspace_root(None)
+    (root / "docs_dir").mkdir()
+    (root / "docs_dir" / "a.txt").write_text("x", encoding="utf-8")
+
+    dir_rename = RenameFileTool().handle(
+        _make_request("workspace_rename", {"old_path": "docs_dir", "new_path": "notes_dir"})
+    )
+    assert dir_rename.ok
+    assert (root / "notes_dir" / "a.txt").exists()
+
+    dir_move = MoveFileTool().handle(
+        _make_request("workspace_move", {"from_path": "notes_dir", "to_path": "moved/docs_dir"})
+    )
+    assert dir_move.ok
+    assert (root / "moved" / "docs_dir" / "a.txt").exists()
+
+
+def test_workspace_root_contextvar_isolated_between_concurrent_tasks(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", tmp_path / "default")
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir(parents=True, exist_ok=True)
+    root_b.mkdir(parents=True, exist_ok=True)
+
+    async def context_worker(root: Path, label: str) -> tuple[str, Path]:
+        await asyncio.sleep(0)
+        with workspace_root_context(root):
+            await asyncio.sleep(0.02)
+            observed = workspace_tools_module.get_workspace_root()
+        return label, observed
+
+    async def setter_worker(root: Path, label: str) -> tuple[str, Path]:
+        await asyncio.sleep(0)
+        workspace_tools_module.set_workspace_root(root)
+        await asyncio.sleep(0.02)
+        observed = workspace_tools_module.get_workspace_root()
+        workspace_tools_module.set_workspace_root(None)
+        return label, observed
+
+    async def run() -> dict[str, Path]:
+        context_results = await asyncio.gather(
+            context_worker(root_a, "ctx-a"),
+            context_worker(root_b, "ctx-b"),
+            context_worker(root_a, "ctx-c"),
+        )
+        setter_results = await asyncio.gather(
+            setter_worker(root_a, "set-a"),
+            setter_worker(root_b, "set-b"),
+            setter_worker(root_a, "set-c"),
+        )
+        combined = dict(context_results)
+        combined.update(dict(setter_results))
+        return combined
+
+    observed = asyncio.run(run())
+    expected = {
+        "ctx-a": root_a.resolve(),
+        "ctx-b": root_b.resolve(),
+        "ctx-c": root_a.resolve(),
+        "set-a": root_a.resolve(),
+        "set-b": root_b.resolve(),
+        "set-c": root_a.resolve(),
+    }
+    assert observed == expected
+    assert workspace_tools_module.get_workspace_root() == (tmp_path / "default").resolve()
+
+
+def test_workspace_symlink_escape_rejected_for_read_write_create(
+    monkeypatch, tmp_path: Path
+) -> None:
+    ws_root = tmp_path / "ws"
+    ws_root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    (outside / "secret.txt").write_text("S", encoding="utf-8")
+    monkeypatch.setattr(workspace_tools_module, "WORKSPACE_ROOT", ws_root.resolve())
+    workspace_tools_module.set_workspace_root(None)
+    try:
+        (ws_root / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        import pytest
+
+        pytest.skip("Symlink недоступен в этом окружении.")
+
+    read_result = ReadFileTool().handle(
+        _make_request("workspace_read", {"path": "link/secret.txt"})
+    )
+    assert not read_result.ok
+
+    write_result = WriteFileTool().handle(
+        _make_request("workspace_write", {"path": "link/new.txt", "content": "x"})
+    )
+    assert not write_result.ok
+    assert not (outside / "new.txt").exists()
+
+    create_result = CreateFileTool().handle(
+        _make_request("workspace_create", {"path": "link/new.txt", "content": "x"})
+    )
+    assert not create_result.ok
+    assert not (outside / "new.txt").exists()
+
+
 def test_workspace_delete_rejects_root_and_allows_recursive_dir_delete() -> None:
     nested_dir = WORKSPACE_ROOT / "ops" / "to_remove"
     shutil.rmtree(nested_dir, ignore_errors=True)

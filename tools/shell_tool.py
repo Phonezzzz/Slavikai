@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Final
 
 from config.shell_config import (
-    DEFAULT_SHELL_CONFIG_PATH,
     ShellConfig,
     load_shell_config,
     save_shell_config,
@@ -56,7 +55,7 @@ def _validate_args(args: list[str], allowed_commands: set[str]) -> str | None:
 
 
 def handle_shell(
-    command: str, config: ShellConfig | None = None, config_path: Path | None = None
+    command: str, config: ShellConfig | None = None, config_path: str | Path | None = None
 ) -> ToolResult:
     """
     Безопасный shell-инструмент:
@@ -69,7 +68,7 @@ def handle_shell(
         return ToolResult.failure("🚫 Опасная команда заблокирована.")
 
     try:
-        cfg = config or load_shell_config(config_path or DEFAULT_SHELL_CONFIG_PATH)
+        cfg = config or load_shell_config(config_path)
     except Exception as exc:  # noqa: BLE001
         return ToolResult.failure(f"Ошибка загрузки shell config: {exc}")
 
@@ -134,11 +133,7 @@ def handle_shell_request(request: ToolRequest) -> ToolResult:
     config_path_raw = request.args.get("config_path")
     if config_path_raw is not None and not isinstance(config_path_raw, str):
         return ToolResult.failure("config_path должен быть строкой.")
-    config_path = (
-        Path(config_path_raw.strip())
-        if isinstance(config_path_raw, str) and config_path_raw.strip()
-        else DEFAULT_SHELL_CONFIG_PATH
-    )
+    config_path = config_path_raw.strip() if config_path_raw else None
     if "shell_config" in request.args:
         # горячее применение настроек из UI
         cfg_payload = request.args.get("shell_config")

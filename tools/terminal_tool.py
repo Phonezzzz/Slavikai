@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from config.shell_config import DEFAULT_SHELL_CONFIG_PATH, load_shell_config
+from config.shell_config import load_shell_config
 from shared.models import JSONValue, ToolRequest, ToolResult
 from tools.shell_tool import _is_unsafe as _is_unsafe_shell_command
 from tools.shell_tool import _validate_args as _validate_shell_args
@@ -119,7 +119,7 @@ class TerminalTool:
             return ToolResult.failure("Опасная команда заблокирована.")
 
         try:
-            cfg = load_shell_config(DEFAULT_SHELL_CONFIG_PATH)
+            cfg = load_shell_config(None)
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Ошибка загрузки shell config: {exc}")
 

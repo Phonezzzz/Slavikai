@@ -447,10 +447,10 @@ class RenameFileTool:
                 return ToolResult.failure("Исходный путь не найден.")
             if old_path.is_file() and not _is_allowed_workspace_file(old_path):
                 return ToolResult.failure("Расширение файла запрещено для переименования.")
+            if old_path.is_file() and not _is_allowed_workspace_file(new_path):
+                return ToolResult.failure("Расширение файла запрещено для переименования.")
             if new_path.exists():
                 return ToolResult.failure("Целевой путь уже существует.")
-            if new_path.suffix and not _is_allowed_workspace_file(new_path):
-                return ToolResult.failure("Расширение файла запрещено для переименования.")
             new_path.parent.mkdir(parents=True, exist_ok=True)
             old_path.rename(new_path)
             return ToolResult.success(
@@ -477,10 +477,10 @@ class MoveFileTool:
                 return ToolResult.failure("Исходный путь не найден.")
             if source.is_file() and not _is_allowed_workspace_file(source):
                 return ToolResult.failure("Расширение файла запрещено для перемещения.")
+            if source.is_file() and not _is_allowed_workspace_file(target):
+                return ToolResult.failure("Расширение файла запрещено для перемещения.")
             if target.exists():
                 return ToolResult.failure("Целевой путь уже существует.")
-            if target.suffix and not _is_allowed_workspace_file(target):
-                return ToolResult.failure("Расширение файла запрещено для перемещения.")
             target.parent.mkdir(parents=True, exist_ok=True)
             source.rename(target)
             return ToolResult.success(

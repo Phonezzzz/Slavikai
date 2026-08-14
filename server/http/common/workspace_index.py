@@ -79,43 +79,45 @@ def index_workspace_root(
         }
 
     embeddings = load_embeddings_settings()
-    vector_index = VectorIndex(
+    with VectorIndex(
         "memory/vectors.db",
         provider=embeddings.provider,
         local_model=embeddings.local_model,
         openai_model=embeddings.openai_model,
         openai_api_key=resolve_provider_api_key("openai"),
-    )
-    vector_index.ensure_runtime_ready()
-    indexed_code = 0
-    indexed_docs = 0
-    skipped = 0
-    for current_root, dirs, files in os.walk(root):
-        dirs[:] = [name for name in dirs if name not in ignored_dirs]
-        current = Path(current_root)
-        for filename in files:
-            full_path = current / filename
-            if filename.endswith(".sqlite"):
-                skipped += 1
-                continue
-            suffix = full_path.suffix.lower()
-            if suffix not in allowed_extensions:
-                skipped += 1
-                continue
-            try:
-                if full_path.stat().st_size > max_file_bytes:
+    ) as vector_index:
+        vector_index.ensure_runtime_ready()
+        indexed_code = 0
+        indexed_docs = 0
+        skipped = 0
+        for current_root, dirs, files in os.walk(root):
+            dirs[:] = [name for name in dirs if name not in ignored_dirs]
+            current = Path(current_root)
+            for filename in files:
+                full_path = current / filename
+                if filename.endswith(".sqlite"):
                     skipped += 1
                     continue
-                content = full_path.read_text(encoding="utf-8", errors="ignore")
-            except Exception:  # noqa: BLE001
-                skipped += 1
-                continue
-            namespace = "code" if suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".sh"} else "docs"
-            vector_index.upsert_text(str(full_path), content, namespace=namespace)
-            if namespace == "code":
-                indexed_code += 1
-            else:
-                indexed_docs += 1
+                suffix = full_path.suffix.lower()
+                if suffix not in allowed_extensions:
+                    skipped += 1
+                    continue
+                try:
+                    if full_path.stat().st_size > max_file_bytes:
+                        skipped += 1
+                        continue
+                    content = full_path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:  # noqa: BLE001
+                    skipped += 1
+                    continue
+                namespace = (
+                    "code" if suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".sh"} else "docs"
+                )
+                vector_index.upsert_text(str(full_path), content, namespace=namespace)
+                if namespace == "code":
+                    indexed_code += 1
+                else:
+                    indexed_docs += 1
     return {
         "ok": True,
         "message": None,

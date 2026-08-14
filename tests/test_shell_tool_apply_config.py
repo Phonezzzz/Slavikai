@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import pytest
+
+import config.shell_config as shell_config_module
 from shared.models import ToolRequest
 from tools.shell_tool import handle_shell_request
 
 
-def test_shell_tool_applies_config(tmp_path, monkeypatch) -> None:
+@pytest.fixture
+def cfg_ctx(tmp_path, monkeypatch):
     monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    config_path = tmp_path / "shell_config.json"
+    monkeypatch.setattr(shell_config_module, "SHELL_CONFIG_DIR", tmp_path)
+    return tmp_path
+
+
+def test_shell_tool_applies_config(cfg_ctx) -> None:
     req = ToolRequest(
         name="shell",
         args={
             "command": "echo hi",
-            "config_path": str(config_path),
+            "config_path": "shell_config.json",
             "shell_config": {
                 "allowed_commands": ["echo"],
                 "timeout_seconds": 1,
@@ -22,3 +30,23 @@ def test_shell_tool_applies_config(tmp_path, monkeypatch) -> None:
     )
     result = handle_shell_request(req)
     assert result.ok
+    assert (cfg_ctx / "shell_config.json").exists()
+
+
+def test_shell_tool_config_path_within_config_dir(cfg_ctx) -> None:
+    req = ToolRequest(
+        name="shell",
+        args={
+            "command": "echo hi",
+            "config_path": "nested/shell_config.json",
+            "shell_config": {
+                "allowed_commands": ["echo"],
+                "timeout_seconds": 1,
+                "max_output_chars": 10,
+                "sandbox_root": "sandbox",
+            },
+        },
+    )
+    result = handle_shell_request(req)
+    assert result.ok
+    assert (cfg_ctx / "nested" / "shell_config.json").exists()
