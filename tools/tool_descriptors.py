@@ -65,11 +65,7 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
                 "command": {
                     "type": "string",
                     "description": "Single shell command allowed by shell policy.",
-                },
-                "shell_config": {
-                    "type": "object",
-                    "description": "Optional runtime shell policy override from UI settings.",
-                },
+                }
             },
             required=["command"],
         ),

@@ -6,11 +6,7 @@ import subprocess
 import time
 from typing import Final
 
-from config.shell_config import (
-    ShellConfig,
-    load_shell_config,
-    save_shell_config,
-)
+from config.shell_config import ShellConfig, load_shell_config
 from shared.models import ToolRequest, ToolResult
 from shared.sandbox import SandboxViolationError, normalize_shell_sandbox_root
 
@@ -127,29 +123,6 @@ def handle_shell(command: str, config: ShellConfig | None = None) -> ToolResult:
 
 def handle_shell_request(request: ToolRequest) -> ToolResult:
     cmd = str(request.args.get("command") or "").strip()
-    if "shell_config" in request.args:
-        # горячее применение настроек из UI
-        cfg_payload = request.args.get("shell_config")
-        if isinstance(cfg_payload, dict):
-            try:
-                allowed_raw = cfg_payload.get("allowed_commands")
-                allowed_commands = (
-                    [str(x) for x in allowed_raw] if isinstance(allowed_raw, list) else []
-                )
-                timeout_raw = cfg_payload.get("timeout_seconds", 10)
-                max_out_raw = cfg_payload.get("max_output_chars", 6000)
-                sandbox_raw = cfg_payload.get("sandbox_root", "sandbox")
-                cfg = ShellConfig(
-                    allowed_commands=allowed_commands,
-                    timeout_seconds=int(timeout_raw),
-                    max_output_chars=int(max_out_raw),
-                    sandbox_root=str(sandbox_raw),
-                )
-                normalize_shell_sandbox_root(cfg.sandbox_root)
-                save_shell_config(cfg)
-                return handle_shell(cmd, config=cfg)
-            except Exception as exc:  # noqa: BLE001
-                return ToolResult.failure(f"Ошибка применения shell config: {exc}")
     return handle_shell(cmd)
 
 

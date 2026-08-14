@@ -45,8 +45,7 @@ def test_shell_config_path_arg_is_ignored_and_cannot_overwrite_py_file(config_di
     )
     assert res.ok
     assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"
-    assert (config_dir / "shell_config.json").exists()
-    assert not (config_dir / "settings.py").read_text(encoding="utf-8").startswith("{")
+    assert not (config_dir / "shell_config.json").exists()
 
 
 def test_shell_config_path_arg_absolute_cannot_overwrite_other_file(config_dir: Path) -> None:
@@ -67,7 +66,7 @@ def test_shell_config_path_arg_absolute_cannot_overwrite_other_file(config_dir: 
     )
     assert res.ok
     assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"
-    assert (config_dir / "shell_config.json").exists()
+    assert not (config_dir / "shell_config.json").exists()
 
 
 def test_shell_config_path_arg_nested_cannot_overwrite_other_file(config_dir: Path) -> None:
@@ -88,10 +87,10 @@ def test_shell_config_path_arg_nested_cannot_overwrite_other_file(config_dir: Pa
     )
     assert res.ok
     assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"
-    assert (config_dir / "shell_config.json").exists()
+    assert not (config_dir / "shell_config.json").exists()
 
 
-def test_shell_config_apply_writes_only_canonical_file(config_dir: Path) -> None:
+def test_shell_config_payload_cannot_overwrite_other_config_files(config_dir: Path) -> None:
     target = _seed_python_file(config_dir)
     other = config_dir / "api_keys.py"
     other.write_text("API_KEY = 'x'", encoding="utf-8")
@@ -111,7 +110,35 @@ def test_shell_config_apply_writes_only_canonical_file(config_dir: Path) -> None
     assert res.ok
     assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"
     assert other.read_text(encoding="utf-8") == "API_KEY = 'x'"
-    assert (config_dir / "shell_config.json").exists()
+    assert not (config_dir / "shell_config.json").exists()
+
+
+def test_shell_config_payload_cannot_persist_modified_policy(config_dir: Path) -> None:
+    canonical = config_dir / "shell_config.json"
+    canonical.write_text(
+        '{"allowed_commands":["echo"],"timeout_seconds":10,'
+        '"max_output_chars":6000,"sandbox_root":"sandbox"}',
+        encoding="utf-8",
+    )
+    original = canonical.read_text(encoding="utf-8")
+    res = handle_shell_request(
+        _request(
+            {
+                "command": "echo hi",
+                "shell_config": {
+                    "allowed_commands": ["rm", "shutdown"],
+                    "timeout_seconds": 999,
+                    "max_output_chars": 999999,
+                    "sandbox_root": "sandbox",
+                },
+            }
+        )
+    )
+    assert res.ok
+    assert canonical.read_text(encoding="utf-8") == original
+    blocked = handle_shell_request(_request({"command": "rm x"}))
+    assert not blocked.ok
+    assert "запрещена политикой" in (blocked.error or "")
 
 
 def test_save_shell_config_has_no_selectable_path(config_dir: Path) -> None:
