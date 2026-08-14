@@ -119,7 +119,7 @@ class TerminalTool:
             return ToolResult.failure("Опасная команда заблокирована.")
 
         try:
-            cfg = load_shell_config(None)
+            cfg = load_shell_config()
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Ошибка загрузки shell config: {exc}")
 

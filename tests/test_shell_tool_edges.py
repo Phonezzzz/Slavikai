@@ -14,12 +14,7 @@ def cfg_ctx(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _config_path(tmp_path) -> str:
-    return "shell_config.json"
-
-
 def test_shell_allowed_command(cfg_ctx) -> None:
-    config_path = "shell_config.json"
     cfg = ShellConfig(
         allowed_commands=["echo"],
         timeout_seconds=2,
@@ -31,7 +26,6 @@ def test_shell_allowed_command(cfg_ctx) -> None:
         args={
             "command": "echo hello",
             "shell_config": cfg.__dict__,
-            "config_path": config_path,
         },
     )
     res = handle_shell_request(req)
@@ -40,11 +34,10 @@ def test_shell_allowed_command(cfg_ctx) -> None:
 
 
 def test_shell_blocks_abs_path(cfg_ctx) -> None:
-    config_path = "shell_config.json"
     cfg = ShellConfig(allowed_commands=["ls"], sandbox_root="sandbox")
     req = ToolRequest(
         name="shell",
-        args={"command": "/bin/ls", "shell_config": cfg.__dict__, "config_path": config_path},
+        args={"command": "/bin/ls", "shell_config": cfg.__dict__},
     )
     res = handle_shell_request(req)
     assert not res.ok
@@ -52,7 +45,6 @@ def test_shell_blocks_abs_path(cfg_ctx) -> None:
 
 
 def test_shell_blocks_dangerous_and_chain(cfg_ctx) -> None:
-    config_path = "shell_config.json"
     cfg = ShellConfig(allowed_commands=["ls"], sandbox_root="sandbox")
     res_rm = handle_shell_request(
         ToolRequest(
@@ -60,7 +52,6 @@ def test_shell_blocks_dangerous_and_chain(cfg_ctx) -> None:
             args={
                 "command": "rm -rf /",
                 "shell_config": cfg.__dict__,
-                "config_path": config_path,
             },
         )
     )
@@ -70,7 +61,6 @@ def test_shell_blocks_dangerous_and_chain(cfg_ctx) -> None:
             args={
                 "command": "ls; whoami",
                 "shell_config": cfg.__dict__,
-                "config_path": config_path,
             },
         )
     )
@@ -80,7 +70,6 @@ def test_shell_blocks_dangerous_and_chain(cfg_ctx) -> None:
 
 
 def test_shell_timeout(cfg_ctx) -> None:
-    config_path = "shell_config.json"
     cfg = ShellConfig(
         allowed_commands=["sleep"],
         timeout_seconds=1,
@@ -93,7 +82,6 @@ def test_shell_timeout(cfg_ctx) -> None:
             args={
                 "command": "sleep 2",
                 "shell_config": cfg.__dict__,
-                "config_path": config_path,
             },
         )
     )
@@ -116,7 +104,6 @@ def test_shell_rejects_absolute_sandbox_root(cfg_ctx) -> None:
         args={
             "command": "echo hi",
             "shell_config": cfg.__dict__,
-            "config_path": "shell_config.json",
         },
     )
     res = handle_shell_request(req)
@@ -139,7 +126,6 @@ def test_shell_rejects_parent_reference_sandbox_root(cfg_ctx) -> None:
         args={
             "command": "echo hi",
             "shell_config": cfg.__dict__,
-            "config_path": "shell_config.json",
         },
     )
     res = handle_shell_request(req)
@@ -150,9 +136,7 @@ def test_shell_rejects_parent_reference_sandbox_root(cfg_ctx) -> None:
 def test_shell_uses_defaults_when_config_missing(cfg_ctx) -> None:
     assert not (cfg_ctx / "shell_config.json").exists()
 
-    res = handle_shell_request(
-        ToolRequest(name="shell", args={"command": "echo hi", "config_path": "shell_config.json"})
-    )
+    res = handle_shell_request(ToolRequest(name="shell", args={"command": "echo hi"}))
     assert res.ok
     assert "hi" in str(res.data.get("output"))
     assert not (cfg_ctx / "shell_config.json").exists()
@@ -203,7 +187,6 @@ def test_shell_rejects_symlink_sandbox_root(cfg_ctx) -> None:
         args={
             "command": "echo hi",
             "shell_config": cfg.__dict__,
-            "config_path": "shell_config.json",
         },
     )
     res = handle_shell_request(req)

@@ -690,6 +690,94 @@ def test_ui_decision_respond_project_command_github_import_resumes_clone_and_ind
     asyncio.run(run())
 
 
+def test_ui_decision_respond_github_import_repo_exists_controlled_failure(
+    monkeypatch,
+) -> None:
+    def fake_parse(args_raw: str) -> tuple[str, str | None]:
+        parts = args_raw.strip().split()
+        return parts[0], parts[1] if len(parts) > 1 else None
+
+    def fake_resolve_raises(repo_url: str) -> tuple[Path, str]:
+        del repo_url
+        raise ValueError("Репозиторий уже импортирован")
+
+    monkeypatch.setattr("server.http.handlers.decision._parse_github_import_args", fake_parse)
+    monkeypatch.setattr("server.http.handlers.decision._resolve_github_target", fake_resolve_raises)
+    monkeypatch.setattr(
+        "server.http.handlers.decision._clone_github_repository", lambda **_: (True, "ok")
+    )
+    monkeypatch.setattr(
+        "server.http.handlers.decision._index_imported_project", lambda p: (True, f"ok {p}")
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            hub: UIHub = client.server.app["ui_hub"]
+
+            decision_payload = {
+                "id": "decision-project-import-exists-1",
+                "kind": "approval",
+                "decision_type": "tool_approval",
+                "status": "pending",
+                "blocking": True,
+                "reason": "approval_required",
+                "summary": "GitHub import request",
+                "proposed_action": {},
+                "options": [],
+                "default_option_id": None,
+                "context": {
+                    "session_id": session_id,
+                    "source_endpoint": "project.command",
+                    "resume_payload": {
+                        "source_request": {
+                            "command": "github_import",
+                            "args": "https://github.com/example/repo",
+                        },
+                        "user_message_id": None,
+                    },
+                },
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "resolved_at": None,
+            }
+            await hub.set_session_decision(session_id, decision_payload)
+
+            respond = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": "decision-project-import-exists-1",
+                    "choice": "approve_once",
+                },
+            )
+            assert respond.status == 200
+            payload = await respond.json()
+            assert payload.get("status") == "resolved"
+            resume = payload.get("resume")
+            assert isinstance(resume, dict)
+            assert resume.get("ok") is False
+            assert "уже импортирован" in str(resume.get("error"))
+            assert resume.get("source_endpoint") == "project.command"
+
+            latest = await hub.get_session_decision(session_id)
+            assert isinstance(latest, dict)
+            assert latest.get("status") == "resolved"
+            assert latest.get("status") != "executing"
+
+            workspace_root = await hub.get_workspace_root(session_id)
+            assert workspace_root is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_decision_respond_workspace_git_stage_approve_executes(
     tmp_path,
 ) -> None:

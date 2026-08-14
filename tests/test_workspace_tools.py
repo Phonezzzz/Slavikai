@@ -397,7 +397,7 @@ def test_workspace_terminal_run_uses_workspace_root_cwd(monkeypatch) -> None:
     monkeypatch.setattr(
         terminal_tool_module,
         "load_shell_config",
-        lambda path: ShellConfig(
+        lambda: ShellConfig(
             allowed_commands=["echo"],
             timeout_seconds=5,
             max_output_chars=2000,

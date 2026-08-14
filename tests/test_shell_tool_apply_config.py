@@ -19,7 +19,6 @@ def test_shell_tool_applies_config(cfg_ctx) -> None:
         name="shell",
         args={
             "command": "echo hi",
-            "config_path": "shell_config.json",
             "shell_config": {
                 "allowed_commands": ["echo"],
                 "timeout_seconds": 1,
@@ -33,12 +32,13 @@ def test_shell_tool_applies_config(cfg_ctx) -> None:
     assert (cfg_ctx / "shell_config.json").exists()
 
 
-def test_shell_tool_config_path_within_config_dir(cfg_ctx) -> None:
+def test_shell_tool_apply_writes_only_canonical_file(cfg_ctx) -> None:
+    other = cfg_ctx / "tools_config.py"
+    other.write_text("ALLOWED = []", encoding="utf-8")
     req = ToolRequest(
         name="shell",
         args={
             "command": "echo hi",
-            "config_path": "nested/shell_config.json",
             "shell_config": {
                 "allowed_commands": ["echo"],
                 "timeout_seconds": 1,
@@ -49,4 +49,5 @@ def test_shell_tool_config_path_within_config_dir(cfg_ctx) -> None:
     )
     result = handle_shell_request(req)
     assert result.ok
-    assert (cfg_ctx / "nested" / "shell_config.json").exists()
+    assert (cfg_ctx / "shell_config.json").exists()
+    assert other.read_text(encoding="utf-8") == "ALLOWED = []"

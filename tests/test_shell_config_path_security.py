@@ -17,88 +17,142 @@ def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _request(config_path: str | None) -> ToolRequest:
-    args: dict[str, object] = {"command": "echo hi"}
-    if config_path is not None:
-        args["config_path"] = config_path
+def _request(args: dict[str, object]) -> ToolRequest:
     return ToolRequest(name="shell", args=args)
 
 
-def test_config_path_absolute_rejected(config_dir: Path) -> None:
-    res = handle_shell_request(_request(str(config_dir / "outside.json")))
-    assert not res.ok
-    assert "относительным" in (res.error or "").lower()
-    assert not (config_dir / "outside.json").exists()
+def _seed_python_file(config_dir: Path) -> Path:
+    target = config_dir / "settings.py"
+    target.write_text("SECRET_KEY = 'original'", encoding="utf-8")
+    return target
 
 
-def test_config_path_parent_reference_rejected(config_dir: Path) -> None:
-    res = handle_shell_request(_request("../outside.json"))
-    assert not res.ok
-    assert ".." in (res.error or "")
-    assert not (config_dir.parent / "outside.json").exists()
-
-
-def test_config_path_tilde_rejected(config_dir: Path) -> None:
-    res = handle_shell_request(_request("~/outside.json"))
-    assert not res.ok
-    assert not (config_dir / "outside.json").exists()
-
-
-def test_config_path_symlink_escape_rejected(config_dir: Path) -> None:
-    outside = config_dir.parent / "escape_target"
-    outside.mkdir(parents=True, exist_ok=True)
-    (config_dir / "link").symlink_to(outside, target_is_directory=True)
-    res = handle_shell_request(_request("link/escape.json"))
-    assert not res.ok
-    assert not (outside / "escape.json").exists()
-
-
-def test_config_path_within_config_dir_applies(config_dir: Path) -> None:
+def test_shell_config_path_arg_is_ignored_and_cannot_overwrite_py_file(config_dir: Path) -> None:
+    target = _seed_python_file(config_dir)
     res = handle_shell_request(
-        ToolRequest(
-            name="shell",
-            args={
+        _request(
+            {
                 "command": "echo hi",
-                "config_path": "nested/shell_config.json",
+                "config_path": "settings.py",
                 "shell_config": {
                     "allowed_commands": ["echo"],
                     "timeout_seconds": 1,
                     "max_output_chars": 10,
                     "sandbox_root": "sandbox",
                 },
-            },
+            }
         )
     )
     assert res.ok
-    assert (config_dir / "nested" / "shell_config.json").exists()
+    assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"
+    assert (config_dir / "shell_config.json").exists()
+    assert not (config_dir / "settings.py").read_text(encoding="utf-8").startswith("{")
 
 
-def test_save_shell_config_rejects_outside_path(config_dir: Path) -> None:
-    with pytest.raises(ValueError):
-        save_shell_config(ShellConfig(allowed_commands=["echo"]), str(config_dir.parent / "x.json"))
-    with pytest.raises(ValueError):
-        save_shell_config(ShellConfig(allowed_commands=["echo"]), "../x.json")
-    with pytest.raises(ValueError):
-        load_shell_config(str(config_dir.parent / "missing.json"))
+def test_shell_config_path_arg_absolute_cannot_overwrite_other_file(config_dir: Path) -> None:
+    target = _seed_python_file(config_dir)
+    res = handle_shell_request(
+        _request(
+            {
+                "command": "echo hi",
+                "config_path": str(target),
+                "shell_config": {
+                    "allowed_commands": ["echo"],
+                    "timeout_seconds": 1,
+                    "max_output_chars": 10,
+                    "sandbox_root": "sandbox",
+                },
+            }
+        )
+    )
+    assert res.ok
+    assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"
+    assert (config_dir / "shell_config.json").exists()
 
 
-def test_default_invocation_uses_canonical_shell_config(config_dir: Path) -> None:
-    canonical = config_dir / "shell_config.json"
-    canonical.write_text(
+def test_shell_config_path_arg_nested_cannot_overwrite_other_file(config_dir: Path) -> None:
+    target = _seed_python_file(config_dir)
+    res = handle_shell_request(
+        _request(
+            {
+                "command": "echo hi",
+                "config_path": "nested/../settings.py",
+                "shell_config": {
+                    "allowed_commands": ["echo"],
+                    "timeout_seconds": 1,
+                    "max_output_chars": 10,
+                    "sandbox_root": "sandbox",
+                },
+            }
+        )
+    )
+    assert res.ok
+    assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"
+    assert (config_dir / "shell_config.json").exists()
+
+
+def test_shell_config_apply_writes_only_canonical_file(config_dir: Path) -> None:
+    target = _seed_python_file(config_dir)
+    other = config_dir / "api_keys.py"
+    other.write_text("API_KEY = 'x'", encoding="utf-8")
+    res = handle_shell_request(
+        _request(
+            {
+                "command": "echo hi",
+                "shell_config": {
+                    "allowed_commands": ["echo"],
+                    "timeout_seconds": 1,
+                    "max_output_chars": 10,
+                    "sandbox_root": "sandbox",
+                },
+            }
+        )
+    )
+    assert res.ok
+    assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"
+    assert other.read_text(encoding="utf-8") == "API_KEY = 'x'"
+    assert (config_dir / "shell_config.json").exists()
+
+
+def test_save_shell_config_has_no_selectable_path(config_dir: Path) -> None:
+    save_shell_config(ShellConfig(allowed_commands=["echo"]))
+    assert (config_dir / "shell_config.json").exists()
+    assert (config_dir / "shell_config.json").read_text(encoding="utf-8").startswith("{")
+    assert not (config_dir / "config").exists()
+
+
+def test_load_shell_config_has_no_selectable_path(config_dir: Path) -> None:
+    (config_dir / "shell_config.json").write_text(
         '{"allowed_commands":["echo"],"timeout_seconds":1,'
         '"max_output_chars":100,"sandbox_root":"sandbox"}',
         encoding="utf-8",
     )
-    res = handle_shell_request(_request(None))
+    loaded = load_shell_config()
+    assert loaded.allowed_commands == ["echo"]
+
+
+def test_default_invocation_uses_canonical_shell_config(config_dir: Path) -> None:
+    (config_dir / "shell_config.json").write_text(
+        '{"allowed_commands":["echo"],"timeout_seconds":1,'
+        '"max_output_chars":100,"sandbox_root":"sandbox"}',
+        encoding="utf-8",
+    )
+    res = handle_shell_request(_request({"command": "echo hi"}))
     assert res.ok
     assert "hi" in str(res.data.get("output"))
-    assert not (config_dir / "config" / "shell_config.json").exists()
     assert not (config_dir / "config").exists()
 
 
 def test_default_invocation_does_not_double_prefix_path(config_dir: Path) -> None:
-    save_shell_config(ShellConfig(allowed_commands=["echo"]), None)
+    save_shell_config(ShellConfig(allowed_commands=["echo"]))
     assert (config_dir / "shell_config.json").exists()
     assert not (config_dir / "config").exists()
-    loaded = load_shell_config(None)
+    loaded = load_shell_config()
     assert loaded.allowed_commands == ["echo"]
+
+
+def test_config_dir_other_files_untouched_by_default_flow(config_dir: Path) -> None:
+    target = _seed_python_file(config_dir)
+    res = handle_shell_request(_request({"command": "echo hi"}))
+    assert res.ok
+    assert target.read_text(encoding="utf-8") == "SECRET_KEY = 'original'"

@@ -6,7 +6,6 @@ from typing import Final, Literal, cast
 
 from config.computer_backend_config import resolve_computer_backend_config
 from config.memory_config import MemoryConfig, load_memory_config
-from config.shell_config import DEFAULT_SHELL_CONFIG_PATH
 from config.tools_config import ToolsConfig, load_tools_config, save_tools_config
 from core.agent_computer import AgentComputerRuntime
 from core.agent_memory import AgentMemoryMixin
@@ -133,7 +132,6 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
     ) -> None:
         self.main_config = main_config
         self.main_api_key = main_api_key
-        self.shell_config_path = str(DEFAULT_SHELL_CONFIG_PATH)
         self._external_brain = brain
         self._brain_manager = brain_manager
         self.user_id = user_id

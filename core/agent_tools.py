@@ -116,7 +116,6 @@ class AgentToolsMixin:
         tools_enabled: dict[str, bool]
         short_term: list[LLMMessage]
         user_id: str
-        shell_config_path: str
         _interaction_store: MemoryCompanionStore
         _rule_engine: RuleEngine
         _skill_candidate_writer: SkillCandidateWriter

@@ -4,7 +4,6 @@ import re
 import shlex
 import subprocess
 import time
-from pathlib import Path
 from typing import Final
 
 from config.shell_config import (
@@ -54,9 +53,7 @@ def _validate_args(args: list[str], allowed_commands: set[str]) -> str | None:
     return None
 
 
-def handle_shell(
-    command: str, config: ShellConfig | None = None, config_path: str | Path | None = None
-) -> ToolResult:
+def handle_shell(command: str, config: ShellConfig | None = None) -> ToolResult:
     """
     Безопасный shell-инструмент:
     /sh <команда> — выполнит системную команду с фильтрацией.
@@ -68,7 +65,7 @@ def handle_shell(
         return ToolResult.failure("🚫 Опасная команда заблокирована.")
 
     try:
-        cfg = config or load_shell_config(config_path)
+        cfg = config or load_shell_config()
     except Exception as exc:  # noqa: BLE001
         return ToolResult.failure(f"Ошибка загрузки shell config: {exc}")
 
@@ -130,10 +127,6 @@ def handle_shell(
 
 def handle_shell_request(request: ToolRequest) -> ToolResult:
     cmd = str(request.args.get("command") or "").strip()
-    config_path_raw = request.args.get("config_path")
-    if config_path_raw is not None and not isinstance(config_path_raw, str):
-        return ToolResult.failure("config_path должен быть строкой.")
-    config_path = config_path_raw.strip() if config_path_raw else None
     if "shell_config" in request.args:
         # горячее применение настроек из UI
         cfg_payload = request.args.get("shell_config")
@@ -153,11 +146,11 @@ def handle_shell_request(request: ToolRequest) -> ToolResult:
                     sandbox_root=str(sandbox_raw),
                 )
                 normalize_shell_sandbox_root(cfg.sandbox_root)
-                save_shell_config(cfg, config_path)
-                return handle_shell(cmd, config=cfg, config_path=config_path)
+                save_shell_config(cfg)
+                return handle_shell(cmd, config=cfg)
             except Exception as exc:  # noqa: BLE001
                 return ToolResult.failure(f"Ошибка применения shell config: {exc}")
-    return handle_shell(cmd, config_path=config_path)
+    return handle_shell(cmd)
 
 
 class ShellTool:

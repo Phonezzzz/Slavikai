@@ -586,7 +586,14 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                         "error": str(exc),
                         "source_endpoint": source_endpoint,
                     }
-                target_path, relative_target = _resolve_github_target(repo_url)
+                try:
+                    target_path, relative_target = _resolve_github_target(repo_url)
+                except ValueError as exc:
+                    return {
+                        "ok": False,
+                        "error": str(exc),
+                        "source_endpoint": source_endpoint,
+                    }
                 cloned, clone_result = await _clone_github_repository(
                     repo_url=repo_url,
                     branch=branch,
