@@ -29,12 +29,15 @@ make ui-build
 }
 ```
 
-`provider` для chat-модели поддерживает: `xai`, `openrouter`, `local`, `inception`.
+`provider` для chat-модели поддерживает: `xai`, `openrouter`, `local`, `inception`, `deepseek`.
 `openai` в runtime используется только для STT-транскрипции (не как chat provider).
 
 Экспортируй ключи/настройки:
 
 ```bash
+# обязательный token для HTTP API и входа в browser UI
+export SLAVIK_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
 # xAI
 export XAI_API_KEY="..."
 
@@ -61,6 +64,13 @@ export OPENAI_API_KEY="..."
 make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000
 ```
 
+При открытии UI введи `SLAVIK_API_TOKEN` в форме входа. Сервер установит подписанную
+`HttpOnly`, `SameSite=Strict` cookie; сам token в cookie не сохраняется. Для внешних API
+клиентов остаётся Bearer auth: `Authorization: Bearer <SLAVIK_API_TOKEN>`.
+
+Для локальной разработки без auth можно явно задать
+`SLAVIK_ALLOW_UNAUTH_LOCAL=true`. На публичном интерфейсе этот режим не использовать.
+
 ## 3) HTTP-конфиг (опционально)
 
 Можно задать `config/http_server.json`:
@@ -82,9 +92,9 @@ make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000
 ## 4) Проверка после старта
 
 ```bash
-curl -sS http://127.0.0.1:8000/ui/api/status
-curl -sS http://127.0.0.1:8000/v1/models
-curl -sS http://127.0.0.1:8000/ui/api/settings
+curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/ui/api/status
+curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/v1/models
+curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/ui/api/settings
 ```
 
 ## 5) Фоновый режим (без systemd)
@@ -107,6 +117,7 @@ Type=simple
 WorkingDirectory=/opt/slavikai
 Environment=SLAVIK_HTTP_HOST=0.0.0.0
 Environment=SLAVIK_HTTP_PORT=8000
+Environment=SLAVIK_API_TOKEN=replace-with-a-long-random-token
 Environment=XAI_API_KEY=your-key
 ExecStart=/opt/slavikai/venv/bin/python -m server
 Restart=always
@@ -130,3 +141,5 @@ sudo systemctl status slavikai
 - UI собран (`make ui-build`), `ui/dist` актуален.
 - Целевая модель видна в списке моделей выбранного провайдера в UI.
 - Для выбранного провайдера выставлен корректный API key.
+- `SLAVIK_API_TOKEN` задан, UI login и Bearer smoke-check проходят.
+- Plan/Auto используют provider с native tools: `deepseek` или `local`.

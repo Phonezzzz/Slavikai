@@ -86,6 +86,12 @@ class AgentProtocol(Protocol):
     def apply_runtime_workspace_root(self, workspace_root: str | None) -> None: ...
     def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult: ...
 
+    def compile_plan_steps(
+        self,
+        goal: str,
+        audit_log: list[dict[str, JSONValue]],
+    ) -> list[dict[str, JSONValue]]: ...
+
     def call_tool(
         self,
         name: str,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from config.http_server_config import HttpAuthConfig
+from config.http_server_config import HttpAuthConfig, HttpServerConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from llm.types import ModelConfig
 from server.http import app as http_app
@@ -38,6 +38,30 @@ def test_create_app_invokes_dotenv_loader(monkeypatch) -> None:
         auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
     )
     assert calls == ["loaded"]
+
+
+def test_run_server_loads_dotenv_before_auth_validation(monkeypatch) -> None:
+    calls: list[str] = []
+    auth_config = HttpAuthConfig(api_token="from-dotenv", allow_unauth_local=False)
+
+    monkeypatch.setattr(http_app, "_load_project_dotenv", lambda: calls.append("dotenv"))
+
+    def _ensure_auth() -> HttpAuthConfig:
+        calls.append("auth")
+        return auth_config
+
+    def _create_app(**kwargs):  # noqa: ANN003, ANN202
+        calls.append("app")
+        assert kwargs["auth_config"] == auth_config
+        return object()
+
+    monkeypatch.setattr(http_app, "ensure_http_auth_boot_config", _ensure_auth)
+    monkeypatch.setattr(http_app, "create_app", _create_app)
+    monkeypatch.setattr(http_app.web, "run_app", lambda *args, **kwargs: None)
+
+    http_app.run_server(HttpServerConfig())
+
+    assert calls == ["dotenv", "auth", "app"]
 
 
 def test_load_project_dotenv_skips_when_dependency_missing(monkeypatch) -> None:

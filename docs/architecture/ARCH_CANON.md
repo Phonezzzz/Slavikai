@@ -20,7 +20,10 @@
   вынес layout/resize state и quick-open indexing/filtering в feature-модули,
   Workspace переименован в Computer (inspector/runtime для chat session), добавлены
   `AgentComputerRuntime`, `ComputerBackend` Protocol, `LocalComputerBackend` (default),
-  `ContainerComputerBackend` (opt-in/inactive).
+  `ContainerComputerBackend` (opt-in/inactive). Browser auth использует token login и
+  подписанную HttpOnly-cookie; Plan draft получает executable steps через structured
+  `submit_plan` tool call; Auto отклоняет provider без native tools до запуска и применяет
+  `tool_outcomes` verifier для generic workspace.
 - **Current legacy runtime**: крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой

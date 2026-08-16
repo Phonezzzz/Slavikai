@@ -26,6 +26,10 @@ workspace history берётся из session snapshot. После PR-24 memory/
 repeated tool failures больше не создают отдельный `DecisionPacket(tool_fail)`. После
 PR-26 workspace IDE начал декомпозицию: layout/resize state и quick-open index/filter logic
 вынесены из `workspace-ide.tsx` в feature-модули.
+После PR-27 browser UI получил token login с подписанной HttpOnly-cookie, `.env` загружается
+до boot auth validation, Plan строит шаги только через structured `submit_plan` tool call,
+а Auto проверяет native-tools capability до запуска и использует verifier profile
+`tool_outcomes` вне code repository.
 После PR-07..PR-12 (текущей серии) Workspace переименован в **Computer** как UI
 inspector/runtime для текущей chat session. Добавлены `AgentComputerRuntime`, `ComputerBackend`
 Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in/inactive).
@@ -55,8 +59,12 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
   - Legacy-контур `planner -> coder pool -> merge -> verifier` больше не имеет
     runtime entrypoint.
   - Auto v1 поддерживает паузу `waiting_approval` и resume через повторный tool-loop run после approval.
+  - Auto доступен только для provider с `supports_native_tools=True` (`deepseek`, `local`).
+    Несовместимый provider даёт явный stop `native_tools_required`, а не internal error.
+  - В repository с canonical `Makefile` verifier запускает `make check`; в generic workspace
+    профиль `tool_outcomes` проверяет фактические результаты native tool calls.
 - **LLM слой** (`llm/*`)
-  - Провайдеры: `xai`, `openrouter`, `local`, `inception`.
+  - Провайдеры: `xai`, `openrouter`, `local`, `inception`, `deepseek`.
   - Контракт: `LLMMessage.role` включает `tool`, `LLMResult.tool_calls`,
     `Brain.generate(..., tools=None)`.
   - Native provider tool calling реализован в primary `local` OpenAI-compatible path.
@@ -131,6 +139,10 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
 - OpenAI-совместимые endpoints: `/v1/models`, `/v1/chat/completions`.
 - Служебные endpoints: `/slavik/trace/{trace_id}`, `/slavik/tool-calls/{trace_id}`, `/slavik/feedback`, `/slavik/approve-session`.
 - UI API и workflow endpoints регистрируются в `server/http/routes.py`.
+- Browser UI проходит login через `/ui/api/auth/login` и работает по подписанной
+  `HttpOnly`, `SameSite=Strict` cookie. `/v1/*` и service clients сохраняют Bearer auth.
+- Plan draft формируется через structured `submit_plan` tool call. Каждый executable step
+  содержит ровно одну `allowed_tool_kinds`, совпадающую `inputs.operation`, и `tool_args`.
 
 ### slavik_meta.runtime_mode contract (для /v1/chat/completions)
 

@@ -142,11 +142,16 @@ def create_app(
 
 
 def run_server(config: HttpServerConfig) -> None:
-    ensure_http_auth_boot_config()
-    app = create_app(max_request_bytes=config.max_request_bytes)
+    _load_project_dotenv()
+    auth_config = ensure_http_auth_boot_config()
+    app = create_app(
+        max_request_bytes=config.max_request_bytes,
+        auth_config=auth_config,
+    )
     web.run_app(app, host=config.host, port=config.port)
 
 
 def main() -> None:
+    _load_project_dotenv()
     config = resolve_http_server_config()
     run_server(config)

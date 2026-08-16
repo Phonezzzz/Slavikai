@@ -1,5 +1,10 @@
 import AppShell from "./app/App";
+import AuthGate from "./app/AuthGate";
 
 export default function App() {
-  return <AppShell />;
+  return (
+    <AuthGate>
+      <AppShell />
+    </AuthGate>
+  );
 }

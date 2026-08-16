@@ -16,6 +16,11 @@ if TYPE_CHECKING:
     from server.ui_hub import UIHub
 
 AUTH_PROTECTED_PREFIXES: tuple[str, ...] = ("/ui/api/", "/v1/", "/slavik/")
+AUTH_PUBLIC_PATHS: frozenset[str] = frozenset(
+    {"/ui/api/auth/status", "/ui/api/auth/login", "/ui/api/auth/logout"}
+)
+UI_AUTH_COOKIE = "slavik_ui_auth"
+_UI_AUTH_COOKIE_CONTEXT = b"slavik-ui-auth-v1"
 
 
 def _extract_ui_session_id(request: web.Request) -> str | None:
@@ -50,12 +55,48 @@ def _extract_bearer_token(request: web.Request) -> str | None:
 
 
 def _is_auth_protected_path(path: str) -> bool:
+    if path in AUTH_PUBLIC_PATHS:
+        return False
     return any(path.startswith(prefix) for prefix in AUTH_PROTECTED_PREFIXES)
 
 
 def _principal_id_from_token(token: str) -> str:
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return f"principal_{digest[:16]}"
+
+
+def _candidate_tokens(auth_config: HttpAuthConfig) -> list[str]:
+    tokens: list[str] = []
+    if auth_config.api_token:
+        tokens.append(auth_config.api_token)
+    admin_token = os.environ.get("SLAVIK_ADMIN_TOKEN", "").strip()
+    if admin_token:
+        tokens.append(admin_token)
+    return tokens
+
+
+def _ui_auth_cookie_value(token: str) -> str:
+    return hmac.new(token.encode("utf-8"), _UI_AUTH_COOKIE_CONTEXT, hashlib.sha256).hexdigest()
+
+
+def _principal_id_for_presented_token(
+    presented_token: str,
+    auth_config: HttpAuthConfig,
+) -> str | None:
+    for token in _candidate_tokens(auth_config):
+        if hmac.compare_digest(presented_token, token):
+            return _principal_id_from_token(token)
+    return None
+
+
+def _principal_id_for_ui_cookie(
+    presented_cookie: str,
+    auth_config: HttpAuthConfig,
+) -> str | None:
+    for token in _candidate_tokens(auth_config):
+        if hmac.compare_digest(presented_cookie, _ui_auth_cookie_value(token)):
+            return _principal_id_from_token(token)
+    return None
 
 
 def _resolve_request_principal_id(
@@ -65,16 +106,11 @@ def _resolve_request_principal_id(
     if auth_config.allow_unauth_local:
         return "local_unauth"
     presented_token = _extract_bearer_token(request)
-    if presented_token is None:
-        return None
-    candidate_tokens: list[str] = []
-    if auth_config.api_token:
-        candidate_tokens.append(auth_config.api_token)
-    admin_token = os.environ.get("SLAVIK_ADMIN_TOKEN", "").strip()
-    if admin_token:
-        candidate_tokens.append(admin_token)
-    if any(hmac.compare_digest(presented_token, token) for token in candidate_tokens):
-        return _principal_id_from_token(presented_token)
+    if presented_token is not None:
+        return _principal_id_for_presented_token(presented_token, auth_config)
+    presented_cookie = request.cookies.get(UI_AUTH_COOKIE, "").strip()
+    if presented_cookie:
+        return _principal_id_for_ui_cookie(presented_cookie, auth_config)
     return None
 
 

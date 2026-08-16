@@ -7,6 +7,7 @@ from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequir
 from core.auto_agent import AutoAgent
 from core.mwv.models import VerificationResult, VerificationStatus
 from core.tool_gateway import ToolGateway
+from core.tool_loop import ExecutedToolCall
 from llm.types import LLMResult, ToolCall, ToolSpec
 from shared.auto_models import AutoPlan, AutoRunStatus, AutoShard
 from shared.models import LLMMessage, ToolResult
@@ -15,6 +16,8 @@ from tools.workspace_tools import workspace_root_context
 
 
 class _FakeBrain:
+    supports_native_tools = False
+
     def __init__(self, text: str) -> None:
         self._text = text
 
@@ -58,6 +61,8 @@ class _FakeAgent:
 
 
 class _ToolLoopBrain:
+    supports_native_tools = True
+
     def __init__(self) -> None:
         self.calls = 0
         self.seen_tools: list[ToolSpec] = []
@@ -179,6 +184,22 @@ def test_auto_agent_run_outcome_uses_auto_v1_tool_loop(monkeypatch) -> None:  # 
     assert isinstance(coders, list)
     assert coders[0]["tool"] == "echo"
     assert coders[0]["status"] == "completed"
+    verifier = agent.last_auto_state.get("verifier")
+    assert isinstance(verifier, dict)
+    assert verifier.get("verifier_profile") == "tool_outcomes"
+
+
+def test_auto_runtime_rejects_provider_without_native_tools(tmp_path) -> None:
+    agent = _FakeAgent(brain_text="unused")
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+
+    outcome = orchestrator.run_v1("write a file", run_root_override=tmp_path)
+
+    assert outcome.status == AutoRunStatus.FAILED_WORKER
+    assert outcome.stop_reason_code is not None
+    assert isinstance(agent.last_auto_state, dict)
+    assert agent.last_auto_state.get("error_code") == "native_tools_required"
+    assert "DeepSeek" in outcome.next_steps[0]
 
 
 def test_auto_runtime_conflict_detection() -> None:
@@ -269,7 +290,12 @@ def test_auto_runtime_v1_waiting_approval_and_resume(monkeypatch, tmp_path) -> N
                 raise ApprovalRequired(request)
 
             class _LoopResult:
-                tool_calls = []
+                tool_calls = [
+                    ExecutedToolCall(
+                        call=ToolCall(id="resume-call", name="echo", arguments={}),
+                        result=ToolResult.success({"output": "ok"}),
+                    )
+                ]
                 iterations = 1
                 text = "resumed"
 

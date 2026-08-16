@@ -50,7 +50,7 @@ def test_ui_plan_edit_resets_approved_to_draft() -> None:
                     "plan_revision": approved_revision,
                     "operation": {
                         "op": "update_step",
-                        "step_id": "step-1-audit",
+                        "step_id": "step-1",
                         "changes": {"title": "Новый заголовок"},
                     },
                 },

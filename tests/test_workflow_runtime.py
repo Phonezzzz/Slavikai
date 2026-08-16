@@ -166,9 +166,22 @@ def test_load_effective_session_security_for_yolo_forces_safe_mode_off() -> None
 
 
 def test_compile_plan_to_task_packet(tmp_path: Path) -> None:
+    steps = [
+        {
+            "step_id": "step-1",
+            "title": "Read",
+            "description": "Read file",
+            "allowed_tool_kinds": ["workspace_read"],
+            "inputs": {"operation": "workspace_read", "tool_args": {"path": "README.md"}},
+            "expected_outputs": ["content"],
+            "acceptance_checks": ["read succeeded"],
+        }
+    ]
     plan = workflow_runtime.build_plan_draft(
         goal="Исправить файл",
         audit_log=[],
+        steps=steps,
+        verifier={},
         utc_now_iso_fn=lambda: "2026-01-01T00:00:00+00:00",
         plan_hash_payload_fn=lambda payload: "plan-hash",
     )
@@ -184,13 +197,27 @@ def test_compile_plan_to_task_packet(tmp_path: Path) -> None:
     assert packet.scope["workspace_root"] == str(tmp_path)
     assert packet.approvals["approved_categories"] == ["EXEC_ARBITRARY"]
     assert packet.packet_hash
-    assert len(packet.steps) == 3
+    assert len(packet.steps) == 1
+    assert packet.steps[0].inputs["operation"] == "workspace_read"
 
 
 def test_task_packet_payload_roundtrip_preserves_hash(tmp_path: Path) -> None:
+    steps = [
+        {
+            "step_id": "step-1",
+            "title": "Read",
+            "description": "Read file",
+            "allowed_tool_kinds": ["workspace_read"],
+            "inputs": {"operation": "workspace_read", "tool_args": {"path": "README.md"}},
+            "expected_outputs": ["content"],
+            "acceptance_checks": ["read succeeded"],
+        }
+    ]
     plan = workflow_runtime.build_plan_draft(
         goal="Исправить файл",
         audit_log=[],
+        steps=steps,
+        verifier={},
         utc_now_iso_fn=lambda: "2026-01-01T00:00:00+00:00",
         plan_hash_payload_fn=lambda payload: "plan-hash",
     )

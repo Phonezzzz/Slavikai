@@ -22,6 +22,7 @@ from core.decision.handler import DecisionHandler
 from core.decision.models import DecisionPacket
 from core.mwv.manager import ManagerRuntime
 from core.mwv.verifier_runtime import VerifierRuntime
+from core.plan_compiler import compile_structured_plan_steps
 from core.rule_engine import RuleEngine
 from core.skills.candidates import SkillCandidateWriter
 from core.skills.index import SkillIndex, SkillMatch
@@ -114,6 +115,19 @@ _COMPAT_EXPORTS = (ManagerRuntime, VerifierRuntime, WORKSPACE_ROOT, MAX_FILE_BYT
 
 class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin):
     """SlavikAI Core v1.0 — Распределённый рассуждающий агент."""
+
+    def compile_plan_steps(
+        self,
+        goal: str,
+        audit_log: list[dict[str, JSONValue]],
+    ) -> list[dict[str, JSONValue]]:
+        return compile_structured_plan_steps(
+            brain=self._get_main_brain(),
+            config=self.main_config,
+            goal=goal,
+            audit_log=audit_log,
+            available_tools=self.tool_registry.list_tool_specs(),
+        )
 
     def __init__(
         self,

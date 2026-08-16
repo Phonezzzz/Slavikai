@@ -83,11 +83,17 @@ def test_worker_runtime_delegates() -> None:
     assert result.status == WorkStatus.SUCCESS
 
 
-def test_verifier_runtime_requires_explicit_command_for_non_repo_workspace() -> None:
+def test_verifier_runtime_requires_explicit_command_for_non_repo_workspace(tmp_path) -> None:
+    (tmp_path / ".git").mkdir()
     runtime = VerifierRuntime()
     result = runtime.run(
         TaskPacket(task_id="task-1", session_id="s", trace_id="t", goal="g"),
-        RunContext(session_id="s", trace_id="t", workspace_root="/tmp", safe_mode=True),
+        RunContext(
+            session_id="s",
+            trace_id="t",
+            workspace_root=str(tmp_path),
+            safe_mode=True,
+        ),
     )
     assert result.status == VerificationStatus.ERROR
     assert result.error == NON_REPO_VERIFIER_REQUIRED_ERROR

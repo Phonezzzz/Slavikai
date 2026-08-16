@@ -77,7 +77,7 @@ class VerifierRuntime:
         if command is not None:
             return self._run_command(command, cwd=cwd, timeout_seconds=timeout_seconds)
 
-        if not _is_repo_like_workspace(workspace_root):
+        if not is_repo_workspace(workspace_root):
             return VerificationResult(
                 status=VerificationStatus.ERROR,
                 command=[],
@@ -348,13 +348,13 @@ def _join_output(parts: list[str]) -> str:
     return "\n".join(filtered)
 
 
-def _is_repo_like_workspace(root: Path) -> bool:
-    if (root / ".git").exists():
-        return True
+def is_repo_workspace(root: Path) -> bool:
     result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
         check=False,
     )
-    return result.returncode == 0
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    return Path(result.stdout.strip()).resolve() == root.resolve()

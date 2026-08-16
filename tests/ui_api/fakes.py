@@ -76,6 +76,26 @@ class DummyAgent:
     def apply_runtime_workspace_root(self, workspace_root: str | None) -> None:
         del workspace_root
 
+    def compile_plan_steps(
+        self,
+        goal: str,
+        audit_log: list[dict[str, JSONValue]],
+    ) -> list[dict[str, JSONValue]]:
+        del goal, audit_log
+        return [
+            {
+                "step_id": "step-1",
+                "title": "Проверить workspace",
+                "description": "Получить список файлов через runtime tool.",
+                "allowed_tool_kinds": ["workspace_list"],
+                "inputs": {"operation": "workspace_list", "tool_args": {"path": "."}},
+                "expected_outputs": ["Список файлов получен"],
+                "acceptance_checks": ["Tool call завершился успешно"],
+                "status": "todo",
+                "evidence": None,
+            }
+        ]
+
     def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
         del context
         step_results = []

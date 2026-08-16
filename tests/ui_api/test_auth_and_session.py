@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from llm.types import ModelConfig
+from server.http.common.auth import UI_AUTH_COOKIE
 
 # ruff: noqa: F403,F405
 from .fakes import *
@@ -26,6 +27,53 @@ def test_ui_api_requires_bearer_by_default() -> None:
             error = payload.get("error")
             assert isinstance(error, dict)
             assert error.get("code") == "unauthorized"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_login_cookie_authenticates_browser_without_exposing_token() -> None:
+    async def run() -> None:
+        token = "ui-browser-token"
+        app = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=token, allow_unauth_local=False),
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            status_response = await client.get("/ui/api/auth/status")
+            assert status_response.status == 200
+            assert (await status_response.json())["authenticated"] is False
+
+            rejected = await client.post("/ui/api/auth/login", json={"token": "wrong"})
+            assert rejected.status == 401
+
+            login = await client.post("/ui/api/auth/login", json={"token": token})
+            assert login.status == 200
+            cookie = login.cookies[UI_AUTH_COOKIE]
+            assert cookie.value != token
+            assert cookie["httponly"] is True
+            assert cookie["samesite"] == "Strict"
+
+            protected = await client.get(
+                "/ui/api/status",
+                headers={"Cookie": f"{UI_AUTH_COOKIE}={cookie.value}"},
+            )
+            assert protected.status == 200
+
+            bearer = await client.get(
+                "/ui/api/status",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert bearer.status == 200
+
+            logout = await client.post("/ui/api/auth/logout")
+            assert logout.status == 200
+            assert logout.cookies[UI_AUTH_COOKIE]["max-age"] == "0"
         finally:
             await client.close()
 

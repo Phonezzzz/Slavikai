@@ -5,6 +5,7 @@ from aiohttp import web
 
 def register_routes(app: web.Application) -> None:
     from server.http.handlers import (
+        auth,
         chat,
         decision,
         events,
@@ -20,6 +21,10 @@ def register_routes(app: web.Application) -> None:
         workflow,
         workspace,
     )
+
+    app.router.add_get("/ui/api/auth/status", auth.handle_ui_auth_status)
+    app.router.add_post("/ui/api/auth/login", auth.handle_ui_auth_login)
+    app.router.add_post("/ui/api/auth/logout", auth.handle_ui_auth_logout)
 
     app.router.add_get("/v1/models", models.handle_models)
     app.router.add_post("/v1/chat/completions", chat.handle_chat_completions)

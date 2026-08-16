@@ -157,61 +157,14 @@ async def apply_agent_runtime_state(
     return mode, active_plan, active_task, auto_state
 
 
-def build_default_plan_steps() -> list[dict[str, JSONValue]]:
-    return [
-        {
-            "step_id": "step-1-audit",
-            "title": "Аудит контекста",
-            "description": "Проверить релевантные файлы и текущее состояние проекта.",
-            "allowed_tool_kinds": ["workspace_list", "workspace_read", "project"],
-            "inputs": {},
-            "expected_outputs": ["Понять текущее поведение и ограничения"],
-            "acceptance_checks": ["Понять текущее поведение и ограничения"],
-            "status": "todo",
-            "evidence": None,
-        },
-        {
-            "step_id": "step-2-implement",
-            "title": "Изменения",
-            "description": "Внести изменения по задаче и синхронизировать артефакты.",
-            "allowed_tool_kinds": [
-                "workspace_read",
-                "workspace_write",
-                "workspace_patch",
-                "project",
-                "shell",
-                "fs",
-            ],
-            "inputs": {},
-            "expected_outputs": ["Изменения применены в нужных файлах"],
-            "acceptance_checks": ["Изменения применены в нужных файлах"],
-            "status": "todo",
-            "evidence": None,
-        },
-        {
-            "step_id": "step-3-verify",
-            "title": "Проверка",
-            "description": "Запустить проверки и убедиться, что задача закрыта.",
-            "allowed_tool_kinds": ["workspace_read", "workspace_run", "shell", "project"],
-            "inputs": {},
-            "expected_outputs": ["make check или эквивалентные проверки зелёные"],
-            "acceptance_checks": ["make check или эквивалентные проверки зелёные"],
-            "status": "todo",
-            "evidence": None,
-        },
-    ]
-
-
 def build_plan_draft(
     *,
     goal: str,
     audit_log: list[dict[str, JSONValue]],
+    steps: list[dict[str, JSONValue]],
+    verifier: dict[str, JSONValue],
     utc_now_iso_fn: Callable[[], str],
     plan_hash_payload_fn: Callable[[dict[str, JSONValue]], str],
-    build_default_plan_steps_fn: Callable[
-        [],
-        list[dict[str, JSONValue]],
-    ] = build_default_plan_steps,
 ) -> dict[str, JSONValue]:
     now = utc_now_iso_fn()
     plan: dict[str, JSONValue] = {
@@ -225,10 +178,10 @@ def build_plan_draft(
         "assumptions": [],
         "inputs_needed": [],
         "audit_log": audit_log,
-        "steps": build_default_plan_steps_fn(),
+        "steps": steps,
         "budgets": {"max_attempts": 1},
         "approvals": {"approved_categories": []},
-        "verifier": {},
+        "verifier": verifier,
         "exit_criteria": [
             "Целевое изменение внедрено",
             "Регрессии не обнаружены",
@@ -269,15 +222,32 @@ def compile_plan_to_task_packet(
         if not isinstance(description_raw, str):
             raise ValueError(f"plan.steps[{index - 1}].description должен быть строкой.")
         allowed_raw = item.get("allowed_tool_kinds")
-        if not isinstance(allowed_raw, list) or not any(
-            isinstance(tool_name, str) and tool_name.strip() for tool_name in allowed_raw
-        ):
+        allowed_tool_kinds = (
+            [
+                tool_name.strip()
+                for tool_name in allowed_raw
+                if isinstance(tool_name, str) and tool_name.strip()
+            ]
+            if isinstance(allowed_raw, list)
+            else []
+        )
+        if len(allowed_tool_kinds) != 1:
             raise ValueError(
                 f"plan.steps[{index - 1}].allowed_tool_kinds "
-                "должен содержать хотя бы один инструмент."
+                "должен содержать ровно один инструмент."
             )
         inputs_raw = item.get("inputs")
-        inputs = inputs_raw if isinstance(inputs_raw, dict) else {}
+        if not isinstance(inputs_raw, dict):
+            raise ValueError(f"plan.steps[{index - 1}].inputs должен быть объектом.")
+        operation_raw = inputs_raw.get("operation")
+        if operation_raw != allowed_tool_kinds[0]:
+            raise ValueError(
+                f"plan.steps[{index - 1}].inputs.operation должен совпадать "
+                "с allowed_tool_kinds[0]."
+            )
+        tool_args_raw = inputs_raw.get("tool_args")
+        if not isinstance(tool_args_raw, dict):
+            raise ValueError(f"plan.steps[{index - 1}].inputs.tool_args должен быть объектом.")
         expected_outputs_raw = item.get("expected_outputs")
         expected_outputs = (
             [
@@ -303,12 +273,8 @@ def compile_plan_to_task_packet(
                 step_id=step_id_raw.strip(),
                 title=title_raw.strip(),
                 description=description_raw,
-                allowed_tool_kinds=[
-                    tool_name.strip()
-                    for tool_name in allowed_raw
-                    if isinstance(tool_name, str) and tool_name.strip()
-                ],
-                inputs={str(key): value for key, value in inputs.items()},
+                allowed_tool_kinds=allowed_tool_kinds,
+                inputs={str(key): value for key, value in inputs_raw.items()},
                 expected_outputs=expected_outputs,
                 acceptance_checks=acceptance_checks,
             )

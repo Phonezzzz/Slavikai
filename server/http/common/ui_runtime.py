@@ -249,9 +249,6 @@ def _normalize_json_value(value: object) -> JSONValue:
     return workflow_state.normalize_json_value(value)
 
 
-_build_default_plan_steps = workflow_runtime.build_default_plan_steps
-
-
 def _stream_preview_ready_for_chat(preview_text: str) -> bool:
     return streaming._stream_preview_ready_for_chat(
         preview_text,
@@ -278,13 +275,16 @@ def _build_plan_draft(
     *,
     goal: str,
     audit_log: list[dict[str, JSONValue]],
+    steps: list[dict[str, JSONValue]],
+    verifier: dict[str, JSONValue],
 ) -> dict[str, JSONValue]:
     return workflow_runtime.build_plan_draft(
         goal=goal,
         audit_log=audit_log,
+        steps=steps,
+        verifier=verifier,
         utc_now_iso_fn=_utc_now_iso,
         plan_hash_payload_fn=_plan_hash_payload,
-        build_default_plan_steps_fn=_build_default_plan_steps,
     )
 
 

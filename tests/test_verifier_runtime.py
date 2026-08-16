@@ -34,7 +34,7 @@ def test_verifier_runtime_fallback_pass_for_repo_like_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr("core.mwv.verifier_runtime.is_repo_workspace", lambda _root: True)
     calls: list[list[str]] = []
 
     def _run(
@@ -70,7 +70,7 @@ def test_verifier_runtime_default_fallback_uses_make_check(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr("core.mwv.verifier_runtime.is_repo_workspace", lambda _root: True)
     (tmp_path / "Makefile").write_text(".PHONY: check\ncheck:\n\t@true\n", encoding="utf-8")
     calls: list[list[str]] = []
 
@@ -102,7 +102,7 @@ def test_verifier_runtime_fallback_fail_for_repo_like_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr("core.mwv.verifier_runtime.is_repo_workspace", lambda _root: True)
 
     def _run(
         command: list[str],
@@ -165,7 +165,7 @@ def test_verifier_runtime_fallback_os_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr("core.mwv.verifier_runtime.is_repo_workspace", lambda _root: True)
 
     def _run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise OSError("cannot execute")

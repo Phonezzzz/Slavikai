@@ -17,9 +17,14 @@ from core.mwv.models import (
     VerificationResult,
     VerificationStatus,
 )
-from core.mwv.verifier_runtime import VerifierRuntime, canonical_check_command
+from core.mwv.verifier_runtime import (
+    VerifierRuntime,
+    canonical_check_command,
+    has_canonical_repo_verifier,
+    is_repo_workspace,
+)
 from core.mwv.verifier_summary import extract_verifier_excerpt
-from core.tool_loop import AgentToolLoop, ExecutedToolCall
+from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ExecutedToolCall
 from shared.auto_models import (
     AUTO_CODER_POOL_DEFAULT,
     AUTO_CODER_POOL_MAX,
@@ -175,6 +180,27 @@ class AutoOrchestrator:
         self._set_state(state)
 
         try:
+            brain = self.parent._get_main_brain()
+            if not brain.supports_native_tools:
+                reason = "Выбранный provider не поддерживает native tool calls для Auto."
+                state["error"] = reason
+                state["error_code"] = "native_tools_required"
+                self._set_status(state, AutoRunStatus.FAILED_WORKER)
+                return AutoRunOutcome(
+                    text=self.parent._format_stop_response(
+                        what="Auto-run остановлен: provider несовместим с Auto",
+                        why=reason,
+                        next_steps=["Выбери DeepSeek или Local model и повтори запуск."],
+                        stop_reason_code=StopReasonCode.WORKER_FAILED,
+                        route="auto",
+                        plan_summary="Auto требует native tool-calling provider.",
+                        execution_summary=reason,
+                    ),
+                    status=AutoRunStatus.FAILED_WORKER,
+                    stop_reason_code=StopReasonCode.WORKER_FAILED,
+                    verifier=None,
+                    next_steps=["Выбери DeepSeek или Local model и повтори запуск."],
+                )
             self._set_status(state, AutoRunStatus.PLANNING)
             budget_stop = _budget_runtime_stop(
                 budgets=budgets,
@@ -214,7 +240,7 @@ class AutoOrchestrator:
             gateway = self.parent._build_tool_gateway()
             tool_specs = self.parent.tool_registry.list_tool_specs()
             loop_result = AgentToolLoop(max_iterations=budgets.max_tool_calls).run(
-                brain=self.parent._get_main_brain(),
+                brain=brain,
                 gateway=gateway,
                 messages=[
                     LLMMessage(role="system", content=AUTO_V1_SYSTEM_PROMPT),
@@ -287,6 +313,7 @@ class AutoOrchestrator:
                 goal=goal,
                 run_root=run_root,
                 budgets=budgets,
+                loop_result=loop_result,
             )
             state["verifier"] = _verification_state(verification)
             self._set_state(state)
@@ -436,7 +463,64 @@ class AutoOrchestrator:
         goal: str,
         run_root: Path,
         budgets: AutoBudgets,
+        loop_result: AgentToolLoopResult,
     ) -> VerificationResult:
+        if not has_canonical_repo_verifier(run_root):
+            if is_repo_workspace(run_root):
+                reason = "canonical_repo_verifier_unavailable"
+                return VerificationResult(
+                    status=VerificationStatus.ERROR,
+                    command=[],
+                    exit_code=None,
+                    stdout="",
+                    stderr=reason,
+                    duration_seconds=0.0,
+                    error=reason,
+                    fail_type="verifier_unavailable",
+                    excerpt=reason,
+                    verifier_profile="repository",
+                )
+            failed_calls = [item for item in loop_result.tool_calls if not item.result.ok]
+            if failed_calls:
+                first_error = failed_calls[0].result.error or "tool call failed"
+                return VerificationResult(
+                    status=VerificationStatus.FAILED,
+                    command=[],
+                    exit_code=1,
+                    stdout="",
+                    stderr=first_error,
+                    duration_seconds=0.0,
+                    error=first_error,
+                    fail_type="tool_outcome_failed",
+                    excerpt=first_error,
+                    verifier_profile="tool_outcomes",
+                )
+            if not loop_result.tool_calls:
+                reason = "auto_no_observable_tool_action"
+                return VerificationResult(
+                    status=VerificationStatus.FAILED,
+                    command=[],
+                    exit_code=1,
+                    stdout="",
+                    stderr=reason,
+                    duration_seconds=0.0,
+                    error=reason,
+                    fail_type="no_observable_action",
+                    excerpt=reason,
+                    verifier_profile="tool_outcomes",
+                )
+            return VerificationResult(
+                status=VerificationStatus.PASSED,
+                command=[],
+                exit_code=0,
+                stdout=f"Verified {len(loop_result.tool_calls)} successful tool call(s).",
+                stderr="",
+                duration_seconds=0.0,
+                error=None,
+                fail_type=None,
+                excerpt="All native tool calls completed successfully.",
+                verifier_profile="tool_outcomes",
+            )
         verifier = VerifierRuntime(project_root=run_root)
         context = RunContext(
             session_id=self.parent.session_id or "local",
