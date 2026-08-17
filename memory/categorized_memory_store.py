@@ -10,6 +10,7 @@ from typing import Final
 
 from shared.memory_category_models import MemoryCategory, MemoryItem, MemorySource
 from shared.models import JSONValue
+from shared.sqlite import ThreadLocalSQLiteConnection
 
 DEFAULT_DB_PATH: Final[Path] = Path("memory/memory_categories.db")
 _CURSOR_SEP: Final[str] = "|"
@@ -26,8 +27,7 @@ class CategorizedMemoryStore:
     def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
-        self.conn.row_factory = sqlite3.Row
+        self.conn = ThreadLocalSQLiteConnection(self.db_path, row_factory=sqlite3.Row)
         self._init_tables()
 
     def close(self) -> None:

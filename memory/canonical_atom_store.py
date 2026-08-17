@@ -8,14 +8,14 @@ from typing import cast
 from shared.canonical_atom_models import AtomStatus, CanonicalAtom, ClaimType, utc_now_iso
 from shared.models import JSONValue
 from shared.sanitize import safe_json_loads
+from shared.sqlite import ThreadLocalSQLiteConnection
 
 
 class CanonicalAtomStore:
     def __init__(self, db_path: str = "memory/canonical_atoms.db") -> None:
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = ThreadLocalSQLiteConnection(db_path, row_factory=sqlite3.Row)
         self._init_db()
 
     def _init_db(self) -> None:
