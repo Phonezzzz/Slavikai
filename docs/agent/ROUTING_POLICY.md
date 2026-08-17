@@ -10,7 +10,8 @@ keyword/classifier маршрутизация.
 - `runtime_mode=ask`: классификатор не используется (прямой chat-ответ).
 - `runtime_mode=act|plan`: используется `chat|mwv` классификация.
 - `runtime_mode=auto`: классификатор не используется; запрос сразу идёт в auto v1 path
-  (`AutoAgent.run_outcome() -> run_v1()`).
+  (`AutoAgent.run_outcome() -> run_v1()`). Модель сама возвращает либо final response без
+  tool calls, либо explicit native tool calls; Python keyword routing это решение не принимает.
 
 Новые tool-capabilities не должны добавляться в этот keyword router. Целевой путь:
 LLM `tool_calls` -> `ToolGateway` -> `role="tool"` message.

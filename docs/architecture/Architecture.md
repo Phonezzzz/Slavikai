@@ -59,6 +59,9 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
   - Legacy-контур `planner -> coder pool -> merge -> verifier` больше не имеет
     runtime entrypoint.
   - Auto v1 поддерживает паузу `waiting_approval` и resume через повторный tool-loop run после approval.
+  - Auto v1 не использует Python intent classifier: модель либо возвращает native tool calls для
+    действий, либо завершает loop обычным ответом. Непустой response-only результат проходит
+    профиль verifier `response_only`; workspace verifier запускается только после tool actions.
   - Auto доступен только для provider с `supports_native_tools=True` (`deepseek`, `local`).
     Несовместимый provider даёт явный stop `native_tools_required`, а не internal error.
   - В repository с canonical `Makefile` verifier запускает `make check`; в generic workspace
@@ -112,8 +115,9 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
    - Разрешены только debug-команды `/trace` и `/end-session`. Подробнее — `docs/agent/COMMAND_LANE_POLICY.md`.
 2. Для обычного текста:
    - `runtime_mode=ask` — сразу chat-ветка (без `classify_request`).
-   - `runtime_mode=auto` — сразу запуск auto v1
-     (`AgentToolLoop -> ToolGateway -> verifier`), без `classify_request` и без chat-fallback.
+   - `runtime_mode=auto` — сразу запуск auto v1 без `classify_request` и chat-fallback. Модель
+     отвечает без tools для conversation-only запроса или выполняет
+     `AgentToolLoop -> ToolGateway -> verifier` для workspace actions.
    - `runtime_mode=act|plan` — в legacy runtime используется `classify_request(...)` (`chat` или `mwv`).
 3. Целевой tool path:
    - LLM получает `ToolSpec[]`.

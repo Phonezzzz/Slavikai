@@ -58,8 +58,10 @@ AUTO_DEFAULT_ACCEPTANCE_CHECKS = [
     "Проверки завершены успешно",
 ]
 AUTO_V1_SYSTEM_PROMPT = (
-    "You are running Auto v1. Use native tool calls for all workspace actions. "
-    "Do not invent filesystem results. Stop with a concise final summary after tools finish."
+    "You are running Auto v1. Decide from the user's request whether workspace action is "
+    "actually required. For conversation or information that needs no action, answer directly "
+    "without tool calls. For every workspace action, use native tool calls and never invent "
+    "filesystem results. Stop with a concise final answer after any tools finish."
 )
 
 
@@ -344,23 +346,35 @@ class AutoOrchestrator:
                 )
 
             self._set_status(state, AutoRunStatus.COMPLETED)
-            text = self.parent._append_report_block(
-                (
+            response_only = not loop_result.tool_calls
+            visible_result = loop_result.text
+            if not response_only:
+                visible_result = (
                     "Auto-run v1 завершён успешно.\n"
                     f"Tool calls: {len(loop_result.tool_calls)}\n"
                     f"Verifier: {verification.status.value}\n"
                     f"Result: {loop_result.text}"
-                ),
+                )
+            text = self.parent._append_report_block(
+                visible_result,
                 route="auto",
                 trace_id=None,
                 attempts=(1, 1),
                 verifier=verification,
                 next_steps=[],
                 stop_reason_code=None,
-                plan_summary="Auto v1 использовал AgentToolLoop и ToolGateway.",
+                plan_summary=(
+                    "Auto v1 определил, что workspace-действия не требуются."
+                    if response_only
+                    else "Auto v1 использовал AgentToolLoop и ToolGateway."
+                ),
                 execution_summary=(
-                    f"Native tool loop iterations={loop_result.iterations}, "
-                    f"tool_calls={len(loop_result.tool_calls)}."
+                    "Модель вернула final response без tool calls."
+                    if response_only
+                    else (
+                        f"Native tool loop iterations={loop_result.iterations}, "
+                        f"tool_calls={len(loop_result.tool_calls)}."
+                    )
                 ),
             )
             return AutoRunOutcome(
@@ -465,6 +479,34 @@ class AutoOrchestrator:
         budgets: AutoBudgets,
         loop_result: AgentToolLoopResult,
     ) -> VerificationResult:
+        if not loop_result.tool_calls:
+            response = loop_result.text.strip()
+            if response:
+                return VerificationResult(
+                    status=VerificationStatus.PASSED,
+                    command=[],
+                    exit_code=0,
+                    stdout="Verified non-empty Auto response without workspace actions.",
+                    stderr="",
+                    duration_seconds=0.0,
+                    error=None,
+                    fail_type=None,
+                    excerpt="Auto completed without requesting workspace tools.",
+                    verifier_profile="response_only",
+                )
+            reason = "auto_no_observable_result"
+            return VerificationResult(
+                status=VerificationStatus.FAILED,
+                command=[],
+                exit_code=1,
+                stdout="",
+                stderr=reason,
+                duration_seconds=0.0,
+                error=reason,
+                fail_type="no_observable_result",
+                excerpt=reason,
+                verifier_profile="response_only",
+            )
         if not has_canonical_repo_verifier(run_root):
             if is_repo_workspace(run_root):
                 reason = "canonical_repo_verifier_unavailable"
@@ -493,20 +535,6 @@ class AutoOrchestrator:
                     error=first_error,
                     fail_type="tool_outcome_failed",
                     excerpt=first_error,
-                    verifier_profile="tool_outcomes",
-                )
-            if not loop_result.tool_calls:
-                reason = "auto_no_observable_tool_action"
-                return VerificationResult(
-                    status=VerificationStatus.FAILED,
-                    command=[],
-                    exit_code=1,
-                    stdout="",
-                    stderr=reason,
-                    duration_seconds=0.0,
-                    error=reason,
-                    fail_type="no_observable_action",
-                    excerpt=reason,
                     verifier_profile="tool_outcomes",
                 )
             return VerificationResult(
