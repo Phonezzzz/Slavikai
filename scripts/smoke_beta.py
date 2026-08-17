@@ -7,10 +7,7 @@ import sys
 import urllib.error
 import urllib.request
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
+from dotenv import load_dotenv
 
 
 def _get_json(base_url: str, path: str, token: str | None = None) -> dict[str, object]:
@@ -26,8 +23,7 @@ def _get_json(base_url: str, path: str, token: str | None = None) -> dict[str, o
 
 
 def main() -> int:
-    if load_dotenv is not None:
-        load_dotenv(override=False)
+    load_dotenv(override=False)
     base_url = os.getenv("SLAVIK_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
     token = os.getenv("SLAVIK_API_TOKEN", "").strip()
     if not token:

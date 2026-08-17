@@ -534,9 +534,9 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
-        provider = api._normalize_provider(provider_raw)
+        model_provider = api._normalize_provider(provider_raw)
         model_id = model_id_raw.strip()
-        if provider is None or not model_id:
+        if model_provider is None or not model_id:
             return error_response(
                 status=400,
                 message="Нужны корректные model.provider и model.model.",
@@ -546,11 +546,13 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
         persisted_model = api._load_default_model()
         model_changed = (
             persisted_model is None
-            or persisted_model.provider != provider
+            or persisted_model.provider != model_provider
             or persisted_model.model != model_id
         )
         if model_changed:
-            models, fetch_error = api._fetch_provider_models(provider, allow_local_fallback=False)
+            models, fetch_error = api._fetch_provider_models(
+                model_provider, allow_local_fallback=False
+            )
             if fetch_error is not None:
                 return error_response(
                     status=502,
@@ -561,11 +563,11 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             if model_id not in models:
                 return error_response(
                     status=404,
-                    message=f"Модель '{model_id}' не найдена у провайдера '{provider}'.",
+                    message=f"Модель '{model_id}' не найдена у провайдера '{model_provider}'.",
                     error_type="invalid_request_error",
                     code="model_not_found",
                 )
-            default_model = api._build_model_config(provider, model_id)
+            default_model = api._build_model_config(model_provider, model_id)
             api._save_default_model(default_model)
             runtime_model_state = cast(
                 RuntimeModelStateProtocol, request.app["runtime_model_state"]
@@ -576,7 +578,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 async with request.app["agent_lock"]:
                     agent.reconfigure_models(
                         default_model,
-                        main_api_key=api._resolve_provider_api_key(provider),
+                        main_api_key=api._resolve_provider_api_key(model_provider),
                         persist=False,
                     )
 

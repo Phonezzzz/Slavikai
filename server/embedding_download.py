@@ -45,7 +45,7 @@ def _repository_id(model: str) -> str:
 def _model_cached(model: str) -> bool:
     if importlib.util.find_spec("huggingface_hub") is None:
         return False
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
 
     try:
         snapshot_download(repo_id=_repository_id(model), local_files_only=True)
