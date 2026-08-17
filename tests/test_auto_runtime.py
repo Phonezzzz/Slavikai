@@ -88,6 +88,14 @@ class _ToolLoopBrain:
         return LLMResult(text="auto v1 final")
 
 
+class _ResponseOnlyBrain:
+    supports_native_tools = True
+
+    def generate(self, messages, config=None, tools=None):  # noqa: ANN001
+        del messages, config, tools
+        return LLMResult(text="Привет! Чем помочь?")
+
+
 class _AutoV1Agent(_FakeAgent):
     def __init__(self) -> None:
         super().__init__(brain_text="")
@@ -103,6 +111,16 @@ class _AutoV1Agent(_FakeAgent):
                 "required": ["value"],
             },
         )
+
+    def _build_tool_gateway(self):
+        return ToolGateway(self.tool_registry)
+
+
+class _ResponseOnlyAgent(_FakeAgent):
+    def __init__(self) -> None:
+        super().__init__(brain_text="")
+        self._brain = _ResponseOnlyBrain()
+        self.tool_registry = ToolRegistry()
 
     def _build_tool_gateway(self):
         return ToolGateway(self.tool_registry)
@@ -187,6 +205,23 @@ def test_auto_agent_run_outcome_uses_auto_v1_tool_loop(monkeypatch) -> None:  # 
     verifier = agent.last_auto_state.get("verifier")
     assert isinstance(verifier, dict)
     assert verifier.get("verifier_profile") == "tool_outcomes"
+
+
+def test_auto_runtime_returns_conversation_without_forcing_tool_action(tmp_path) -> None:
+    agent = _ResponseOnlyAgent()
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+
+    outcome = orchestrator.run_v1("privet", run_root_override=tmp_path)
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert outcome.text == "Привет! Чем помочь?"
+    assert outcome.stop_reason_code is None
+    assert isinstance(agent.last_auto_state, dict)
+    assert agent.last_auto_state.get("coders") == []
+    verifier = agent.last_auto_state.get("verifier")
+    assert isinstance(verifier, dict)
+    assert verifier.get("status") == VerificationStatus.PASSED.value
+    assert verifier.get("verifier_profile") == "response_only"
 
 
 def test_auto_runtime_rejects_provider_without_native_tools(tmp_path) -> None:
