@@ -3,6 +3,8 @@ from __future__ import annotations
 # ruff: noqa: F403,F405
 import pytest
 
+from core.agent import Agent
+from llm.brain_base import Brain
 from llm.stream_model import (
     Done,
     TextDelta,
@@ -11,10 +13,74 @@ from llm.stream_model import (
     ToolCallStarted,
     Usage,
 )
-from llm.types import LLMUsage, ToolCall
-from shared.models import ToolResult
+from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
+from shared.models import LLMMessage, ToolResult
 
 from .fakes import *
+
+
+class _RealAgentStreamingBrain(Brain):
+    def generate(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None = None,
+        tools: list[ToolSpec] | None = None,
+    ) -> LLMResult:
+        del messages, config, tools
+        return LLMResult(text="Привет из реального Agent")
+
+
+class _RealStreamingAgent(Agent):
+    def reconfigure_models(
+        self,
+        main_config: ModelConfig,
+        main_api_key: str | None = None,
+        *,
+        persist: bool = True,
+    ) -> None:
+        del main_config, main_api_key, persist
+
+
+def test_ui_chat_stream_real_agent_uses_sqlite_from_worker_thread(
+    tmp_path,
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    monkeypatch.chdir(tmp_path)
+    agent = _RealStreamingAgent(
+        brain=_RealAgentStreamingBrain(),
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    agent.runtime_mode = "ask"
+
+    async def run() -> None:
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            status_response = await client.get("/ui/api/status")
+            status_payload = await status_response.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            response = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "hi"},
+                headers={"X-Slavik-Session": session_id},
+            )
+
+            assert response.status == 200
+            payload = await response.json()
+            messages = payload.get("messages")
+            assert isinstance(messages, list)
+            assistant = messages[-1]
+            assert isinstance(assistant, dict)
+            assert "Привет из реального Agent" in str(assistant.get("content"))
+            assert "SQLite objects created in a thread" not in str(assistant.get("content"))
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 def test_ui_chat_send_named_file_canvas_stream_keeps_full_answer_in_chat() -> None:

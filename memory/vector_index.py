@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
@@ -9,6 +8,7 @@ import numpy as np
 import requests
 
 from shared.models import JSONValue, VectorSearchResult
+from shared.sqlite import ThreadLocalSQLiteConnection
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
@@ -64,7 +64,7 @@ class VectorIndex:
         self.max_total_records = max_total_records
         self.batch_size = batch_size
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.conn = ThreadLocalSQLiteConnection(db_path)
         self.model: SentenceTransformer | None = None
         self._load_error: Exception | None = None
         self._init_db()

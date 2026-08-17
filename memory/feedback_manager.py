@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import sqlite3
 import time
 from pathlib import Path
+
+from shared.sqlite import ThreadLocalSQLiteConnection
 
 
 class FeedbackManager:
     def __init__(self, db_path: str = "memory/feedback.db"):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.conn = ThreadLocalSQLiteConnection(db_path)
         self._init_db()
 
     def _init_db(self) -> None:

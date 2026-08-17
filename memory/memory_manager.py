@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
 from shared.models import MemoryItem, MemoryKind, MemoryRecord, ProjectFact, UserPreference
+from shared.sqlite import ThreadLocalSQLiteConnection
 
 
 class MemoryManager:
     def __init__(self, db_path: str = "memory/memory.db"):
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.conn = ThreadLocalSQLiteConnection(db_path)
         self._init_tables()
 
     def _init_tables(self) -> None:

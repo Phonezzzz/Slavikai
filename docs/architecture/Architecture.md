@@ -94,6 +94,8 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
     не в `workspace_messages`.
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
+  - Persistent Agent memory stores use one SQLite connection per calling thread through
+    `shared/sqlite.py`; HTTP streaming workers never reuse the server thread connection.
   - UI message storage физически разделён: `chat_messages` для chat-сообщений и
     `workspace_messages` как legacy internal table. `workspace_messages` — не
     "workspace chat lane", а остаток storage split (PR-20); новый Computer activity

@@ -38,6 +38,7 @@ from shared.policy_models import (
     policy_trigger_from_json,
     policy_trigger_to_json,
 )
+from shared.sqlite import ThreadLocalSQLiteConnection
 
 DEFAULT_DB_PATH: Final[Path] = Path("memory/memory_companion.db")
 SCHEMA_VERSION: Final[int] = 4
@@ -212,8 +213,7 @@ class MemoryCompanionStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         is_new = not self.db_path.exists()
-        self.conn = sqlite3.connect(str(self.db_path))
-        self.conn.row_factory = sqlite3.Row
+        self.conn = ThreadLocalSQLiteConnection(self.db_path, row_factory=sqlite3.Row)
         self.conn.execute("PRAGMA foreign_keys = ON")
 
         if is_new:
@@ -923,8 +923,7 @@ class MemoryCompanionStore:
         except Exception:
             self.conn.close()
             shutil.copy2(str(backup_path), str(self.db_path))
-            self.conn = sqlite3.connect(str(self.db_path))
-            self.conn.row_factory = sqlite3.Row
+            self.conn = ThreadLocalSQLiteConnection(self.db_path, row_factory=sqlite3.Row)
             self.conn.execute("PRAGMA foreign_keys = ON")
             raise
 
