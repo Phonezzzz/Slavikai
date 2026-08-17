@@ -4,6 +4,8 @@ from pathlib import Path
 
 from setuptools import find_packages, setup  # type: ignore[import-untyped]
 
+from server.version import VERSION
+
 ROOT = Path(__file__).parent
 
 
@@ -24,7 +26,7 @@ def _read_lock(path: Path) -> list[str]:
 
 setup(
     name="slavikai",
-    version="0.1.0",
+    version=VERSION,
     description="SlavikAI local/server agent",
     python_requires=">=3.12",
     packages=find_packages(exclude=("tests", "tests.*", "ui", "ui.*", "vendor", "vendor.*")),

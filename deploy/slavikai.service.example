@@ -1,0 +1,21 @@
+[Unit]
+Description=SlavikAI beta server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=slavikai
+Group=slavikai
+WorkingDirectory=/opt/slavikai
+EnvironmentFile=/opt/slavikai/.env
+Environment=SLAVIK_HTTP_HOST=127.0.0.1
+Environment=SLAVIK_HTTP_PORT=8000
+ExecStart=/opt/slavikai/venv-prod/bin/python -m server
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

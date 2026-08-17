@@ -18,6 +18,7 @@ def _isolate_settings_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     api_keys_path = tmp_path / "config" / "api_keys.json"
     monkeypatch.setattr("server.http_api.API_KEYS_PATH", api_keys_path)
     monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", tmp_path / "ui_settings.json")
+    monkeypatch.setattr("server.http_api.MODEL_CONFIG_PATH", tmp_path / "model_config.json")
     for env_name in (
         "XAI_API_KEY",
         "OPENROUTER_API_KEY",
@@ -254,6 +255,64 @@ def test_model_selection_applied(
             await client.close()
 
     asyncio.run(run())
+
+
+def test_default_model_is_persisted_and_inherited_by_new_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_settings_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider, **kwargs: (["deepseek-chat", "deepseek-reasoner"], None),
+    )
+
+    async def run() -> None:
+        client = await _create_client(CaptureConfigAgent())
+        try:
+            save_response = await client.post(
+                "/ui/api/settings",
+                json={"model": {"provider": "deepseek", "model": "deepseek-chat"}},
+            )
+            assert save_response.status == 200
+            settings = (await save_response.json()).get("settings")
+            assert isinstance(settings, dict)
+            assert settings.get("model") == {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+            }
+
+            monkeypatch.setattr(
+                "server.http_api._fetch_provider_models",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("unchanged default model must not be fetched again")
+                ),
+            )
+            repeat_response = await client.post(
+                "/ui/api/settings",
+                json={
+                    "model": {"provider": "deepseek", "model": "deepseek-chat"},
+                    "personalization": {"tone": "balanced"},
+                },
+            )
+            assert repeat_response.status == 200
+
+            create_response = await client.post("/ui/api/sessions")
+            assert create_response.status == 200
+            session = (await create_response.json()).get("session")
+            assert isinstance(session, dict)
+            assert session.get("selected_model") == {
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+            }
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+    persisted = json.loads((tmp_path / "model_config.json").read_text(encoding="utf-8"))
+    assert persisted["main"]["provider"] == "deepseek"
+    assert persisted["main"]["model"] == "deepseek-chat"
 
 
 def test_environment_api_key_takes_priority_over_saved_file(

@@ -19,6 +19,7 @@ from config.http_server_config import (
 )
 from config.model_store import load_model_configs
 from server import http_api as api
+from server.embedding_download import EmbeddingDownloadManager
 from server.http.common.chat_cancellation import ChatCancellationRegistry
 from server.http.common.idempotency import IdempotencyStore
 from server.http.common.runtime_contract import AgentProtocol, SessionApprovalStore
@@ -69,6 +70,11 @@ async def _close_chat_generations(app: web.Application) -> None:
     errors = await registry.shutdown()
     for error in errors:
         logger.warning("Chat cancellation cleanup failed: %s", error)
+
+
+async def _close_embedding_downloads(app: web.Application) -> None:
+    manager: EmbeddingDownloadManager = app["embedding_download_manager"]
+    await manager.shutdown()
 
 
 def create_app(
@@ -122,12 +128,14 @@ def create_app(
     app["idempotency_store"] = IdempotencyStore()
     app["chat_cancellation_registry"] = ChatCancellationRegistry()
     app["terminal_manager"] = TerminalTool()
+    app["embedding_download_manager"] = EmbeddingDownloadManager()
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )
     app["ui_hub"] = UIHub(storage=resolved_ui_storage)
     app.on_cleanup.append(_close_chat_generations)
     app.on_cleanup.append(_close_terminal_manager)
+    app.on_cleanup.append(_close_embedding_downloads)
     dist_path = api.PROJECT_ROOT / "ui" / "dist"
     app["ui_dist_path"] = dist_path
     from server.http.routes import register_routes

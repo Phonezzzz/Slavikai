@@ -14,6 +14,7 @@ type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai' | 
 type ModelProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'deepseek';
 type ApiKeySource = 'env' | 'file' | 'missing';
 type EmbeddingsProvider = 'local' | 'openai';
+type EmbeddingDownloadState = 'missing' | 'package_missing' | 'downloading' | 'ready' | 'error';
 type ImportMode = 'replace' | 'merge';
 type AppearanceTheme = 'default' | 'oled';
 
@@ -60,6 +61,14 @@ type ParsedSettings = {
   embeddingsProvider: EmbeddingsProvider;
   embeddingsLocalModel: string;
   embeddingsOpenaiModel: string;
+  defaultModelProvider: ModelProvider;
+  defaultModelId: string;
+};
+
+type EmbeddingRuntime = {
+  model: string;
+  state: EmbeddingDownloadState;
+  error: string | null;
 };
 
 type ProviderRuntimeByModel = Record<ModelProvider, ProviderRuntimeState | null>;
@@ -296,6 +305,8 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     embeddingsProvider: DEFAULT_EMBEDDINGS_PROVIDER,
     embeddingsLocalModel: DEFAULT_EMBEDDINGS_LOCAL_MODEL,
     embeddingsOpenaiModel: DEFAULT_EMBEDDINGS_OPENAI_MODEL,
+    defaultModelProvider: 'deepseek',
+    defaultModelId: '',
   };
 
   if (!payload || typeof payload !== 'object') {
@@ -307,6 +318,19 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   }
 
   let appearanceTheme = defaults.appearanceTheme;
+  let defaultModelProvider = defaults.defaultModelProvider;
+  let defaultModelId = defaults.defaultModelId;
+  const defaultModelRaw = (settings as { model?: unknown }).model;
+  if (defaultModelRaw && typeof defaultModelRaw === 'object') {
+    const providerRaw = (defaultModelRaw as { provider?: unknown }).provider;
+    const modelRaw = (defaultModelRaw as { model?: unknown }).model;
+    if (isModelProvider(providerRaw)) {
+      defaultModelProvider = providerRaw;
+    }
+    if (typeof modelRaw === 'string' && modelRaw.trim()) {
+      defaultModelId = modelRaw.trim();
+    }
+  }
   const appearance = (settings as { appearance?: unknown }).appearance;
   if (appearance && typeof appearance === 'object') {
     const themeRaw = (appearance as { theme?: unknown }).theme;
@@ -478,6 +502,32 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     embeddingsProvider,
     embeddingsLocalModel,
     embeddingsOpenaiModel,
+    defaultModelProvider,
+    defaultModelId,
+  };
+};
+
+const parseEmbeddingRuntime = (payload: unknown): EmbeddingRuntime => {
+  const fallback: EmbeddingRuntime = {
+    model: DEFAULT_EMBEDDINGS_LOCAL_MODEL,
+    state: 'missing',
+    error: null,
+  };
+  if (!payload || typeof payload !== 'object') {
+    return fallback;
+  }
+  const model = (payload as { model?: unknown }).model;
+  const state = (payload as { state?: unknown }).state;
+  const error = (payload as { error?: unknown }).error;
+  const validState = state === 'missing'
+    || state === 'package_missing'
+    || state === 'downloading'
+    || state === 'ready'
+    || state === 'error';
+  return {
+    model: typeof model === 'string' && model.trim() ? model : fallback.model,
+    state: validState ? state : fallback.state,
+    error: typeof error === 'string' ? error : null,
   };
 };
 
@@ -633,6 +683,10 @@ export function Settings({
   const [providerRuntime, setProviderRuntime] = useState<ProviderRuntimeByModel>(DEFAULT_PROVIDER_RUNTIME);
   const [providerRuntimeLoading, setProviderRuntimeLoading] = useState(false);
   const [providerRuntimeError, setProviderRuntimeError] = useState<string | null>(null);
+  const [defaultModelProvider, setDefaultModelProvider] = useState<ModelProvider>('deepseek');
+  const [defaultModelId, setDefaultModelId] = useState('');
+  const [defaultModelOptions, setDefaultModelOptions] = useState<string[]>([]);
+  const [defaultModelsLoading, setDefaultModelsLoading] = useState(false);
   const [tone, setTone] = useState('balanced');
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [appearanceTheme, setAppearanceTheme] = useState<AppearanceTheme>(
@@ -648,6 +702,11 @@ export function Settings({
   const [embeddingsProvider, setEmbeddingsProvider] = useState<EmbeddingsProvider>(DEFAULT_EMBEDDINGS_PROVIDER);
   const [embeddingsLocalModel, setEmbeddingsLocalModel] = useState(DEFAULT_EMBEDDINGS_LOCAL_MODEL);
   const [embeddingsOpenaiModel, setEmbeddingsOpenaiModel] = useState(DEFAULT_EMBEDDINGS_OPENAI_MODEL);
+  const [embeddingRuntime, setEmbeddingRuntime] = useState<EmbeddingRuntime>({
+    model: DEFAULT_EMBEDDINGS_LOCAL_MODEL,
+    state: 'missing',
+    error: null,
+  });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -682,6 +741,18 @@ export function Settings({
     setEmbeddingsProvider(parsed.embeddingsProvider);
     setEmbeddingsLocalModel(parsed.embeddingsLocalModel);
     setEmbeddingsOpenaiModel(parsed.embeddingsOpenaiModel);
+    setDefaultModelProvider(parsed.defaultModelProvider);
+    setDefaultModelId(parsed.defaultModelId);
+    setDefaultModelOptions(parsed.defaultModelId ? [parsed.defaultModelId] : []);
+  };
+
+  const refreshEmbeddingRuntime = async (): Promise<void> => {
+    const response = await fetch('/ui/api/embeddings/status');
+    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, 'Failed to load embedding model status.'));
+    }
+    setEmbeddingRuntime(parseEmbeddingRuntime(payload));
   };
 
   const loadSettings = async (): Promise<void> => {
@@ -690,9 +761,10 @@ export function Settings({
     setProviderRuntimeLoading(true);
     setProviderRuntimeError(null);
     try {
-      const [settingsResponse, providerRuntimeResponse] = await Promise.all([
+      const [settingsResponse, providerRuntimeResponse, embeddingResponse] = await Promise.all([
         fetch('/ui/api/settings'),
         fetch('/ui/api/models'),
+        fetch('/ui/api/embeddings/status'),
       ]);
       const settingsPayload: unknown = await settingsResponse.json();
       if (!settingsResponse.ok) {
@@ -705,6 +777,12 @@ export function Settings({
         throw new Error(extractErrorMessage(providerRuntimePayload, 'Failed to load provider diagnostics.'));
       }
       setProviderRuntime(parseProviderRuntimePayload(providerRuntimePayload));
+
+      const embeddingPayload: unknown = await embeddingResponse.json();
+      if (!embeddingResponse.ok) {
+        throw new Error(extractErrorMessage(embeddingPayload, 'Failed to load embedding model status.'));
+      }
+      setEmbeddingRuntime(parseEmbeddingRuntime(embeddingPayload));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load settings.';
       setProviderRuntime({ ...DEFAULT_PROVIDER_RUNTIME });
@@ -722,6 +800,94 @@ export function Settings({
     }
     void loadSettings();
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || embeddingRuntime.state !== 'downloading') {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void refreshEmbeddingRuntime().catch((error: unknown) => {
+        setStatus(error instanceof Error ? error.message : 'Failed to refresh embedding model status.');
+      });
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [embeddingRuntime.state, isOpen]);
+
+  const handleLoadDefaultModels = async (): Promise<void> => {
+    if (defaultModelsLoading) {
+      return;
+    }
+    setDefaultModelsLoading(true);
+    setStatus(null);
+    try {
+      if (providerDirty[defaultModelProvider]) {
+        const apiKey = apiKeys[defaultModelProvider].trim();
+        const saveKeyResponse = await fetch('/ui/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            providers: {
+              [defaultModelProvider]: apiKey ? { api_key: apiKey } : null,
+            },
+          }),
+        });
+        const saveKeyPayload: unknown = await saveKeyResponse.json();
+        if (!saveKeyResponse.ok) {
+          throw new Error(extractErrorMessage(saveKeyPayload, `Failed to save ${defaultModelProvider} key.`));
+        }
+        const parsed = parseSettingsPayload(saveKeyPayload);
+        setProviders(parsed.providers);
+        setApiKeys((current) => ({ ...current, [defaultModelProvider]: '' }));
+        setProviderDirty((current) => ({ ...current, [defaultModelProvider]: false }));
+      }
+      const params = new URLSearchParams({ provider: defaultModelProvider, strict: '1' });
+      const response = await fetch(`/ui/api/models?${params.toString()}`);
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, `Failed to load ${defaultModelProvider} models.`));
+      }
+      const providersRaw = (payload as { providers?: unknown }).providers;
+      const item = Array.isArray(providersRaw) ? providersRaw[0] : null;
+      const modelsRaw = item && typeof item === 'object' ? (item as { models?: unknown }).models : null;
+      const errorRaw = item && typeof item === 'object' ? (item as { error?: unknown }).error : null;
+      if (typeof errorRaw === 'string' && errorRaw.trim()) {
+        throw new Error(errorRaw);
+      }
+      const models = Array.isArray(modelsRaw)
+        ? modelsRaw.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        : [];
+      setDefaultModelOptions(models);
+      if (!models.includes(defaultModelId)) {
+        setDefaultModelId(models[0] ?? '');
+      }
+      setStatus(models.length > 0 ? `Loaded ${models.length} ${defaultModelProvider} models.` : 'No models returned.');
+    } catch (error) {
+      setDefaultModelOptions(defaultModelId ? [defaultModelId] : []);
+      setStatus(error instanceof Error ? error.message : 'Failed to load provider models.');
+    } finally {
+      setDefaultModelsLoading(false);
+    }
+  };
+
+  const handleDownloadEmbeddings = async (): Promise<void> => {
+    setStatus(null);
+    try {
+      const response = await fetch('/ui/api/embeddings/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true, model: embeddingsLocalModel.trim() }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to download embedding model.'));
+      }
+      const parsed = parseEmbeddingRuntime(payload);
+      setEmbeddingRuntime(parsed);
+      setStatus(parsed.state === 'ready' ? 'Embedding model is ready.' : 'Embedding model download started.');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Failed to download embedding model.');
+    }
+  };
 
   const handleSave = async () => {
     if (saving) {
@@ -742,6 +908,9 @@ export function Settings({
       }
 
       const payload: Record<string, unknown> = {
+        model: defaultModelId.trim()
+          ? { provider: defaultModelProvider, model: defaultModelId.trim() }
+          : null,
         personalization: {
           tone: tone.trim() || 'balanced',
           system_prompt: systemPrompt,
@@ -1072,6 +1241,57 @@ export function Settings({
                           ))}
                         </div>
                       </SectionCard>
+
+                      <SectionCard
+                        title="Default chat model"
+                        description="Choose the provider and model used by every new chat. DeepSeek is the recommended beta starting point."
+                        scope="Global"
+                      >
+                        <div className="grid gap-3 md:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)_auto]">
+                          <label>
+                            <span className="mb-2 block text-sm font-medium text-zinc-300">Provider</span>
+                            <select
+                              value={defaultModelProvider}
+                              onChange={(event) => {
+                                const provider = event.target.value;
+                                if (isModelProvider(provider)) {
+                                  setDefaultModelProvider(provider);
+                                  setDefaultModelId('');
+                                  setDefaultModelOptions([]);
+                                }
+                              }}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                            >
+                              {(['deepseek', 'openrouter', 'xai', 'inception', 'local'] as ModelProvider[]).map((provider) => (
+                                <option key={provider} value={provider}>{PROVIDER_LABELS[provider]}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            <span className="mb-2 block text-sm font-medium text-zinc-300">Model</span>
+                            <select
+                              value={defaultModelId}
+                              onChange={(event) => setDefaultModelId(event.target.value)}
+                              disabled={defaultModelsLoading || defaultModelOptions.length === 0}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none disabled:opacity-50"
+                            >
+                              {defaultModelOptions.length === 0 ? <option value="">Load models first</option> : null}
+                              {defaultModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}
+                            </select>
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => { void handleLoadDefaultModels(); }}
+                            disabled={defaultModelsLoading}
+                            className="self-end rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {defaultModelsLoading ? 'Loading...' : 'Load models'}
+                          </button>
+                        </div>
+                        <p className="mt-3 text-xs text-zinc-500">
+                          A newly entered provider key is validated and saved automatically when you load models.
+                        </p>
+                      </SectionCard>
                     </div>
                   ) : null}
 
@@ -1346,15 +1566,52 @@ export function Settings({
                         </div>
 
                         {embeddingsProvider === 'local' ? (
-                          <label className="mt-4 block">
-                            <span className="mb-2 block text-sm font-medium text-zinc-300">Local embedding model</span>
-                            <input
-                              type="text"
-                              value={embeddingsLocalModel}
-                              onChange={(event) => setEmbeddingsLocalModel(event.target.value)}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
-                            />
-                          </label>
+                          <div className="mt-4 space-y-3">
+                            <label className="block">
+                              <span className="mb-2 block text-sm font-medium text-zinc-300">Local embedding model</span>
+                              <input
+                                type="text"
+                                value={embeddingsLocalModel}
+                                onChange={(event) => setEmbeddingsLocalModel(event.target.value)}
+                                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                              />
+                            </label>
+                            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
+                              <div>
+                                <div className="flex items-center gap-2 text-sm text-zinc-200">
+                                  Model files
+                                  <span className={`rounded-md px-2 py-1 text-xs font-medium ${
+                                    embeddingRuntime.state === 'ready'
+                                      ? 'bg-emerald-500/20 text-emerald-300'
+                                      : embeddingRuntime.state === 'error' || embeddingRuntime.state === 'package_missing'
+                                        ? 'bg-rose-500/20 text-rose-300'
+                                        : 'bg-amber-500/20 text-amber-300'
+                                  }`}>
+                                    {embeddingRuntime.state.replace('_', ' ')}
+                                  </span>
+                                </div>
+                                <p className="mt-2 text-xs text-zinc-400">
+                                  {embeddingRuntime.error
+                                    || (embeddingRuntime.state === 'ready'
+                                      ? `${embeddingRuntime.model} is available locally.`
+                                      : 'Save the model name first, then download it once for offline runtime use.')}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => { void handleDownloadEmbeddings(); }}
+                                disabled={embeddingRuntime.state === 'downloading' || !embeddingsLocalModel.trim()}
+                                className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                <Download className="h-4 w-4" />
+                                {embeddingRuntime.state === 'downloading'
+                                  ? 'Downloading...'
+                                  : embeddingRuntime.state === 'ready'
+                                    ? 'Check again'
+                                    : 'Download model'}
+                              </button>
+                            </div>
+                          </div>
                         ) : (
                           <label className="mt-4 block">
                             <span className="mb-2 block text-sm font-medium text-zinc-300">OpenAI embedding model</span>

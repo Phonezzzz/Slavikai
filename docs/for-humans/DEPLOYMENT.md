@@ -8,37 +8,33 @@
 - `git`, `make`, `venv`.
 - Для UI-сборки: Node.js + npm.
 
-## 2) Быстрый запуск (xAI / OpenRouter / Local / Inception)
+## 2) Быстрый beta-запуск (DeepSeek)
 
 ```bash
 git clone <repo-url>
 cd slavikai
-make venv
-make ui-build
+cp .env.example .env
+make install-beta
 ```
 
-Создай модельный конфиг `config/model_config.json`:
+Минимальный `.env`:
 
-```json
-{
-  "main": {
-    "provider": "xai",
-    "model": "your-model-id",
-    "temperature": 0.3
-  }
-}
+```dotenv
+SLAVIK_API_TOKEN=replace-with-a-long-random-token
+DEEPSEEK_API_KEY=replace-with-your-deepseek-key
 ```
 
 `provider` для chat-модели поддерживает: `xai`, `openrouter`, `local`, `inception`, `deepseek`.
 `openai` в runtime используется только для STT-транскрипции (не как chat provider).
 
-Экспортируй ключи/настройки:
+После входа выбери `Settings → API Keys → Default chat model`, загрузи live-список
+DeepSeek models и сохрани выбранную модель. Конфиг `config/model_config.json` будет
+создан автоматически; новые сессии наследуют эту модель.
+
+Дополнительные ключи/настройки:
 
 ```bash
-# обязательный token для HTTP API и входа в browser UI
-export SLAVIK_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-
-# xAI
+# xAI (optional)
 export XAI_API_KEY="..."
 
 # optional: OpenRouter
@@ -92,9 +88,11 @@ make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000
 ## 4) Проверка после старта
 
 ```bash
+curl -sS http://127.0.0.1:8000/healthz
 curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/ui/api/status
 curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/v1/models
 curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/ui/api/settings
+make smoke-prod
 ```
 
 ## 5) Фоновый режим (без systemd)
@@ -105,27 +103,10 @@ make status
 make logs
 ```
 
-## 6) Пример systemd unit
+## 6) systemd
 
-```ini
-[Unit]
-Description=SlavikAI server
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/slavikai
-Environment=SLAVIK_HTTP_HOST=0.0.0.0
-Environment=SLAVIK_HTTP_PORT=8000
-Environment=SLAVIK_API_TOKEN=replace-with-a-long-random-token
-Environment=XAI_API_KEY=your-key
-ExecStart=/opt/slavikai/venv/bin/python -m server
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
+Используй `deploy/slavikai.service.example`: он запускает `venv-prod`, читает
+секреты из `/opt/slavikai/.env` и по умолчанию слушает только localhost.
 
 После добавления:
 
@@ -139,7 +120,9 @@ sudo systemctl status slavikai
 
 - `make check` проходит локально.
 - UI собран (`make ui-build`), `ui/dist` актуален.
+- `curl /healthz` возвращает `status=ok` и `ui_built=true`.
 - Целевая модель видна в списке моделей выбранного провайдера в UI.
 - Для выбранного провайдера выставлен корректный API key.
 - `SLAVIK_API_TOKEN` задан, UI login и Bearer smoke-check проходят.
 - Plan/Auto используют provider с native tools: `deepseek` или `local`.
+- Для local embeddings установлен beta bundle и модель имеет статус `ready` в UI.

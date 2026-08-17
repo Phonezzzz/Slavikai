@@ -14,6 +14,7 @@ from config.api_keys import (
     save_api_keys,
 )
 from config.memory_config import load_memory_config
+from config.model_store import load_model_configs, save_model_configs
 from config.tools_config import (
     DEFAULT_TOOLS_STATE,
     ToolsConfig,
@@ -57,6 +58,9 @@ OPENAI_TTS_ENDPOINT: Final[str] = "https://api.openai.com/v1/audio/speech"
 MODEL_FETCH_TIMEOUT: Final[int] = 20
 UI_SETTINGS_PATH: Final[Path] = Path(__file__).resolve().parents[3] / ".run" / "ui_settings.json"
 API_KEYS_PATH: Final[Path] = DEFAULT_API_KEYS_PATH
+MODEL_CONFIG_PATH: Final[Path] = (
+    Path(__file__).resolve().parents[3] / "config" / "model_config.json"
+)
 DEFAULT_UI_TONE: Final[str] = "balanced"
 INDEX_ENABLED_ENV: Final[str] = "SLAVIK_INDEX_ENABLED"
 DEFAULT_LONG_PASTE_TO_FILE_ENABLED: Final[bool] = True
@@ -72,6 +76,7 @@ UI_SETTINGS_USER_ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = {
     "composer",
     "appearance",
     "memory",
+    "model",
     "providers",
 }
 UI_SETTINGS_CONTROL_TOP_LEVEL_KEYS: Final[set[str]] = {
@@ -107,6 +112,18 @@ def _build_model_config(provider: str, model_id: str) -> ModelConfig:
     if provider == "deepseek":
         return ModelConfig(provider="deepseek", model=model_id)
     raise ValueError(f"Неизвестный провайдер: {provider}")
+
+
+def _load_default_model(*, model_config_path: Path = MODEL_CONFIG_PATH) -> ModelConfig | None:
+    return load_model_configs(model_config_path)
+
+
+def _save_default_model(
+    config: ModelConfig,
+    *,
+    model_config_path: Path = MODEL_CONFIG_PATH,
+) -> None:
+    save_model_configs(config, model_config_path)
 
 
 def _closest_model_suggestion(model_id: str, candidates: list[str]) -> str | None:

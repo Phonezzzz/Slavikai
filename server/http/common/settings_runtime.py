@@ -8,6 +8,7 @@ from typing import Literal
 from config.memory_config import MemoryConfig
 from config.tools_config import DEFAULT_TOOLS_STATE, ToolsConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
+from llm.types import ModelConfig
 from server.http.common import ui_settings
 from shared.models import JSONValue
 
@@ -16,6 +17,7 @@ from shared.models import JSONValue
 class SettingsRuntimeBindings:
     ui_settings_path_getter: Callable[[], Path]
     api_keys_path_getter: Callable[[], Path]
+    model_config_path_getter: Callable[[], Path]
     load_memory_config_fn: Callable[[], MemoryConfig]
     save_memory_config_fn: Callable[[MemoryConfig], None]
     load_tools_config_fn: Callable[[], ToolsConfig]
@@ -26,6 +28,9 @@ class SettingsRuntimeBindings:
 
     def _api_keys_path(self) -> Path:
         return self.api_keys_path_getter()
+
+    def _model_config_path(self) -> Path:
+        return self.model_config_path_getter()
 
     def provider_auth_headers(self, provider: str) -> tuple[dict[str, str], str | None]:
         return ui_settings._provider_auth_headers(
@@ -174,6 +179,12 @@ class SettingsRuntimeBindings:
             api_keys_path=self._api_keys_path(),
         )
 
+    def load_default_model(self) -> ModelConfig | None:
+        return ui_settings._load_default_model(model_config_path=self._model_config_path())
+
+    def save_default_model(self, config: ModelConfig) -> None:
+        ui_settings._save_default_model(config, model_config_path=self._model_config_path())
+
     def build_settings_payload(self) -> dict[str, JSONValue]:
         tone, system_prompt = self.load_personalization_settings()
         appearance_theme = self.load_appearance_settings()
@@ -183,8 +194,16 @@ class SettingsRuntimeBindings:
         embeddings_settings = self.load_embeddings_settings()
         tools_state = self.load_tools_state()
         tools_registry = {key: value for key, value in tools_state.items() if key != "safe_mode"}
+        default_model = self.load_default_model()
+        default_model_payload: dict[str, JSONValue] | None = None
+        if default_model is not None:
+            default_model_payload = {
+                "provider": default_model.provider,
+                "model": default_model.model,
+            }
         return {
             "settings": {
+                "model": default_model_payload,
                 "personalization": {"tone": tone, "system_prompt": system_prompt},
                 "appearance": {"theme": appearance_theme},
                 "composer": {

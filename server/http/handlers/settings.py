@@ -12,6 +12,7 @@ from config.memory_config import MemoryConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server import http_api as api
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import RuntimeModelStateProtocol
 from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
@@ -506,6 +507,78 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                     "last_checked_at": checked_at,
                 }
             api._save_provider_runtime_checks(next_runtime_checks)
+
+    model_raw = payload.get("model")
+    if model_raw is not None:
+        if not isinstance(model_raw, dict):
+            return error_response(
+                status=400,
+                message="model должен быть объектом.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        unexpected = sorted(str(key) for key in model_raw if key not in {"provider", "model"})
+        if unexpected:
+            return error_response(
+                status=400,
+                message=f"model содержит неподдерживаемые поля: {', '.join(unexpected)}.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        provider_raw = model_raw.get("provider")
+        model_id_raw = model_raw.get("model")
+        if not isinstance(provider_raw, str) or not isinstance(model_id_raw, str):
+            return error_response(
+                status=400,
+                message="model.provider и model.model должны быть строками.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        provider = api._normalize_provider(provider_raw)
+        model_id = model_id_raw.strip()
+        if provider is None or not model_id:
+            return error_response(
+                status=400,
+                message="Нужны корректные model.provider и model.model.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        persisted_model = api._load_default_model()
+        model_changed = (
+            persisted_model is None
+            or persisted_model.provider != provider
+            or persisted_model.model != model_id
+        )
+        if model_changed:
+            models, fetch_error = api._fetch_provider_models(provider, allow_local_fallback=False)
+            if fetch_error is not None:
+                return error_response(
+                    status=502,
+                    message=fetch_error,
+                    error_type="provider_error",
+                    code="provider_models_unavailable",
+                )
+            if model_id not in models:
+                return error_response(
+                    status=404,
+                    message=f"Модель '{model_id}' не найдена у провайдера '{provider}'.",
+                    error_type="invalid_request_error",
+                    code="model_not_found",
+                )
+            default_model = api._build_model_config(provider, model_id)
+            api._save_default_model(default_model)
+            runtime_model_state = cast(
+                RuntimeModelStateProtocol, request.app["runtime_model_state"]
+            )
+            await runtime_model_state.set_global_main(default_model)
+            agent = await api._resolve_agent(request)
+            if agent is not None:
+                async with request.app["agent_lock"]:
+                    agent.reconfigure_models(
+                        default_model,
+                        main_api_key=api._resolve_provider_api_key(provider),
+                        persist=False,
+                    )
 
     if next_embeddings_settings is not None:
         agent_lock = request.app["agent_lock"]

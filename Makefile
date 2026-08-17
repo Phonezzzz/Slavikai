@@ -35,6 +35,7 @@ help:
 	@echo "  make venv            Create venv/ and install requirements + dev tools"
 	@echo "  make venv-prod       Create venv-prod/ and install only production deps"
 	@echo "  make venv-embeddings Install embeddings (torch, sentence-transformers) into venv/"
+	@echo "  make install-beta    Install production backend, local embeddings, and built UI"
 	@echo "  make deps-compile    Generate lock files from *.in via .venv-lock/pip-compile"
 	@echo "  make deps-sync       Sync venv/ to requirements.txt (pip-sync, removes extras)"
 	@echo "  make activate        Print venv activation command"
@@ -58,6 +59,7 @@ help:
 	@echo "Run:"
 	@echo "  make run             Run UI in foreground"
 	@echo "  make run-prod        Run server in foreground for production host/port"
+	@echo "  make smoke-prod      Check health, settings, and models on a running server"
 	@echo "  make up              Run UI in background (pid/log in .run/)"
 	@echo "  make down            Stop background UI started by make up"
 	@echo "  make status          Show background UI status"
@@ -112,11 +114,22 @@ $(PROD_VENV_DIR)/.installed: requirements.txt constraints.txt $(PROD_VENV_DIR)/b
 	$(PROD_VENV_DIR)/bin/python -m pip install -r requirements.txt -c constraints.txt
 	@touch "$(PROD_VENV_DIR)/.installed"
 
+$(PROD_VENV_DIR)/.installed-embeddings: requirements-embeddings.txt requirements.txt $(PROD_VENV_DIR)/bin/python
+	$(PROD_VENV_DIR)/bin/python -m pip install --upgrade pip
+	$(PROD_VENV_DIR)/bin/python -m pip install -r requirements-embeddings.txt -c requirements.txt
+	@touch "$(PROD_VENV_DIR)/.installed-embeddings"
+
 .PHONY: venv
 venv: $(VENV_DIR)/.installed $(VENV_DIR)/.installed-dev
 
 .PHONY: venv-prod
 venv-prod: $(PROD_VENV_DIR)/.installed
+
+.PHONY: venv-prod-embeddings
+venv-prod-embeddings: $(PROD_VENV_DIR)/.installed-embeddings
+
+.PHONY: install-beta
+install-beta: venv-prod venv-prod-embeddings ui-ci ui-build
 
 .PHONY: venv-dev
 venv-dev: venv $(VENV_DIR)/.installed-dev
@@ -261,18 +274,26 @@ run: venv
 run-prod: venv-prod
 	SLAVIK_HTTP_HOST="$(PROD_HOST)" SLAVIK_HTTP_PORT="$(PROD_PORT)" "$(PROD_VENV_PY)" -m server
 
+.PHONY: smoke-prod
+smoke-prod:
+	"$(PYTHON)" scripts/smoke_beta.py
+
 .PHONY: deploy-example
 deploy-example:
 	@echo "Production deploy:"
-	@echo "  export XAI_API_KEY=***"
-	@echo "  export SLAVIK_MODEL_WHITELIST='your-model-id'"
-	@echo "  make venv-prod"
-	@echo "  make ui-build"
+	@echo "  cp .env.example .env"
+	@echo "  # Set SLAVIK_API_TOKEN and DEEPSEEK_API_KEY in .env"
+	@echo "  make install-beta"
 	@echo "  make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000"
+	@echo "  SLAVIK_API_TOKEN=*** make smoke-prod"
 
 .PHONY: ui-install
 ui-install:
 	cd ui && npm install
+
+.PHONY: ui-ci
+ui-ci:
+	cd ui && npm ci
 
 .PHONY: ui-build
 ui-build:

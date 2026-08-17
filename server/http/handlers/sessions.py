@@ -419,6 +419,11 @@ async def handle_ui_sessions_create(request: web.Request) -> web.Response:
             code="unauthorized",
         )
     session_id = await hub.create_session(principal_id)
+    runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
+    default_model = await runtime_model_state.get_global_main()
+    if default_model is not None:
+        await runtime_model_state.set_session_override(session_id, default_model)
+        await hub.set_session_model(session_id, default_model.provider, default_model.model)
     session = await hub.get_session(session_id)
     if session is None:
         return error_response(

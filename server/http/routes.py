@@ -8,7 +8,9 @@ def register_routes(app: web.Application) -> None:
         auth,
         chat,
         decision,
+        embeddings,
         events,
+        health,
         memory,
         models,
         plan,
@@ -21,6 +23,8 @@ def register_routes(app: web.Application) -> None:
         workflow,
         workspace,
     )
+
+    app.router.add_get("/healthz", health.handle_health)
 
     app.router.add_get("/ui/api/auth/status", auth.handle_ui_auth_status)
     app.router.add_post("/ui/api/auth/login", auth.handle_ui_auth_login)
@@ -53,6 +57,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/plan/cancel", plan.handle_ui_plan_cancel)
     app.router.add_get("/ui/api/settings", settings.handle_ui_settings)
     app.router.add_post("/ui/api/settings", settings.handle_ui_settings_update)
+    app.router.add_get("/ui/api/embeddings/status", embeddings.handle_embeddings_status)
+    app.router.add_post("/ui/api/embeddings/download", embeddings.handle_embeddings_download)
     app.router.add_get("/ui/api/memory/conflicts", memory.handle_ui_memory_conflicts)
     app.router.add_get("/ui/api/memory/pinned", memory.handle_ui_memory_pinned)
     app.router.add_post("/ui/api/memory/pin", memory.handle_ui_memory_pin)
