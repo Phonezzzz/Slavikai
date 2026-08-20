@@ -24,6 +24,7 @@ from config.tools_config import (
     save_tools_config as save_tools_config_to_path,
 )
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
+from core.desktop_policy import DesktopPolicyStore
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import (
     RunContext,
@@ -743,12 +744,17 @@ class FakeSttResponse:
         return self._payload
 
 
-async def _create_client(agent: DummyAgent) -> TestClient:
+async def _create_client(
+    agent: DummyAgent,
+    *,
+    desktop_policy_store: DesktopPolicyStore | None = None,
+) -> TestClient:
     app = create_app(
         agent=agent,
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
         auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        desktop_policy_store=desktop_policy_store,
     )
     server = TestServer(app)
     client = TestClient(server, headers=TEST_AUTH_HEADERS)

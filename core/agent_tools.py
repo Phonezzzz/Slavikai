@@ -20,6 +20,7 @@ from core.approval_policy import (
 from core.computer_activity_log import ComputerActivityLog
 from core.decision.handler import DecisionContext
 from core.decision.models import DecisionPacket
+from core.desktop_policy import DesktopApprovalRule, DesktopPolicyRuntime
 from core.mwv.models import (
     MWV_REPORT_PREFIX,
     StopReasonCode,
@@ -74,6 +75,8 @@ if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
     from core.auto_agent import AutoAgent
     from core.decision.handler import DecisionHandler
+    from core.desktop_policy import DesktopPolicyStore
+    from core.desktop_security import DesktopPathSecurity
     from core.rule_engine import RuleEngine
     from core.skills.candidates import SkillCandidateWriter
     from core.tracer import Tracer
@@ -112,6 +115,9 @@ class AgentToolsMixin:
         memory: MemoryManager
         memory_config: MemoryConfig
         auto_agent: AutoAgent
+        desktop_policy_store: DesktopPolicyStore
+        desktop_policy_runtime: DesktopPolicyRuntime
+        desktop_security: DesktopPathSecurity
         tool_registry: ToolRegistry
         tools_enabled: dict[str, bool]
         short_term: list[LLMMessage]
@@ -328,6 +334,19 @@ class AgentToolsMixin:
         self.session_id = session_id
         self.approved_categories = set(approved_categories)
 
+    def set_desktop_policy_context(
+        self,
+        rules: list[DesktopApprovalRule],
+    ) -> None:
+        persistent = self.desktop_policy_store.list_rules()
+        self.desktop_policy_runtime = DesktopPolicyRuntime([*persistent, *rules])
+
+    def clear_desktop_policy_context(self) -> None:
+        self.desktop_policy_runtime = DesktopPolicyRuntime(self.desktop_policy_store.list_rules())
+
+    def drain_consumed_desktop_rule_ids(self) -> list[str]:
+        return self.desktop_policy_runtime.drain_consumed_rule_ids()
+
     def set_runtime_state(
         self,
         *,
@@ -362,6 +381,11 @@ class AgentToolsMixin:
             safe_mode=safe_mode,
             session_id=self.session_id,
             approved_categories=normalized,
+            execution_target=(
+                "desktop" if getattr(self, "runtime_mode", "ask") == "desktop" else "sandbox"
+            ),
+            desktop_policy=getattr(self, "desktop_policy_runtime", None),
+            desktop_security=getattr(self, "desktop_security", None),
         )
 
     def _build_tool_gateway(

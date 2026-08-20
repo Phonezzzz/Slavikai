@@ -4,6 +4,7 @@ import uuid
 from collections.abc import Callable
 
 from core.approval_policy import ApprovalCategory
+from core.desktop_policy import DesktopApprovalScope
 from shared.models import JSONValue
 
 
@@ -200,6 +201,7 @@ def build_ui_approval_decision(
     tool_raw = approval_request.get("tool")
     details_raw = approval_request.get("details")
     required_raw = approval_request.get("required_categories")
+    scope_raw = approval_request.get("scope")
     required_categories: list[str] = []
     if isinstance(required_raw, list):
         for item in required_raw:
@@ -219,6 +221,8 @@ def build_ui_approval_decision(
         "required_categories": required_categories,
         "tool": tool_raw if isinstance(tool_raw, str) else "",
         "details": normalize_json_value_fn(details_raw) if isinstance(details_raw, dict) else {},
+        "scope": normalize_json_value_fn(scope_raw) if isinstance(scope_raw, dict) else None,
+        "policy_reason": approval_request.get("policy_reason"),
     }
     now = utc_now_iso()
     context_payload: dict[str, JSONValue] = {
@@ -230,30 +234,40 @@ def build_ui_approval_decision(
     if isinstance(workflow_context, dict):
         for key, value in workflow_context.items():
             context_payload[str(key)] = normalize_json_value_fn(value)
-    return {
-        "id": f"decision-{uuid.uuid4().hex}",
-        "kind": "approval",
-        "decision_type": "tool_approval",
-        "status": "pending",
-        "blocking": True,
-        "reason": reason,
-        "summary": summary,
-        "proposed_action": proposed_action,
-        "options": [
+    options: list[dict[str, JSONValue]] = [
+        {
+            "id": "approve_once",
+            "title": "Approve once",
+            "action": "approve_once",
+            "payload": {},
+            "risk": "medium",
+        },
+        {
+            "id": "approve_session",
+            "title": "Approve for session",
+            "action": "approve_session",
+            "payload": {},
+            "risk": "high",
+        },
+    ]
+    persistent_scope: DesktopApprovalScope | None = None
+    if isinstance(scope_raw, dict):
+        try:
+            persistent_scope = DesktopApprovalScope.from_dict(scope_raw)
+        except ValueError:
+            persistent_scope = None
+    if persistent_scope is not None and persistent_scope.supports_persistent_allow:
+        options.append(
             {
-                "id": "approve_once",
-                "title": "Approve once",
-                "action": "approve_once",
-                "payload": {},
-                "risk": "medium",
-            },
-            {
-                "id": "approve_session",
-                "title": "Approve session",
-                "action": "approve_session",
-                "payload": {},
+                "id": "always_allow",
+                "title": "Always allow matching rule",
+                "action": "always_allow",
+                "payload": {"scope": normalize_json_value_fn(scope_raw)},
                 "risk": "high",
-            },
+            }
+        )
+    options.extend(
+        [
             {
                 "id": "edit_and_approve",
                 "title": "Edit and approve",
@@ -263,12 +277,23 @@ def build_ui_approval_decision(
             },
             {
                 "id": "reject",
-                "title": "Reject",
+                "title": "Deny",
                 "action": "reject",
                 "payload": {},
                 "risk": "low",
             },
-        ],
+        ]
+    )
+    return {
+        "id": f"decision-{uuid.uuid4().hex}",
+        "kind": "approval",
+        "decision_type": "tool_approval",
+        "status": "pending",
+        "blocking": True,
+        "reason": reason,
+        "summary": summary,
+        "proposed_action": proposed_action,
+        "options": options,
         "default_option_id": "approve_once",
         "context": context_payload,
         "created_at": now,

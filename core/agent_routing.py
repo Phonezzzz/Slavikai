@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from core.approval_policy import ApprovalRequest
     from core.decision.handler import DecisionHandler
     from core.decision.models import DecisionPacket
+    from core.desktop_runtime import DesktopRuntime
     from core.mwv.models import VerificationResult
     from core.rule_engine import PolicyApplication
     from core.skills.index import SkillIndex, SkillMatch
@@ -53,6 +54,9 @@ class AgentRoutingMixin:
         short_term: list[LLMMessage]
         main_config: ModelConfig | None
         _last_skill_match: SkillMatch | None
+        desktop_runtime: DesktopRuntime
+        last_plan_summary: str | None
+        last_execution_summary: str | None
 
         def _should_record_in_history(self, user_input: str) -> bool: ...
         def _append_short_term(
@@ -218,6 +222,8 @@ class AgentRoutingMixin:
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=result)])
                 return result
+            if runtime_mode == "desktop":
+                return self._run_desktop_response(last_content, record_in_history)
 
             decision = classify_request(
                 messages,
@@ -333,6 +339,15 @@ class AgentRoutingMixin:
                 return
             if runtime_mode == "auto":
                 response = self.handle_auto_command(last_content)
+                self.last_stream_response_raw = response
+                yield from _text_response_events(response)
+                return
+            if runtime_mode == "desktop":
+                response = self._run_desktop_response(
+                    last_content,
+                    record_in_history,
+                    cancellation_token=cancellation_token,
+                )
                 self.last_stream_response_raw = response
                 yield from _text_response_events(response)
                 return
@@ -477,6 +492,40 @@ class AgentRoutingMixin:
             if record_in_history:
                 self._append_short_term([LLMMessage(role="assistant", content=error_text)])
             return error_text
+
+    def _run_desktop_response(
+        self,
+        goal: str,
+        record_in_history: bool,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> str:
+        outcome = self.desktop_runtime.run(goal, cancellation_token=cancellation_token)
+        self.last_plan_summary = "Desktop использовал native tool loop для host execution."
+        self.last_execution_summary = (
+            f"tool_calls={len(outcome.loop_result.tool_calls)}, "
+            f"iterations={outcome.loop_result.iterations}, "
+            f"verification={outcome.verification.status.value}"
+        )
+        response = self._append_report_block(
+            outcome.text,
+            route="desktop",
+            trace_id=None,
+            attempts=(1, 1),
+            verifier=outcome.verification,
+            next_steps=[],
+            stop_reason_code=(
+                None
+                if outcome.verification.ok and outcome.loop_result.error is None
+                else StopReasonCode.VERIFIER_FAILED
+            ),
+            plan_summary=self.last_plan_summary,
+            execution_summary=self.last_execution_summary,
+        )
+        self._log_chat_interaction(raw_input=goal, response_text=response)
+        if record_in_history:
+            self._append_short_term([LLMMessage(role="assistant", content=response)])
+        return response
 
     def _run_chat_tool_loop_if_available(
         self,

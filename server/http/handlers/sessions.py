@@ -16,7 +16,7 @@ from aiohttp import web
 from server import http_api as api
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
-from server.http.common.runtime_contract import RuntimeModelStateProtocol
+from server.http.common.runtime_contract import RuntimeModelStateProtocol, SessionApprovalStore
 from server.http_api import (
     SUPPORTED_MODEL_PROVIDERS,
     UI_SESSION_HEADER,
@@ -924,4 +924,6 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
         )
     runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
     await runtime_model_state.clear_session_override(session_id)
+    session_store = cast(SessionApprovalStore, request.app["session_store"])
+    await session_store.clear_session(session_id)
     return json_response({"session_id": session_id, "deleted": True})

@@ -33,6 +33,9 @@ PR-26 workspace IDE начал декомпозицию: layout/resize state и 
 После PR-07..PR-12 (текущей серии) Workspace переименован в **Computer** как UI
 inspector/runtime для текущей chat session. Добавлены `AgentComputerRuntime`, `ComputerBackend`
 Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in/inactive).
+Текущий runtime также содержит отдельный Desktop execution profile. Он использует общий
+conversational endpoint и существующий LLM/tool loop, но публикует host tools только при
+`mode=desktop`; Chat (`ask`) и Agent (`auto`/Act) сохраняют прежние sandbox semantics.
 Часть старого runtime ещё остаётся legacy-обвязкой.
 
 ## Основные слои
@@ -79,6 +82,11 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
   - Descriptor: `name`, `description`, `parameters_schema`, capability/risk classes.
   - Журнал вызовов: `logs/tool_calls.log`.
   - Terminal: `tools/terminal_tool.py`, режимы `oneshot|pty`.
+  - Desktop host primitives: search/read/atomic write/copy-move-rename/recoverable delete,
+    staged archive extraction, argv-only bounded shell, application launch, URL/file open,
+    browser search/fetch/open и explicit result verification.
+  - `ToolRegistry` фильтрует descriptors и dispatch по `execution_target=sandbox|desktop`;
+    Desktop tools не доступны в Chat/Agent snapshots.
 - **Agent Computer** (`core/agent_computer.py`, `core/computer_backend.py`, `core/container_computer_backend.py`)
   - Computer — это **inspector/runtime для текущей chat session**, а не отдельный чат.
   - Chat остаётся единственной conversational entrypoint. Computer не имеет assistant
@@ -118,6 +126,8 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
    - `runtime_mode=auto` — сразу запуск auto v1 без `classify_request` и chat-fallback. Модель
      отвечает без tools для conversation-only запроса или выполняет
      `AgentToolLoop -> ToolGateway -> verifier` для workspace actions.
+   - `runtime_mode=desktop` — тот же `AgentToolLoop -> ToolGateway -> VerifierRuntime`, но
+     с desktop-only descriptors и execution target реального host.
    - `runtime_mode=act|plan` — в legacy runtime используется `classify_request(...)` (`chat` или `mwv`).
 3. Целевой tool path:
    - LLM получает `ToolSpec[]`.
@@ -132,6 +142,11 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
 - Workspace: `workspace_list`, `workspace_read`, `workspace_write`, `workspace_create`, `workspace_rename`, `workspace_move`, `workspace_delete`, `workspace_patch`, `workspace_run`, `workspace_terminal_run`.
 - `workspace_terminal_run` — restricted one-shot режим общего `TerminalTool`.
 - `workspace_patch` контракт: single-file hunk patch для одного `path` (без `diff --git` / `---` / `+++` заголовков).
+- Desktop host profile: `desktop_file_*`, `desktop_archive_extract`, `desktop_shell`,
+  `desktop_clipboard`, `desktop_system_info`, `desktop_process`, `desktop_systemd`,
+  `desktop_package`, `desktop_session`, `desktop_open`, `desktop_browser`, `desktop_gui`,
+  `desktop_verify`. `desktop_process/systemd/package` являются typed semantic capabilities;
+  generic shell отказывает в прямых `kill/systemctl/apt` вызовах.
 
 ## Sandbox и безопасность
 
@@ -139,6 +154,30 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
 - `workspace_*` и `project` ограничены `sandbox/project/`.
 - `shell` использует sandbox root + ограничения конфигурации.
 - Safe-mode отключает рискованные инструменты через `SAFE_MODE_TOOLS_OFF`, включая `workspace_run` и `workspace_terminal_run`.
+- `desktop_*` — намеренное исключение только для `mode=desktop`: canonical host paths
+  проверяются `DesktopPathSecurity`, после чего запрос всё равно проходит `ToolGateway`.
+  Protected paths, symlink/traversal и собственные policy/enforcement/config resources
+  блокируются до tool execution.
+
+## Desktop policy и lifecycle
+
+- `DesktopPolicyRuntime` объединяет persistent snapshot с once/session rules; explicit DENY
+  всегда сильнее matching ALLOW.
+- `DesktopPolicyStore` хранит inspectable persistent rules атомарно с mode `0600`.
+- UI decision flow поддерживает approve once, approve for session, narrow always allow и deny;
+  выбор и применённое policy решение пишутся в существующий trace/tool logging контур с
+  redaction payload/secrets.
+- Переход из Desktop отменяет активную генерацию, очищает pending decision и session rules.
+- Mutating tool success не завершает задачу: typed tools возвращают проверенное structured
+  state, browser/GUI interaction требует correlated observation, а generic filesystem/shell
+  action — отдельный `desktop_verify`. `AgentToolLoop` даёт ограниченный correction retry.
+- Desktop planner получает единый priority contract: native/application API → typed tool →
+  filesystem/system/DBus → argv CLI → browser DOM → AT-SPI → visual GUI fallback.
+- Browser capability использует Playwright semantic selectors и first-class verified download
+  artifacts. После установки Python dependencies нужен browser runtime:
+  `python -m playwright install chromium`.
+- Push-to-talk использует существующий STT endpoint; в Desktop transcription передаётся в тот
+  же `/ui/api/chat/send` pipeline, что и typed request.
 
 ## HTTP/UI слой
 
@@ -163,6 +202,8 @@ Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in
 
 - Sessions/folders: `/ui/api/folders`, `/ui/api/sessions`, `/ui/api/sessions/{session_id}`.
 - Workflow: `/ui/api/mode`, `/ui/api/plan/*`, `/ui/api/runtime/init`.
+- Desktop approvals: `/ui/api/desktop/approvals` и
+  `/ui/api/desktop/approvals/{rule_id}` для inspect/update/remove persistent rules.
 - Chat (единственный conversational entrypoint): `/ui/api/chat/send`, `/ui/api/chat/events/{session_id}`.
 - Workspace file operations (Computer inspector): `/ui/api/workspace/root`,
   `/ui/api/workspace/tree`, `/ui/api/workspace/file`, `/ui/api/workspace/file/create`,

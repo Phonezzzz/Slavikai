@@ -3,7 +3,7 @@ import { PanelRight } from 'lucide-react';
 import { ArtifactPanel } from './artifact-panel';
 import { Canvas, type CanvasMessage, type CanvasSendPayload } from './canvas';
 import type { Artifact } from './artifacts-sidebar';
-import type { DecisionRespondChoice, UiDecision } from '../types';
+import type { DecisionRespondChoice, SessionMode, UiDecision } from '../types';
 
 type ChatSessionScreenProps = {
   messages: CanvasMessage[];
@@ -23,6 +23,7 @@ type ChatSessionScreenProps = {
   decision: UiDecision | null;
   decisionBusy: boolean;
   decisionError: string | null;
+  runtimeMode: SessionMode;
   onSendMessage: (payload: CanvasSendPayload) => Promise<boolean>;
   onCancelSend: () => Promise<boolean>;
   onSendFeedback: (interactionId: string, rating: 'good' | 'bad') => Promise<boolean>;
@@ -56,6 +57,7 @@ export function ChatSessionScreen({
   decision,
   decisionBusy,
   decisionError,
+  runtimeMode,
   onSendMessage,
   onCancelSend,
   onSendFeedback,
@@ -91,6 +93,7 @@ export function ChatSessionScreen({
           decision={decision}
           decisionBusy={decisionBusy}
           decisionError={decisionError}
+          runtimeMode={runtimeMode}
           onDecisionRespond={onDecisionRespond}
         />
       </div>

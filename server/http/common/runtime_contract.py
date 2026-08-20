@@ -9,6 +9,7 @@ import requests
 from aiohttp import web
 
 from core.approval_policy import ApprovalCategory, ApprovalRequest
+from core.desktop_policy import DesktopApprovalRule
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import RunContext, TaskPacket
 from llm.stream_model import StreamEvent
@@ -23,6 +24,7 @@ from shared.models import JSONValue, LLMMessage, ToolResult
 class SessionApprovalStore:
     def __init__(self) -> None:
         self._approved: dict[str, set[ApprovalCategory]] = {}
+        self._desktop_rules: dict[str, list[DesktopApprovalRule]] = {}
         self._lock = asyncio.Lock()
 
     async def approve(
@@ -41,6 +43,43 @@ class SessionApprovalStore:
     async def get_categories(self, session_id: str) -> set[ApprovalCategory]:
         async with self._lock:
             return set(self._approved.get(session_id, set()))
+
+    async def add_desktop_rule(
+        self,
+        session_id: str,
+        rule: DesktopApprovalRule,
+    ) -> list[DesktopApprovalRule]:
+        if rule.source not in {"once", "session"}:
+            raise ValueError("SessionApprovalStore принимает once/session desktop rules")
+        async with self._lock:
+            rules = list(self._desktop_rules.get(session_id, []))
+            rules.append(rule)
+            self._desktop_rules[session_id] = rules
+            return list(rules)
+
+    async def get_desktop_rules(self, session_id: str) -> list[DesktopApprovalRule]:
+        async with self._lock:
+            return list(self._desktop_rules.get(session_id, []))
+
+    async def remove_desktop_rules(self, session_id: str, rule_ids: set[str]) -> None:
+        if not rule_ids:
+            return
+        async with self._lock:
+            rules = self._desktop_rules.get(session_id, [])
+            remaining = [rule for rule in rules if rule.rule_id not in rule_ids]
+            if remaining:
+                self._desktop_rules[session_id] = remaining
+            else:
+                self._desktop_rules.pop(session_id, None)
+
+    async def clear_desktop_rules(self, session_id: str) -> None:
+        async with self._lock:
+            self._desktop_rules.pop(session_id, None)
+
+    async def clear_session(self, session_id: str) -> None:
+        async with self._lock:
+            self._approved.pop(session_id, None)
+            self._desktop_rules.pop(session_id, None)
 
 
 class TracerProtocol(Protocol):

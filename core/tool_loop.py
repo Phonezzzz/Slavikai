@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, field
 
 from core.tool_gateway import ToolGateway
@@ -47,13 +47,31 @@ class AgentToolLoop:
         messages: list[LLMMessage],
         tools: list[ToolSpec],
         config: ModelConfig | None = None,
+        cancellation_token: asyncio.Event | None = None,
+        final_gate: Callable[[Sequence[ExecutedToolCall]], str | None] | None = None,
     ) -> AgentToolLoopResult:
         history = list(messages)
         executed: list[ExecutedToolCall] = []
         final_text = ""
 
         for iteration in range(1, self.max_iterations + 1):
+            if cancellation_requested(cancellation_token):
+                return AgentToolLoopResult(
+                    text=final_text,
+                    messages=history,
+                    tool_calls=executed,
+                    iterations=iteration - 1,
+                    cancelled=True,
+                )
             result = brain.generate(history, config=config, tools=tools)
+            if cancellation_requested(cancellation_token):
+                return AgentToolLoopResult(
+                    text=final_text,
+                    messages=history,
+                    tool_calls=executed,
+                    iterations=iteration,
+                    cancelled=True,
+                )
             final_text = result.text
             history.append(
                 _assistant_message(
@@ -64,6 +82,26 @@ class AgentToolLoop:
             )
 
             if not result.tool_calls:
+                gate_error = final_gate(executed) if final_gate is not None else None
+                if gate_error is not None:
+                    history.append(
+                        LLMMessage(
+                            role="system",
+                            content=(
+                                "Deterministic result verification rejected the current final "
+                                f"answer: {gate_error}. Correct the execution and verify again."
+                            ),
+                        )
+                    )
+                    if iteration < self.max_iterations:
+                        continue
+                    return AgentToolLoopResult(
+                        text=final_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error=gate_error,
+                    )
                 return AgentToolLoopResult(
                     text=final_text,
                     messages=history,
@@ -72,6 +110,14 @@ class AgentToolLoop:
                 )
 
             for tool_call in result.tool_calls:
+                if cancellation_requested(cancellation_token):
+                    return AgentToolLoopResult(
+                        text=final_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        cancelled=True,
+                    )
                 tool_result = gateway.call(
                     ToolRequest(name=tool_call.name, args=dict(tool_call.arguments))
                 )
@@ -83,12 +129,22 @@ class AgentToolLoop:
                         tool_call_id=tool_call.id,
                     )
                 )
+                if cancellation_requested(cancellation_token):
+                    return AgentToolLoopResult(
+                        text=final_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        cancelled=True,
+                    )
 
+        message = f"Цикл инструментов превысил лимит: {self.max_iterations} итераций."
         return AgentToolLoopResult(
             text=final_text,
             messages=history,
             tool_calls=executed,
             iterations=self.max_iterations,
+            error=message,
         )
 
     def run_stream_events(
@@ -100,6 +156,7 @@ class AgentToolLoop:
         tools: list[ToolSpec],
         config: ModelConfig | None = None,
         cancellation_token: asyncio.Event | None = None,
+        final_gate: Callable[[Sequence[ExecutedToolCall]], str | None] | None = None,
     ) -> Generator[StreamEvent, None, AgentToolLoopResult]:
         history = list(messages)
         executed: list[ExecutedToolCall] = []
@@ -199,6 +256,28 @@ class AgentToolLoop:
                 )
             )
             if not pending_calls:
+                gate_error = final_gate(executed) if final_gate is not None else None
+                if gate_error is not None:
+                    history.append(
+                        LLMMessage(
+                            role="system",
+                            content=(
+                                "Deterministic result verification rejected the current final "
+                                f"answer: {gate_error}. Correct the execution and verify again."
+                            ),
+                        )
+                    )
+                    if iteration < self.max_iterations:
+                        continue
+                    yield Error(message=gate_error, code="tool_loop_verification_failed")
+                    yield Done(finish_reason="error")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error=gate_error,
+                    )
                 yield Done()
                 return AgentToolLoopResult(
                     text=visible_text,
@@ -281,6 +360,7 @@ def _assistant_message(
 
 def _serialize_tool_result(result: ToolResult) -> str:
     payload: dict[str, JSONValue] = {
+        "trust": "untrusted_observation",
         "ok": result.ok,
         "data": result.data,
         "error": result.error,

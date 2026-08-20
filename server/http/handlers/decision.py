@@ -10,6 +10,12 @@ from aiohttp import web
 
 from core.agent_computer import execute_local_commit
 from core.approval_policy import ApprovalRequired
+from core.desktop_policy import (
+    DesktopApprovalRule,
+    DesktopApprovalScope,
+    DesktopPolicyStore,
+    RuleSource,
+)
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
@@ -103,6 +109,31 @@ def _decision_is_expired(decision: dict[str, JSONValue]) -> bool:
     else:
         expires_at = expires_at.astimezone(UTC)
     return datetime.now(UTC) >= expires_at
+
+
+async def _trace_desktop_approval_choice(
+    request: web.Request,
+    *,
+    session_id: str,
+    choice: str,
+    scope: DesktopApprovalScope,
+) -> None:
+    agent = await _resolve_agent(request)
+    if agent is None:
+        return
+    tracer = getattr(agent, "tracer", None)
+    log = getattr(tracer, "log", None)
+    if not callable(log):
+        return
+    log(
+        "desktop_approval_decision",
+        choice,
+        {
+            "session_id": session_id,
+            "choice": choice,
+            "scope": scope.to_dict(),
+        },
+    )
 
 
 async def handle_ui_decision_respond(request: web.Request) -> web.Response:
@@ -282,12 +313,18 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
-        if choice not in {"approve_once", "approve_session", "edit_and_approve", "reject"}:
+        if choice not in {
+            "approve_once",
+            "approve_session",
+            "always_allow",
+            "edit_and_approve",
+            "reject",
+        }:
             return error_response(
                 status=400,
                 message=(
                     "Для tool decision доступны "
-                    "approve_once|approve_session|edit_and_approve|reject."
+                    "approve_once|approve_session|always_allow|edit_and_approve|reject."
                 ),
                 error_type="invalid_request_error",
                 code="invalid_request_error",
@@ -351,6 +388,69 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 code="invalid_request_error",
             )
 
+    async def _resume_chat_source_request(
+        *,
+        source_endpoint: str,
+        resume_payload: dict[str, object],
+    ) -> dict[str, JSONValue]:
+        source_request_raw = resume_payload.get("source_request")
+        if not isinstance(source_request_raw, dict):
+            return {
+                "ok": False,
+                "error": "resume_payload.source_request is missing.",
+                "source_endpoint": source_endpoint,
+            }
+        content_raw = source_request_raw.get("content")
+        if not isinstance(content_raw, str) or not content_raw.strip():
+            return {
+                "ok": False,
+                "error": "resume_payload.source_request.content is missing.",
+                "source_endpoint": source_endpoint,
+            }
+        lane = _normalize_message_lane(source_request_raw.get("lane"))
+        resumed_response = await handle_ui_send_resume(
+            request,
+            payload={
+                str(key): _normalize_json_value(value) for key, value in source_request_raw.items()
+            },
+            lane=lane,
+            bypass_root_gate=False,
+        )
+        parsed_resume_payload: dict[str, JSONValue] = {}
+        if isinstance(resumed_response.text, str) and resumed_response.text.strip():
+            try:
+                parsed = json.loads(resumed_response.text)
+                if isinstance(parsed, dict):
+                    parsed_resume_payload = {
+                        str(key): _normalize_json_value(value) for key, value in parsed.items()
+                    }
+            except json.JSONDecodeError:
+                parsed_resume_payload = {}
+        if resumed_response.status < 400:
+            return {
+                "ok": True,
+                "source_endpoint": source_endpoint,
+                "data": {
+                    "status_code": resumed_response.status,
+                    "trace_id": parsed_resume_payload.get("trace_id"),
+                    "output": parsed_resume_payload.get("output"),
+                    "decision": parsed_resume_payload.get("decision"),
+                },
+                "resume_started": True,
+            }
+        error_raw = parsed_resume_payload.get("error")
+        message = error_raw.get("message") if isinstance(error_raw, dict) else None
+        return {
+            "ok": False,
+            "source_endpoint": source_endpoint,
+            "error": (
+                message
+                if isinstance(message, str) and message.strip()
+                else f"{source_endpoint} failed: {resumed_response.status}"
+            ),
+            "resume_started": True,
+        }
+
     async def _resolve_tool_decision() -> dict[str, JSONValue]:
         context_raw = current_decision.get("context")
         context = context_raw if isinstance(context_raw, dict) else {}
@@ -360,14 +460,83 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
 
         required_categories = _decision_categories(current_decision)
-        if choice == "approve_session" and required_categories:
+        proposed_raw = current_decision.get("proposed_action")
+        proposed = proposed_raw if isinstance(proposed_raw, dict) else {}
+        scope_raw = proposed.get("scope")
+        desktop_scope: DesktopApprovalScope | None = None
+        if isinstance(scope_raw, dict):
+            try:
+                desktop_scope = DesktopApprovalScope.from_dict(scope_raw)
+            except ValueError:
+                return {
+                    "ok": False,
+                    "error": "invalid_desktop_approval_scope",
+                    "source_endpoint": source_endpoint,
+                }
+        if choice == "always_allow" and desktop_scope is None:
+            return {
+                "ok": False,
+                "error": "always_allow requires a scoped Desktop approval.",
+                "source_endpoint": source_endpoint,
+            }
+        if (
+            choice == "always_allow"
+            and desktop_scope is not None
+            and not desktop_scope.supports_persistent_allow
+        ):
+            return {
+                "ok": False,
+                "error": "always_allow is not permitted for command-based Desktop scopes.",
+                "source_endpoint": source_endpoint,
+            }
+        if desktop_scope is not None and choice in {
+            "approve_once",
+            "approve_session",
+            "always_allow",
+            "edit_and_approve",
+        }:
+            if choice == "always_allow":
+                persistent_store: DesktopPolicyStore = request.app["desktop_policy_store"]
+                persistent_store.add_rule(
+                    DesktopApprovalRule.create(
+                        effect="allow",
+                        scope=desktop_scope,
+                        source="persistent",
+                        description="Approved from Desktop UI",
+                    )
+                )
+            else:
+                source: RuleSource = "session" if choice == "approve_session" else "once"
+                await session_store.add_desktop_rule(
+                    session_id,
+                    DesktopApprovalRule.create(
+                        effect="allow",
+                        scope=desktop_scope,
+                        source=source,
+                        description="Approved from Desktop UI",
+                    ),
+                )
+        elif choice == "approve_session" and required_categories:
             await session_store.approve(session_id, required_categories)
+        if desktop_scope is not None:
+            await _trace_desktop_approval_choice(
+                request,
+                session_id=session_id,
+                choice=choice,
+                scope=desktop_scope,
+            )
         approved_categories = await session_store.get_categories(session_id)
         one_call_categories = (
             approved_categories | required_categories
             if choice in {"approve_once", "edit_and_approve"}
             else approved_categories
         )
+
+        if source_endpoint in {"chat.send", "workspace.send"}:
+            return await _resume_chat_source_request(
+                source_endpoint=source_endpoint,
+                resume_payload={str(key): value for key, value in resume_payload.items()},
+            )
 
         if source_endpoint == "workspace.root_select":
             if choice == "edit_and_approve":
@@ -1198,6 +1367,21 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         source_endpoint = source_endpoint_raw if isinstance(source_endpoint_raw, str) else ""
         resume_payload_raw = context.get("resume_payload")
         resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+        proposed_raw = current_decision.get("proposed_action")
+        proposed = proposed_raw if isinstance(proposed_raw, dict) else {}
+        scope_raw = proposed.get("scope")
+        if decision_type == "tool_approval" and isinstance(scope_raw, dict):
+            try:
+                rejected_scope = DesktopApprovalScope.from_dict(scope_raw)
+            except ValueError:
+                rejected_scope = None
+            if rejected_scope is not None:
+                await _trace_desktop_approval_choice(
+                    request,
+                    session_id=session_id,
+                    choice=choice,
+                    scope=rejected_scope,
+                )
         rejected = _decision_with_status(current_decision, status="rejected", resolved=True)
         updated, latest = await hub.transition_session_decision(
             session_id,
@@ -1448,7 +1632,12 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     )
     normalized_resolved = _normalize_ui_decision(latest_resolved, session_id=session_id)
     if not updated_resolved:
-        if decision_type == "agent_decision":
+        nested_chat_resume = (
+            decision_type == "tool_approval"
+            and current_source_endpoint in {"chat.send", "workspace.send"}
+            and resume.get("ok") is True
+        )
+        if decision_type == "agent_decision" or nested_chat_resume:
             workflow = await hub.get_session_workflow(session_id)
             latest_decision = _normalize_ui_decision(
                 await hub.get_session_decision(session_id),

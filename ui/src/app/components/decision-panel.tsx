@@ -92,7 +92,7 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
             const action = option.action;
             const isEditAction = action === 'edit_and_approve' || action === 'edit_plan';
             const baseClass =
-              action === 'approve_once' || action === 'approve_session'
+              action === 'approve_once' || action === 'approve_session' || action === 'always_allow'
                 ? 'bg-emerald-600 text-white hover:bg-emerald-500'
                 : 'border border-[#3a3a44] text-[#d4d4db] hover:bg-[#1b1b22]';
             const icon = action === 'reject'

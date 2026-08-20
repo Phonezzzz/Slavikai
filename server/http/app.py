@@ -18,6 +18,7 @@ from config.http_server_config import (
     resolve_http_server_config,
 )
 from config.model_store import load_model_configs
+from core.desktop_policy import DesktopPolicyStore
 from server import http_api as api
 from server.embedding_download import EmbeddingDownloadManager
 from server.http.common.chat_cancellation import ChatCancellationRegistry
@@ -83,6 +84,7 @@ def create_app(
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
     auth_config: HttpAuthConfig | None = None,
+    desktop_policy_store: DesktopPolicyStore | None = None,
 ) -> web.Application:
     _load_project_dotenv()
     config_max_bytes = max_request_bytes or DEFAULT_MAX_REQUEST_BYTES
@@ -99,6 +101,10 @@ def create_app(
     )
     app["runtime_model_state"] = runtime_model_state
     app["runtime_model_resolver"] = RuntimeModelResolver(runtime_model_state)
+    resolved_desktop_policy_store = desktop_policy_store or DesktopPolicyStore(
+        api.PROJECT_ROOT / ".run" / "desktop_approvals.json"
+    )
+    app["desktop_policy_store"] = resolved_desktop_policy_store
     if agent is None:
 
         def _factory() -> AgentProtocol:
@@ -115,6 +121,7 @@ def create_app(
                     embeddings_local_model=embeddings_settings.local_model,
                     embeddings_openai_model=embeddings_settings.openai_model,
                     embeddings_openai_api_key=api._resolve_provider_api_key("openai"),
+                    desktop_policy_store=resolved_desktop_policy_store,
                 ),
             )
 

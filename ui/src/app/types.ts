@@ -61,6 +61,7 @@ export type UiDecisionOption = {
 export type DecisionRespondChoice =
   | 'approve_once'
   | 'approve_session'
+  | 'always_allow'
   | 'edit_and_approve'
   | 'edit_plan'
   | 'reject'
@@ -89,9 +90,17 @@ export type UiDecision = {
   resolved_at: string | null;
 };
 
-export const SESSION_MODE_VALUES = ['ask', 'plan', 'act', 'auto'] as const;
+export const SESSION_MODE_VALUES = ['ask', 'plan', 'act', 'auto', 'desktop'] as const;
 
 export type SessionMode = (typeof SESSION_MODE_VALUES)[number];
+
+export const SESSION_MODE_LABELS: Record<SessionMode, string> = {
+  ask: 'Chat',
+  plan: 'Plan',
+  act: 'Act',
+  auto: 'Agent',
+  desktop: 'Desktop',
+};
 
 export const isSessionMode = (value: unknown): value is SessionMode =>
   typeof value === 'string' && SESSION_MODE_VALUES.some((mode) => mode === value);

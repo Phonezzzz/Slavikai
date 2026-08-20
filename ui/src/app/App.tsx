@@ -638,6 +638,7 @@ export default function App() {
             decision={runtime.pendingDecision}
             decisionBusy={runtime.decisionBusy}
             decisionError={runtime.decisionError}
+            runtimeMode={runtime.sessionMode}
             onSendMessage={transport.handleSendChat}
             onCancelSend={transport.handleCancelChat}
             onSendFeedback={handleSendFeedback}

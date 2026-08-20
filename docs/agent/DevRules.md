@@ -52,6 +52,16 @@
   - `tools/project_tool.py::_normalize_path(...)`.
 - Общий хелпер для нормализации путей в песочнице существует в `shared/sandbox.py` (сейчас используется для `ShellTool.sandbox_root`).
 
+Исключение — только tools с descriptor `execution_target=desktop`, доступные исключительно
+в явном Desktop mode. Они работают с host path через `DesktopPathSecurity` и scoped
+`DesktopPolicyRuntime`, но по-прежнему обязаны проходить `ToolGateway`. Нельзя использовать
+Desktop helpers из Chat/Agent, делать direct host I/O в routing или обходить protected-resource
+checks. Новая Desktop capability обязана иметь mode-isolation, approval и verifier tests.
+Typed `desktop_process`, `desktop_systemd` и `desktop_package` имеют precedence над generic
+shell. Browser использует semantic DOM selectors, GUI — AT-SPI и только затем coordinates.
+Screenshot после GUI action является observation, но не доказательством результата без
+expected state или correlated follow-up observation.
+
 ## 5) Safe-mode (обязательный контур безопасности)
 
 - Safe-mode реализован на уровне `ToolRegistry` и включается/выключается агентом (`core/agent.py` → `ToolRegistry.apply_safe_mode`).

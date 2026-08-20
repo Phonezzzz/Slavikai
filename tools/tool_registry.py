@@ -22,7 +22,8 @@ ToolRiskClass = Literal[
     "privileged",
     "external_side_effect",
 ]
-ExecutionMode = Literal["ask", "plan", "act", "auto"]
+ExecutionMode = Literal["ask", "plan", "act", "auto", "desktop"]
+ExecutionTarget = Literal["sandbox", "desktop"]
 
 
 @dataclass
@@ -35,6 +36,7 @@ class ToolDescriptor:
     description: str = ""
     parameters_schema: dict[str, JSONValue] = field(default_factory=dict)
     chat_exposed: bool = False
+    execution_targets: frozenset[ExecutionTarget] = frozenset({"sandbox"})
 
 
 class ToolRegistry:
@@ -50,6 +52,7 @@ class ToolRegistry:
         self._safe_mode = False
         self._safe_block = safe_block or set()
         self._mode: ExecutionMode = "act"
+        self._execution_target: ExecutionTarget = "sandbox"
         self._active_plan: dict[str, JSONValue] | None = None
         self._active_task: dict[str, JSONValue] | None = None
         self._enforce_plan_guard = False
@@ -64,6 +67,7 @@ class ToolRegistry:
         description: str = "",
         parameters_schema: dict[str, JSONValue] | None = None,
         chat_exposed: bool = False,
+        execution_targets: set[str] | None = None,
     ) -> None:
         resolved: ToolHandler
         if isinstance(handler, Tool):
@@ -82,6 +86,7 @@ class ToolRegistry:
             description=description,
             parameters_schema=parameters_schema or {},
             chat_exposed=chat_exposed,
+            execution_targets=self._normalize_execution_targets(execution_targets),
         )
         self._logger.info(
             "tool_registered",
@@ -125,7 +130,7 @@ class ToolRegistry:
                 parameters_schema=dict(descriptor.parameters_schema),
             )
             for descriptor in self._tools.values()
-            if descriptor.enabled
+            if descriptor.enabled and self._execution_target in descriptor.execution_targets
         ]
 
     def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
@@ -139,6 +144,18 @@ class ToolRegistry:
                 args=request.args,
             )
             return ToolResult.failure(f"Инструмент {request.name} не зарегистрирован")
+
+        if self._execution_target not in descriptor.execution_targets:
+            error = (
+                f"EXECUTION_TARGET_BLOCK: tool '{request.name}' недоступен для "
+                f"{self._execution_target}."
+            )
+            self._logger.info(
+                "tool_execution_target_blocked",
+                extra={"tool": request.name, "execution_target": self._execution_target},
+            )
+            self._log_call(request.name, ok=False, error=error, args=request.args)
+            return ToolResult.failure(error)
 
         mode_error = self._mode_policy_error(request.name, descriptor.capability)
         if mode_error is not None:
@@ -223,6 +240,7 @@ class ToolRegistry:
         enforce_plan_guard: bool = False,
     ) -> None:
         self._mode = self._normalize_mode(mode)
+        self._execution_target = "desktop" if self._mode == "desktop" else "sandbox"
         self._active_plan = dict(active_plan) if isinstance(active_plan, dict) else None
         self._active_task = dict(active_task) if isinstance(active_task, dict) else None
         self._enforce_plan_guard = bool(enforce_plan_guard)
@@ -235,7 +253,24 @@ class ToolRegistry:
             return "act"
         if normalized == "auto":
             return "auto"
+        if normalized == "desktop":
+            return "desktop"
         return "ask"
+
+    def _normalize_execution_targets(
+        self,
+        execution_targets: set[str] | None,
+    ) -> frozenset[ExecutionTarget]:
+        if not execution_targets:
+            return frozenset({"sandbox"})
+        normalized: set[ExecutionTarget] = set()
+        if "sandbox" in execution_targets:
+            normalized.add("sandbox")
+        if "desktop" in execution_targets:
+            normalized.add("desktop")
+        if not normalized:
+            raise ValueError("execution_targets должен содержать sandbox и/или desktop")
+        return frozenset(normalized)
 
     def _normalize_capability(self, capability: str) -> ToolCapability:
         normalized = capability.strip().lower()

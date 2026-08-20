@@ -23,6 +23,34 @@ def test_sanitizer_masks_secrets() -> None:
     assert sanitized["nested"]["token"] == "[secret]"
 
 
+def test_tool_logger_redacts_secrets_embedded_in_command_arguments(tmp_path: Path) -> None:
+    logger = ToolCallLogger(path=tmp_path / "tool-calls.log")
+    logger.log(
+        tool="desktop_shell",
+        ok=True,
+        args={
+            "argv": [
+                "curl",
+                "--token",
+                "token-value",
+                "--password=hunter2",
+                "Authorization: Bearer abc",
+                "https://user:pass@example.test/path",
+            ]
+        },
+    )
+
+    record = logger.read_recent(limit=1)[0]
+    argv = record.args["argv"] if record.args is not None else None
+    assert isinstance(argv, list)
+    serialized = str(argv)
+    assert "token-value" not in serialized
+    assert "hunter2" not in serialized
+    assert "Bearer abc" not in serialized
+    assert "user:pass@" not in serialized
+    assert serialized.count("[secret]") >= 4
+
+
 def test_sanitizer_truncates_large_payload() -> None:
     payload = "x" * 600
     data = {"content": payload}
@@ -32,6 +60,27 @@ def test_sanitizer_truncates_large_payload() -> None:
     assert content["bytes_count"] == len(payload.encode())
     assert "…[truncated]" in content["preview"]
     assert len(content["sha256"]) == 64
+
+
+def test_desktop_text_inputs_and_url_query_secrets_are_not_logged_plaintext() -> None:
+    sanitized = sanitize_record(
+        {
+            "tool": "desktop_browser",
+            "args": {
+                "value": "private form value",
+                "text": "clipboard secret",
+                "body": "notification contents",
+                "url": "https://example.test/?token=abc123&safe=yes",
+            },
+        }
+    )
+
+    serialized = str(sanitized)
+    assert "private form value" not in serialized
+    assert "clipboard secret" not in serialized
+    assert "notification contents" not in serialized
+    assert "abc123" not in serialized
+    assert "token=[secret]" in serialized
 
 
 def test_read_recent_does_not_read_whole_file(tmp_path: Path, monkeypatch) -> None:

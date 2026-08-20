@@ -8,6 +8,7 @@ def register_routes(app: web.Application) -> None:
         auth,
         chat,
         decision,
+        desktop,
         embeddings,
         events,
         health,
@@ -98,6 +99,22 @@ def register_routes(app: web.Application) -> None:
         sessions.handle_ui_session_files_get,
     )
     app.router.add_post("/ui/api/decision/respond", decision.handle_ui_decision_respond)
+    app.router.add_get(
+        "/ui/api/desktop/approvals",
+        desktop.handle_desktop_approval_rules_list,
+    )
+    app.router.add_post(
+        "/ui/api/desktop/approvals",
+        desktop.handle_desktop_approval_rule_create,
+    )
+    app.router.add_patch(
+        "/ui/api/desktop/approvals/{rule_id}",
+        desktop.handle_desktop_approval_rule_update,
+    )
+    app.router.add_delete(
+        "/ui/api/desktop/approvals/{rule_id}",
+        desktop.handle_desktop_approval_rule_delete,
+    )
     app.router.add_get(
         "/ui/api/sessions/{session_id}/files/download",
         sessions.handle_ui_session_file_download,

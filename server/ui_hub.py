@@ -33,7 +33,7 @@ def _utc_iso_now() -> str:
 SessionStatus = Literal["ok", "busy", "error"]
 MessageLane = Literal["chat", "workspace"]
 PolicyProfile = Literal["sandbox", "index", "yolo"]
-SessionMode = Literal["ask", "plan", "act", "auto"]
+SessionMode = Literal["ask", "plan", "act", "auto", "desktop"]
 SessionAccess = Literal["owned", "forbidden", "missing"]
 _UNSET: object = object()
 DEFAULT_LEGACY_PRINCIPAL_ID = "legacy"
@@ -1525,6 +1525,8 @@ class UIHub:
             return "act"
         if normalized == "auto":
             return "auto"
+        if normalized == "desktop":
+            return "desktop"
         return "ask"
 
     def _normalize_optional_object(

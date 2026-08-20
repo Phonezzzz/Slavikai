@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 
 import {
   SESSION_MODE_VALUES,
+  SESSION_MODE_LABELS,
   type ModeTransitionsContract,
   type ProviderModels,
   type SessionMode,
@@ -451,7 +452,7 @@ export function SessionDrawer({
 
                 <div className="space-y-2">
                   <div className="text-xs font-medium text-zinc-300">Mode</div>
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-5 gap-2">
                     {SESSION_MODE_VALUES.map((item) => {
                         const transition = modeTransitions?.targets[item] ?? null;
                         const blockedReason =
@@ -479,7 +480,7 @@ export function SessionDrawer({
                                 : 'border-[#2a2a31] bg-[#121217] text-[#a4a4ad] hover:bg-[#181820]'
                             } disabled:opacity-50`}
                           >
-                            {item}
+                            {SESSION_MODE_LABELS[item]}
                           </button>
                         );
                     })}

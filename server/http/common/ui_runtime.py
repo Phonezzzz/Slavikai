@@ -15,7 +15,7 @@ from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
-SESSION_MODES: Final[set[str]] = {"ask", "plan", "act", "auto"}
+SESSION_MODES: Final[set[str]] = {"ask", "plan", "act", "auto", "desktop"}
 PLAN_STATUSES: Final[set[str]] = {
     "draft",
     "approved",
@@ -54,6 +54,9 @@ def _serialize_approval_request(
         "tool": approval_request.tool,
         "details": dict(approval_request.details),
         "session_id": approval_request.session_id,
+        "scope": approval_request.scope.to_dict() if approval_request.scope is not None else None,
+        "policy_reason": approval_request.reason,
+        "policy_rule_id": approval_request.policy_rule_id,
         "prompt": {
             "what": approval_request.prompt.what,
             "why": approval_request.prompt.why,

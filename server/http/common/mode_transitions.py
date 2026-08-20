@@ -5,7 +5,7 @@ from typing import Literal
 
 from shared.models import JSONValue
 
-SessionMode = Literal["ask", "plan", "act", "auto"]
+SessionMode = Literal["ask", "plan", "act", "auto", "desktop"]
 ReasonCode = Literal[
     "already_active",
     "mode_transition_not_allowed",
@@ -54,6 +54,8 @@ def _message_for(
         return "В act можно перейти только из plan-режима."
     if target_mode == "auto":
         return "Нельзя перейти в auto при активном plan/act workflow."
+    if target_mode == "desktop":
+        return "Нельзя перейти в Desktop при активном plan/act/auto workflow."
     if current_mode == "auto" and target_mode == "plan":
         return "Переход auto->plan запрещён до завершения auto-run."
     return "Переход между режимами сейчас недоступен."
@@ -73,6 +75,8 @@ def _normalize_mode(value: object) -> SessionMode:
         return "act"
     if value == "auto":
         return "auto"
+    if value == "desktop":
+        return "desktop"
     return "ask"
 
 
@@ -90,7 +94,7 @@ def build_mode_transitions(
     plan_is_approved = isinstance(plan_status_raw, str) and plan_status_raw == "approved"
 
     targets: dict[str, JSONValue] = {}
-    for target_mode in ("ask", "plan", "act", "auto"):
+    for target_mode in ("ask", "plan", "act", "auto", "desktop"):
         if target_mode == mode:
             targets[target_mode] = _target_payload(
                 allowed=False,
@@ -134,6 +138,21 @@ def build_mode_transitions(
             continue
         if target_mode == "auto":
             if mode in {"plan", "act"} and has_active_workflow:
+                reason_code = "mode_transition_not_allowed"
+                targets[target_mode] = _target_payload(
+                    allowed=False,
+                    reason_code=reason_code,
+                    message=_message_for(
+                        current_mode=mode,
+                        target_mode=target_mode,
+                        reason_code=reason_code,
+                    ),
+                )
+                continue
+            targets[target_mode] = _target_payload(allowed=True)
+            continue
+        if target_mode == "desktop":
+            if auto_run_active or (mode in {"plan", "act"} and has_active_workflow):
                 reason_code = "mode_transition_not_allowed"
                 targets[target_mode] = _target_payload(
                     allowed=False,

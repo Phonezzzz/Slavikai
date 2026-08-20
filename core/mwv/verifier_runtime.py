@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -11,6 +12,7 @@ from typing import Protocol
 from core.mwv.models import RunContext, TaskPacket, VerificationResult, VerificationStatus
 from core.mwv.verifier import VerifierRunner
 from core.mwv.verifier_summary import extract_verifier_excerpt, verifier_fail_type
+from shared.models import JSONValue, ToolResult
 
 
 class VerifierRunnerProtocol(Protocol):
@@ -33,6 +35,27 @@ def _default_project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _desktop_observation_result(
+    *,
+    status: VerificationStatus,
+    reason: str,
+    duration_seconds: float,
+) -> VerificationResult:
+    passed = status == VerificationStatus.PASSED
+    return VerificationResult(
+        status=status,
+        command=[],
+        exit_code=0 if passed else 1,
+        stdout=reason if passed else "",
+        stderr="" if passed else reason,
+        duration_seconds=duration_seconds,
+        error=None if passed else reason,
+        fail_type=None if passed else "desktop_observation",
+        excerpt=reason,
+        verifier_profile="desktop_observation",
+    )
+
+
 def canonical_check_command() -> list[str]:
     return list(CANONICAL_CHECK_COMMAND)
 
@@ -43,11 +66,202 @@ def has_canonical_repo_verifier(project_root: Path) -> bool:
     )
 
 
+def _desktop_change_is_verified(
+    name: str,
+    args: dict[str, JSONValue],
+    result: ToolResult,
+    later: Sequence[tuple[str, dict[str, JSONValue], ToolResult]],
+) -> bool:
+    if result.data.get("verified") is True:
+        return True
+    verifications = [
+        (verify_args, verify_result)
+        for verify_name, verify_args, verify_result in later
+        if verify_name == "desktop_verify" and verify_result.ok
+    ]
+    if name == "desktop_file_write":
+        path = _result_string(result, "path")
+        content = args.get("content")
+        if path is None or not isinstance(content, str):
+            return False
+        if not content:
+            return _has_path_check(verifications, path=path, check="path_exists")
+        return any(
+            verify_args.get("check") == "file_contains"
+            and verify_result.data.get("path") == path
+            and verify_args.get("expected") == content
+            for verify_args, verify_result in verifications
+        )
+    if name == "desktop_file_transfer":
+        destination = _result_string(result, "destination")
+        source = _result_string(result, "source")
+        operation = args.get("operation")
+        if destination is None or not _has_path_check(
+            verifications,
+            path=destination,
+            check="path_exists",
+        ):
+            return False
+        if operation in {"move", "rename"}:
+            return source is not None and _has_path_check(
+                verifications,
+                path=source,
+                check="path_missing",
+            )
+        return True
+    if name == "desktop_file_delete":
+        path = _result_string(result, "path")
+        return path is not None and _has_path_check(
+            verifications,
+            path=path,
+            check="path_missing",
+        )
+    if name == "desktop_archive_extract":
+        destination = _result_string(result, "destination")
+        return destination is not None and _has_path_check(
+            verifications,
+            path=destination,
+            check="path_exists",
+        )
+    if name in {"desktop_launch", "desktop_process"}:
+        pid = result.data.get("pid")
+        return isinstance(pid, int) and any(
+            verify_args.get("check") == "process_running" and verify_args.get("pid") == pid
+            for verify_args, _ in verifications
+        )
+    if name == "desktop_browser":
+        page_id = result.data.get("page_id")
+        if not isinstance(page_id, str):
+            return False
+        semantic_observations = {"find", "read", "snapshot", "wait"}
+        return any(
+            later_name == "desktop_browser"
+            and later_result.ok
+            and later_args.get("operation") in semantic_observations
+            and later_result.data.get("page_id") == page_id
+            for later_name, later_args, later_result in later
+        )
+    if name == "desktop_gui":
+        observations = {"windows", "active_window", "observe", "screenshot"}
+        return any(
+            later_name == "desktop_gui"
+            and later_result.ok
+            and later_args.get("operation") in observations
+            for later_name, later_args, later_result in later
+        )
+    return bool(verifications)
+
+
+def _desktop_call_changes_state(name: str, args: dict[str, JSONValue]) -> bool:
+    if name in {
+        "desktop_file_write",
+        "desktop_file_transfer",
+        "desktop_file_delete",
+        "desktop_archive_extract",
+        "desktop_shell",
+        "desktop_launch",
+    }:
+        return True
+    operation = args.get("operation")
+    if not isinstance(operation, str):
+        return False
+    if name == "desktop_clipboard":
+        return operation in {"write", "clear"}
+    if name == "desktop_process":
+        return operation in {"launch", "terminate", "kill"}
+    if name == "desktop_systemd":
+        return operation in {"start", "stop", "restart", "enable", "disable"}
+    if name == "desktop_package":
+        return operation in {"install", "remove", "update_metadata"}
+    if name == "desktop_session":
+        return operation in {"notify", "lock"}
+    if name == "desktop_browser":
+        return operation in {
+            "open",
+            "new_tab",
+            "navigate",
+            "click",
+            "input",
+            "select",
+            "submit",
+            "close_tab",
+            "download",
+            "close",
+        }
+    if name == "desktop_gui":
+        return operation in {"focus", "invoke", "set_text", "click", "type", "shortcut"}
+    return False
+
+
+def _has_path_check(
+    verifications: Sequence[tuple[dict[str, JSONValue], ToolResult]],
+    *,
+    path: str,
+    check: str,
+) -> bool:
+    return any(
+        verify_args.get("check") == check and verify_result.data.get("path") == path
+        for verify_args, verify_result in verifications
+    )
+
+
+def _result_string(result: ToolResult, key: str) -> str | None:
+    value = result.data.get(key)
+    return value if isinstance(value, str) else None
+
+
 @dataclass(frozen=True)
 class VerifierRuntime:
     runner: VerifierRunnerProtocol = field(default_factory=_default_runner)
     fallback_commands: tuple[tuple[str, ...], ...] = DEFAULT_FALLBACK_COMMANDS
     project_root: Path = field(default_factory=_default_project_root)
+
+    def verify_desktop_observations(
+        self,
+        calls: Sequence[tuple[str, dict[str, JSONValue], ToolResult]],
+    ) -> VerificationResult:
+        start = time.monotonic()
+        if not calls:
+            return _desktop_observation_result(
+                status=VerificationStatus.FAILED,
+                reason="desktop_no_observable_tool_action",
+                duration_seconds=time.monotonic() - start,
+            )
+        change_attempts = [
+            (index, name, args, result)
+            for index, (name, args, result) in enumerate(calls)
+            if _desktop_call_changes_state(name, args)
+        ]
+        successful_changes = [
+            (index, name, args, result)
+            for index, name, args, result in change_attempts
+            if result.ok
+        ]
+        if successful_changes:
+            for index, name, args, result in successful_changes:
+                later = calls[index + 1 :]
+                if _desktop_change_is_verified(name, args, result, later):
+                    continue
+                return _desktop_observation_result(
+                    status=VerificationStatus.FAILED,
+                    reason=f"desktop_result_verification_required:{name}",
+                    duration_seconds=time.monotonic() - start,
+                )
+        elif change_attempts or not any(result.ok for _, _, result in calls):
+            last_error = next(
+                (result.error for _, _, result in reversed(calls) if result.error),
+                "desktop_no_successful_observation",
+            )
+            return _desktop_observation_result(
+                status=VerificationStatus.FAILED,
+                reason=last_error,
+                duration_seconds=time.monotonic() - start,
+            )
+        return _desktop_observation_result(
+            status=VerificationStatus.PASSED,
+            reason=f"Verified {len(calls)} Desktop tool observation(s).",
+            duration_seconds=time.monotonic() - start,
+        )
 
     def run(self, task: TaskPacket, context: RunContext) -> VerificationResult:
         start = time.monotonic()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 from typing import Final, Literal, cast
 
 from config.computer_backend_config import resolve_computer_backend_config
@@ -20,6 +21,9 @@ from core.computer_backend import ComputerBackend, LocalComputerBackend
 from core.container_computer_backend import ContainerComputerBackend
 from core.decision.handler import DecisionHandler
 from core.decision.models import DecisionPacket
+from core.desktop_policy import DesktopPolicyRuntime, DesktopPolicyStore
+from core.desktop_runtime import DesktopExecutionControl, DesktopRuntime
+from core.desktop_security import DesktopPathSecurity
 from core.mwv.manager import ManagerRuntime
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.plan_compiler import compile_structured_plan_steps
@@ -51,6 +55,28 @@ from shared.models import (
     ToolCallRecord,
     ToolResult,
     WorkspaceDiffEntry,
+)
+from tools.desktop_browser_tool import DesktopBrowserTool
+from tools.desktop_gui_tool import DesktopGuiTool
+from tools.desktop_system_tools import (
+    DesktopClipboardTool,
+    DesktopPackageTool,
+    DesktopProcessTool,
+    DesktopSessionTool,
+    DesktopSystemdTool,
+    DesktopSystemInfoTool,
+)
+from tools.desktop_tools import (
+    DesktopArchiveExtractTool,
+    DesktopFileDeleteTool,
+    DesktopFileReadTool,
+    DesktopFileSearchTool,
+    DesktopFileTransferTool,
+    DesktopFileWriteTool,
+    DesktopLaunchTool,
+    DesktopOpenTool,
+    DesktopShellTool,
+    DesktopVerifyTool,
 )
 from tools.filesystem_tool import SANDBOX_ROOT, FilesystemTool
 from tools.http_client import HttpClient
@@ -144,6 +170,8 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         embeddings_local_model: str = "all-MiniLM-L6-v2",
         embeddings_openai_model: str = "text-embedding-3-small",
         embeddings_openai_api_key: str | None = None,
+        desktop_policy_store: DesktopPolicyStore | None = None,
+        desktop_home: Path | None = None,
     ) -> None:
         self.main_config = main_config
         self.main_api_key = main_api_key
@@ -170,7 +198,37 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.tracer = Tracer()
         self.auto_agent = AutoAgent(self)
         self.auto_agent.set_progress_callback(self._record_auto_progress)
+        self.desktop_execution_control = DesktopExecutionControl()
+        self.desktop_runtime = DesktopRuntime(self)
         self.tools_enabled = enable_tools or self._load_tools()
+        self.desktop_policy_store = desktop_policy_store or DesktopPolicyStore()
+        project_root = Path(__file__).resolve().parents[1]
+        self.desktop_security = DesktopPathSecurity(
+            home=desktop_home,
+            policy_store_path=self.desktop_policy_store.path,
+            protected_paths=(
+                project_root / "config",
+                project_root / "core" / "approval_policy.py",
+                project_root / "core" / "agent.py",
+                project_root / "core" / "desktop_policy.py",
+                project_root / "core" / "desktop_runtime.py",
+                project_root / "core" / "desktop_security.py",
+                project_root / "core" / "tool_gateway.py",
+                project_root / "core" / "tool_loop.py",
+                project_root / "requirements.in",
+                project_root / "requirements.txt",
+                project_root / "constraints.txt",
+                project_root / "tools" / "desktop_tools.py",
+                project_root / "tools" / "desktop_browser_tool.py",
+                project_root / "tools" / "desktop_gui_tool.py",
+                project_root / "tools" / "desktop_system_tools.py",
+                project_root / "tools" / "tool_descriptors.py",
+                project_root / "tools" / "tool_registry.py",
+                project_root / "server" / "http" / "handlers" / "decision.py",
+                project_root / "server" / "http" / "handlers" / "desktop.py",
+            ),
+        )
+        self.desktop_policy_runtime = DesktopPolicyRuntime(self.desktop_policy_store.list_rules())
         self.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
         self.web_tool = WebSearchTool()
         self._register_tools()
@@ -292,6 +350,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             enabled: bool,
             capability: ToolCapability,
             risk_classes: list[str] | None = None,
+            execution_targets: set[str] | None = None,
         ) -> None:
             metadata = get_tool_metadata(name)
             self.tool_registry.register(
@@ -303,6 +362,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
                 description=metadata.description,
                 parameters_schema=metadata.parameters_schema,
                 chat_exposed=name in CHAT_EXPOSED_READ_TOOLS,
+                execution_targets=execution_targets,
             )
 
         register_tool(
@@ -423,6 +483,91 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             capability="exec",
             risk_classes=["execute"],
         )
+        desktop_open = DesktopOpenTool(self.desktop_security)
+        desktop_launcher = DesktopLaunchTool(
+            self.desktop_security,
+            cancelled=self.desktop_execution_control.cancelled,
+            on_launch=self.desktop_execution_control.register_launch,
+        )
+        self.desktop_browser_tool = DesktopBrowserTool(
+            self.desktop_security,
+            cancelled=self.desktop_execution_control.cancelled,
+        )
+        self.desktop_gui_tool = DesktopGuiTool()
+        desktop_tools: list[tuple[str, Tool, ToolCapability, list[str]]] = [
+            ("desktop_file_search", DesktopFileSearchTool(self.desktop_security), "read", ["read"]),
+            ("desktop_file_read", DesktopFileReadTool(self.desktop_security), "read", ["read"]),
+            ("desktop_file_write", DesktopFileWriteTool(self.desktop_security), "write", ["write"]),
+            (
+                "desktop_file_transfer",
+                DesktopFileTransferTool(self.desktop_security),
+                "write",
+                ["write"],
+            ),
+            (
+                "desktop_file_delete",
+                DesktopFileDeleteTool(self.desktop_security),
+                "write",
+                ["write", "destructive"],
+            ),
+            (
+                "desktop_archive_extract",
+                DesktopArchiveExtractTool(self.desktop_security),
+                "write",
+                ["write"],
+            ),
+            (
+                "desktop_shell",
+                DesktopShellTool(
+                    self.desktop_security,
+                    cancelled=self.desktop_execution_control.cancelled,
+                ),
+                "exec",
+                ["execute"],
+            ),
+            ("desktop_clipboard", DesktopClipboardTool(), "exec", ["external_side_effect"]),
+            ("desktop_system_info", DesktopSystemInfoTool(), "read", ["read"]),
+            (
+                "desktop_process",
+                DesktopProcessTool(
+                    self.desktop_security,
+                    launcher=desktop_launcher,
+                    cancelled=self.desktop_execution_control.cancelled,
+                ),
+                "exec",
+                ["execute"],
+            ),
+            ("desktop_systemd", DesktopSystemdTool(), "exec", ["execute", "privileged"]),
+            ("desktop_package", DesktopPackageTool(), "exec", ["install", "privileged"]),
+            ("desktop_session", DesktopSessionTool(), "exec", ["external_side_effect"]),
+            ("desktop_open", desktop_open, "exec", ["execute", "external_side_effect"]),
+            (
+                "desktop_browser",
+                self.desktop_browser_tool,
+                "exec",
+                ["network", "external_side_effect"],
+            ),
+            (
+                "desktop_gui",
+                self.desktop_gui_tool,
+                "exec",
+                ["execute", "external_side_effect"],
+            ),
+            ("desktop_verify", DesktopVerifyTool(self.desktop_security), "read", ["read"]),
+        ]
+        for name, handler, capability, risk_classes in desktop_tools:
+            register_tool(
+                name,
+                handler,
+                enabled=True,
+                capability=capability,
+                risk_classes=risk_classes,
+                execution_targets={"desktop"},
+            )
+
+    def close_desktop_resources(self) -> None:
+        self.desktop_browser_tool.close()
+        self.desktop_gui_tool.close()
 
     def synthesize_speech(
         self,

@@ -18,6 +18,7 @@ from config.tools_config import (
     save_tools_config,
 )
 from core.approval_policy import ApprovalCategory
+from core.desktop_policy import DesktopPolicyStore
 from server.http.common import (
     chat_payload as _chat_payload,
 )
@@ -190,6 +191,7 @@ DEFAULT_POLICY_PROFILE: Final[str] = _ui_settings.DEFAULT_POLICY_PROFILE
 UI_DECISION_RESPONSES: Final[set[str]] = {
     "approve_once",
     "approve_session",
+    "always_allow",
     "edit_and_approve",
     "edit_plan",
     "reject",
@@ -509,6 +511,7 @@ def create_app(
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
     auth_config: HttpAuthConfig | None = None,
+    desktop_policy_store: DesktopPolicyStore | None = None,
 ) -> web.Application:
     from server.http.app import create_app as _create_app
 
@@ -517,6 +520,7 @@ def create_app(
         max_request_bytes=max_request_bytes,
         ui_storage=ui_storage,
         auth_config=auth_config,
+        desktop_policy_store=desktop_policy_store,
     )
 
 

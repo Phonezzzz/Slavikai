@@ -5,6 +5,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
+from core.desktop_policy import (
+    DesktopAction,
+    DesktopApprovalScope,
+    DesktopPolicyRuntime,
+    PolicyEffect,
+    desktop_actions_from_request,
+    exact_scope_for_action,
+)
+from core.desktop_security import DesktopPathSecurity
 from shared.models import JSONValue, ToolRequest
 
 ApprovalCategory = Literal[
@@ -43,6 +52,9 @@ class ApprovalContext:
     safe_mode: bool
     session_id: str | None
     approved_categories: set[ApprovalCategory]
+    execution_target: Literal["sandbox", "desktop"] = "sandbox"
+    desktop_policy: DesktopPolicyRuntime | None = None
+    desktop_security: DesktopPathSecurity | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +63,7 @@ class ApprovalDecision:
     reason: str
     intents: list[ActionIntent]
     required_categories: list[ApprovalCategory]
+    policy_rule_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +74,9 @@ class ApprovalRequest:
     tool: str
     details: dict[str, JSONValue]
     session_id: str | None
+    scope: DesktopApprovalScope | None = None
+    reason: str = "category_not_approved"
+    policy_rule_id: str | None = None
 
 
 class ApprovalRequired(RuntimeError):
@@ -166,10 +182,83 @@ def decide_action(
     return ApprovalDecision("allow", "approved", intents, [])
 
 
+def decide_request(
+    *,
+    context: ApprovalContext,
+    request: ToolRequest,
+    risk_classes: Sequence[str] | None = None,
+) -> tuple[ApprovalDecision, DesktopApprovalScope | None]:
+    if context.execution_target != "desktop":
+        intents = detect_action_intents(request, risk_classes=risk_classes)
+        return decide_action(context=context, intents=intents), None
+    actions = desktop_actions_from_request(request)
+    if not actions:
+        return ApprovalDecision("block", "desktop_tool_unknown", [], []), None
+    canonical_actions = [
+        _canonical_desktop_action(action, context.desktop_security) for action in actions
+    ]
+    defaults = [_desktop_default(action, context.desktop_security) for action in canonical_actions]
+    for action, (hard_effect, hard_reason) in zip(canonical_actions, defaults, strict=True):
+        if hard_effect == "deny":
+            intent = _desktop_intent(action, request)
+            return (
+                ApprovalDecision("block", hard_reason, [intent], [intent.category]),
+                exact_scope_for_action(action),
+            )
+    policy = context.desktop_policy or DesktopPolicyRuntime()
+    resolutions = [
+        policy.resolve(
+            action,
+            default_effect=default[0],
+            default_reason=default[1],
+            consume_once=False,
+        )
+        for action, default in zip(canonical_actions, defaults, strict=True)
+    ]
+    for wanted_effect in ("deny", "ask"):
+        for action, resolution in zip(canonical_actions, resolutions, strict=True):
+            if resolution.effect != wanted_effect:
+                continue
+            intent = _desktop_intent(action, request)
+            status: ApprovalDecisionStatus = (
+                "block" if wanted_effect == "deny" else "require_approval"
+            )
+            return (
+                ApprovalDecision(
+                    status,
+                    resolution.reason,
+                    [intent],
+                    [intent.category],
+                    policy_rule_id=resolution.rule_id,
+                ),
+                exact_scope_for_action(action),
+            )
+    policy.consume_once_rule_ids(
+        {resolution.rule_id for resolution in resolutions if resolution.rule_id is not None}
+    )
+    intents = [_desktop_intent(action, request) for action in canonical_actions]
+    reason = next(
+        (resolution.reason for resolution in resolutions if resolution.rule_id is not None),
+        "desktop_safe_default",
+    )
+    policy_rule_id = next(
+        (resolution.rule_id for resolution in resolutions if resolution.rule_id is not None),
+        None,
+    )
+    return ApprovalDecision(
+        "allow",
+        reason,
+        intents,
+        [],
+        policy_rule_id=policy_rule_id,
+    ), exact_scope_for_action(canonical_actions[-1])
+
+
 def build_approval_request(
     *,
     context: ApprovalContext,
     decision: ApprovalDecision,
+    scope: DesktopApprovalScope | None = None,
 ) -> ApprovalRequest | None:
     if decision.status != "require_approval" or not decision.intents:
         return None
@@ -181,7 +270,137 @@ def build_approval_request(
         tool=primary.tool,
         details=primary.details,
         session_id=context.session_id,
+        scope=scope,
+        reason=decision.reason,
+        policy_rule_id=decision.policy_rule_id,
     )
+
+
+def _canonical_desktop_action(
+    action: DesktopAction,
+    security: DesktopPathSecurity | None,
+) -> DesktopAction:
+    if security is None or action.target is None:
+        return action
+    if not _desktop_target_is_path(action):
+        return action
+    resolved = security.resolve(
+        action.target,
+        mutation=_desktop_action_mutates_target(action),
+    )
+    return DesktopAction(
+        tool=action.tool,
+        action=action.action,
+        target=str(resolved.canonical),
+        command_class=action.command_class,
+        command=action.command,
+        risk_class=action.risk_class,
+        execution_target=action.execution_target,
+    )
+
+
+def _desktop_default(
+    action: DesktopAction,
+    security: DesktopPathSecurity | None,
+) -> tuple[PolicyEffect, str]:
+    if action.target is not None and security is not None and _desktop_target_is_path(action):
+        resolved = security.resolve(
+            action.target,
+            mutation=_desktop_action_mutates_target(action),
+        )
+        if resolved.protection == "deny":
+            return "deny", f"protected_resource:{resolved.reason}"
+        if resolved.protection == "ask":
+            return "ask", f"sensitive_resource:{resolved.reason}"
+    if action.action == "delete":
+        return "ask", "destructive_action"
+    if action.risk_class == "overwrite":
+        return "ask", "overwrite_action"
+    if action.risk_class in {
+        "destructive",
+        "external_side_effect",
+        "install",
+        "sensitive_read",
+        "system_impact",
+        "ui_interaction",
+    }:
+        return "ask", f"desktop_risk_requires_approval:{action.risk_class}"
+    if action.command_class in {"privilege_escalation", "disk_boot", "shell_indirection"}:
+        return "deny", f"command_denied:{action.command_class}"
+    if action.command_class in {
+        "package_management",
+        "service_management",
+        "network",
+        "project_execution",
+        "filesystem_mutation",
+        "unknown",
+        "malformed",
+    }:
+        return "ask", f"command_requires_approval:{action.command_class}"
+    return "allow", "desktop_safe_default"
+
+
+def _desktop_action_mutates_target(action: DesktopAction) -> bool:
+    return action.action in {
+        "archive_extract",
+        "copy",
+        "delete",
+        "move",
+        "move_source",
+        "rename",
+        "write",
+        "download_destination",
+    }
+
+
+def _desktop_target_is_path(action: DesktopAction) -> bool:
+    if action.tool in {
+        "desktop_file_search",
+        "desktop_file_read",
+        "desktop_file_write",
+        "desktop_file_transfer",
+        "desktop_file_delete",
+        "desktop_archive_extract",
+        "desktop_shell",
+        "desktop_launch",
+        "desktop_verify",
+    }:
+        return True
+    if action.tool == "desktop_process" and action.action == "launch":
+        return True
+    return action.tool == "desktop_browser" and action.action == "download_destination"
+
+
+def _desktop_intent(action: DesktopAction, request: ToolRequest) -> ActionIntent:
+    category: ApprovalCategory
+    if action.command_class == "package_management" or (
+        action.tool == "desktop_package"
+        and action.action in {"install", "remove", "update_metadata"}
+    ):
+        category = "DEPS_INSTALL_UPDATE"
+    elif action.action == "delete" or action.risk_class in {"destructive", "overwrite"}:
+        category = "FS_DELETE_OVERWRITE"
+    elif action.command_class == "service_management":
+        category = "SYSTEM_IMPACT"
+    elif action.tool == "desktop_systemd" or action.risk_class == "system_impact":
+        category = "SYSTEM_IMPACT"
+    elif action.command_class == "privilege_escalation":
+        category = "SUDO"
+    elif action.risk_class == "network":
+        category = "NETWORK_RISK"
+    elif action.risk_class == "sensitive_read":
+        category = "FS_CONFIG_SECRETS"
+    else:
+        category = "EXEC_ARBITRARY"
+    details: dict[str, JSONValue] = {
+        "action": action.action,
+        "target": action.target,
+        "command_class": action.command_class,
+        "risk_class": action.risk_class,
+        "execution_target": action.execution_target,
+        "arguments": request.args,
+    }
+    return _intent(action.tool, category, details)
 
 
 def detect_action_intents(

@@ -861,7 +861,7 @@ class SQLiteUISessionStorage:
 
     def _normalize_mode(self, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized in {"ask", "plan", "act", "auto"}:
+        if normalized in {"ask", "plan", "act", "auto", "desktop"}:
             return normalized
         return "ask"
 

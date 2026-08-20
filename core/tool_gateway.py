@@ -8,8 +8,7 @@ from core.approval_policy import (
     ApprovalContext,
     ApprovalRequired,
     build_approval_request,
-    decide_action,
-    detect_action_intents,
+    decide_request,
 )
 from shared.models import JSONValue, ToolRequest, ToolResult
 from tools.tool_registry import ToolRegistry
@@ -28,15 +27,16 @@ class ToolGateway:
     def call(self, request: ToolRequest) -> ToolResult:
         bypass_safe_mode = False
         if self.approval_context is not None:
-            intents = detect_action_intents(
-                request,
+            decision, scope = decide_request(
+                context=self.approval_context,
+                request=request,
                 risk_classes=self.registry.get_risk_classes(request.name),
             )
-            decision = decide_action(context=self.approval_context, intents=intents)
             if decision.status == "require_approval":
                 approval_request = build_approval_request(
                     context=self.approval_context,
                     decision=decision,
+                    scope=scope,
                 )
                 if approval_request is None:
                     raise RuntimeError("Approval request was not built.")
@@ -50,20 +50,39 @@ class ToolGateway:
                             "tool": approval_request.tool,
                             "details": approval_request.details,
                             "session_id": approval_request.session_id,
+                            "policy_rule_id": approval_request.policy_rule_id,
                         },
                     )
                 raise ApprovalRequired(approval_request)
-            if decision.status == "allow" and intents:
-                bypass_safe_mode = True
-                if self.log_event and not self.approval_context.safe_mode:
-                    categories = [intent.category for intent in intents]
+            if decision.status == "block":
+                if self.log_event:
                     self.log_event(
-                        "approval_skipped",
-                        "Safe mode disabled",
+                        "policy_denied",
+                        decision.reason,
+                        {
+                            "tool": request.name,
+                            "session_id": self.approval_context.session_id,
+                            "execution_target": self.approval_context.execution_target,
+                            "policy_rule_id": decision.policy_rule_id,
+                        },
+                    )
+                return ToolResult.failure(
+                    f"POLICY_DENY: {decision.reason}",
+                    meta={"policy_reason": decision.reason},
+                )
+            if decision.status == "allow" and decision.intents:
+                bypass_safe_mode = True
+                if self.log_event:
+                    categories = [intent.category for intent in decision.intents]
+                    self.log_event(
+                        "policy_allowed",
+                        decision.reason,
                         {
                             "categories": categories,
                             "tool": request.name,
                             "session_id": self.approval_context.session_id,
+                            "execution_target": self.approval_context.execution_target,
+                            "policy_rule_id": decision.policy_rule_id,
                         },
                     )
         context = self.pre_call(request) if self.pre_call else None

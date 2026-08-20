@@ -23,7 +23,10 @@
   `ContainerComputerBackend` (opt-in/inactive). Browser auth использует token login и
   подписанную HttpOnly-cookie; Plan draft получает executable steps через structured
   `submit_plan` tool call; Auto отклоняет provider без native tools до запуска и применяет
-  `tool_outcomes` verifier для generic workspace.
+  `tool_outcomes` verifier для generic workspace. Добавлен пользовательский режим Desktop:
+  тот же provider-neutral `AgentToolLoop -> ToolGateway -> VerifierRuntime`, но с явным
+  execution target `desktop`, host-only tool profile, детерминированной scoped policy
+  `ALLOW|ASK|DENY` и lifecycle once/session/persistent approvals.
 - **Current legacy runtime**: крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой
@@ -39,6 +42,12 @@
 2. Plan = **transactional**.
 3. Act = **isolated**.
 4. Auto = **FSM orchestrator**.
+5. Desktop = **host execution profile**, а не отдельный AI, planner или execution loop.
+
+В пользовательском UI Chat соответствует безопасному диалогу (`ask`), Agent — существующему
+изолированному agent/auto execution, Desktop — выполнению через host capabilities. Desktop
+ортогонален внутренним Plan/Act ролям: reasoning остаётся у текущего LLM provider, enforcement
+и execution target выбираются локальным runtime.
 
 ## 2) Инварианты (обязательные)
 
@@ -77,6 +86,26 @@
 - В `runtime_mode=auto` запрещён chat-fallback.
 - Budgets обязательны: time/tool_calls/tokens/files/retries.
 - При fail/ambiguity/risk Auto останавливается в STOP и ждёт явного решения.
+
+### Desktop (host execution profile)
+
+- Desktop tools имеют `execution_target=desktop` и не публикуются Chat/Agent tool snapshots.
+- Все host actions идут через существующие `ToolRequest -> ToolGateway -> ToolRegistry`.
+- Policy локальна и детерминирована; LLM не может создать approval или отключить enforcement.
+- Explicit `DENY` имеет precedence над `ALLOW`; scope включает tool/action/target/command/risk.
+- Пути канонизируются до policy match; symlink/traversal, credentials, policy store и
+  enforcement/config resources защищены на execution boundary.
+- Typed state-changing actions обязаны вернуть verified structured state. Generic
+  filesystem/shell actions требуют `desktop_verify`; browser/GUI interactions — correlated
+  post-action observation. Verifier может вернуть bounded correction cycle `AgentToolLoop`.
+- Capability order фиксирован: native/API → typed host tool → filesystem/system/DBus → argv
+  CLI → browser DOM → AT-SPI → visual GUI. GUI не является отдельным агентом.
+- Browser downloads являются host artifacts с canonical destination, size/type metadata и
+  existence verification; дальнейшие filesystem/archive tools используют тот же path.
+- Process identity включает PID + create time (или retained launcher handle), поэтому reused
+  PID не подтверждает состояние исходного процесса.
+- При выходе из Desktop pending execution отменяется, once/session approvals очищаются.
+- Наблюдения tools, файлов, terminal и browser считаются untrusted data, не approvals.
 
 ## 3) TaskPacket v2 (execution contract)
 
@@ -155,6 +184,9 @@ API:
 - Enforcement строится по packet-policy snapshot, а не по “текущему состоянию”.
 - Работа вне workspace root запрещается policy-check на исполнении шага.
 - Index-режим: явный, наблюдаемый, с отдельным контуром read/write.
+- Sandbox semantics относятся к Agent/Act. Desktop является отдельным explicit execution
+  target реального host и использует `DesktopPathSecurity` + scoped Desktop policy вместо
+  workspace sandbox; это исключение не распространяется на Chat или Agent.
 
 ## 7) Rollout `/v1` (совместимость)
 

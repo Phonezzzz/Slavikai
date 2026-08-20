@@ -153,7 +153,7 @@ def _request_requires_root_gate(
 ) -> bool:
     if content.strip().startswith("/"):
         return False
-    if mode == "ask":
+    if mode in {"ask", "desktop"}:
         return False
     route = classify_request(
         llm_messages,
@@ -679,6 +679,7 @@ async def _handle_ui_send_impl(
         )
 
         approved_categories = await session_store.get_categories(session_id)
+        desktop_rules = await session_store.get_desktop_rules(session_id)
         user_message = hub.create_message(
             role="user",
             content=content_raw.strip(),
@@ -807,6 +808,14 @@ async def _handle_ui_send_impl(
             try:
                 await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
                 agent.set_session_context(session_id, approved_categories)
+                set_desktop_policy_context = getattr(agent, "set_desktop_policy_context", None)
+                clear_desktop_policy_context = getattr(agent, "clear_desktop_policy_context", None)
+                if mode == "desktop":
+                    if not callable(set_desktop_policy_context):
+                        raise RuntimeError("Desktop policy context is unavailable")
+                    set_desktop_policy_context(desktop_rules)
+                elif callable(clear_desktop_policy_context):
+                    clear_desktop_policy_context()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Failed to set session context for ui",
@@ -817,6 +826,24 @@ async def _handle_ui_send_impl(
                         "error": str(exc),
                     },
                 )
+                if mode == "desktop":
+                    set_runtime_workspace_root(None)
+                    error_payload = {
+                        "error": {
+                            "message": "Desktop policy context could not be applied.",
+                            "type": "configuration_error",
+                            "code": "desktop_policy_context_failed",
+                            "trace_id": None,
+                            "details": {},
+                        }
+                    }
+                    await _complete_idempotency(error_payload, status=500)
+                    return error_response(
+                        status=500,
+                        message="Desktop policy context could not be applied.",
+                        error_type="configuration_error",
+                        code="desktop_policy_context_failed",
+                    )
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -1078,6 +1105,15 @@ async def _handle_ui_send_impl(
                         response_raw = f"[Ошибка ответа: {exc}]"
             else:
                 response_raw = agent.respond(llm_messages)
+            drain_consumed_rules = getattr(agent, "drain_consumed_desktop_rule_ids", None)
+            if callable(drain_consumed_rules):
+                consumed_raw = drain_consumed_rules()
+                consumed_rule_ids = (
+                    {item for item in consumed_raw if isinstance(item, str) and item.strip()}
+                    if isinstance(consumed_raw, list)
+                    else set()
+                )
+                await session_store.remove_desktop_rules(session_id, consumed_rule_ids)
             response_text, mwv_report = _split_response_and_report(response_raw)
             await _publish_agent_activity(
                 hub,
@@ -1205,6 +1241,14 @@ async def _handle_ui_send_impl(
         if guidance:
             trimmed = response_text.strip()
             response_text = f"{trimmed}\n\n{guidance}" if trimmed else guidance
+
+        if mode == "desktop" and _decision_is_pending_blocking(ui_decision):
+            latest_workflow = await hub.get_session_workflow(session_id)
+            latest_mode = _normalize_mode_value(latest_workflow.get("mode"), default="ask")
+            if latest_mode != "desktop":
+                ui_decision = None
+                approval_request = None
+                response_text = "Desktop task cancelled because the execution mode changed."
 
         if _decision_is_pending_blocking(ui_decision):
             await _set_current_plan_step_status(

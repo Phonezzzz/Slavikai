@@ -5,8 +5,10 @@ from pathlib import Path
 from aiohttp import web
 
 from core.mwv.verifier_runtime import has_canonical_repo_verifier
+from server.http.common.chat_cancellation import ChatCancellationRegistry
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import SessionApprovalStore
 from server.http_api import (
     SESSION_MODES,
     UI_SESSION_HEADER,
@@ -114,7 +116,7 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
     if not isinstance(mode_raw, str) or mode_raw.strip().lower() not in SESSION_MODES:
         return error_response(
             status=400,
-            message="mode должен быть ask|plan|act|auto.",
+            message="mode должен быть ask|plan|act|auto|desktop.",
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
@@ -158,6 +160,14 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="mode_confirm_required",
             )
+    session_store: SessionApprovalStore = request.app["session_store"]
+    if current_mode == "desktop" and next_mode != "desktop":
+        cancellation_registry: ChatCancellationRegistry = request.app["chat_cancellation_registry"]
+        await cancellation_registry.request_cancel(session_id)
+        await session_store.clear_desktop_rules(session_id)
+        await hub.set_session_decision(session_id, None)
+    elif current_mode != "desktop" and next_mode == "desktop":
+        await session_store.clear_desktop_rules(session_id)
     if next_mode == "ask":
         await hub.set_session_workflow(
             session_id,
@@ -170,6 +180,14 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
             mode="auto",
             active_plan=None,
             active_task=None,
+        )
+    elif next_mode == "desktop":
+        await hub.set_session_workflow(
+            session_id,
+            mode="desktop",
+            active_plan=None,
+            active_task=None,
+            auto_state=None,
         )
     else:
         await hub.set_session_workflow(session_id, mode=next_mode)
