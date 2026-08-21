@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
+import subprocess
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -14,7 +13,7 @@ from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ExecutedToolCall
 from llm.brain_base import Brain
 from llm.types import ModelConfig, ToolSpec
-from shared.models import LLMMessage
+from shared.models import LLMMessage, ToolRequest, ToolResult
 from tools.tool_registry import ToolRegistry
 
 DESKTOP_SYSTEM_PROMPT = """You are executing the user's task on their real Linux host.
@@ -56,13 +55,13 @@ class DesktopAgentProtocol(Protocol):
 class DesktopExecutionControl:
     def __init__(self) -> None:
         self._token: asyncio.Event | None = None
-        self._launched_pids: set[int] = set()
+        self._launched_processes: dict[int, subprocess.Popen[bytes]] = {}
         self._lock = threading.Lock()
 
     def bind(self, token: asyncio.Event | None) -> None:
         with self._lock:
             self._token = token
-            self._launched_pids.clear()
+            self._launched_processes.clear()
 
     def clear(self) -> None:
         with self._lock:
@@ -72,14 +71,14 @@ class DesktopExecutionControl:
         with self._lock:
             return bool(self._token is not None and self._token.is_set())
 
-    def register_launch(self, pid: int) -> None:
+    def register_launch(self, process: subprocess.Popen[bytes]) -> None:
         with self._lock:
-            self._launched_pids.add(pid)
+            self._launched_processes[process.pid] = process
 
-    def drain_launches(self) -> set[int]:
+    def drain_launches(self) -> list[subprocess.Popen[bytes]]:
         with self._lock:
-            launched = set(self._launched_pids)
-            self._launched_pids.clear()
+            launched = list(self._launched_processes.values())
+            self._launched_processes.clear()
             return launched
 
 
@@ -154,21 +153,21 @@ class DesktopRuntime:
                 final_gate=_final_gate,
             )
         except Exception:
-            self._cleanup_unverified_launches()
+            self._cleanup_unverified_launches(gateway)
             raise
         finally:
             self._close_resources()
             self.parent.desktop_execution_control.clear()
         verification = self._verify(loop_result.tool_calls)
         if loop_result.cancelled:
-            self._cleanup_unverified_launches()
+            self._cleanup_unverified_launches(gateway)
             return DesktopRunOutcome(
                 text="Desktop task cancelled before further host actions.",
                 verification=_failed_verification("desktop_task_cancelled"),
                 loop_result=loop_result,
             )
         if loop_result.error is not None or verification.status != VerificationStatus.PASSED:
-            self._cleanup_unverified_launches()
+            self._cleanup_unverified_launches(gateway)
             reason = loop_result.error or verification.error or "desktop_verification_failed"
             return DesktopRunOutcome(
                 text=f"Desktop task stopped: {reason}",
@@ -183,20 +182,8 @@ class DesktopRuntime:
         observations = [(item.call.name, dict(item.call.arguments), item.result) for item in calls]
         return self.verifier.verify_desktop_observations(observations)
 
-    def _cleanup_unverified_launches(self) -> None:
-        for pid in self.parent.desktop_execution_control.drain_launches():
-            try:
-                os.killpg(pid, signal.SIGTERM)
-            except OSError:
-                continue
-            tracer = getattr(self.parent, "tracer", None)
-            log = getattr(tracer, "log", None)
-            if callable(log):
-                log(
-                    "desktop_launch_cleanup",
-                    "Terminated unverified Desktop launch",
-                    {"pid": pid},
-                )
+    def _cleanup_unverified_launches(self, gateway: ToolGateway) -> ToolResult:
+        return gateway.call(ToolRequest("desktop_cleanup_unverified_launches", {}))
 
     def _close_resources(self) -> None:
         close = getattr(self.parent, "close_desktop_resources", None)

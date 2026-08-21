@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import tools.desktop_system_tools as system_tools_module
+from core.desktop_runtime import DesktopExecutionControl
 from core.desktop_security import DesktopPathSecurity
 from shared.models import ToolRequest
 from tools.desktop_system_tools import (
@@ -15,6 +16,7 @@ from tools.desktop_system_tools import (
     DesktopSessionTool,
     DesktopSystemdTool,
     DesktopSystemInfoTool,
+    DesktopUnverifiedLaunchCleanupTool,
 )
 from tools.desktop_tools import DesktopLaunchTool, DesktopShellTool
 
@@ -193,6 +195,36 @@ def test_real_process_launch_inspect_verify_and_terminate(tmp_path: Path) -> Non
                     },
                 )
             )
+
+
+def test_unverified_launch_cleanup_terminates_tracked_process(tmp_path: Path) -> None:
+    security = _security(tmp_path)
+    control = DesktopExecutionControl()
+    control.bind(None)
+    process_tool = DesktopProcessTool(
+        security,
+        launcher=DesktopLaunchTool(security, on_launch=control.register_launch),
+    )
+    launched = process_tool.handle(
+        ToolRequest(
+            "desktop_process",
+            {"operation": "launch", "argv": ["/usr/bin/sleep", "30"], "cwd": str(tmp_path)},
+        )
+    )
+    assert launched.ok
+    pid = launched.data["pid"]
+    assert isinstance(pid, int)
+
+    cleanup = DesktopUnverifiedLaunchCleanupTool(control, process_tool).handle(
+        ToolRequest("desktop_cleanup_unverified_launches", {})
+    )
+
+    assert cleanup.ok
+    assert cleanup.data["terminated_pids"] == [pid]
+    status = process_tool.handle(
+        ToolRequest("desktop_process", {"operation": "status", "pid": pid})
+    )
+    assert status.ok and status.data["running"] is False
 
 
 def test_generic_shell_refuses_typed_service_package_and_process_actions(tmp_path: Path) -> None:

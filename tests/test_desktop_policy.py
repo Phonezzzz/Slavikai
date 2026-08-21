@@ -62,6 +62,29 @@ def test_desktop_safe_create_is_allowed_but_delete_and_overwrite_ask(tmp_path: P
     assert overwrite.status == "require_approval"
 
 
+def test_runtime_cleanup_is_a_deterministic_allowed_rollback(tmp_path: Path) -> None:
+    decision, scope = decide_request(
+        context=_context(tmp_path),
+        request=ToolRequest("desktop_cleanup_unverified_launches", {}),
+    )
+
+    assert decision.status == "allow"
+    assert decision.reason == "desktop_safe_default"
+    assert scope is not None
+    assert scope.action == "rollback"
+    assert scope.target_pattern == "current-desktop-run"
+
+    store = DesktopPolicyStore(tmp_path / "desktop-approvals.json")
+    with pytest.raises(ValueError, match="Runtime cleanup policy недоступна"):
+        store.add_rule(
+            DesktopApprovalRule.create(
+                effect="deny",
+                source="persistent",
+                scope=scope,
+            )
+        )
+
+
 def test_deny_precedence_over_broad_allow() -> None:
     action = DesktopAction(
         tool="desktop_file_delete",
@@ -159,7 +182,7 @@ def test_shell_approval_is_bound_to_exact_command(tmp_path: Path) -> None:
 
     assert decision.status == "require_approval"
     assert scope is not None
-    assert scope.command_pattern == "pytest tests/test_one.py"
+    assert scope.command_exact == "pytest tests/test_one.py"
 
     rule = DesktopApprovalRule.create(effect="allow", source="session", scope=scope)
     allowed, _ = decide_request(context=_context(tmp_path, rules=[rule]), request=request)
@@ -175,7 +198,7 @@ def test_shell_approval_is_bound_to_exact_command(tmp_path: Path) -> None:
     assert changed.status == "require_approval"
 
 
-def test_exact_approval_does_not_treat_filename_or_command_globs_as_wildcards() -> None:
+def test_exact_approval_treats_wildcard_characters_literally() -> None:
     path_scope = DesktopApprovalScope(
         tool="desktop_file_delete",
         action="delete",
@@ -187,7 +210,7 @@ def test_exact_approval_does_not_treat_filename_or_command_globs_as_wildcards() 
         action="execute",
         target_pattern="/home/user",
         command_class="unknown",
-        command_pattern="custom '*'",
+        command_exact="custom '*'",
         risk_class="unknown",
     )
 
@@ -217,6 +240,17 @@ def test_exact_approval_does_not_treat_filename_or_command_globs_as_wildcards() 
             risk_class="unknown",
         )
     )
+
+
+def test_legacy_command_pattern_is_rejected_instead_of_broadening_scope() -> None:
+    with pytest.raises(ValueError, match="command_pattern больше не поддерживается"):
+        DesktopApprovalScope.from_dict(
+            {
+                "tool": "desktop_shell",
+                "action": "execute",
+                "command_pattern": "git *",
+            }
+        )
 
 
 def test_transfer_checks_protected_source_and_destination(tmp_path: Path) -> None:
@@ -295,7 +329,7 @@ def test_policy_store_round_trip_and_rejects_nonpersistent_rule(tmp_path: Path) 
                     action="execute",
                     target_pattern=str(tmp_path),
                     command_class="project_execution",
-                    command_pattern="pytest",
+                    command_exact="pytest",
                     risk_class="arbitrary_code",
                 ),
             )

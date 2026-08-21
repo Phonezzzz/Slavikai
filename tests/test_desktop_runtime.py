@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import signal
 from pathlib import Path
 
-import core.desktop_runtime as desktop_runtime_module
 from core.desktop_runtime import DESKTOP_SYSTEM_PROMPT, DesktopExecutionControl, DesktopRuntime
 from core.desktop_security import DesktopPathSecurity
 from core.mwv.models import VerificationStatus
@@ -41,12 +39,16 @@ class DesktopParent:
         self.tool_registry = registry
         self.main_config = None
         self.desktop_execution_control = DesktopExecutionControl()
+        self.gateway_requests: list[ToolRequest] = []
 
     def _get_main_brain(self) -> Brain:
         return self.brain
 
     def _build_tool_gateway(self) -> ToolGateway:
-        return ToolGateway(self.tool_registry)
+        return ToolGateway(
+            self.tool_registry,
+            pre_call=lambda request: self.gateway_requests.append(request),
+        )
 
 
 def _desktop_registry(tmp_path: Path) -> ToolRegistry:
@@ -347,7 +349,7 @@ def test_mode_switch_cancellation_stops_before_host_tool_call(tmp_path: Path) ->
     assert not path.exists()
 
 
-def test_unverified_launched_process_is_cleaned_up(tmp_path: Path, monkeypatch) -> None:
+def test_unverified_launched_process_is_cleaned_up_through_gateway(tmp_path: Path) -> None:
     del tmp_path
     registry = ToolRegistry()
     brain = ScriptedBrain(
@@ -364,8 +366,13 @@ def test_unverified_launched_process_is_cleaned_up(tmp_path: Path, monkeypatch) 
     parent = DesktopParent(brain, registry)
 
     def launch(_request: ToolRequest) -> ToolResult:
-        parent.desktop_execution_control.register_launch(43210)
         return ToolResult.success({"pid": 43210})
+
+    cleaned: list[ToolRequest] = []
+
+    def cleanup(request: ToolRequest) -> ToolResult:
+        cleaned.append(request)
+        return ToolResult.success({"terminated_pids": [43210], "verified": True})
 
     registry.register(
         "desktop_launch",
@@ -373,18 +380,20 @@ def test_unverified_launched_process_is_cleaned_up(tmp_path: Path, monkeypatch) 
         capability="exec",
         execution_targets={"desktop"},
     )
-    registry.set_execution_policy(mode="desktop")
-    killed: list[tuple[int, signal.Signals]] = []
-    monkeypatch.setattr(
-        desktop_runtime_module.os,
-        "killpg",
-        lambda pid, sig: killed.append((pid, sig)),
+    registry.register(
+        "desktop_cleanup_unverified_launches",
+        cleanup,
+        capability="exec",
+        model_exposed=False,
+        execution_targets={"desktop"},
     )
+    registry.set_execution_policy(mode="desktop")
 
     outcome = DesktopRuntime(parent, max_iterations=2).run("launch")
 
     assert not outcome.verification.ok
-    assert killed == [(43210, signal.SIGTERM)]
+    assert cleaned == [ToolRequest("desktop_cleanup_unverified_launches", {})]
+    assert parent.gateway_requests[-1] == ToolRequest("desktop_cleanup_unverified_launches", {})
 
 
 def test_tool_observations_are_marked_untrusted(tmp_path: Path) -> None:

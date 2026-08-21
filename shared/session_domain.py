@@ -6,7 +6,7 @@ from typing import Literal
 from shared.models import JSONValue
 
 MessageLane = Literal["chat", "workspace"]
-SessionMode = Literal["ask", "plan", "act", "auto", "desktop"]
+SessionMode = Literal["ask", "plan", "act", "auto"]
 PolicyProfile = Literal["sandbox", "index", "yolo"]
 
 
@@ -88,8 +88,6 @@ def normalize_session_mode(value: object) -> SessionMode:
             return "act"
         if normalized == "auto":
             return "auto"
-        if normalized == "desktop":
-            return "desktop"
     return "ask"
 
 

@@ -128,6 +128,19 @@ def test_tool_registry_descriptor_exposes_llm_metadata() -> None:
     assert descriptor.parameters_schema == schema
 
 
+def test_tool_registry_hides_runtime_internal_tools_from_model() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        "runtime_cleanup",
+        _echo_tool,
+        capability="exec",
+        model_exposed=False,
+    )
+
+    assert registry.get_descriptor("runtime_cleanup") is not None
+    assert "runtime_cleanup" not in {spec.name for spec in registry.list_tool_specs()}
+
+
 def test_agent_runtime_tools_have_complete_llm_metadata(tmp_path: Path) -> None:
     agent = Agent(
         brain=EchoBrainForMetadata(),

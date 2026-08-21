@@ -65,6 +65,7 @@ from tools.desktop_system_tools import (
     DesktopSessionTool,
     DesktopSystemdTool,
     DesktopSystemInfoTool,
+    DesktopUnverifiedLaunchCleanupTool,
 )
 from tools.desktop_tools import (
     DesktopArchiveExtractTool,
@@ -494,6 +495,11 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             cancelled=self.desktop_execution_control.cancelled,
         )
         self.desktop_gui_tool = DesktopGuiTool()
+        desktop_process = DesktopProcessTool(
+            self.desktop_security,
+            launcher=desktop_launcher,
+            cancelled=self.desktop_execution_control.cancelled,
+        )
         desktop_tools: list[tuple[str, Tool, ToolCapability, list[str]]] = [
             ("desktop_file_search", DesktopFileSearchTool(self.desktop_security), "read", ["read"]),
             ("desktop_file_read", DesktopFileReadTool(self.desktop_security), "read", ["read"]),
@@ -529,11 +535,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             ("desktop_system_info", DesktopSystemInfoTool(), "read", ["read"]),
             (
                 "desktop_process",
-                DesktopProcessTool(
-                    self.desktop_security,
-                    launcher=desktop_launcher,
-                    cancelled=self.desktop_execution_control.cancelled,
-                ),
+                desktop_process,
                 "exec",
                 ["execute"],
             ),
@@ -564,6 +566,20 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
                 risk_classes=risk_classes,
                 execution_targets={"desktop"},
             )
+        self.tool_registry.register(
+            "desktop_cleanup_unverified_launches",
+            DesktopUnverifiedLaunchCleanupTool(
+                self.desktop_execution_control,
+                desktop_process,
+            ),
+            enabled=True,
+            capability="exec",
+            risk_classes=["execute"],
+            description="Rollback processes launched by the current failed Desktop run.",
+            parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            model_exposed=False,
+            execution_targets={"desktop"},
+        )
 
     def close_desktop_resources(self) -> None:
         self.desktop_browser_tool.close()
