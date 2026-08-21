@@ -7,6 +7,7 @@ import platform
 import pwd
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -48,6 +49,14 @@ class ClipboardBackend(Protocol):
     def write(self, text: str) -> None: ...
 
     def clear(self) -> None: ...
+
+
+class DesktopLaunchControl(Protocol):
+    def drain_launches(self) -> list[subprocess.Popen[bytes]]: ...
+
+
+class DesktopProcessTracker(Protocol):
+    def forget_launched_process(self, pid: int) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +356,9 @@ class DesktopProcessTool:
             "operation must be list|find|inspect|launch|status|wait|terminate|kill"
         )
 
+    def forget_launched_process(self, pid: int) -> None:
+        self._launched.pop(pid, None)
+
     def _stop_process(self, request: ToolRequest, *, pid: int, operation: str) -> ToolResult:
         if pid in self._protected_pids or pid <= 1:
             return ToolResult.failure("Refusing to stop SlavikAI or an ancestor/system process.")
@@ -487,6 +499,58 @@ class DesktopProcessTool:
                 }
             )
         return sorted(items, key=lambda item: cast(int, item["pid"]))
+
+
+class DesktopUnverifiedLaunchCleanupTool:
+    def __init__(
+        self,
+        control: DesktopLaunchControl,
+        process_tracker: DesktopProcessTracker,
+    ) -> None:
+        self._control = control
+        self._process_tracker = process_tracker
+
+    def handle(self, request: ToolRequest) -> ToolResult:
+        if request.args:
+            return ToolResult.failure("Desktop launch cleanup does not accept arguments.")
+        terminated: list[int] = []
+        already_exited: list[int] = []
+        failed: list[int] = []
+        for process in self._control.drain_launches():
+            pid = process.pid
+            try:
+                if process.poll() is None:
+                    os.killpg(pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        failed.append(pid)
+                    else:
+                        terminated.append(pid)
+                else:
+                    already_exited.append(pid)
+            except OSError:
+                failed.append(pid)
+            finally:
+                self._process_tracker.forget_launched_process(pid)
+        details: dict[str, JSONValue] = {
+            "operation": "rollback",
+            "terminated_pids": terminated,
+            "already_exited_pids": already_exited,
+            "failed_pids": failed,
+            "verified": not failed,
+        }
+        if failed:
+            return ToolResult.failure(
+                "Failed to terminate one or more unverified Desktop launches.",
+                meta=details,
+            )
+        return ToolResult.success(
+            {
+                "output": "Unverified Desktop launches were rolled back through ToolGateway.",
+                **details,
+            }
+        )
 
 
 class DesktopSystemdTool:

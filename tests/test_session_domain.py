@@ -40,6 +40,7 @@ def test_session_domain_normalizers_default_to_safe_values() -> None:
     assert normalize_policy_profile("yolo") == "yolo"
     assert normalize_policy_profile("unknown") == "sandbox"
     assert normalize_session_mode("auto") == "auto"
+    assert normalize_session_mode("desktop") == "ask"
     assert normalize_session_mode("unknown") == "ask"
 
 
@@ -141,3 +142,9 @@ async def _assert_ui_hub_domain_views() -> None:
     assert workspace_session.auto_state["run_id"] == "auto-1"
     assert workspace_session.auto_state["status"] == "planning"
     assert [message.content for message in workspace_session.messages] == ["workspace msg"]
+
+    await hub.set_session_workflow(session_id, mode="desktop")
+    desktop_workspace = await hub.get_workspace_session_domain(session_id)
+
+    assert desktop_workspace is not None
+    assert desktop_workspace.mode == "ask"

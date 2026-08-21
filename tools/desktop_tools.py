@@ -435,11 +435,11 @@ class DesktopLaunchTool:
         security: DesktopPathSecurity,
         *,
         cancelled: Callable[[], bool] | None = None,
-        on_launch: Callable[[int], None] | None = None,
+        on_launch: Callable[[subprocess.Popen[bytes]], None] | None = None,
     ) -> None:
         self.security = security
         self.cancelled = cancelled or (lambda: False)
-        self.on_launch = on_launch or (lambda _pid: None)
+        self.on_launch = on_launch or (lambda _process: None)
 
     def handle(self, request: ToolRequest) -> ToolResult:
         result, _process = self.start(request)
@@ -478,7 +478,7 @@ class DesktopLaunchTool:
                 start_new_session=True,
                 env=_desktop_subprocess_env(),
             )
-            self.on_launch(process.pid)
+            self.on_launch(process)
         except (OSError, ValueError, PermissionError) as exc:
             return ToolResult.failure(f"Desktop launch failed: {exc}"), None
         if self.cancelled():

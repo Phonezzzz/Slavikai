@@ -35,7 +35,7 @@ class DesktopApprovalScope:
     action: str
     target_pattern: str | None = None
     command_class: str | None = None
-    command_pattern: str | None = None
+    command_exact: str | None = None
     risk_class: str | None = None
     execution_target: str = "desktop"
 
@@ -46,7 +46,7 @@ class DesktopApprovalScope:
             return False
         if self.command_class is not None and self.command_class != action.command_class:
             return False
-        if self.command_pattern is not None and action.command != self.command_pattern:
+        if self.command_exact is not None and action.command != self.command_exact:
             return False
         if self.risk_class is not None and self.risk_class != action.risk_class:
             return False
@@ -69,8 +69,8 @@ class DesktopApprovalScope:
             score += len(self.target_pattern.replace("*", ""))
         if self.command_class is not None:
             score += 10
-        if self.command_pattern is not None:
-            score += len(self.command_pattern.replace("*", ""))
+        if self.command_exact is not None:
+            score += len(self.command_exact)
         if self.risk_class is not None:
             score += 5
         return score
@@ -93,7 +93,7 @@ class DesktopApprovalScope:
             self.tool not in {"desktop_shell", "desktop_launch", "desktop_browser", "desktop_gui"}
             and (self.tool, self.action) not in non_persistent_actions
             and self.command_class is None
-            and self.command_pattern is None
+            and self.command_exact is None
         )
 
     def to_dict(self) -> dict[str, JSONValue]:
@@ -102,7 +102,7 @@ class DesktopApprovalScope:
             "action": self.action,
             "target_pattern": self.target_pattern,
             "command_class": self.command_class,
-            "command_pattern": self.command_pattern,
+            "command_exact": self.command_exact,
             "risk_class": self.risk_class,
             "execution_target": self.execution_target,
         }
@@ -111,6 +111,10 @@ class DesktopApprovalScope:
     def from_dict(cls, raw: object) -> DesktopApprovalScope:
         if not isinstance(raw, dict):
             raise ValueError("scope должен быть JSON-объектом")
+        if "command_pattern" in raw:
+            raise ValueError(
+                "scope.command_pattern больше не поддерживается; пересоздайте exact-command rule"
+            )
         tool = raw.get("tool")
         action = raw.get("action")
         execution_target = raw.get("execution_target", "desktop")
@@ -125,7 +129,7 @@ class DesktopApprovalScope:
             action=action.strip(),
             target_pattern=_optional_string(raw.get("target_pattern")),
             command_class=_optional_string(raw.get("command_class")),
-            command_pattern=_optional_string(raw.get("command_pattern")),
+            command_exact=_optional_string(raw.get("command_exact")),
             risk_class=_optional_string(raw.get("risk_class")),
         )
 
@@ -356,7 +360,7 @@ def exact_scope_for_action(action: DesktopAction) -> DesktopApprovalScope:
         action=action.action,
         target_pattern=action.target,
         command_class=action.command_class,
-        command_pattern=action.command,
+        command_exact=action.command,
         risk_class=action.risk_class,
         execution_target=action.execution_target,
     )
@@ -450,6 +454,10 @@ def desktop_actions_from_request(request: ToolRequest) -> list[DesktopAction]:
                 if action == "terminate"
                 else "read"
             )
+    elif tool == "desktop_cleanup_unverified_launches":
+        action = "rollback"
+        target = "current-desktop-run"
+        risk_class = "rollback"
     elif tool == "desktop_systemd":
         action = str(args.get("operation") or "status").strip().lower()
         scope = str(args.get("scope") or "system").strip().lower()
@@ -676,5 +684,7 @@ def _optional_string(value: object) -> str | None:
 
 
 def _validate_persistent_rule(rule: DesktopApprovalRule) -> None:
+    if rule.scope.tool == "desktop_cleanup_unverified_launches":
+        raise ValueError("Runtime cleanup policy недоступна для persistent Desktop rules")
     if rule.effect == "allow" and not rule.scope.supports_persistent_allow:
         raise ValueError("Persistent allow запрещён для unrestricted or sensitive Desktop scopes")

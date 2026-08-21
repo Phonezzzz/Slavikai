@@ -36,6 +36,7 @@ class ToolDescriptor:
     description: str = ""
     parameters_schema: dict[str, JSONValue] = field(default_factory=dict)
     chat_exposed: bool = False
+    model_exposed: bool = True
     execution_targets: frozenset[ExecutionTarget] = frozenset({"sandbox"})
 
 
@@ -67,6 +68,7 @@ class ToolRegistry:
         description: str = "",
         parameters_schema: dict[str, JSONValue] | None = None,
         chat_exposed: bool = False,
+        model_exposed: bool = True,
         execution_targets: set[str] | None = None,
     ) -> None:
         resolved: ToolHandler
@@ -86,6 +88,7 @@ class ToolRegistry:
             description=description,
             parameters_schema=parameters_schema or {},
             chat_exposed=chat_exposed,
+            model_exposed=model_exposed,
             execution_targets=self._normalize_execution_targets(execution_targets),
         )
         self._logger.info(
@@ -130,7 +133,11 @@ class ToolRegistry:
                 parameters_schema=dict(descriptor.parameters_schema),
             )
             for descriptor in self._tools.values()
-            if descriptor.enabled and self._execution_target in descriptor.execution_targets
+            if (
+                descriptor.enabled
+                and descriptor.model_exposed
+                and self._execution_target in descriptor.execution_targets
+            )
         ]
 
     def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:

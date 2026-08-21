@@ -147,6 +147,9 @@ conversational endpoint и существующий LLM/tool loop, но публ
   `desktop_package`, `desktop_session`, `desktop_open`, `desktop_browser`, `desktop_gui`,
   `desktop_verify`. `desktop_process/systemd/package` являются typed semantic capabilities;
   generic shell отказывает в прямых `kill/systemctl/apt` вызовах.
+- `desktop` остаётся инфраструктурным HTTP/runtime profile и не входит в shared domain
+  `SessionMode`: domain workflow сохраняет только `ask|plan|act|auto`, а Desktop snapshot
+  проецируется в безопасный базовый workflow `ask`.
 
 ## Sandbox и безопасность
 
@@ -163,11 +166,15 @@ conversational endpoint и существующий LLM/tool loop, но публ
 
 - `DesktopPolicyRuntime` объединяет persistent snapshot с once/session rules; explicit DENY
   всегда сильнее matching ALLOW.
+- Command scope использует явное exact-match поле `command_exact`; wildcard-команды не
+  поддерживаются и не могут неявно расширить approval.
 - `DesktopPolicyStore` хранит inspectable persistent rules атомарно с mode `0600`.
 - UI decision flow поддерживает approve once, approve for session, narrow always allow и deny;
   выбор и применённое policy решение пишутся в существующий trace/tool logging контур с
   redaction payload/secrets.
 - Переход из Desktop отменяет активную генерацию, очищает pending decision и session rules.
+- При fail/cancel процессы из непроверенного Desktop run завершаются через скрытый
+  runtime-only cleanup tool и `ToolGateway`, а не прямым вызовом из runtime.
 - Mutating tool success не завершает задачу: typed tools возвращают проверенное structured
   state, browser/GUI interaction требует correlated observation, а generic filesystem/shell
   action — отдельный `desktop_verify`. `AgentToolLoop` даёт ограниченный correction retry.

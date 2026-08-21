@@ -51,3 +51,5 @@ def test_phase2_tools_are_registered_only_for_desktop_execution_target(tmp_path:
     assert phase2.isdisjoint(sandbox_agent)
     assert phase2 <= desktop
     assert "desktop_launch" not in desktop
+    assert "desktop_cleanup_unverified_launches" not in desktop
+    assert agent.tool_registry.get_descriptor("desktop_cleanup_unverified_launches") is not None
