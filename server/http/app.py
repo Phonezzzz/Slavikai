@@ -183,7 +183,7 @@ def create_app(
     app["ui_hub"] = UIHub(
         storage=resolved_ui_storage,
         legacy_principal_id=owner_principal_id,
-        legacy_principal_aliases=_legacy_owner_principal_aliases(resolved_auth_config),
+        legacy_principal_aliases=_legacy_owner_principal_aliases(),
         on_session_pruned=lambda principal_id, session_id: provider.schedule_release(
             AgentScope(principal_id=principal_id, session_id=session_id)
         ),

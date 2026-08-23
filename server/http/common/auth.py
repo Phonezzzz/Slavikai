@@ -121,13 +121,20 @@ def _owner_principal_id(auth_config: HttpAuthConfig) -> str:
     return "local_unauth"
 
 
-def _legacy_owner_principal_aliases(auth_config: HttpAuthConfig) -> frozenset[str]:
+def _legacy_owner_principal_aliases() -> frozenset[str]:
+    """Legacy browser principal'ы, допустимые для одноразовой миграции к owner.
+
+    Bearer/token principal'ы намеренно исключены: тот же token-derived principal
+    обслуживает живые /v1 automation sessions, поэтому авто-миграция передала бы
+    automation state владельцу и смешала browser и /v1 lanes. Token-era browser
+    данные при необходимости мигрируются явно через SLAVIK_LEGACY_OWNER_PRINCIPAL_ALIASES.
+    """
     aliases = {"legacy", "local_unauth"}
-    if auth_config.api_token:
-        aliases.add(_principal_id_from_token(auth_config.api_token))
-    admin_token = os.environ.get("SLAVIK_ADMIN_TOKEN", "").strip()
-    if admin_token:
-        aliases.add(_principal_id_from_token(admin_token))
+    explicit_raw = os.environ.get("SLAVIK_LEGACY_OWNER_PRINCIPAL_ALIASES", "").strip()
+    for alias in explicit_raw.split(","):
+        alias = alias.strip()
+        if alias:
+            aliases.add(alias)
     return frozenset(aliases)
 
 

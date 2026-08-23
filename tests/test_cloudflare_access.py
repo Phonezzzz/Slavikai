@@ -44,24 +44,62 @@ class StubAccessVerifier:
         return claims
 
 
-def test_owner_migration_includes_all_legacy_browser_principals(monkeypatch) -> None:
+def test_owner_migration_aliases_exclude_bearer_automation_principals(monkeypatch) -> None:
     monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "legacy-admin-token")
-    aliases = _legacy_owner_principal_aliases(
-        HttpAuthConfig(
-            api_token="legacy-api-token",
+    monkeypatch.delenv("SLAVIK_LEGACY_OWNER_PRINCIPAL_ALIASES", raising=False)
+    aliases = _legacy_owner_principal_aliases()
+
+    assert aliases == {"legacy", "local_unauth"}
+    assert _principal_id_from_token("legacy-api-token") not in aliases
+    assert _principal_id_from_token("legacy-admin-token") not in aliases
+
+
+def test_owner_migration_respects_explicit_alias_list(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "SLAVIK_LEGACY_OWNER_PRINCIPAL_ALIASES",
+        "principal_custom,email:old@example.com",
+    )
+    aliases = _legacy_owner_principal_aliases()
+
+    assert "principal_custom" in aliases
+    assert "email:old@example.com" in aliases
+    assert "legacy" in aliases
+    assert "local_unauth" in aliases
+
+
+def test_owner_migration_does_not_reassign_bearer_automation_sessions(
+    tmp_path: Path,
+) -> None:
+    token_principal = _principal_id_from_token("automation-token")
+    storage = InMemoryUISessionStorage()
+    storage.save_session(
+        PersistedSession(
+            session_id="automation-session",
+            principal_id=token_principal,
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:01+00:00",
+            status="ok",
+            decision=None,
+            messages=[],
+        )
+    )
+
+    create_app(
+        agent=DummyAgent(),
+        ui_storage=storage,
+        auth_config=HttpAuthConfig(
+            api_token="automation-token",
             browser_auth_mode="cloudflare",
             cloudflare_access_issuer="https://example.cloudflareaccess.com",
             cloudflare_access_aud="application-aud",
             owner_email="owner@example.com",
-        )
+        ),
+        cloudflare_access_verifier=StubAccessVerifier({}),
+        desktop_policy_store=DesktopPolicyStore(tmp_path / "desktop-approvals.json"),
     )
 
-    assert aliases == {
-        "legacy",
-        "local_unauth",
-        _principal_id_from_token("legacy-api-token"),
-        _principal_id_from_token("legacy-admin-token"),
-    }
+    sessions = {item.session_id: item for item in storage.load_sessions()}
+    assert sessions["automation-session"].principal_id == token_principal
 
 
 def _b64url(value: bytes) -> str:
@@ -401,7 +439,9 @@ def test_cloudflare_owner_receives_legacy_sessions(tmp_path: Path) -> None:
     sessions = storage.load_sessions()
     folders = storage.load_folders()
 
-    assert {session.principal_id for session in sessions} == {"email:owner@example.com"}
+    sessions_by_id = {session.session_id: session for session in sessions}
+    assert sessions_by_id["legacy-session"].principal_id == "email:owner@example.com"
+    assert sessions_by_id["token-cookie-session"].principal_id == token_principal
     assert folders[0].principal_id == "email:owner@example.com"
     assert app["ui_hub"] is not None
 
