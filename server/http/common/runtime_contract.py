@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Protocol, cast
 
 import requests
@@ -14,9 +13,10 @@ from core.mwv.manager import MWVRunResult
 from core.mwv.models import RunContext, TaskPacket
 from llm.stream_model import StreamEvent
 from llm.types import ModelConfig
+from server.agent_provider import AgentScope, ScopedAgentProvider
+from server.http.common.auth import _request_principal_id
 from server.http.common.responses import error_response as _error_response
-from server.http.common.ui_settings import _build_model_config
-from server.lazy_agent import LazyAgentProvider
+from server.http.common.ui_settings import _build_model_config, _resolve_provider_api_key
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
 
@@ -176,14 +176,6 @@ class RuntimeModelResolverProtocol(Protocol):
     async def resolve_main(self, session_id: str | None) -> ModelConfig | None: ...
 
 
-def _load_agent_factory() -> Callable[..., AgentProtocol]:
-    module = importlib.import_module("core.agent")
-    agent_factory = getattr(module, "Agent", None)
-    if not callable(agent_factory):
-        raise RuntimeError("Agent class not found in core.agent")
-    return cast(Callable[..., AgentProtocol], agent_factory)
-
-
 def _model_not_selected_response() -> web.Response:
     return _error_response(
         status=409,
@@ -193,33 +185,80 @@ def _model_not_selected_response() -> web.Response:
     )
 
 
-async def _resolve_agent(request: web.Request) -> AgentProtocol | None:
-    provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
+def _agent_scope(request: web.Request, session_id: str | None = None) -> AgentScope:
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        raise RuntimeError("Request principal is unavailable")
+    normalized_session = session_id.strip() if isinstance(session_id, str) else ""
+    return AgentScope(
+        principal_id=principal_id,
+        session_id=normalized_session or "__principal__",
+    )
+
+
+def _agent_lock_for_request(
+    request: web.Request,
+    session_id: str | None = None,
+) -> asyncio.Lock:
+    provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+    return provider.lock_for(_agent_scope(request, session_id))
+
+
+async def _get_scoped_agent(
+    *,
+    provider: ScopedAgentProvider[AgentProtocol],
+    scope: AgentScope,
+    main_config: ModelConfig | None,
+) -> AgentProtocol:
+    agent = await provider.get(scope, main_config)
+    if main_config is not None:
+        async with provider.lock_for(scope):
+            agent.reconfigure_models(
+                main_config,
+                main_api_key=_resolve_provider_api_key(main_config.provider),
+                persist=False,
+            )
+    return agent
+
+
+async def _resolve_agent(
+    request: web.Request,
+    session_id: str | None = None,
+) -> AgentProtocol | None:
+    provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+    resolver = cast(RuntimeModelResolverProtocol, request.app["runtime_model_resolver"])
+    main_config = await resolver.resolve_main(session_id)
+    if main_config is None and not provider.is_static:
+        return None
     try:
-        return await provider.get()
+        scope = _agent_scope(request, session_id)
+        return await _get_scoped_agent(
+            provider=provider,
+            scope=scope,
+            main_config=main_config,
+        )
     except RuntimeError as exc:
         if "Не выбрана модель" in str(exc):
             return None
         raise
 
 
-async def _resolve_agent_for_base_http(request: web.Request) -> AgentProtocol | None:
-    provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
-    if request.app.get("agent") is not None:
-        try:
-            return await provider.get()
-        except RuntimeError as exc:
-            if "Не выбрана модель" in str(exc):
-                return None
-            raise
-
+async def _resolve_agent_for_base_http(
+    request: web.Request,
+    session_id: str | None = None,
+) -> AgentProtocol | None:
+    provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
     resolver = cast(RuntimeModelResolverProtocol, request.app["runtime_model_resolver"])
-    main_config = await resolver.resolve_main(None)
-    if main_config is None:
+    main_config = await resolver.resolve_main(session_id)
+    if main_config is None and not provider.is_static:
         return None
-    agent_factory = _load_agent_factory()
     try:
-        return await provider.ensure(lambda: agent_factory(main_config=main_config))
+        scope = _agent_scope(request, session_id)
+        return await _get_scoped_agent(
+            provider=provider,
+            scope=scope,
+            main_config=main_config,
+        )
     except RuntimeError as exc:
         if "Не выбрана модель" in str(exc):
             return None
@@ -262,17 +301,15 @@ async def _resolve_agent_for_ui_session(
     main_config = await _resolve_runtime_main_for_session(request, session_id)
     if main_config is None:
         return None, None
-    provider: LazyAgentProvider[AgentProtocol] = request.app["agent_provider"]
-    if request.app.get("agent") is not None:
-        try:
-            return await provider.get(), main_config
-        except RuntimeError as exc:
-            if "Не выбрана модель" in str(exc):
-                return None, None
-            raise
-    agent_factory = _load_agent_factory()
+    provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
     try:
-        return await provider.ensure(lambda: agent_factory(main_config=main_config)), main_config
+        scope = _agent_scope(request, session_id)
+        agent = await _get_scoped_agent(
+            provider=provider,
+            scope=scope,
+            main_config=main_config,
+        )
+        return agent, main_config
     except RuntimeError as exc:
         if "Не выбрана модель" in str(exc):
             return None, None

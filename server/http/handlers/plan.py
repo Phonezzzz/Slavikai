@@ -16,6 +16,7 @@ from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     UI_SESSION_HEADER,
+    _agent_lock_for_request,
     _apply_agent_runtime_state,
     _build_plan_draft,
     _build_plan_execute_decision,
@@ -29,7 +30,7 @@ from server.http_api import (
     _plan_apply_edit_operation,
     _plan_revision_value,
     _plan_with_status,
-    _resolve_agent_for_ui_session,
+    _resolve_agent,
     _resolve_ui_session_id_for_principal,
     _run_plan_readonly_audit,
     _run_plan_runner,
@@ -101,14 +102,12 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
     root = await _workspace_root_for_session(hub, session_id)
     audit_log, usage = _run_plan_readonly_audit(root=root)
     try:
-        if request.app.get("agent") is not None:
-            agent = await request.app["agent_provider"].get()
-        else:
-            agent, _ = await _resolve_agent_for_ui_session(request, session_id)
+        agent = await _resolve_agent(request, session_id)
         if agent is None:
             return _model_not_selected_response()
-        await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
-        steps = await asyncio.to_thread(agent.compile_plan_steps, goal_raw.strip(), audit_log)
+        async with _agent_lock_for_request(request, session_id):
+            await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+            steps = await asyncio.to_thread(agent.compile_plan_steps, goal_raw.strip(), audit_log)
     except PlanCompilationError as exc:
         return error_response(
             status=409,

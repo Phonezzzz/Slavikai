@@ -37,6 +37,7 @@ from server.http_api import (
     MAX_CONTENT_CHARS,
     MAX_TOTAL_PAYLOAD_CHARS,
     UI_SESSION_HEADER,
+    _agent_lock_for_request,
     _apply_agent_runtime_state,
     _build_output_artifacts,
     _build_ui_approval_decision,
@@ -311,7 +312,6 @@ async def _handle_ui_send_impl(
     bypass_root_gate: bool = False,
     idempotency_enabled: bool = True,
 ) -> web.Response:
-    agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
     idempotency_store: IdempotencyStore = request.app["idempotency_store"]
@@ -530,6 +530,7 @@ async def _handle_ui_send_impl(
         if agent is None or selected_main_config is None:
             await _abort_idempotency()
             return _model_not_selected_response()
+        agent_lock = _agent_lock_for_request(request, session_id)
         selected_model = _selected_model_snapshot(selected_main_config)
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")

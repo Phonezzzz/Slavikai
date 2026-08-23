@@ -7,6 +7,7 @@ import time
 
 from llm.cancellation import bind_cancellation_resource
 from llm.stream_model import Done, TextDelta
+from server.agent_provider import AgentScope
 
 from .fakes import *
 
@@ -113,7 +114,10 @@ def test_chat_cancel_cleans_up_resources() -> None:
             assert agent.provider_response.closed.is_set()
             assert agent.provider_response.close_calls >= 1
             assert agent.cleaned_up.is_set()
-            agent_lock = client.server.app["agent_lock"]
+            provider = client.server.app["agent_provider"]
+            agent_lock = provider.lock_for(
+                AgentScope(principal_id="test-static-agent", session_id=session_id)
+            )
             await asyncio.wait_for(agent_lock.acquire(), timeout=1)
             agent_lock.release()
         finally:

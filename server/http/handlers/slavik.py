@@ -171,7 +171,6 @@ async def handle_feedback(request: web.Request) -> web.Response:
 
 async def handle_approve_session(request: web.Request) -> web.Response:
     session_store = request.app["session_store"]
-    agent = request.app.get("agent")
     admin_error = _require_admin_bearer(request)
     if admin_error is not None:
         return admin_error
@@ -231,6 +230,7 @@ async def handle_approve_session(request: web.Request) -> web.Response:
     approved_categories: set[ApprovalCategory] = set()
     if categories:
         approved_categories = await session_store.approve(session_id.strip(), categories)
+        agent = await _resolve_agent_for_base_http(request, session_id.strip())
         if agent is not None:
             try:
                 agent.tracer.log(

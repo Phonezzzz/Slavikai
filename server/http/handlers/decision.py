@@ -29,6 +29,7 @@ from server.http.common.workspace_git import (
 from server.http.handlers.ui_chat import handle_ui_send_resume
 from server.http_api import (
     UI_DECISION_RESPONSES,
+    _agent_lock_for_request,
     _apply_agent_runtime_state,
     _clone_github_repository,
     _compile_plan_to_task_packet,
@@ -119,7 +120,7 @@ async def _trace_desktop_approval_choice(
     choice: str,
     scope: DesktopApprovalScope,
 ) -> None:
-    agent = await _resolve_agent(request)
+    agent = await _resolve_agent(request, session_id)
     if agent is None:
         return
     tracer = getattr(agent, "tracer", None)
@@ -140,7 +141,6 @@ async def _trace_desktop_approval_choice(
 async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     hub = request.app["ui_hub"]
     session_store = request.app["session_store"]
-    agent_lock = request.app["agent_lock"]
 
     try:
         payload = await request.json()
@@ -199,6 +199,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
     session_id = session_id_raw.strip()
+    agent_lock = _agent_lock_for_request(request, session_id)
     decision_id = decision_id_raw.strip()
     choice = choice_raw
     edited_action_raw = payload.get("edited_action")
@@ -599,7 +600,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "error": "resume_payload.run_id is missing.",
                     "source_endpoint": source_endpoint,
                 }
-            agent = await _resolve_agent(request)
+            agent = await _resolve_agent(request, session_id)
             if agent is None:
                 return {
                     "ok": False,
@@ -917,7 +918,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             if isinstance(edited_args_raw, dict):
                 args = edited_args_raw
 
-        agent = await _resolve_agent(request)
+        agent = await _resolve_agent(request, session_id)
         if agent is None:
             return {
                 "ok": False,
@@ -1455,7 +1456,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 run_id_raw.strip() if isinstance(run_id_raw, str) and run_id_raw.strip() else ""
             )
             if run_id:
-                agent = await _resolve_agent(request)
+                agent = await _resolve_agent(request, session_id)
                 if agent is not None:
                     async with agent_lock:
                         await _apply_agent_runtime_state(
@@ -1530,7 +1531,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "error": "invalid_commit_data",
                 "resume_started": False,
             }
-        agent = await _resolve_agent(request)
+        agent = await _resolve_agent(request, session_id)
         if agent is None:
             return {
                 "ok": False,

@@ -13,6 +13,7 @@ from server.http.common.chat_payload import (
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     TOOL_PIPELINE_ENABLED,
+    _agent_lock_for_request,
     _apply_agent_runtime_state,
     _model_not_selected_response,
     _parse_chat_request,
@@ -24,10 +25,6 @@ logger = logging.getLogger("SlavikAI.HttpAPI")
 
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
-    agent = await _resolve_agent_for_base_http(request)
-    if agent is None:
-        return _model_not_selected_response()
-    agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
     hub = request.app["ui_hub"]
 
@@ -62,6 +59,11 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         session_id = str(uuid.uuid4())
     runtime_session_id = parsed.runtime_session_id or session_id
     runtime_mode = parsed.runtime_mode
+
+    agent = await _resolve_agent_for_base_http(request, session_id)
+    if agent is None:
+        return _model_not_selected_response()
+    agent_lock = _agent_lock_for_request(request, session_id)
 
     if runtime_mode in {"plan", "act"}:
         return error_response(

@@ -5,6 +5,7 @@ import asyncio
 from config.http_server_config import HttpAuthConfig, HttpServerConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from llm.types import ModelConfig
+from server.agent_provider import AgentScope
 from server.http import app as http_app
 from server.ui_session_storage import InMemoryUISessionStorage
 
@@ -121,7 +122,7 @@ def test_create_app_leaves_runtime_model_state_empty_when_persisted_missing(monk
     assert asyncio.run(resolver.resolve_main(None)) is None
 
 
-def test_create_app_passes_ui_embeddings_settings_to_lazy_agent(monkeypatch) -> None:
+def test_create_app_passes_ui_embeddings_settings_to_scoped_agent(monkeypatch) -> None:
     monkeypatch.setattr(http_app, "_load_project_dotenv", lambda: None)
     monkeypatch.setattr(http_app, "load_model_configs", lambda: None)
     factory = CaptureAgentFactory()
@@ -150,9 +151,18 @@ def test_create_app_passes_ui_embeddings_settings_to_lazy_agent(monkeypatch) -> 
         ui_storage=InMemoryUISessionStorage(),
         auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
     )
-    _ = asyncio.run(app["agent_provider"].get())
+    main_config = ModelConfig(provider="local", model="test-model")
+    _ = asyncio.run(
+        app["agent_provider"].get(
+            AgentScope(principal_id="principal-a", session_id="session-a"),
+            main_config,
+        )
+    )
 
     assert factory.kwargs is not None
     assert factory.kwargs["embeddings_provider"] == "openai"
     assert factory.kwargs["embeddings_openai_model"] == "text-embedding-3-small"
     assert factory.kwargs["embeddings_openai_api_key"] == "openai-test-key"
+    assert factory.kwargs["user_id"] == "principal-a"
+    assert str(factory.kwargs["memory_db_path"]).endswith("/memory.db")
+    assert str(factory.kwargs["vectors_db_path"]).endswith("/vectors.db")

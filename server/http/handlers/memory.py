@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Protocol, cast
 
 from aiohttp import web
@@ -9,6 +8,7 @@ from memory.categorized_memory_store import ListPage
 from memory.triage import TriagePlan, TriageSuggestion, triage_apply, triage_preview, triage_undo
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
+    _agent_lock_for_request,
     _model_not_selected_response,
     _normalize_json_value,
     _resolve_agent,
@@ -248,7 +248,7 @@ async def _handle_ui_memory_pin_state(request: web.Request, *, pinned: bool) -> 
             code="invalid_request_error",
         )
 
-    agent_lock: asyncio.Lock = request.app["agent_lock"]
+    agent_lock = _agent_lock_for_request(request)
     try:
         async with agent_lock:
             updated_raw = update_pinned(stable_key_raw.strip())
@@ -473,7 +473,7 @@ async def handle_ui_memory_conflicts_resolve(request: web.Request) -> web.Respon
     if action != "set_value":
         value_json = None
 
-    agent_lock: asyncio.Lock = request.app["agent_lock"]
+    agent_lock = _agent_lock_for_request(request)
     try:
         async with agent_lock:
             resolved_raw = resolve_conflict(

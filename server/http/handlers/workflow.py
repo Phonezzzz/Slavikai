@@ -285,7 +285,7 @@ async def handle_ui_runtime_init(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
 
-    agent = await _resolve_agent(request)
+    agent = await _resolve_agent(request, session_id)
 
     workspace_root = await _workspace_root_for_session(hub, session_id)
     workflow_before = await hub.get_session_workflow(session_id)

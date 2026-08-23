@@ -164,6 +164,8 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         main_api_key: str | None = None,
         brain_manager: BrainManager | None = None,
         user_id: str = "local",
+        memory_db_path: str | None = None,
+        vectors_db_path: str | None = None,
         memory_companion_db_path: str | None = None,
         memory_inbox_db_path: str | None = None,
         canonical_atoms_db_path: str | None = None,
@@ -239,15 +241,16 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self._register_tools()
         if self.tools_enabled.get("safe_mode", False):
             self._apply_safe_mode(True)
-        self.memory = MemoryManager("memory/memory.db")
+        self.memory = MemoryManager(memory_db_path or "memory/memory.db")
         self._memory_inbox_store = (
             CategorizedMemoryStore(memory_inbox_db_path)
             if memory_inbox_db_path
             else CategorizedMemoryStore()
         )
         self._memory_inbox_writer = MemoryInboxWriter(self._memory_inbox_store, self.memory_config)
+        self._vectors_db_path = vectors_db_path or "memory/vectors.db"
         self.vectors = VectorIndex(
-            "memory/vectors.db",
+            self._vectors_db_path,
             provider=embeddings_provider,
             local_model=embeddings_local_model,
             openai_model=embeddings_openai_model,
@@ -589,6 +592,14 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.desktop_browser_tool.close()
         self.desktop_gui_tool.close()
 
+    def close(self) -> None:
+        self.close_desktop_resources()
+        self.memory.close()
+        self.vectors.close()
+        self._interaction_store.close()
+        self._memory_inbox_store.close()
+        self._canonical_store.close()
+
     def synthesize_speech(
         self,
         text: str,
@@ -693,7 +704,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
 
         self.vectors.close()
         self.vectors = VectorIndex(
-            "memory/vectors.db",
+            self._vectors_db_path,
             provider=cast(Literal["local", "openai"], normalized_provider),
             local_model=normalized_local_model,
             openai_model=normalized_openai_model,

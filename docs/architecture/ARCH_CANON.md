@@ -32,8 +32,9 @@
   execution target `desktop`, host-only tool profile, детерминированной scoped policy
   `ALLOW|ASK|DENY` и lifecycle once/session/persistent approvals.
 - **Known partial contracts**: Ask всё ещё допускает explicit Memory write до mode gate и
-  hidden vector runtime init; полная principal isolation Agent/Memory/vector state,
-  explicit Memory confirmation и strict public `model="slavik"` validation ещё не готовы.
+  hidden vector runtime init; explicit Memory confirmation и strict public `model="slavik"`
+  validation ещё не готовы. Agent runtime state изолирован по `(principal_id, session_id)`;
+  Memory/canonical/vector stores изолированы по principal, а owner сохраняет legacy DB paths.
 - **Current legacy runtime**: token-cookie browser auth, крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой
