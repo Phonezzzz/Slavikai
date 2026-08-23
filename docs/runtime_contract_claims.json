@@ -36,17 +36,20 @@
     {
       "id": "identity.principal_isolation",
       "scope": "security",
-      "status": "partial",
+      "status": "implemented",
       "owner": "security",
-      "version": 2,
+      "version": 3,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/ui_api/test_auth_and_session.py",
         "server/http/common/auth.py",
         "tests/test_cloudflare_access.py",
-        "tests/test_desktop_policy.py"
+        "tests/test_desktop_policy.py",
+        "tests/test_principal_runtime_isolation.py",
+        "server/agent_provider.py",
+        "server/principal_storage.py"
       ],
-      "summary": "Sessions and persistent Desktop approvals are principal-scoped, but Agent runtime state, Memory and vectors are not fully isolated yet."
+      "summary": "Sessions, mutable Agent runtime state, Memory, vectors and persistent Desktop approvals are principal-scoped; owner retains the legacy data paths."
     },
     {
       "id": "runtime.ask.zero_side_effects",

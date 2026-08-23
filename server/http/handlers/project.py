@@ -19,6 +19,7 @@ from server.http_api import (
     UI_GITHUB_REQUIRED_CATEGORIES,
     UI_PROJECT_COMMANDS,
     UI_SESSION_HEADER,
+    _agent_lock_for_request,
     _apply_agent_runtime_state,
     _build_github_import_approval_request,
     _build_ui_approval_decision,
@@ -60,7 +61,6 @@ def _workspace_inception_runtime_config(config: ModelConfig) -> ModelConfig:
 
 
 async def handle_ui_project_command(request: web.Request) -> web.Response:
-    agent_lock = request.app["agent_lock"]
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
 
@@ -127,6 +127,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             )
         if agent is None or selected_main_config is None:
             return _model_not_selected_response()
+        agent_lock = _agent_lock_for_request(request, session_id)
         selected_model = _selected_model_snapshot(selected_main_config)
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")

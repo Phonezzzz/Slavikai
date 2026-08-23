@@ -20,6 +20,9 @@ from core.mwv.models import (
     with_task_packet_hash,
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
+from llm.types import ModelConfig
+from server.agent_provider import AgentScope, ScopedAgentProvider
+from server.http.common.ui_settings import _resolve_provider_api_key
 from shared.models import JSONValue
 
 WorkflowRuntimeState = tuple[
@@ -31,6 +34,8 @@ WorkflowRuntimeState = tuple[
 
 
 class WorkflowHubProtocol(Protocol):
+    async def get_session_principal_id(self, session_id: str) -> str | None: ...
+
     async def get_session_policy(self, session_id: str) -> dict[str, JSONValue]: ...
 
     async def get_session_tools_state(self, session_id: str) -> dict[str, bool] | None: ...
@@ -53,6 +58,18 @@ class WorkflowHubProtocol(Protocol):
         active_task: dict[str, JSONValue] | None | object = None,
         auto_state: dict[str, JSONValue] | None | object = None,
     ) -> dict[str, JSONValue]: ...
+
+
+class RuntimeModelResolverProtocol(Protocol):
+    async def resolve_main(self, session_id: str | None) -> ModelConfig | None: ...
+
+
+class PlanRunnerAgentProtocol(Protocol):
+    tools_enabled: dict[str, bool]
+
+    def set_session_context(self, session_id: str, approved_categories: set[object]) -> None: ...
+
+    def run_task_packet(self, packet: TaskPacket, context: object) -> MWVRunResult: ...
 
 
 def normalize_tools_state_payload(
@@ -723,13 +740,31 @@ async def run_plan_runner(
         )
         return
 
-    provider = app["agent_provider"]
+    provider = cast(ScopedAgentProvider[PlanRunnerAgentProtocol], app["agent_provider"])
     session_store = app["session_store"]
-    agent = await provider.get()
-    approved_categories = await session_store.get_categories(session_id)
-    set_session_context = getattr(agent, "set_session_context", None)
-    if callable(set_session_context):
-        set_session_context(session_id, approved_categories)
+    principal_id = await hub.get_session_principal_id(session_id)
+    if principal_id is None:
+        return
+    resolver = cast(RuntimeModelResolverProtocol, app["runtime_model_resolver"])
+    main_config = await resolver.resolve_main(session_id)
+    if main_config is None and not provider.is_static:
+        failed_plan = plan_with_status_fn(plan, "failed")
+        failed_task = task_with_status_fn(task, "failed", None)
+        failed_task["execution"] = {
+            "runner": "mwv_packet_runner",
+            "status": "failed",
+            "error": "model_not_selected",
+        }
+        await hub.set_session_workflow(
+            session_id,
+            mode="act",
+            active_plan=failed_plan,
+            active_task=failed_task,
+        )
+        return
+    scope = AgentScope(principal_id=principal_id, session_id=session_id)
+    agent = await provider.get(scope, main_config)
+    agent_lock = provider.lock_for(scope)
 
     async def _security_loader(
         _hub: WorkflowHubProtocol,
@@ -760,35 +795,45 @@ async def run_plan_runner(
             return Path(session_root_raw)
         return Path(".").resolve()
 
-    await apply_agent_runtime_state(
-        agent=agent,
-        hub=hub,
-        session_id=session_id,
-        load_effective_session_security_fn=_security_loader,
-        resolve_workspace_root_fn=_workspace_root_loader,
-        normalize_mode_value_fn=normalize_mode_value_fn,
-        normalize_plan_payload_fn=normalize_plan_payload_fn,
-        normalize_task_payload_fn=normalize_task_payload_fn,
-        normalize_auto_state_fn=lambda value: value if isinstance(value, dict) else None,
-    )
-
-    context_root = str(packet.scope.get("workspace_root") or "")
-    from core.mwv.models import RunContext  # local import to avoid protocol layering drift
-
-    max_attempts_raw = packet.budgets.get("max_attempts")
-    max_attempts = max_attempts_raw if isinstance(max_attempts_raw, int) else 1
-
-    run_context = RunContext(
-        session_id=session_id,
-        trace_id=packet.trace_id,
-        workspace_root=context_root,
-        safe_mode=bool(getattr(agent, "tools_enabled", {}).get("safe_mode", False)),
-        approved_categories=sorted(str(item) for item in approved_categories),
-        max_retries=max(0, max_attempts - 1),
-    )
-
     try:
-        run_result = await asyncio.to_thread(agent.run_task_packet, packet, run_context)
+        async with agent_lock:
+            reconfigure_models = getattr(agent, "reconfigure_models", None)
+            if main_config is not None and callable(reconfigure_models):
+                reconfigure_models(
+                    main_config,
+                    main_api_key=_resolve_provider_api_key(main_config.provider),
+                    persist=False,
+                )
+            approved_categories = await session_store.get_categories(session_id)
+            set_session_context = getattr(agent, "set_session_context", None)
+            if callable(set_session_context):
+                set_session_context(session_id, approved_categories)
+            await apply_agent_runtime_state(
+                agent=agent,
+                hub=hub,
+                session_id=session_id,
+                load_effective_session_security_fn=_security_loader,
+                resolve_workspace_root_fn=_workspace_root_loader,
+                normalize_mode_value_fn=normalize_mode_value_fn,
+                normalize_plan_payload_fn=normalize_plan_payload_fn,
+                normalize_task_payload_fn=normalize_task_payload_fn,
+                normalize_auto_state_fn=lambda value: value if isinstance(value, dict) else None,
+            )
+
+            context_root = str(packet.scope.get("workspace_root") or "")
+            from core.mwv.models import RunContext
+
+            max_attempts_raw = packet.budgets.get("max_attempts")
+            max_attempts = max_attempts_raw if isinstance(max_attempts_raw, int) else 1
+            run_context = RunContext(
+                session_id=session_id,
+                trace_id=packet.trace_id,
+                workspace_root=context_root,
+                safe_mode=bool(getattr(agent, "tools_enabled", {}).get("safe_mode", False)),
+                approved_categories=sorted(str(item) for item in approved_categories),
+                max_retries=max(0, max_attempts - 1),
+            )
+            run_result = await asyncio.to_thread(agent.run_task_packet, packet, run_context)
     except TaskPacketApprovalPending as exc:
         approval_payload = serialize_approval_request_fn(exc.request)
         if approval_payload is None:

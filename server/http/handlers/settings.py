@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Literal, cast
@@ -11,6 +10,7 @@ from aiohttp.multipart import BodyPartReader
 from config.memory_config import MemoryConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server import http_api as api
+from server.agent_provider import ScopedAgentProvider
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import RuntimeModelStateProtocol
 from shared.models import JSONValue
@@ -573,27 +573,23 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 RuntimeModelStateProtocol, request.app["runtime_model_state"]
             )
             await runtime_model_state.set_global_main(default_model)
-            agent = await api._resolve_agent(request)
-            if agent is not None:
-                async with request.app["agent_lock"]:
-                    agent.reconfigure_models(
-                        default_model,
-                        main_api_key=api._resolve_provider_api_key(model_provider),
-                        persist=False,
-                    )
+            agent_provider = cast(
+                ScopedAgentProvider[api.AgentProtocol], request.app["agent_provider"]
+            )
+
+            def _apply_main_model(agent: api.AgentProtocol) -> None:
+                agent.reconfigure_models(
+                    default_model,
+                    main_api_key=api._resolve_provider_api_key(model_provider),
+                    persist=False,
+                )
+
+            await agent_provider.apply_to_existing(_apply_main_model)
 
     if next_embeddings_settings is not None:
-        agent_lock = request.app["agent_lock"]
-        try:
-            agent = await api._resolve_agent(request)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Failed to resolve agent for embeddings update",
-                exc_info=True,
-                extra={"error": str(exc)},
-            )
-            agent = None
-        if agent is not None:
+        agent_provider = cast(ScopedAgentProvider[api.AgentProtocol], request.app["agent_provider"])
+
+        def _apply_embeddings(agent: api.AgentProtocol) -> None:
             embeddings_model_for_agent = (
                 next_embeddings_settings.local_model
                 if next_embeddings_settings.provider == "local"
@@ -602,16 +598,16 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             set_embeddings_config = getattr(agent, "set_embeddings_config", None)
             set_embeddings_model = getattr(agent, "set_embeddings_model", None)
             if callable(set_embeddings_config):
-                async with agent_lock:
-                    set_embeddings_config(
-                        provider=next_embeddings_settings.provider,
-                        local_model=next_embeddings_settings.local_model,
-                        openai_model=next_embeddings_settings.openai_model,
-                        openai_api_key=api._resolve_provider_api_key("openai"),
-                    )
+                set_embeddings_config(
+                    provider=next_embeddings_settings.provider,
+                    local_model=next_embeddings_settings.local_model,
+                    openai_model=next_embeddings_settings.openai_model,
+                    openai_api_key=api._resolve_provider_api_key("openai"),
+                )
             elif callable(set_embeddings_model):
-                async with agent_lock:
-                    set_embeddings_model(embeddings_model_for_agent)
+                set_embeddings_model(embeddings_model_for_agent)
+
+        await agent_provider.apply_to_existing(_apply_embeddings)
 
     return json_response(api._build_settings_payload())
 
@@ -758,21 +754,14 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
         next_tools_state = dict(next_state)
 
     if next_tools_state is not None:
-        agent_lock: asyncio.Lock = request.app["agent_lock"]
-        try:
-            agent = await api._resolve_agent(request)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Failed to resolve agent for control-plane tools update",
-                exc_info=True,
-                extra={"error": str(exc)},
-            )
-            agent = None
-        if agent is not None:
+        agent_provider = cast(ScopedAgentProvider[api.AgentProtocol], request.app["agent_provider"])
+
+        def _apply_tools(agent: api.AgentProtocol) -> None:
             update_tools_enabled = getattr(agent, "update_tools_enabled", None)
             if callable(update_tools_enabled):
-                async with agent_lock:
-                    update_tools_enabled(next_tools_state)
+                update_tools_enabled(next_tools_state)
+
+        await agent_provider.apply_to_existing(_apply_tools)
 
     return json_response(api._build_settings_payload())
 
@@ -859,7 +848,7 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
     if isinstance(format_raw, str) and format_raw.strip():
         args["format"] = format_raw.strip().lower()
 
-    agent_lock: asyncio.Lock = request.app["agent_lock"]
+    agent_lock = api._agent_lock_for_request(request)
     async with agent_lock:
         result = agent.call_tool("tts", args=args, raw_input="ui:tts")
     if not result.ok:

@@ -493,12 +493,12 @@ async def _resolve_workspace_session(
 ) -> tuple[AgentProtocol | None, str | None, set[ApprovalCategory], web.Response | None]:
     hub: UIHub = request.app["ui_hub"]
     session_store = request.app["session_store"]
-    agent = await api._resolve_agent(request)
     session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
     if session_error is not None:
-        return agent, None, set(), session_error
+        return None, None, set(), session_error
     if session_id is None:
-        return agent, None, set(), _session_forbidden_response()
+        return None, None, set(), _session_forbidden_response()
+    agent = await api._resolve_agent(request, session_id)
     approved_categories = await session_store.get_categories(session_id)
     return agent, session_id, approved_categories, None
 
@@ -563,7 +563,7 @@ async def _call_workspace_tool(
     raw_input: str,
 ) -> ToolResult | web.Response:
     hub: UIHub = request.app["ui_hub"]
-    agent_lock = request.app["agent_lock"]
+    agent_lock = api._agent_lock_for_request(request, session_id)
     session_root = await _workspace_root_for_session(hub, session_id)
     async with agent_lock:
         set_runtime_workspace_root(session_root)

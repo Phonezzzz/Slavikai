@@ -14,6 +14,7 @@ from typing import Literal, cast
 from aiohttp import web
 
 from server import http_api as api
+from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import RuntimeModelStateProtocol, SessionApprovalStore
@@ -912,6 +913,14 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
     terminal_manager = cast(TerminalTool, request.app["terminal_manager"])
     await terminal_manager.delete_session(session_id)
     deleted = await hub.delete_session(session_id)
@@ -926,4 +935,6 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
     await runtime_model_state.clear_session_override(session_id)
     session_store = cast(SessionApprovalStore, request.app["session_store"])
     await session_store.clear_session(session_id)
+    provider = cast(ScopedAgentProvider[object], request.app["agent_provider"])
+    await provider.release(AgentScope(principal_id=principal_id, session_id=session_id))
     return json_response({"session_id": session_id, "deleted": True})

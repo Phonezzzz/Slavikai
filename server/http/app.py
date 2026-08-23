@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import importlib
 import logging
 from collections.abc import Callable
@@ -20,7 +19,9 @@ from config.http_server_config import (
 from config.model_store import load_model_configs
 from core.desktop_policy import DesktopPolicyStore
 from core.desktop_runtime import DesktopRunCoordinator
+from llm.types import ModelConfig
 from server import http_api as api
+from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.embedding_download import EmbeddingDownloadManager
 from server.http.common.auth import _owner_principal_id
 from server.http.common.chat_cancellation import ChatCancellationRegistry
@@ -34,7 +35,7 @@ from server.http.common.runtime_model_state import (
     RuntimeModelResolver,
     build_runtime_model_state_from_persisted,
 )
-from server.lazy_agent import LazyAgentProvider
+from server.principal_storage import principal_storage_paths
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
 from tools.terminal_tool import TerminalTool
@@ -84,6 +85,11 @@ async def _close_embedding_downloads(app: web.Application) -> None:
     await manager.shutdown()
 
 
+async def _close_agent_provider(app: web.Application) -> None:
+    provider = cast(ScopedAgentProvider[AgentProtocol], app["agent_provider"])
+    await provider.close()
+
+
 def create_app(
     *,
     agent: AgentProtocol | None = None,
@@ -126,16 +132,30 @@ def create_app(
     app["desktop_policy_store"] = resolved_desktop_policy_store
     if agent is None:
 
-        def _factory() -> AgentProtocol:
+        def _factory(scope: AgentScope, main_config: ModelConfig | None) -> AgentProtocol:
             module = importlib.import_module("core.agent")
             agent_factory = getattr(module, "Agent", None)
             if not callable(agent_factory):
                 raise RuntimeError("Agent class not found in core.agent")
+            if main_config is None:
+                raise RuntimeError("Не выбрана модель. Укажите model id в настройках.")
             embeddings_settings = api._load_embeddings_settings()
+            storage = principal_storage_paths(
+                principal_id=scope.principal_id,
+                owner_principal_id=owner_principal_id,
+                memory_root=api.PROJECT_ROOT / "memory",
+            )
             return cast(
                 "AgentProtocol",
                 agent_factory(
-                    main_config=runtime_model_state.peek_global_main(),
+                    main_config=main_config,
+                    main_api_key=api._resolve_provider_api_key(main_config.provider),
+                    user_id=scope.principal_id,
+                    memory_db_path=str(storage.memory_db),
+                    vectors_db_path=str(storage.vectors_db),
+                    memory_companion_db_path=str(storage.memory_companion_db),
+                    memory_inbox_db_path=str(storage.memory_categories_db),
+                    canonical_atoms_db_path=str(storage.canonical_atoms_db),
                     embeddings_provider=embeddings_settings.provider,
                     embeddings_local_model=embeddings_settings.local_model,
                     embeddings_openai_model=embeddings_settings.openai_model,
@@ -145,12 +165,9 @@ def create_app(
                 ),
             )
 
-        app["agent"] = None
-        app["agent_provider"] = LazyAgentProvider(factory=_factory)
+        app["agent_provider"] = ScopedAgentProvider(factory=_factory)
     else:
-        app["agent"] = agent
-        app["agent_provider"] = LazyAgentProvider.from_instance(agent)
-    app["agent_lock"] = asyncio.Lock()
+        app["agent_provider"] = ScopedAgentProvider.from_instance(agent)
     app["session_store"] = SessionApprovalStore()
     app["idempotency_store"] = IdempotencyStore()
     app["chat_cancellation_registry"] = ChatCancellationRegistry()
@@ -166,6 +183,7 @@ def create_app(
     app.on_cleanup.append(_close_chat_generations)
     app.on_cleanup.append(_close_terminal_manager)
     app.on_cleanup.append(_close_embedding_downloads)
+    app.on_cleanup.append(_close_agent_provider)
     dist_path = api.PROJECT_ROOT / "ui" / "dist"
     app["ui_dist_path"] = dist_path
     from server.http.routes import register_routes

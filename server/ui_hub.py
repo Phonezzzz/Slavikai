@@ -345,6 +345,14 @@ class UIHub:
                 return "forbidden"
             return "owned"
 
+    async def get_session_principal_id(self, session_id: str) -> str | None:
+        normalized_session = session_id.strip()
+        if not normalized_session:
+            return None
+        async with self._lock:
+            state = self._sessions.get(normalized_session)
+            return state.principal_id if state is not None else None
+
     async def delete_session(self, session_id: str) -> bool:
         normalized = session_id.strip()
         if not normalized:

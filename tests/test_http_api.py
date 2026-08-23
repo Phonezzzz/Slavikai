@@ -584,7 +584,7 @@ def test_chat_completions_returns_409_when_model_not_selected(monkeypatch, tmp_p
     asyncio.run(run())
 
 
-def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent(
+def test_chat_completions_uses_runtime_global_main_config_for_scoped_default_agent(
     monkeypatch, tmp_path
 ) -> None:
     trace_path = tmp_path / "trace.log"
@@ -596,7 +596,11 @@ def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent
             del event_type, message, meta
 
     class RuntimeAgent:
-        def __init__(self, main_config: ModelConfig | None = None) -> None:
+        def __init__(
+            self,
+            main_config: ModelConfig | None = None,
+            **_kwargs: object,
+        ) -> None:
             self.main_config = main_config
             captured_main_configs.append(main_config)
             self.brain = object()
@@ -611,6 +615,16 @@ def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent
             approved_categories: set[str],
         ) -> None:
             del session_id, approved_categories
+
+        def reconfigure_models(
+            self,
+            main_config: ModelConfig,
+            main_api_key: str | None = None,
+            *,
+            persist: bool = True,
+        ) -> None:
+            del main_api_key, persist
+            self.main_config = main_config
 
         def respond(self, messages) -> str:
             del messages
@@ -628,7 +642,7 @@ def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent
             del interaction_id, rating, labels, free_text
 
     monkeypatch.setattr(
-        "server.http.common.runtime_contract.importlib.import_module",
+        "server.http.app.importlib.import_module",
         lambda module_name: (
             SimpleNamespace(Agent=RuntimeAgent)
             if module_name == "core.agent"
@@ -648,6 +662,7 @@ def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent
             )
             first = await client.post(
                 "/v1/chat/completions",
+                headers={"X-Slavik-Session": "runtime-session"},
                 json={
                     "model": "slavik",
                     "messages": [{"role": "user", "content": "Привет"}],
@@ -657,6 +672,7 @@ def test_chat_completions_uses_runtime_global_main_config_for_lazy_default_agent
             assert first.status == 200
             second = await client.post(
                 "/v1/chat/completions",
+                headers={"X-Slavik-Session": "runtime-session"},
                 json={
                     "model": "slavik",
                     "messages": [{"role": "user", "content": "Ещё раз"}],

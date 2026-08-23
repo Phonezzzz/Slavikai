@@ -11,8 +11,10 @@ Computer Mode product invariant ("not a manual IDE", live agent execution surfac
 ## Цель
 
 SlavikAI сейчас работает как server-side agent runtime с Cloudflare Access owner/member
-browser identity и частичной principal isolation. Legacy token-cookie auth остаётся для
-локального запуска; Memory/vector/Agent state ещё не изолированы полностью. После PR-0..PR-14 в коде есть tool-calling contract,
+browser identity и principal isolation. Legacy token-cookie auth остаётся для
+локального запуска. Mutable Agent/runtime state принадлежит `(principal_id, session_id)`,
+Memory/vector stores принадлежат principal; owner продолжает использовать существующие legacy
+DB paths. После PR-0..PR-14 в коде есть tool-calling contract,
 read-only chat integration через `AgentToolLoop`, auto v1 через `AgentToolLoop`,
 split chat/workspace API paths, debug-only command lane и единый terminal backend.
 После PR-15 runtime tools имеют LLM descriptions/JSON Schema. После PR-16 auto mode
@@ -108,6 +110,11 @@ conversational endpoint и существующий LLM/tool loop, но публ
     не в `workspace_messages`.
 - **Storage/Memory** (`memory/*`)
   - `memory/memory.db`, `memory/memory_companion.db`, `memory/vectors.db`.
+  - Эти legacy paths принадлежат owner. Для members используются директории
+    `memory/principals/<sha256(principal_id)>/` с отдельными Memory, Memory Companion,
+    categorized/canonical и vector DB. Email не включается в filesystem path.
+  - Каждая session имеет отдельный mutable `Agent` и lock; сессии одного principal разделяют
+    только его persistent DB paths, но не short-term/runtime/tool state.
   - Persistent Agent memory stores use one SQLite connection per calling thread through
     `shared/sqlite.py`; HTTP streaming workers never reuse the server thread connection.
   - UI message storage физически разделён: `chat_messages` для chat-сообщений и
