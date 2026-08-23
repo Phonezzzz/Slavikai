@@ -140,3 +140,17 @@ def test_cloudflare_auth_config_rejects_local_bypass(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(RuntimeError, match="ALLOW_UNAUTH_LOCAL"):
         ensure_http_auth_boot_config(config)
+
+
+@pytest.mark.parametrize("owner_email", ["@example.com", "owner@", "   "])
+def test_cloudflare_auth_config_rejects_invalid_owner_email(owner_email: str) -> None:
+    config = HttpAuthConfig(
+        api_token="automation-token",
+        browser_auth_mode="cloudflare",
+        cloudflare_access_issuer="https://team.cloudflareaccess.com",
+        cloudflare_access_aud="application-aud",
+        owner_email=owner_email,
+    )
+
+    with pytest.raises(RuntimeError, match="must be a valid email"):
+        ensure_http_auth_boot_config(config)

@@ -254,14 +254,16 @@ def test_legacy_command_pattern_is_rejected_instead_of_broadening_scope() -> Non
         )
 
 
-def test_policy_store_skips_invalid_legacy_rule_without_broadening(tmp_path: Path) -> None:
+def test_policy_store_rejects_all_rules_when_one_persistent_rule_is_invalid(
+    tmp_path: Path,
+) -> None:
     store_path = tmp_path / "desktop-approvals.json"
     store_path.write_text(
         json.dumps(
             [
                 {
                     "rule_id": "legacy-pattern",
-                    "effect": "allow",
+                    "effect": "deny",
                     "source": "persistent",
                     "created_at": "2026-01-01T00:00:00+00:00",
                     "scope": {
@@ -271,7 +273,7 @@ def test_policy_store_skips_invalid_legacy_rule_without_broadening(tmp_path: Pat
                     },
                 },
                 DesktopApprovalRule.create(
-                    effect="deny",
+                    effect="allow",
                     source="persistent",
                     scope=DesktopApprovalScope(
                         tool="desktop_file_delete",
@@ -285,10 +287,8 @@ def test_policy_store_skips_invalid_legacy_rule_without_broadening(tmp_path: Pat
     )
     store = DesktopPolicyStore(store_path)
 
-    rules = store.list_rules()
-
-    assert len(rules) == 1
-    assert rules[0].effect == "deny"
+    with pytest.raises(ValueError, match="contains invalid rules"):
+        store.list_rules()
     assert "command_pattern больше не поддерживается" in store.list_load_errors()[0]
 
 

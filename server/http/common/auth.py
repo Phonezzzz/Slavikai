@@ -15,10 +15,9 @@ from server.http.common.request_identity import (
     CloudflareAccessVerifier,
     IdentityRole,
     RequestIdentity,
-    normalize_email,
-    principal_id_for_email,
 )
 from server.http.common.responses import error_response
+from shared.identity import normalize_email, principal_id_for_email
 
 if TYPE_CHECKING:
     from server.ui_hub import UIHub

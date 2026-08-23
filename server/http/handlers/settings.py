@@ -11,6 +11,7 @@ from config.memory_config import MemoryConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server import http_api as api
 from server.agent_provider import ScopedAgentProvider
+from server.http.common.auth import _require_owner
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import RuntimeModelStateProtocol
 from shared.models import JSONValue
@@ -90,6 +91,9 @@ async def handle_ui_settings(request: web.Request) -> web.Response:
 
 
 async def handle_ui_settings_update(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001

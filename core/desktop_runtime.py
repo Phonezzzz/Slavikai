@@ -233,6 +233,9 @@ class DesktopRuntime:
 
     def _cleanup_unverified_launches(self, gateway: ToolGateway) -> ToolResult:
         result = gateway.call(ToolRequest("desktop_cleanup_unverified_launches", {}))
+        details = dict(result.data)
+        if result.meta:
+            details.update(result.meta)
         tracer = getattr(self.parent, "tracer", None)
         log = getattr(tracer, "log", None)
         if callable(log):
@@ -244,7 +247,7 @@ class DesktopRuntime:
                 {
                     "ok": result.ok,
                     "error": result.error,
-                    "details": dict(result.data),
+                    "details": details,
                 },
             )
         return result

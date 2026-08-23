@@ -12,6 +12,8 @@ import aiohttp
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from shared.identity import normalize_email
+
 IdentityRole = Literal["owner", "member", "automation"]
 IdentityMethod = Literal["cloudflare_access", "bearer", "cookie", "local"]
 
@@ -93,13 +95,17 @@ class CloudflareAccessJWTVerifier:
 
     async def _key_for_kid(self, kid: str) -> Mapping[str, object]:
         now = self._now()
-        cached = self._cached_keys.get(kid)
-        if cached is not None and now < self._cache_expires_at:
+        if now < self._cache_expires_at and self._cached_keys:
+            cached = self._cached_keys.get(kid)
+            if cached is None:
+                raise CloudflareAccessTokenError("Cloudflare Access JWT kid is unknown")
             return cached
         async with self._cache_lock:
             now = self._now()
-            cached = self._cached_keys.get(kid)
-            if cached is not None and now < self._cache_expires_at:
+            if now < self._cache_expires_at and self._cached_keys:
+                cached = self._cached_keys.get(kid)
+                if cached is None:
+                    raise CloudflareAccessTokenError("Cloudflare Access JWT kid is unknown")
                 return cached
             keys = await self._fetch_keys()
             self._cached_keys = keys
@@ -148,25 +154,6 @@ class CloudflareAccessJWTVerifier:
             raise CloudflareAccessTokenError("Cloudflare Access JWT is expired")
         if now < nbf:
             raise CloudflareAccessTokenError("Cloudflare Access JWT is not active yet")
-
-
-def normalize_email(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().casefold()
-    if not normalized or "@" not in normalized:
-        return None
-    local, domain = normalized.rsplit("@", 1)
-    if not local or not domain:
-        return None
-    return normalized
-
-
-def principal_id_for_email(email: str) -> str:
-    normalized = normalize_email(email)
-    if normalized is None:
-        raise ValueError("email must be valid")
-    return f"email:{normalized}"
 
 
 def _split_jwt(token: str) -> tuple[str, str, str]:

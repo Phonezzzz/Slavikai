@@ -133,6 +133,32 @@ def test_cloudflare_verifier_rejects_invalid_claims(
         asyncio.run(verifier.verify(_jwt(private_key, payload)))
 
 
+def test_cloudflare_verifier_does_not_refetch_unknown_kids_within_cache_ttl() -> None:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    fetch_count = 0
+
+    async def fetch_jwks() -> object:
+        nonlocal fetch_count
+        fetch_count += 1
+        return {"keys": [_jwk(private_key)]}
+
+    verifier = CloudflareAccessJWTVerifier(
+        issuer="https://example.cloudflareaccess.com",
+        audience="application-aud",
+        jwks_fetcher=fetch_jwks,
+        now=lambda: 1_000.0,
+    )
+
+    async def resolve_unknown_kids() -> None:
+        for kid in ("unknown-one", "unknown-two"):
+            with pytest.raises(CloudflareAccessTokenError, match="kid is unknown"):
+                await verifier._key_for_kid(kid)
+
+    asyncio.run(resolve_unknown_kids())
+
+    assert fetch_count == 1
+
+
 def test_cloudflare_browser_lane_is_separate_from_bearer_automation(tmp_path: Path) -> None:
     async def run() -> None:
         auth_config = HttpAuthConfig(
@@ -179,6 +205,14 @@ def test_cloudflare_browser_lane_is_separate_from_bearer_automation(tmp_path: Pa
             )
             assert member_persistent.status == 403
             assert (await member_persistent.json())["error"]["code"] == "owner_required"
+
+            member_settings_update = await client.post(
+                "/ui/api/settings",
+                headers={"Cf-Access-Jwt-Assertion": "member-token"},
+                json={"appearance": {"theme": "oled"}},
+            )
+            assert member_settings_update.status == 403
+            assert (await member_settings_update.json())["error"]["code"] == "owner_required"
 
             member_status = await client.get(
                 "/ui/api/status",

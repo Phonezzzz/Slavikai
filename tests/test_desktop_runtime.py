@@ -45,6 +45,7 @@ class DesktopParent:
         self.main_config = None
         self.desktop_execution_control = DesktopExecutionControl()
         self.gateway_requests: list[ToolRequest] = []
+        self.tracer: RecordingTracer | None = None
 
     def _get_main_brain(self) -> Brain:
         return self.brain
@@ -54,6 +55,14 @@ class DesktopParent:
             self.tool_registry,
             pre_call=lambda request: self.gateway_requests.append(request),
         )
+
+
+class RecordingTracer:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict[str, object]]] = []
+
+    def log(self, event_type: str, message: str, meta=None) -> None:  # noqa: ANN001
+        self.records.append((event_type, message, dict(meta or {})))
 
 
 def _desktop_registry(tmp_path: Path) -> ToolRegistry:
@@ -417,6 +426,33 @@ def test_unverified_launched_process_is_cleaned_up_through_gateway(tmp_path: Pat
     assert not outcome.verification.ok
     assert cleaned == [ToolRequest("desktop_cleanup_unverified_launches", {})]
     assert parent.gateway_requests[-1] == ToolRequest("desktop_cleanup_unverified_launches", {})
+
+
+def test_unverified_launch_cleanup_trace_preserves_failure_meta(tmp_path: Path) -> None:
+    del tmp_path
+    registry = ToolRegistry()
+    registry.register(
+        "desktop_cleanup_unverified_launches",
+        lambda _request: ToolResult.failure(
+            "cleanup_failed",
+            meta={"failed_pids": [43210], "retained_pids": [43210]},
+        ),
+        capability="exec",
+        model_exposed=False,
+        execution_targets={"desktop"},
+    )
+    registry.set_execution_policy(mode="desktop")
+    parent = DesktopParent(ScriptedBrain([]), registry)
+    parent.tracer = RecordingTracer()
+    runtime = DesktopRuntime(parent)
+
+    result = runtime._cleanup_unverified_launches(parent._build_tool_gateway())
+
+    assert not result.ok
+    assert parent.tracer.records[-1][2]["details"] == {
+        "failed_pids": [43210],
+        "retained_pids": [43210],
+    }
 
 
 def test_tool_observations_are_marked_untrusted(tmp_path: Path) -> None:
