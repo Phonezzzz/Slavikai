@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from shared.identity import normalize_email
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_MAX_REQUEST_BYTES = 1_000_000
@@ -126,8 +128,8 @@ def ensure_http_auth_boot_config(auth_config: HttpAuthConfig | None = None) -> H
             raise RuntimeError("SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN is required.")
         if not resolved.cloudflare_access_aud:
             raise RuntimeError("SLAVIK_CLOUDFLARE_ACCESS_AUD is required.")
-        if not resolved.owner_email or "@" not in resolved.owner_email:
-            raise RuntimeError("SLAVIK_OWNER_EMAIL is required and must be an email.")
+        if normalize_email(resolved.owner_email) is None:
+            raise RuntimeError("SLAVIK_OWNER_EMAIL is required and must be a valid email.")
     return resolved
 
 

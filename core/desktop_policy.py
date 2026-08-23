@@ -382,12 +382,16 @@ class DesktopPolicyStore:
                     migrated = True
                 rules.append(rule)
             except ValueError as exc:
-                message = f"rule[{index}] skipped: {exc}"
+                message = f"rule[{index}] invalid: {exc}"
                 self._load_errors.append(message)
                 logger.warning(
-                    "Invalid Desktop approval rule skipped",
+                    "Desktop approval store rejected due to invalid rule",
                     extra={"path": str(self.path), "index": index, "error": str(exc)},
                 )
+        if self._load_errors:
+            raise ValueError(
+                "Desktop approval store contains invalid rules: " + "; ".join(self._load_errors)
+            )
         if migrated and not self._load_errors:
             self._write_locked(rules)
         return rules
