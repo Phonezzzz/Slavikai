@@ -53,6 +53,13 @@ conversational endpoint и существующий LLM/tool loop, но публ
     `tool_calls` через `ToolGateway` и добавляет `role="tool"` сообщения.
   - Chat integration: `runtime_mode=ask` может использовать только описанные read-capability
     tools; write/exec tool calls остаются вне chat path.
+  - Ask vector retrieval всегда использует `allow_runtime_init=False`: неготовый embedding
+    runtime даёт soft-degrade без скрытой инициализации.
+  - Explicit Memory request возвращает server-owned `memory_save` preview/decision. Только
+    отдельный `confirm` или `edit_and_confirm` применяет preview к canonical/vector stores;
+    `reject` не выполняет запись. Confirm endpoint сейчас доступен только как
+    `/ui/api/decision/respond`; OpenAI-compatible `/v1` не имеет Memory-confirm lane и остаётся
+    non-writing. Runtime/config toggle `auto_save_dialogue` удалён.
   - Старые `Planner`/`Executor` удалены как runtime entrypoints; MWV строит
     `TaskPacket` напрямую, а шаги исполняются explicit gateway tool requests.
   - Трассировка: `Tracer` (`logs/trace.log`).

@@ -274,7 +274,7 @@ def _normalize_agent_decision(
     normalized = dict(decision)
     decision_type_raw = normalized.get("decision_type")
     decision_type = decision_type_raw.strip() if isinstance(decision_type_raw, str) else ""
-    if decision_type in {"tool_approval", "plan_execute"}:
+    if decision_type in {"tool_approval", "plan_execute", "memory_save"}:
         return normalized
     normalized["decision_type"] = "agent_decision"
 

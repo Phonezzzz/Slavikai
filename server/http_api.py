@@ -197,6 +197,8 @@ UI_DECISION_RESPONSES: Final[set[str]] = {
     "select_skill",
     "adjust_threshold",
     "create_candidate",
+    "confirm",
+    "edit_and_confirm",
 }
 UI_DECISION_EDITABLE_FIELDS: Final[set[str]] = {"details", "args", "query", "branch", "repo_url"}
 UI_SETTINGS_USER_ALLOWED_TOP_LEVEL_KEYS: Final[set[str]] = (

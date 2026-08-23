@@ -54,7 +54,6 @@ type ParsedSettings = {
   appearanceTheme: AppearanceTheme;
   longPasteToFileEnabled: boolean;
   longPasteThresholdChars: number;
-  memoryAutoSaveDialogue: boolean;
   memoryInboxMaxItems: number;
   memoryInboxTtlDays: number;
   memoryInboxWritesPerMinute: number;
@@ -173,7 +172,6 @@ const APPEARANCE_THEME_OPTIONS: Array<{
 const DEFAULT_EMBEDDINGS_PROVIDER: EmbeddingsProvider = 'local';
 const DEFAULT_EMBEDDINGS_LOCAL_MODEL = 'all-MiniLM-L6-v2';
 const DEFAULT_EMBEDDINGS_OPENAI_MODEL = 'text-embedding-3-small';
-const DEFAULT_MEMORY_AUTO_SAVE_DIALOGUE = false;
 const DEFAULT_MEMORY_INBOX_MAX_ITEMS = 200;
 const DEFAULT_MEMORY_INBOX_TTL_DAYS = 30;
 const DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE = 6;
@@ -298,7 +296,6 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     appearanceTheme: DEFAULT_APPEARANCE_THEME,
     longPasteToFileEnabled: DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
     longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
-    memoryAutoSaveDialogue: DEFAULT_MEMORY_AUTO_SAVE_DIALOGUE,
     memoryInboxMaxItems: DEFAULT_MEMORY_INBOX_MAX_ITEMS,
     memoryInboxTtlDays: DEFAULT_MEMORY_INBOX_TTL_DAYS,
     memoryInboxWritesPerMinute: DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE,
@@ -367,7 +364,6 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
-  let memoryAutoSaveDialogue = defaults.memoryAutoSaveDialogue;
   let memoryInboxMaxItems = defaults.memoryInboxMaxItems;
   let memoryInboxTtlDays = defaults.memoryInboxTtlDays;
   let memoryInboxWritesPerMinute = defaults.memoryInboxWritesPerMinute;
@@ -376,13 +372,9 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   let embeddingsOpenaiModel = defaults.embeddingsOpenaiModel;
   const memory = (settings as { memory?: unknown }).memory;
   if (memory && typeof memory === 'object') {
-    const autoSaveRaw = (memory as { auto_save_dialogue?: unknown }).auto_save_dialogue;
     const inboxMaxItemsRaw = (memory as { inbox_max_items?: unknown }).inbox_max_items;
     const inboxTtlDaysRaw = (memory as { inbox_ttl_days?: unknown }).inbox_ttl_days;
     const inboxWritesRaw = (memory as { inbox_writes_per_minute?: unknown }).inbox_writes_per_minute;
-    if (typeof autoSaveRaw === 'boolean') {
-      memoryAutoSaveDialogue = autoSaveRaw;
-    }
     if (typeof inboxMaxItemsRaw === 'number' && Number.isFinite(inboxMaxItemsRaw) && inboxMaxItemsRaw > 0) {
       memoryInboxMaxItems = Math.floor(inboxMaxItemsRaw);
     }
@@ -495,7 +487,6 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     appearanceTheme,
     longPasteToFileEnabled,
     longPasteThresholdChars,
-    memoryAutoSaveDialogue,
     memoryInboxMaxItems,
     memoryInboxTtlDays,
     memoryInboxWritesPerMinute,
@@ -695,7 +686,6 @@ export function Settings({
   const [showAssistantAdvanced, setShowAssistantAdvanced] = useState(false);
   const [longPasteToFileEnabled, setLongPasteToFileEnabled] = useState(DEFAULT_LONG_PASTE_TO_FILE_ENABLED);
   const [longPasteThresholdChars, setLongPasteThresholdChars] = useState(DEFAULT_LONG_PASTE_THRESHOLD_CHARS);
-  const [memoryAutoSaveDialogue, setMemoryAutoSaveDialogue] = useState(DEFAULT_MEMORY_AUTO_SAVE_DIALOGUE);
   const [memoryInboxMaxItems, setMemoryInboxMaxItems] = useState(DEFAULT_MEMORY_INBOX_MAX_ITEMS);
   const [memoryInboxTtlDays, setMemoryInboxTtlDays] = useState(DEFAULT_MEMORY_INBOX_TTL_DAYS);
   const [memoryInboxWritesPerMinute, setMemoryInboxWritesPerMinute] = useState(DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE);
@@ -734,7 +724,6 @@ export function Settings({
     setAppearanceTheme(parsed.appearanceTheme);
     setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
     setLongPasteThresholdChars(parsed.longPasteThresholdChars);
-    setMemoryAutoSaveDialogue(parsed.memoryAutoSaveDialogue);
     setMemoryInboxMaxItems(parsed.memoryInboxMaxItems);
     setMemoryInboxTtlDays(parsed.memoryInboxTtlDays);
     setMemoryInboxWritesPerMinute(parsed.memoryInboxWritesPerMinute);
@@ -923,7 +912,6 @@ export function Settings({
           long_paste_threshold_chars: Math.max(1000, Math.min(80000, longPasteThresholdChars)),
         },
         memory: {
-          auto_save_dialogue: memoryAutoSaveDialogue,
           inbox_max_items: Math.max(1, Math.floor(memoryInboxMaxItems)),
           inbox_ttl_days: Math.max(1, Math.floor(memoryInboxTtlDays)),
           inbox_writes_per_minute: Math.max(1, Math.floor(memoryInboxWritesPerMinute)),
@@ -1463,24 +1451,15 @@ export function Settings({
                     <div className="space-y-6">
                       <SectionCard
                         title="Memory behavior"
-                        description="Controls how dialogue and memory inbox settings behave at runtime."
+                        description="Memory writes require a separate preview and explicit confirmation."
                         scope="Global"
                       >
                         <div className="grid gap-4 md:grid-cols-2">
                           <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <div className="text-sm font-medium text-zinc-100">Auto-save dialogue</div>
-                                <p className="mt-1 text-xs text-zinc-400">
-                                  Store dialogue in memory automatically instead of keeping it opt-in only.
-                                </p>
-                              </div>
-                              <ToggleSwitch
-                                checked={memoryAutoSaveDialogue}
-                                label="Toggle auto-save dialogue"
-                                onToggle={() => setMemoryAutoSaveDialogue((current) => !current)}
-                              />
-                            </div>
+                            <div className="text-sm font-medium text-zinc-100">Explicit confirmation</div>
+                            <p className="mt-1 text-xs text-zinc-400">
+                              Slavik previews each requested Memory change. Nothing is saved until you confirm or edit it.
+                            </p>
                           </div>
 
                           <label className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">

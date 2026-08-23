@@ -52,15 +52,18 @@ Desktop approvals также имеют explicit principal subject, при эт�
 
 ## Binding runtime decisions
 
-- Ask: целевой invariant — zero write и no hidden vector initialization; current status
-  `partial`.
+- Ask: current `implemented` invariant — никаких Memory/tool writes и hidden vector runtime
+  initialization; явный запрос на запоминание создаёт только preview/decision и не сохраняет
+  данные.
 - Plan: current contract — read-only tools только через `ToolGateway`; write/exec запрещены.
 - Auto: Auto v1 через `AgentToolLoop -> ToolGateway -> verifier` является current;
   `Ask -> Plan -> Act` FSM является target.
 - Public OpenAI-compatible API: `slavik` — единственный публичный proxy model id; strict
   request validation ещё `partial`.
-- Memory: запись возможна только после отдельного явного confirm/edit; current status
-  `target`, автоматический `auto_save_dialogue` не является допустимым целевым поведением.
+- Memory: current `implemented` contract — запись возможна только после отдельного явного
+  `confirm` или `edit_and_confirm`; `reject` не пишет данные. Устаревший
+  `auto_save_dialogue` удалён из config/runtime/UI и отклоняется settings API. Confirm endpoint
+  сейчас существует только в browser UI lane; `/v1` может вернуть preview, но не применяет его.
 - Engineering skills: instructions и supporting dependencies должны внедряться per run в
   существующий runtime без глобальной мутации Brain; current status `target`.
 

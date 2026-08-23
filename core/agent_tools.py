@@ -50,8 +50,6 @@ from shared.memory_companion_models import (
 from shared.models import (
     JSONValue,
     LLMMessage,
-    MemoryKind,
-    MemoryRecord,
     PlanStepStatus,
     TaskPlan,
     ToolCallRecord,
@@ -135,14 +133,14 @@ class AgentToolsMixin:
         _computer_log: ComputerActivityLog
 
         def _build_brain(self) -> Brain: ...
-        def remember_explicit_text(
+        def build_memory_save_preview(
             self,
             text: str,
             *,
             source_kind: str,
             source_id: str | None = None,
             lang_hint: str | None = None,
-        ) -> str: ...
+        ) -> dict[str, JSONValue]: ...
         def summarize_current_session(self) -> dict[str, JSONValue] | None: ...
 
     main_config: ModelConfig | None
@@ -319,8 +317,6 @@ class AgentToolsMixin:
             packet.summary,
             {"id": packet.id, "reason": packet.reason.value},
         )
-        if self.memory_config.auto_save_dialogue:
-            self.save_to_memory(raw_input, response)
         self._log_chat_interaction(raw_input=raw_input, response_text=response)
         if record_in_history:
             self._append_short_term([LLMMessage(role="assistant", content=response)])
@@ -904,18 +900,6 @@ class AgentToolsMixin:
         if not run_id_clean:
             return None
         return self.auto_agent.cancel_run(run_id_clean, reason=reason)
-
-    def save_to_memory(self, prompt: str, answer: str) -> None:
-        item = MemoryRecord(
-            id=str(uuid.uuid4()),
-            content=f"Q: {prompt}\nA: {answer}",
-            kind=MemoryKind.NOTE,
-            tags=["dialogue"],
-            timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
-            meta={},
-        )
-        self.memory.save(item)
-        self.tracer.log("memory_saved", prompt[:100])
 
     def reconfigure_models(
         self,

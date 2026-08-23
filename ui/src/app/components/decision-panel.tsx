@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Check, ChevronDown, Pencil, X } from 'lucide-react';
 
 import type { DecisionRespondChoice, UiDecision } from '../types';
@@ -14,21 +14,65 @@ type DecisionPanelProps = {
 };
 
 export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPanelProps) {
+  const isMemorySave = decision.decision_type === 'memory_save';
+  const proposedMemoryText = isMemorySave && typeof decision.proposed_action?.text === 'string'
+    ? decision.proposed_action.text
+    : '';
+  const initialEditValue = isMemorySave
+    ? proposedMemoryText
+    : JSON.stringify(decision.proposed_action ?? {}, null, 2);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [editMode, setEditMode] = useState(false);
-  const [editAction, setEditAction] = useState<'edit_and_approve' | 'edit_plan'>('edit_and_approve');
-  const [editValue, setEditValue] = useState<string>(() =>
-    JSON.stringify(decision.proposed_action ?? {}, null, 2),
-  );
+  const [editAction, setEditAction] = useState<
+    'edit_and_approve' | 'edit_plan' | 'edit_and_confirm'
+  >('edit_and_approve');
+  const [editValue, setEditValue] = useState<string>(initialEditValue);
   const [editError, setEditError] = useState<string | null>(null);
+  const memoryClaimLabels = useMemo(
+    () => (
+      Array.isArray(decision.proposed_action?.claims)
+        ? decision.proposed_action.claims.flatMap((claim) => {
+          if (!claim || typeof claim !== 'object' || Array.isArray(claim)) return [];
+          const summary = 'summary_text' in claim ? claim.summary_text : null;
+          const stableKey = 'stable_key' in claim ? claim.stable_key : null;
+          if (typeof summary === 'string' && summary.trim()) return [summary.trim()];
+          if (typeof stableKey === 'string' && stableKey.trim()) return [stableKey.trim()];
+          return [];
+        })
+        : []
+    ),
+    [decision.proposed_action],
+  );
+
+  useEffect(() => {
+    setDetailsOpen(false);
+    setEditMode(false);
+    setEditValue(initialEditValue);
+    setEditError(null);
+  }, [decision.id, initialEditValue]);
 
   const supportsEdit = useMemo(() => {
     return decision.options.some(
-      (option) => option.action === 'edit_and_approve' || option.action === 'edit_plan',
+      (option) => (
+        option.action === 'edit_and_approve'
+        || option.action === 'edit_plan'
+        || option.action === 'edit_and_confirm'
+      ),
     );
   }, [decision.options]);
 
   const handleApplyEdit = () => {
+    if (editAction === 'edit_and_confirm') {
+      const text = editValue.trim();
+      if (!text) {
+        setEditError('Текст для Memory не может быть пустым.');
+        return;
+      }
+      setEditError(null);
+      void onRespond(editAction, { text });
+      setEditMode(false);
+      return;
+    }
     try {
       const parsed = JSON.parse(editValue) as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -72,13 +116,29 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
           </div>
         ) : null}
 
+        {isMemorySave ? (
+          <div className="mt-3 rounded-lg border border-[#2a2a30] bg-[#0f0f14] p-3">
+            <div className="text-xs font-medium text-[#d7d7de]">Будет сохранено</div>
+            <p className="mt-1 whitespace-pre-wrap text-sm text-[#e4e4e7]">
+              {proposedMemoryText}
+            </p>
+            {memoryClaimLabels.length > 0 ? (
+              <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-[#a8a8b2]">
+                {memoryClaimLabels.map((label, index) => (
+                  <li key={`${index}-${label}`}>{label}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
+
         {supportsEdit && editMode ? (
           <div className="mt-3 space-y-2">
             <textarea
               value={editValue}
               onChange={(event) => setEditValue(event.target.value)}
-              rows={6}
-              className="w-full rounded-lg border border-[#2a2a30] bg-[#0f0f14] px-3 py-2 font-mono text-[12px] text-[#d7d7de] outline-none focus:border-[#3a3a44]"
+              rows={isMemorySave ? 4 : 6}
+              className={`w-full rounded-lg border border-[#2a2a30] bg-[#0f0f14] px-3 py-2 text-[#d7d7de] outline-none focus:border-[#3a3a44] ${isMemorySave ? 'text-sm' : 'font-mono text-[12px]'}`}
               disabled={busy}
             />
             {editError ? <p className="text-xs text-rose-300">{editError}</p> : null}
@@ -90,9 +150,14 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
         <div className="mt-3 flex items-center gap-2">
           {decision.options.map((option) => {
             const action = option.action;
-            const isEditAction = action === 'edit_and_approve' || action === 'edit_plan';
+            const isEditAction = action === 'edit_and_approve'
+              || action === 'edit_plan'
+              || action === 'edit_and_confirm';
             const baseClass =
-              action === 'approve_once' || action === 'approve_session' || action === 'always_allow'
+              action === 'approve_once'
+              || action === 'approve_session'
+              || action === 'always_allow'
+              || action === 'confirm'
                 ? 'bg-emerald-600 text-white hover:bg-emerald-500'
                 : 'border border-[#3a3a44] text-[#d4d4db] hover:bg-[#1b1b22]';
             const icon = action === 'reject'

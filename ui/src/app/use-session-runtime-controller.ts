@@ -884,7 +884,7 @@ export function useSessionRuntimeController({
           session_id: selectedConversation,
           decision_id: pendingDecision.id,
           choice,
-          edited_action: choice === 'edit_and_approve' ? (editedPayload ?? {}) : null,
+          edited_action: choice === 'edit_and_approve' || choice === 'edit_and_confirm' ? (editedPayload ?? {}) : null,
           edited_plan: choice === 'edit_plan' ? (editedPayload ?? {}) : null,
         }),
       });

@@ -311,6 +311,21 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+    elif decision_type == "memory_save":
+        if choice not in {"confirm", "edit_and_confirm", "reject"}:
+            return error_response(
+                status=400,
+                message="Для memory_save доступны confirm|edit_and_confirm|reject.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+        if choice == "edit_and_confirm" and edited_action is None:
+            return error_response(
+                status=400,
+                message="edit_and_confirm требует edited_action.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
     elif decision_type == "tool_approval":
         if choice in {"edit_plan"}:
             return error_response(
@@ -1072,6 +1087,65 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "resume_started": True,
         }
 
+    async def _resolve_memory_save_decision() -> dict[str, JSONValue]:
+        if choice == "reject":
+            return {
+                "ok": True,
+                "source_endpoint": "memory.save",
+                "data": {"action": "reject", "saved": False, "claims": []},
+                "resume_started": False,
+            }
+        proposed_raw = current_decision.get("proposed_action")
+        proposed_action = dict(proposed_raw) if isinstance(proposed_raw, dict) else {}
+        agent = await _resolve_agent(request, session_id)
+        if agent is None:
+            return {
+                "ok": False,
+                "source_endpoint": "memory.save",
+                "error": "model_not_selected",
+                "resume_started": False,
+            }
+        async with agent_lock:
+            if choice == "edit_and_confirm":
+                edited_text_raw = edited_action.get("text") if edited_action is not None else None
+                if not isinstance(edited_text_raw, str) or not edited_text_raw.strip():
+                    return {
+                        "ok": False,
+                        "source_endpoint": "memory.save",
+                        "error": "invalid_memory_edit",
+                        "resume_started": False,
+                    }
+                proposed_action = agent.build_memory_save_preview(
+                    edited_text_raw.strip(),
+                    source_kind="chat.explicit_remember",
+                    source_id=session_id,
+                )
+            try:
+                applied = agent.apply_memory_save_preview(
+                    proposed_action,
+                    source_kind="chat.explicit_remember",
+                    source_id=session_id,
+                )
+            except (TypeError, ValueError) as exc:
+                return {
+                    "ok": False,
+                    "source_endpoint": "memory.save",
+                    "error": "memory_preview_invalid",
+                    "details": {"message": str(exc)},
+                    "resume_started": False,
+                }
+        return {
+            "ok": True,
+            "source_endpoint": "memory.save",
+            "data": {
+                "action": choice,
+                "saved": True,
+                "claims": applied,
+                "proposed_action": proposed_action,
+            },
+            "resume_started": False,
+        }
+
     async def _resolve_plan_execute_decision() -> dict[str, JSONValue]:
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
@@ -1568,6 +1642,8 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         resume = await _resolve_tool_decision()
     elif decision_type == "computer_commit":
         resume = await _resolve_computer_commit_decision()
+    elif decision_type == "memory_save":
+        resume = await _resolve_memory_save_decision()
     else:
         resume = await _resolve_agent_decision()
 
@@ -1592,6 +1668,9 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         "mode_not_plan",
         "mode_not_act",
         "plan_state_conflict",
+        "invalid_memory_edit",
+        "memory_preview_invalid",
+        "model_not_selected",
     }
     resume_error_code: str | None = None
     if isinstance(resume, dict):
@@ -1619,6 +1698,9 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "mode_not_plan": "Операция доступна только в plan-режиме.",
             "mode_not_act": "Операция доступна только в act-режиме.",
             "plan_state_conflict": "Состояние плана изменилось, повторите действие.",
+            "invalid_memory_edit": "Для сохранения Memory нужен непустой edited_action.text.",
+            "memory_preview_invalid": "Memory preview недействителен; создайте новый preview.",
+            "model_not_selected": "Сначала выберите модель, затем повторите подтверждение.",
         }
         details_raw = resume.get("details")
         details = details_raw if isinstance(details_raw, dict) else None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from config.memory_config import ContextBudgetConfig
@@ -90,7 +92,10 @@ def test_agent_mwv_task_contains_memory_capsule(tmp_path, monkeypatch) -> None:
     assert count_raw >= 1
 
 
-def test_agent_explicit_remember_response_persists_claim(tmp_path, monkeypatch) -> None:
+def test_agent_explicit_remember_response_builds_preview_without_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
     agent = _build_agent(tmp_path, monkeypatch)
     agent.runtime_mode = "ask"
 
@@ -98,7 +103,31 @@ def test_agent_explicit_remember_response_persists_claim(tmp_path, monkeypatch) 
         [LLMMessage(role="user", content="запомни: я предпочитаю короткие ответы")]
     )
 
-    assert response == "Запомнил: preference:response_length"
+    decision = json.loads(response)
+    assert decision["decision_type"] == "memory_save"
+    assert decision["status"] == "pending"
+    assert decision["default_option_id"] == "reject"
+    assert decision["proposed_action"]["claims"][0]["stable_key"] == ("preference:response_length")
+    assert agent._canonical_store.get_by_stable_key("preference:response_length") is None
+
+
+def test_agent_confirmed_preview_persists_exact_claim(tmp_path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    preview = agent.build_memory_save_preview(
+        "запомни: я предпочитаю короткие ответы",
+        source_kind="chat.explicit_remember",
+        source_id="session-confirmed",
+    )
+
+    assert agent._canonical_store.get_by_stable_key("preference:response_length") is None
+
+    applied = agent.apply_memory_save_preview(
+        preview,
+        source_kind="chat.explicit_remember",
+        source_id="session-confirmed",
+    )
+
+    assert applied[0]["stable_key"] == "preference:response_length"
     atom = agent._canonical_store.get_by_stable_key("preference:response_length")
     assert atom is not None
     assert atom.value_json == {
@@ -107,7 +136,10 @@ def test_agent_explicit_remember_response_persists_claim(tmp_path, monkeypatch) 
     }
 
 
-def test_agent_explicit_remember_stream_persists_fallback_fact(tmp_path, monkeypatch) -> None:
+def test_agent_explicit_remember_stream_builds_preview_without_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
     agent = _build_agent(tmp_path, monkeypatch)
     agent.runtime_mode = "ask"
 
@@ -117,14 +149,22 @@ def test_agent_explicit_remember_stream_persists_fallback_fact(tmp_path, monkeyp
         )
     )
 
-    assert chunks == [TextDelta(text="Запомнил: fact:my_laptop_hostname_is_alpha"), Done()]
-    assert agent.last_stream_response_raw == "Запомнил: fact:my_laptop_hostname_is_alpha"
-    atom = agent._canonical_store.get_by_stable_key("fact:my_laptop_hostname_is_alpha")
-    assert atom is not None
-    assert atom.value_json == {"text": "my laptop hostname is alpha"}
+    assert isinstance(chunks[-1], Done)
+    assert agent.last_stream_response_raw is not None
+    decision = json.loads(agent.last_stream_response_raw)
+    assert decision["decision_type"] == "memory_save"
+    assert decision["proposed_action"]["claims"][0]["stable_key"] == (
+        "fact:my_laptop_hostname_is_alpha"
+    )
+    streamed_text = "".join(chunk.text for chunk in chunks if isinstance(chunk, TextDelta))
+    assert json.loads(streamed_text) == decision
+    assert agent._canonical_store.get_by_stable_key("fact:my_laptop_hostname_is_alpha") is None
 
 
-def test_agent_explicit_remember_uses_llm_enrichment(tmp_path, monkeypatch) -> None:
+def test_agent_memory_preview_uses_llm_enrichment_and_waits_for_confirm(
+    tmp_path,
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         "memory.vector_index.VectorIndex._get_model",
         lambda _self, _name: DummyModel(),
@@ -139,7 +179,17 @@ def test_agent_explicit_remember_uses_llm_enrichment(tmp_path, monkeypatch) -> N
 
     response = agent.respond([LLMMessage(role="user", content="remember my editor is neovim")])
 
-    assert "environment:editor" in response
+    decision = json.loads(response)
+    proposed_action = decision["proposed_action"]
+    proposed_keys = {claim["stable_key"] for claim in proposed_action["claims"]}
+    assert "environment:editor" in proposed_keys
+    assert agent._canonical_store.get_by_stable_key("environment:editor") is None
+
+    agent.apply_memory_save_preview(
+        proposed_action,
+        source_kind="chat.explicit_remember",
+        source_id="session-enriched",
+    )
     atom = agent._canonical_store.get_by_stable_key("environment:editor")
     assert atom is not None
     assert atom.value_json == {"value": "neovim"}

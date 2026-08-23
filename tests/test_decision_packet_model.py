@@ -55,8 +55,15 @@ def test_decision_packet_to_dict_and_json() -> None:
 
     data = packet.to_dict()
     assert data["id"] == "dp-1"
+    assert data["kind"] == "decision"
+    assert data["decision_type"] is None
+    assert data["status"] == "pending"
+    assert data["blocking"] is True
     assert data["reason"] == "ambiguous_skill"
     assert data["created_at"] == created.isoformat()
+    assert data["updated_at"] == created.isoformat()
+    assert data["resolved_at"] is None
+    assert data["proposed_action"] == {}
     assert data["expires_at"] == (created.replace(tzinfo=UTC) + timedelta(seconds=600)).isoformat()
     assert data["default_option_id"] == "ask"
     assert data["ttl_seconds"] == 600

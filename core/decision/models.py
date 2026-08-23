@@ -17,6 +17,7 @@ class DecisionReason(StrEnum):
     NEED_USER_INPUT = "need_user_input"
     AMBIGUOUS_SKILL = "ambiguous_skill"
     VERIFIER_FAIL = "verifier_fail"
+    MEMORY_SAVE_CONFIRMATION = "memory_save_confirmation"
 
 
 class DecisionAction(StrEnum):
@@ -25,6 +26,9 @@ class DecisionAction(StrEnum):
     RETRY = "retry"
     SELECT_SKILL = "select_skill"
     ABORT = "abort"
+    CONFIRM = "confirm"
+    EDIT_AND_CONFIRM = "edit_and_confirm"
+    REJECT = "reject"
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,8 @@ class DecisionPacket:
     default_option_id: str | None = None
     ttl_seconds: int = 600
     policy: dict[str, JSONValue] = field(default_factory=dict)
+    decision_type: str | None = None
+    proposed_action: dict[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -96,12 +102,20 @@ class DecisionPacket:
         return reference >= self.expires_at
 
     def to_dict(self) -> dict[str, JSONValue]:
+        created_at = self.created_at.isoformat()
         return {
             "id": self.id,
-            "created_at": self.created_at.isoformat(),
+            "kind": "decision",
+            "decision_type": self.decision_type,
+            "status": "pending",
+            "blocking": True,
+            "created_at": created_at,
             "expires_at": self.expires_at.isoformat(),
+            "updated_at": created_at,
+            "resolved_at": None,
             "reason": self.reason.value,
             "summary": self.summary,
+            "proposed_action": self.proposed_action,
             "context": self.context,
             "options": [option.to_dict() for option in self.options],
             "default_option_id": self.default_option_id,

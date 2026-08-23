@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from core.batch_review import BatchReviewer
 from memory.memory_retrieval import build_memory_capsule as build_memory_capsule_payload
@@ -270,6 +270,93 @@ class AgentMemoryMixin:
         source_id: str,
         lang_hint: str | None = None,
     ) -> list[dict[str, JSONValue]]:
+        claims = self._extract_memory_claims_from_text(
+            text,
+            source_kind=source_kind,
+            source_id=source_id,
+            lang_hint=lang_hint,
+        )
+        return self._apply_memory_claims(claims)
+
+    def build_memory_save_preview(
+        self,
+        text: str,
+        *,
+        source_kind: str,
+        source_id: str | None = None,
+        lang_hint: str | None = None,
+    ) -> dict[str, JSONValue]:
+        cleaned = text.strip()
+        if not cleaned:
+            return {"text": "", "claims": []}
+        capture_text = (
+            cleaned if self.is_explicit_memory_request(cleaned) else f"remember {cleaned}"
+        )
+        resolved_source_id = source_id or self.session_id or self.conversation_id
+        claims = self._extract_memory_claims_from_text(
+            capture_text,
+            source_kind=source_kind,
+            source_id=resolved_source_id,
+            lang_hint=lang_hint,
+        )
+        memory_text = _EXPLICIT_MEMORY_PREFIX.sub("", capture_text, count=1).strip()
+        return {
+            "text": memory_text,
+            "claims": [self._claim_to_preview_payload(claim) for claim in claims],
+        }
+
+    def apply_memory_save_preview(
+        self,
+        proposed_action: dict[str, JSONValue],
+        *,
+        source_kind: str,
+        source_id: str | None = None,
+    ) -> list[dict[str, JSONValue]]:
+        claims_raw = proposed_action.get("claims")
+        if not isinstance(claims_raw, list) or not claims_raw:
+            raise ValueError("Memory preview не содержит claims.")
+        resolved_source_id = source_id or self.session_id or self.conversation_id
+        created_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+        claims: list[Claim] = []
+        for item in claims_raw:
+            if not isinstance(item, dict):
+                raise ValueError("Memory preview claim должен быть объектом.")
+            claim_type_raw = item.get("claim_type")
+            stable_key_raw = item.get("stable_key")
+            summary_raw = item.get("summary_text")
+            confidence_raw = item.get("confidence")
+            if not isinstance(claim_type_raw, str):
+                raise ValueError("Memory preview claim_type обязателен.")
+            if not isinstance(stable_key_raw, str) or not stable_key_raw.strip():
+                raise ValueError("Memory preview stable_key обязателен.")
+            if not isinstance(summary_raw, str) or not summary_raw.strip():
+                raise ValueError("Memory preview summary_text обязателен.")
+            if isinstance(confidence_raw, bool) or not isinstance(confidence_raw, (int, float)):
+                raise ValueError("Memory preview confidence должен быть числом.")
+            claim_type = ClaimType(claim_type_raw.strip())
+            claims.append(
+                Claim(
+                    claim_type=claim_type,
+                    stable_key=stable_key_raw.strip(),
+                    value_json=cast(JSONValue, item.get("value_json")),
+                    confidence=float(confidence_raw),
+                    summary_text=summary_raw.strip(),
+                    is_explicit=True,
+                    source_kind=source_kind,
+                    source_id=resolved_source_id,
+                    created_at=created_at,
+                )
+            )
+        return self._apply_memory_claims(claims)
+
+    def _extract_memory_claims_from_text(
+        self,
+        text: str,
+        *,
+        source_kind: str,
+        source_id: str,
+        lang_hint: str | None,
+    ) -> list[Claim]:
         payload = ClaimExtractionInput(
             text=text,
             source_kind=source_kind,
@@ -277,11 +364,15 @@ class AgentMemoryMixin:
             lang_hint=lang_hint,
             created_at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
         )
-        claims = self._claim_extractor.extract(payload)
+        return [
+            claim
+            for claim in self._claim_extractor.extract(payload)
+            if self._should_promote_claim(claim)
+        ]
+
+    def _apply_memory_claims(self, claims: list[Claim]) -> list[dict[str, JSONValue]]:
         applied: list[dict[str, JSONValue]] = []
         for claim in claims:
-            if not self._should_promote_claim(claim):
-                continue
             atom = self._canonical_aggregator.upsert_claim(claim)
             self._atom_embedding_index.sync_atom(atom)
             applied.append(
@@ -293,49 +384,30 @@ class AgentMemoryMixin:
                 }
             )
         if applied:
+            first_claim = claims[0]
             self.tracer.log(
                 "memory_claims_applied",
                 f"Applied {len(applied)} claims",
-                {"claims": applied, "source_kind": source_kind, "source_id": source_id},
+                {
+                    "claims": applied,
+                    "source_kind": first_claim.source_kind,
+                    "source_id": first_claim.source_id,
+                },
             )
         return applied
 
+    @staticmethod
+    def _claim_to_preview_payload(claim: Claim) -> dict[str, JSONValue]:
+        return {
+            "claim_type": claim.claim_type.value,
+            "stable_key": claim.stable_key,
+            "value_json": claim.value_json,
+            "confidence": claim.confidence,
+            "summary_text": claim.summary_text,
+        }
+
     def is_explicit_memory_request(self, text: str) -> bool:
         return _EXPLICIT_MEMORY_PREFIX.match(text.strip()) is not None
-
-    def remember_explicit_text(
-        self,
-        text: str,
-        *,
-        source_kind: str,
-        source_id: str | None = None,
-        lang_hint: str | None = None,
-    ) -> str:
-        cleaned = text.strip()
-        if not cleaned:
-            return "Нечего запомнить."
-
-        capture_text = (
-            cleaned if self.is_explicit_memory_request(cleaned) else f"remember {cleaned}"
-        )
-        resolved_source_id = source_id or self.session_id or self.conversation_id
-        applied = self.capture_memory_claims_from_text(
-            capture_text,
-            source_kind=source_kind,
-            source_id=resolved_source_id,
-            lang_hint=lang_hint,
-        )
-        if not applied:
-            return "Не удалось выделить факт для памяти."
-
-        stable_keys = [
-            str(item["stable_key"])
-            for item in applied
-            if isinstance(item.get("stable_key"), str) and item["stable_key"]
-        ]
-        if not stable_keys:
-            return f"Запомнил: {len(applied)}"
-        return f"Запомнил: {', '.join(stable_keys)}"
 
     def build_memory_capsule(
         self,
@@ -442,6 +514,7 @@ class AgentMemoryMixin:
 
     def _build_context_messages(self, messages: list[LLMMessage], query: str) -> list[LLMMessage]:
         budget = self.memory_config.context_budget
+        allow_vector_runtime_init = getattr(self, "runtime_mode", "ask") != "ask"
         remaining = budget.total_chars
         filled_slots: list[str] = []
         slot_sizes: dict[str, int] = {}
@@ -564,7 +637,7 @@ class AgentMemoryMixin:
                 vector_index=self.vectors,
                 for_mwv=False,
                 config=retrieval_config,
-                allow_vector_runtime_init=True,
+                allow_vector_runtime_init=allow_vector_runtime_init,
             )
             capsule_text = memory_capsule.get("text")
             if isinstance(capsule_text, str) and capsule_text.strip():
@@ -585,13 +658,13 @@ class AgentMemoryMixin:
                 query,
                 namespace="code",
                 top_k=code_top_k,
-                allow_runtime_init=True,
+                allow_runtime_init=allow_vector_runtime_init,
             )
             vec_results_docs = self.vectors.search(
                 query,
                 namespace="docs",
                 top_k=docs_top_k,
-                allow_runtime_init=True,
+                allow_runtime_init=allow_vector_runtime_init,
             )
             if vec_results_code:
                 code_parts = ["Контекст проекта (code):"]
