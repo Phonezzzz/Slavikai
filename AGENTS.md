@@ -15,6 +15,8 @@
 
 ## Canonical rules (must read)
 
+- `docs/SOURCE_OF_TRUTH.md` — иерархия контрактов и статусы current/target/legacy.
+- `docs/architecture/ARCH_CANON.md` — обязательные runtime-инварианты.
 - `docs/agent/DevRules.md` — глобальные инварианты проекта.
 - `docs/workflow/dev_workflow.md` — git-процесс (режим A).
 - `docs/agent/COMMAND_LANE_POLICY.md` — границы командного режима.
@@ -34,23 +36,28 @@
 - Какие контекстные документы прочитаны и почему они релевантны.
 - Какие ограничения являются жёсткими (sandbox, safe-mode, MWV, git-flow, approvals).
 
-## Product default: single-user/admin
+## Product deployment: closed owner/member group
 
-- По умолчанию агент исходит из режима `single-user / single-admin`.
-- Владелец проекта и основной пользователь считаются одним человеком, если в задаче явно не сказано обратное.
-- Без явного запроса не добавлять:
-  - migration logic,
-  - backward compatibility "на всякий случай",
-  - multi-user guards,
-  - специальные меры ради сохранения гипотетически чужих данных.
-- Если есть конфликт между enterprise-осторожностью и простым решением для текущего владельца проекта, по умолчанию выбирать простое решение.
+- Целевой deployment — небольшая закрытая группа за Cloudflare Access email OTP.
+- Один настроенный owner имеет административные полномочия; остальные допущенные
+  пользователи являются members.
+- Browser principal выводится только из криптографически проверенного Cloudflare Access JWT;
+  подтверждённый нормализованный email является `principal_id`.
+- Browser identity и Bearer auth для `/v1` automation — разные auth lanes.
+- Sessions, runtime state, Memory, vectors и approvals обязаны быть principal-scoped.
+- Текущая реализация этого контракта неполна. Статус определяется только через
+  `docs/runtime_contract_claims.json`; нельзя считать legacy token-cookie auth достаточной
+  multi-user isolation.
+- Не добавлять compatibility/migration layers «на всякий случай». Миграция существующих
+  локальных данных к owner допустима только как явно спроектированная часть security PR.
 
 ## Non-negotiable rules
 
 - Работа никогда не ведётся напрямую в `main`.
 - Каждая задача выполняется в отдельной PR-ветке.
-- Перед началом работы в PR-ветке: `make git-check`.
+- На новой чистой PR-ветке до изменений: `make preflight`.
 - Перед завершением: `make check`.
+- После commit и push перед merge: `make git-check`.
 - В `main` только `git merge --ff-only`.
 - После merge обязательно вернуться в `main`.
 - Если что-то неясно — остановиться и запросить решение у человека.
@@ -85,10 +92,14 @@
 
 ## Workflow (кратко)
 
-1. `git checkout main`
+1. `git checkout main` + `git pull --ff-only origin main`
 2. `git checkout -b pr-<id>-<name>`
-3. `make git-check`
-4. реализация + commit + push
+3. `make preflight`
+4. реализация + targeted tests
 5. `make check`
-6. `git rebase origin/main` + `git merge --ff-only`
-7. `git checkout main`
+6. commit + `git push -u origin HEAD`
+7. перед merge: fetch; если `origin/main` продвинулся — rebase PR-ветки, повторный
+   `make check` и push
+8. `make git-check`
+9. после одобрения: `git merge --ff-only` в `main`
+10. `git checkout main`

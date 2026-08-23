@@ -1,12 +1,15 @@
 # ARCH_CANON — runtime canon Ask/Plan/Act/Auto
 
-Этот документ — **source of truth** для runtime-архитектуры и rollout-границ.
-`docs/architecture/Architecture.md` описывает текущее фактическое устройство и обязано
-называть legacy-пути legacy, а не целевым поведением.
+Этот документ задаёт обязательные runtime-инварианты и target design в иерархии
+`docs/SOURCE_OF_TRUTH.md`. Точный статус каждого claim находится только в
+`docs/runtime_contract_claims.json`. `docs/architecture/Architecture.md` описывает текущее
+фактическое устройство и обязано называть legacy-пути legacy, а не целевым поведением.
 
 ## 0) Статус канона
 
-- **Target runtime**: Ask / Plan / Act / Auto, описанные ниже.
+- **Status registry**: `docs/runtime_contract_claims.json`; `partial` и `target` нельзя
+  интерпретировать как shipped guarantee.
+- **Target runtime**: строгие Ask / Plan / Act и Auto FSM, описанные ниже.
 - **Implemented baseline**: tool-calling типы, `AgentToolLoop`, read-only chat tool-loop
   integration, explicit `PlanStep.tool_args`, debug-only command lane, единый chat send
   endpoint (`/ui/api/chat/send`; `/ui/api/workspace/send` удалён), единый `TerminalTool`,
@@ -27,22 +30,27 @@
   тот же provider-neutral `AgentToolLoop -> ToolGateway -> VerifierRuntime`, но с явным
   execution target `desktop`, host-only tool profile, детерминированной scoped policy
   `ALLOW|ASK|DENY` и lifecycle once/session/persistent approvals.
-- **Current legacy runtime**: крупные `core/agent_mwv.py`, `core/agent_tools.py`,
+- **Known partial contracts**: Ask всё ещё допускает explicit Memory write до mode gate и
+  hidden vector runtime init; browser Cloudflare identity, полная principal isolation,
+  explicit Memory confirmation и strict public `model="slavik"` validation ещё не готовы.
+- **Current legacy runtime**: token-cookie browser auth, крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой
   архитектурой.
 - **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
   `plan|act` через `/v1` отклоняются и должны идти через UI workflow.
 - **UI workflow**: endpoints `/ui/api/plan/*` и mode transitions допустимы только если
-  соблюдают этот канон: Plan не исполняет, Act исполняет только packet.
+  соблюдают этот канон: Plan использует только read-only inspection через `ToolGateway`,
+  Act исполняет только packet.
 
 ## 1) Канонические роли режимов
 
-1. Ask = **stateless**.
-2. Plan = **transactional**.
-3. Act = **isolated**.
-4. Auto = **FSM orchestrator**.
-5. Desktop = **host execution profile**, а не отдельный AI, planner или execution loop.
+1. Ask = **stateless** (target; current `partial`).
+2. Plan = **transactional read-only** (current `implemented`).
+3. Act = **isolated** (current `partial`).
+4. Auto v1 = **native tool loop** (current `implemented`).
+5. Auto FSM = **Ask -> Plan -> Act orchestrator** (target).
+6. Desktop = **host execution profile**, а не отдельный AI, planner или execution loop.
 
 В пользовательском UI Chat соответствует безопасному диалогу (`ask`), Agent — существующему
 изолированному agent/auto execution, Desktop — выполнению через host capabilities. Desktop
@@ -51,7 +59,7 @@
 
 ## 2) Инварианты (обязательные)
 
-### Ask (stateless, 0 side effects)
+### Ask (target: stateless, 0 side effects; current: partial)
 
 - Запрещены любые записи:
   - `save_to_memory`
@@ -62,10 +70,15 @@
 - Разрешён только read-only контекст (memory/vector read path).
 - Если vector runtime не готов, ask делает soft-degrade (ответ без vector-контекста, без hidden init).
 
-### Plan (transactional)
+До исправления раннего explicit-memory path и `allow_runtime_init=True` это обязательный
+target invariant, а не описание текущей полной защиты.
+
+### Plan (current: transactional read-only)
 
 - Plan только формирует/редактирует/валидирует `TaskPacket`.
-- Plan не исполняет инструменты.
+- Plan может использовать только read-capability tools для inspection через
+  `ToolGateway`; write/exec capabilities блокируются на registry boundary.
+- Read tool result не является выполнением будущего Act step и не может менять packet scope.
 - Plan фиксирует execution-контракт:
   - `policy`
   - `scope`
@@ -73,14 +86,20 @@
   - `approvals`
   - `verifier`
 
-### Act (isolated)
+### Act (target: isolated; current: partial)
 
 - Act исполняет только `TaskPacket.steps`.
 - Act не меняет `scope/policy/budgets/verifier`.
 - Любое отклонение от packet-контракта => `STOP_TO_CHAT` с `stop_reason_code=REPLAN_REQUIRED`.
 - Retry через новый `packet_revision` в Plan, а не через импровизацию в Act.
 
-### Auto (FSM only)
+### Auto v1 (current)
+
+- Current Auto запускает provider-native `AgentToolLoop -> ToolGateway -> verifier`.
+- Он не является отдельным runtime и не использует classifier для выбора tools.
+- Approvals, sandbox, safe-mode и verifier остаются обязательными execution boundaries.
+
+### Auto FSM (target)
 
 - Целевой Auto гоняет только детерминированный цикл: `Ask -> Plan -> Act`.
 - В `runtime_mode=auto` запрещён chat-fallback.

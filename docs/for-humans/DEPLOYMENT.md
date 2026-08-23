@@ -6,7 +6,7 @@
 
 - Linux/macOS сервер с Python 3.12+.
 - `git`, `make`, `venv`.
-- Для UI-сборки: Node.js + npm.
+- Для UI-сборки: Node.js 20 (см. `.nvmrc`) + npm.
 
 ## 2) Быстрый beta-запуск (DeepSeek)
 
@@ -64,6 +64,9 @@ make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000
 `HttpOnly`, `SameSite=Strict` cookie; сам token в cookie не сохраняется. Для внешних API
 клиентов остаётся Bearer auth: `Authorization: Bearer <SLAVIK_API_TOKEN>`.
 
+Это текущая legacy browser auth, а не реализация целевого owner/member deployment за
+Cloudflare Access. Статус security claims см. в `docs/runtime_contract_claims.json`.
+
 Для локальной разработки без auth можно явно задать
 `SLAVIK_ALLOW_UNAUTH_LOCAL=true`. На публичном интерфейсе этот режим не использовать.
 
@@ -95,13 +98,19 @@ curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/ui/a
 make smoke-prod
 ```
 
+`/v1/models` возвращает один публичный proxy model id `slavik`. Реальный provider/model
+выбирается в Settings и не является публичным model id этого API.
+
 ## 5) Фоновый режим (без systemd)
 
 ```bash
-make up
-make status
-make logs
+make up-prod PROD_HOST=127.0.0.1 PROD_PORT=8000
+make status-prod
+make logs-prod
 ```
+
+Остановка: `make down-prod`. Development background использует отдельные `make up/down/status/logs`
+и окружение `venv`; не используй его как production-команду.
 
 ## 6) systemd
 

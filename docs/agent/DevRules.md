@@ -22,16 +22,20 @@
   - осознанно (и желательно проверено тестом),
   - наблюдаемо (лог/трейс), если влияет на поведение агента.
 
-## 2.1) Product default: single-user / single-admin
+## 2.1) Product deployment: closed owner/member group
 
-- По умолчанию проект рассматривается как `single-user / single-admin`.
-- Агент обязан принимать архитектурные и продуктовые решения, исходя из того, что владелец проекта и основной пользователь — один человек.
-- Если в задаче явно не сказано обратное, не нужно добавлять:
-  - migration logic,
-  - backward compatibility "на всякий случай",
-  - multi-user safeguards,
-  - специальные меры ради сохранения гипотетически чужих данных.
-- Такие меры допустимы только по явному запросу в задаче.
+- Целевой deployment — небольшая закрытая группа за Cloudflare Access email OTP.
+- Один настроенный owner имеет административные полномочия; остальные допущенные Access
+  пользователи являются members.
+- Доверять browser identity можно только после проверки Access JWT signature и обязательных
+  claims; подтверждённый нормализованный email становится `principal_id`.
+- Request/session/runtime/Memory/vector/approval state должен сохранять principal ownership
+  через весь execution path.
+- Browser Access identity нельзя смешивать с Bearer auth для `/v1` automation.
+- Пока claim отмечен `partial` или `target` в `docs/runtime_contract_claims.json`, нельзя
+  документировать его как shipped security guarantee.
+- Compatibility и migration layers не добавляются «на всякий случай». Перенос существующих
+  данных к owner требует отдельного explicit design и mechanism tests.
 
 ## 3) Инструменты: обязательный `ToolResult`
 
@@ -105,8 +109,10 @@ expected state или correlated follow-up observation.
 
 - Работа начинается с `main`: `git checkout main`.
 - На PR создаётся ветка: `git checkout -b pr-<номер>-<название>`.
-- Перед любой работой в PR-ветке запускай `make git-check`.
-- После завершения PR: `git rebase origin/main`, `git merge --ff-only <pr-branch>`, `git push origin main`.
+- На новой чистой PR-ветке до изменений запускай `make preflight`; upstream ещё не требуется.
+- Перед merge синхронизируй remote refs. Если `origin/main` продвинулся, rebase PR-ветку,
+  повтори `make check` и push; затем запускай `make git-check`.
+- После одобрения PR: `git merge --ff-only <pr-branch>`, `git push origin main`.
 - Перед финализацией изменений запускай `make check`.
 - Нельзя продолжать новую фичу в старой ветке.
 - После PR — всегда обратно на `main`.
@@ -121,8 +127,12 @@ expected state или correlated follow-up observation.
 
 ## 12) Документация как источник истины
 
-- `AGENTS.md` и документы из его раздела **Canonical rules** являются обязательными для любой задачи.
-- Фактическое поведение должно соответствовать "живым" документам (`architecture/Architecture`, `workflow/CONTRIBUTING`).
+- `docs/SOURCE_OF_TRUTH.md`, `docs/runtime_contract_claims.json`, `AGENTS.md` и документы
+  из его раздела **Canonical rules** обязательны для любой задачи.
+- `docs/architecture/ARCH_CANON.md` задаёт обязательные runtime-инварианты;
+  `docs/architecture/Architecture.md` описывает наблюдаемое current/legacy устройство.
+- Claim нельзя называть implemented без указанной executable проверки. Расхождение current
+  кода с каноном получает статус `partial`, а не скрывается переписыванием guide.
 - В рабочем дереве хранятся только действующие документы. Устаревшие документы и завершённые планы удаляются. История изменений сохраняется в Git.
 
 ## Anti-pseudo audit

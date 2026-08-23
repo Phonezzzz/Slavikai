@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "contract_version": "2026-08-23",
+  "statuses": [
+    "implemented",
+    "partial",
+    "target",
+    "legacy"
+  ],
+  "claims": [
+    {
+      "id": "auth.browser.token_cookie",
+      "scope": "security",
+      "status": "legacy",
+      "owner": "security",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_auth_and_session.py"
+      ],
+      "summary": "Current browser auth uses token login and a signed HttpOnly cookie."
+    },
+    {
+      "id": "auth.browser.cloudflare_access",
+      "scope": "security",
+      "status": "target",
+      "owner": "security",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "docs/SOURCE_OF_TRUTH.md"
+      ],
+      "summary": "Cloudflare Access JWT validation and verified-email principals are not implemented yet."
+    },
+    {
+      "id": "identity.principal_isolation",
+      "scope": "security",
+      "status": "partial",
+      "owner": "security",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_auth_and_session.py",
+        "server/http/common/auth.py"
+      ],
+      "summary": "Session ownership exists, but runtime state, Memory, vectors and persistent approvals are not fully principal-scoped."
+    },
+    {
+      "id": "runtime.ask.zero_side_effects",
+      "scope": "runtime",
+      "status": "partial",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "tests/test_ask_stateless.py",
+        "core/agent_routing.py",
+        "core/agent_memory.py"
+      ],
+      "summary": "Ask blocks tools, but explicit Memory writes and hidden vector runtime initialization still violate the target invariant."
+    },
+    {
+      "id": "runtime.plan.read_only_tools",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "tests/test_plan_readonly_audit.py",
+        "tests/test_tool_registry.py"
+      ],
+      "summary": "Plan may inspect through ToolGateway; write and exec capabilities are rejected."
+    },
+    {
+      "id": "runtime.auto.v1_tool_loop",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "tests/test_auto_runtime.py",
+        "tests/test_tool_loop.py",
+        "tests/test_verifier_runtime.py"
+      ],
+      "summary": "Current Auto v1 uses AgentToolLoop, ToolGateway and verifier."
+    },
+    {
+      "id": "runtime.auto.ask_plan_act_fsm",
+      "scope": "runtime",
+      "status": "target",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "docs/architecture/ARCH_CANON.md"
+      ],
+      "summary": "Deterministic Ask to Plan to Act orchestration is a target, not current Auto behavior."
+    },
+    {
+      "id": "memory.explicit_confirmation",
+      "scope": "memory",
+      "status": "target",
+      "owner": "memory",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "docs/SOURCE_OF_TRUTH.md"
+      ],
+      "summary": "Memory save preview with explicit confirm, edit or reject is not implemented yet."
+    },
+    {
+      "id": "api.proxy_model.slavik",
+      "scope": "api",
+      "status": "partial",
+      "owner": "api",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "server/http/handlers/models.py",
+        "tests/test_http_api.py"
+      ],
+      "summary": "The model list exposes only slavik, but chat request model validation is not yet strict."
+    },
+    {
+      "id": "desktop.shared_host_policy",
+      "scope": "security",
+      "status": "partial",
+      "owner": "desktop",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "tests/test_desktop_policy.py",
+        "tests/test_desktop_runtime.py"
+      ],
+      "summary": "Desktop policy exists, but owner-only persistence, global host serialization and PR 35 hardening are incomplete."
+    },
+    {
+      "id": "skills.per_run_instructions",
+      "scope": "skills",
+      "status": "target",
+      "owner": "skills",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "core/skills/manifest.py"
+      ],
+      "summary": "Skill metadata exists; body instructions and supporting dependencies are not injected into the runtime yet."
+    },
+    {
+      "id": "workflow.local_pr_preflight",
+      "scope": "workflow",
+      "status": "implemented",
+      "owner": "workflow",
+      "version": 1,
+      "source": "docs/workflow/dev_workflow.md",
+      "verified_by": [
+        "Makefile",
+        "scripts/check_source_of_truth.py"
+      ],
+      "summary": "A clean local PR branch can run preflight before it has an upstream."
+    },
+    {
+      "id": "config.local_chat_completions_url",
+      "scope": "configuration",
+      "status": "implemented",
+      "owner": "configuration",
+      "version": 1,
+      "source": ".env.example",
+      "verified_by": [
+        "scripts/check_source_of_truth.py"
+      ],
+      "summary": "The environment example uses a complete OpenAI-compatible chat completions URL."
+    },
+    {
+      "id": "deployment.production_background_targets",
+      "scope": "deployment",
+      "status": "implemented",
+      "owner": "deployment",
+      "version": 1,
+      "source": "docs/for-humans/DEPLOYMENT.md",
+      "verified_by": [
+        "Makefile",
+        "scripts/check_source_of_truth.py"
+      ],
+      "summary": "Production background execution has separate venv-prod pid and log targets."
+    }
+  ]
+}

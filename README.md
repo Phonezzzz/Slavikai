@@ -7,17 +7,19 @@ SlavikAI — self-hosted AI workspace с browser UI, сессиями, памя�
 
 ## Что уже можно использовать
 
-- Browser UI с token login и сохранением истории чатов.
+- Browser UI с текущим legacy token login и сохранением истории чатов.
 - DeepSeek, OpenRouter, xAI, Inception и OpenAI-compatible local chat providers.
 - Выбор глобальной chat-модели и API key через `Settings → API Keys`.
 - Local или OpenAI embeddings; local model скачивается через
   `Settings → Memory → Advanced indexing`.
 - Ask/Plan/Auto workflow, workspace tools, approvals и session-level model override.
 - `/v1/chat/completions`, `/v1/models` и `/healthz` для интеграции и мониторинга.
+  Публичный API использует единый proxy model id `slavik`; provider/model из Settings
+  остаются внутренней конфигурацией runtime.
 
 ## Быстрый beta-запуск (DeepSeek)
 
-Требования: Linux/macOS, Python 3.12+, Node.js 20+, npm, git и make.
+Требования: Linux/macOS, Python 3.12+, Node.js 20 (см. `.nvmrc`), npm, git и make.
 
 ```bash
 git clone https://github.com/Phonezzzz/Slavikai.git
@@ -70,15 +72,18 @@ make ui-ci
 make check
 ```
 
-Работа ведётся только через PR-ветки. Перед merge используется `make git-check` и
-fast-forward merge. Правила: [`docs/workflow/CONTRIBUTING.md`](docs/workflow/CONTRIBUTING.md).
+Работа ведётся только через PR-ветки. На чистой новой ветке используется `make preflight`,
+после push перед merge — `make git-check`. Правила:
+[`docs/workflow/CONTRIBUTING.md`](docs/workflow/CONTRIBUTING.md).
 
-Архитектура и поведение agent runtime описаны в [`docs/architecture`](docs/architecture)
-и [`docs/agent`](docs/agent).
+Иерархия контрактов и честные статусы current/partial/target описаны в
+[`docs/SOURCE_OF_TRUTH.md`](docs/SOURCE_OF_TRUTH.md). Архитектура и поведение agent runtime —
+в [`docs/architecture`](docs/architecture) и [`docs/agent`](docs/agent).
 
 ## Статус beta
 
-Beta предназначена для контролируемого self-hosted использования. До стабильного
-релиза остаются расширение end-to-end coverage, hardening публичного deployment и
-проверка дополнительных provider/model combinations. Не выдавай проекту доступ к
-критичным workspace или production secrets без ограничений approvals и OS user.
+Beta предназначена для контролируемого self-hosted использования. Текущая browser auth ещё
+не реализует целевой Cloudflare Access owner/member contract и полную principal isolation.
+До завершения соответствующего security PR не открывай UI нескольким внешним пользователям.
+Не выдавай проекту доступ к критичным workspace или production secrets без ограничений
+approvals и OS user.

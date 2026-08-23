@@ -887,6 +887,8 @@ def test_approval_flow_and_session_reset(monkeypatch, tmp_path) -> None:
 
 
 def test_approve_session_requires_admin_bearer_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "")
+    monkeypatch.setenv("SLAVIK_API_TOKEN", "")
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
 
@@ -939,6 +941,8 @@ def test_approve_session_requires_admin_bearer_token(monkeypatch, tmp_path) -> N
 
 
 def test_control_plane_requires_admin_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "")
+    monkeypatch.setenv("SLAVIK_API_TOKEN", "")
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
 

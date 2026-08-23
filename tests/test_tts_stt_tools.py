@@ -61,6 +61,9 @@ class DummyHttp:
 
 def test_tts_tool_writes_file(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("OPENAI_TTS_MODEL", "")
+    monkeypatch.setenv("OPENAI_TTS_VOICE", "")
+    monkeypatch.setenv("OPENAI_TTS_FORMAT", "")
     http = DummyHttp(payload=b"audio data")
     tool = TtsTool(http, TtsConfig(format="mp3"))
     req = ToolRequest(name="tts", args={"text": "hello"})

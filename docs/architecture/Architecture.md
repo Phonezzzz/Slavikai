@@ -1,15 +1,18 @@
 # Architecture — SlavikAI current runtime
 
 Этот документ фиксирует **текущее фактическое устройство** системы после PR-12 текущей серии.
-Целевое поведение runtime определено в `docs/architecture/ARCH_CANON.md`.
+Иерархия источников истины определена в `docs/SOURCE_OF_TRUTH.md`, статусы claims — в
+`docs/runtime_contract_claims.json`, а обязательные runtime-инварианты и target design — в
+`docs/architecture/ARCH_CANON.md`.
 Product direction (personal agent computer, роли Chat/Computer, backends) — `ARCH_CANON.md §9`.
 Computer Mode product invariant ("not a manual IDE", live agent execution surface, primary vs secondary surfaces) — `ARCH_CANON.md §9`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
 ## Цель
 
-SlavikAI сейчас работает как single-user/server-side agent runtime с контурами chat,
-workspace/MWV и auto. После PR-0..PR-14 в коде есть честный tool-calling contract,
+SlavikAI сейчас работает как server-side agent runtime с частичной principal-scoped session
+изоляцией и legacy token-cookie browser auth. Целевой owner/member deployment за Cloudflare
+Access ещё не реализован полностью. После PR-0..PR-14 в коде есть tool-calling contract,
 read-only chat integration через `AgentToolLoop`, auto v1 через `AgentToolLoop`,
 split chat/workspace API paths, debug-only command lane и единый terminal backend.
 После PR-15 runtime tools имеют LLM descriptions/JSON Schema. После PR-16 auto mode
@@ -189,6 +192,9 @@ conversational endpoint и существующий LLM/tool loop, но публ
 ## HTTP/UI слой
 
 - OpenAI-совместимые endpoints: `/v1/models`, `/v1/chat/completions`.
+- `/v1/models` сейчас возвращает только публичный proxy id `slavik`; provider/model из UI
+  Settings являются внутренней runtime-конфигурацией. Проверка `model="slavik"` в chat
+  request ещё неполна и отмечена `partial` в registry claims.
 - Служебные endpoints: `/slavik/trace/{trace_id}`, `/slavik/tool-calls/{trace_id}`, `/slavik/feedback`, `/slavik/approve-session`.
 - UI API и workflow endpoints регистрируются в `server/http/routes.py`.
 - Browser UI проходит login через `/ui/api/auth/login` и работает по подписанной

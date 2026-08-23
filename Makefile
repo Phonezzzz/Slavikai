@@ -22,6 +22,8 @@ LOCK_SYNC := $(LOCK_VENV_DIR)/bin/pip-sync
 RUN_DIR ?= .run
 APP_PID_FILE := $(RUN_DIR)/slavikai-ui.pid
 APP_LOG_FILE := $(RUN_DIR)/slavikai-ui.log
+PROD_APP_PID_FILE := $(RUN_DIR)/slavikai-prod.pid
+PROD_APP_LOG_FILE := $(RUN_DIR)/slavikai-prod.log
 UI_PID_FILE := $(RUN_DIR)/ui-server.pid
 UI_LOG_FILE := $(RUN_DIR)/ui-server.log
 PROD_HOST ?= 0.0.0.0
@@ -50,20 +52,26 @@ help:
 	@echo "  make ui-test         npm test (ui)"
 	@echo "  make test            pytest (coverage configured in pyproject.toml)"
 	@echo "  make check           canonical project gate: UI guard + lint + format-check + type + ui-type + ui-test + test"
+	@echo "  make check-contracts Validate source-of-truth registry and mechanical contracts"
 	@echo "  make ci              skills lint/manifest + pytest -q (temp candidates)"
 	@echo
 	@echo "Git:"
 	@echo "  make guard-main      Fail if current branch is main"
-	@echo "  make git-check       Verify PR branch is pushed and make check passes"
+	@echo "  make preflight       Clean local PR branch baseline (upstream not required)"
+	@echo "  make git-check       Clean, fully pushed PR branch plus canonical check"
 	@echo
 	@echo "Run:"
 	@echo "  make run             Run UI in foreground"
 	@echo "  make run-prod        Run server in foreground for production host/port"
 	@echo "  make smoke-prod      Check health, settings, and models on a running server"
-	@echo "  make up              Run UI in background (pid/log in .run/)"
-	@echo "  make down            Stop background UI started by make up"
-	@echo "  make status          Show background UI status"
-	@echo "  make logs            Tail background UI log"
+	@echo "  make up-prod         Run production server in background via venv-prod"
+	@echo "  make down-prod       Stop background production server"
+	@echo "  make status-prod     Show background production server status"
+	@echo "  make logs-prod       Tail background production server log"
+	@echo "  make up              Run development server in background via venv"
+	@echo "  make down            Stop background development server"
+	@echo "  make status          Show background development server status"
+	@echo "  make logs            Tail background development server log"
 	@echo "  make deploy-example  Print production deployment command sequence"
 	@echo
 	@echo "UI:"
@@ -191,11 +199,15 @@ test-behavior: venv
 	"$(VENV_PY)" -m pytest --no-cov -m behavior
 
 .PHONY: check
-check: check-no-legacy-ui lint format-check type ui-type ui-test test
+check: check-no-legacy-ui check-contracts lint format-check type ui-type ui-test test
 
 .PHONY: check-no-legacy-ui
 check-no-legacy-ui:
 	./scripts/check_no_legacy_ui.sh
+
+.PHONY: check-contracts
+check-contracts:
+	"$(PYTHON)" scripts/check_source_of_truth.py
 
 .PHONY: guard-main
 guard-main:
@@ -213,6 +225,16 @@ guard-main:
 		exit 1; \
 	fi
 
+.PHONY: preflight
+preflight: guard-main
+	@if [[ -n "$$(git status --porcelain)" ]]; then \
+		echo "Preflight requires a clean worktree."; \
+		git status --short; \
+		exit 1; \
+	fi
+	$(MAKE) check
+	@echo "OK: clean local PR branch baseline passed."
+
 .PHONY: git-check
 git-check:
 	@if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
@@ -228,28 +250,31 @@ git-check:
 		echo "git-check must run on a PR branch (not main)."; \
 		exit 1; \
 	fi; \
-	status_line="$$(git status -sb)"; \
-	status_line="$${status_line%%$$'\n'*}"; \
-	if [[ "$$status_line" != "## "* ]]; then \
-		echo "Could not determine git status."; \
+	git fetch --prune origin; \
+	if [[ -n "$$(git status --porcelain)" ]]; then \
+		echo "git-check requires a clean worktree."; \
+		git status --short; \
 		exit 1; \
 	fi; \
-	if [[ "$$status_line" != *"..."* ]]; then \
+	if ! upstream="$$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"; then \
 		echo "No upstream for $$branch (branch not pushed)."; \
 		git branch -vv; \
 		exit 1; \
 	fi; \
-	if [[ "$$status_line" == *"ahead "* ]]; then \
-		echo "Unpushed commits in $$branch."; \
-		echo "$$status_line"; \
+	read -r ahead behind < <(git rev-list --left-right --count "HEAD...$$upstream"); \
+	if [[ "$$ahead" != "0" || "$$behind" != "0" ]]; then \
+		echo "Branch must match upstream (ahead=$$ahead behind=$$behind)."; \
 		git branch -vv; \
+		exit 1; \
+	fi; \
+	if ! git merge-base --is-ancestor origin/main HEAD; then \
+		echo "Branch is not based on current origin/main; rebase and push it first."; \
 		exit 1; \
 	fi; \
 	$(MAKE) check; \
 	echo "OK: PR branch is ready to merge."; \
 	echo "Next:"; \
 	echo "  git checkout main"; \
-	echo "  git rebase origin/main"; \
 	echo "  git merge --ff-only $$branch"; \
 	echo "  git push origin main"
 
@@ -441,6 +466,72 @@ logs:
 		exit 1; \
 	fi
 	@tail -n 200 -f "$(APP_LOG_FILE)"
+
+.PHONY: up-prod
+up-prod: venv-prod
+	@mkdir -p "$(RUN_DIR)"
+	@if [[ -f "$(PROD_APP_PID_FILE)" ]]; then \
+		pid="$$(cat "$(PROD_APP_PID_FILE)")"; \
+		if kill -0 "$$pid" 2>/dev/null; then \
+			echo "Already running: pid=$$pid (use: make down-prod)"; \
+			exit 1; \
+		fi; \
+	fi
+	@nohup env SLAVIK_HTTP_HOST="$(PROD_HOST)" SLAVIK_HTTP_PORT="$(PROD_PORT)" \
+		"$(PROD_VENV_PY)" -m server >"$(PROD_APP_LOG_FILE)" 2>&1 & \
+		echo $$! >"$(PROD_APP_PID_FILE)"
+	@echo "Started production server: pid=$$(cat "$(PROD_APP_PID_FILE)")"
+	@echo "Logs: $(PROD_APP_LOG_FILE)"
+
+.PHONY: down-prod
+down-prod:
+	@if [[ ! -f "$(PROD_APP_PID_FILE)" ]]; then \
+		echo "Not running (no pid file: $(PROD_APP_PID_FILE))"; \
+		exit 0; \
+	fi; \
+	pid="$$(cat "$(PROD_APP_PID_FILE)")"; \
+	if ! kill -0 "$$pid" 2>/dev/null; then \
+		echo "Stale pid file (pid=$$pid not running), removing $(PROD_APP_PID_FILE)"; \
+		rm -f "$(PROD_APP_PID_FILE)"; \
+		exit 0; \
+	fi; \
+	cmd="$$(ps -p "$$pid" -o command= 2>/dev/null || true)"; \
+	case "$$cmd" in \
+		*$(PROD_VENV_PY)*-m\ server*) ;; \
+		*) echo "Refusing to stop pid=$$pid (unexpected cmd: $$cmd)"; exit 1;; \
+	esac; \
+	kill "$$pid"; \
+	for _ in {1..30}; do \
+		if kill -0 "$$pid" 2>/dev/null; then sleep 0.1; else break; fi; \
+	done; \
+	if kill -0 "$$pid" 2>/dev/null; then \
+		echo "Still running after SIGTERM: pid=$$pid"; \
+		exit 1; \
+	fi; \
+	rm -f "$(PROD_APP_PID_FILE)"; \
+	echo "Stopped production server: pid=$$pid"
+
+.PHONY: status-prod
+status-prod:
+	@if [[ -f "$(PROD_APP_PID_FILE)" ]]; then \
+		pid="$$(cat "$(PROD_APP_PID_FILE)")"; \
+		if kill -0 "$$pid" 2>/dev/null; then \
+			echo "Running production server: pid=$$pid"; \
+			exit 0; \
+		fi; \
+		echo "Not running (stale pid file: $(PROD_APP_PID_FILE))"; \
+		exit 1; \
+	fi; \
+	echo "Not running"; \
+	exit 1
+
+.PHONY: logs-prod
+logs-prod:
+	@if [[ ! -f "$(PROD_APP_LOG_FILE)" ]]; then \
+		echo "No log file: $(PROD_APP_LOG_FILE)"; \
+		exit 1; \
+	fi
+	@tail -n 200 -f "$(PROD_APP_LOG_FILE)"
 
 .PHONY: ui-clean
 ui-clean:
