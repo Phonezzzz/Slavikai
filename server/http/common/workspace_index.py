@@ -61,6 +61,7 @@ def is_index_enabled(*, index_enabled_env: str) -> bool:
 def index_workspace_root(
     *,
     root: Path,
+    vectors_db_path: Path,
     load_embeddings_settings: Callable[[], UIEmbeddingsSettings],
     resolve_provider_api_key: Callable[[str], str | None],
     index_enabled_env: str,
@@ -80,7 +81,7 @@ def index_workspace_root(
 
     embeddings = load_embeddings_settings()
     vector_index = VectorIndex(
-        "memory/vectors.db",
+        str(vectors_db_path),
         provider=embeddings.provider,
         local_model=embeddings.local_model,
         openai_model=embeddings.openai_model,

@@ -1762,6 +1762,93 @@ def test_ui_storage_destructively_replaces_legacy_ui_messages_table(tmp_path) ->
     assert "lane" not in workspace_columns
 
 
+def test_ui_storage_adds_folder_principal_column_without_data_loss(tmp_path) -> None:
+    db_path = tmp_path / "ui_sessions.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE ui_folders (
+                folder_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ui_folders (folder_id, name, created_at, updated_at)
+            VALUES ('legacy-folder', 'Legacy', 'created', 'updated')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    storage = SQLiteUISessionStorage(db_path)
+    folders = storage.load_folders()
+
+    assert len(folders) == 1
+    assert folders[0].folder_id == "legacy-folder"
+    assert folders[0].principal_id is None
+
+    verify_conn = sqlite3.connect(db_path)
+    try:
+        verify_conn.row_factory = sqlite3.Row
+        columns = {
+            str(row["name"])
+            for row in verify_conn.execute("PRAGMA table_info(ui_folders)").fetchall()
+            if isinstance(row, sqlite3.Row)
+        }
+    finally:
+        verify_conn.close()
+    assert "principal_id" in columns
+
+
+def test_ui_storage_principal_migration_marker_survives_restart(tmp_path) -> None:
+    db_path = tmp_path / "ui_sessions.db"
+    storage = SQLiteUISessionStorage(db_path)
+    storage.save_session(
+        PersistedSession(
+            session_id="legacy-token-session",
+            principal_id="principal_token",
+            created_at="created",
+            updated_at="updated",
+            status="ok",
+            decision=None,
+            messages=[],
+        )
+    )
+    storage.migrate_principals_once(
+        migration_id="owner-principal-v1:test",
+        source_principal_ids={"principal_token"},
+        target_principal_id="email:owner@example.com",
+    )
+    storage.save_session(
+        PersistedSession(
+            session_id="new-automation-session",
+            principal_id="principal_token",
+            created_at="created",
+            updated_at="updated",
+            status="ok",
+            decision=None,
+            messages=[],
+        )
+    )
+
+    restarted = SQLiteUISessionStorage(db_path)
+    restarted.migrate_principals_once(
+        migration_id="owner-principal-v1:test",
+        source_principal_ids={"principal_token"},
+        target_principal_id="email:owner@example.com",
+    )
+    sessions = {item.session_id: item for item in restarted.load_sessions()}
+
+    assert sessions["legacy-token-session"].principal_id == "email:owner@example.com"
+    assert sessions["new-automation-session"].principal_id == "principal_token"
+
+
 def test_ui_storage_uses_physical_chat_and_workspace_message_tables(tmp_path) -> None:
     db_path = tmp_path / "ui_sessions.db"
     storage = SQLiteUISessionStorage(db_path)

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -90,6 +90,7 @@ class PersistedFolder:
     name: str
     created_at: str
     updated_at: str
+    principal_id: str | None = None
 
 
 def split_persisted_session_domains(session: PersistedSession) -> PersistedSessionDomainRecords:
@@ -174,6 +175,14 @@ def legacy_session_from_domain_records(records: PersistedSessionDomainRecords) -
 
 
 class UISessionStorage(Protocol):
+    def migrate_principals_once(
+        self,
+        *,
+        migration_id: str,
+        source_principal_ids: Collection[str],
+        target_principal_id: str,
+    ) -> None: ...
+
     def load_sessions(self) -> list[PersistedSession]: ...
 
     def save_session(self, session: PersistedSession) -> None: ...
@@ -191,6 +200,31 @@ class InMemoryUISessionStorage:
     def __init__(self) -> None:
         self._sessions: dict[str, PersistedSession] = {}
         self._folders: dict[str, PersistedFolder] = {}
+        self._principal_migrations: set[str] = set()
+
+    def migrate_principals_once(
+        self,
+        *,
+        migration_id: str,
+        source_principal_ids: Collection[str],
+        target_principal_id: str,
+    ) -> None:
+        if migration_id in self._principal_migrations:
+            return
+        sources = {value.strip() for value in source_principal_ids if value.strip()}
+        for session_id, session in tuple(self._sessions.items()):
+            if session.principal_id in sources:
+                self._sessions[session_id] = replace(
+                    session,
+                    principal_id=target_principal_id,
+                )
+        for folder_id, folder in tuple(self._folders.items()):
+            if folder.principal_id in sources:
+                self._folders[folder_id] = replace(
+                    folder,
+                    principal_id=target_principal_id,
+                )
+        self._principal_migrations.add(migration_id)
 
     def load_sessions(self) -> list[PersistedSession]:
         return [self._clone_session(item) for item in self._sessions.values()]
@@ -250,6 +284,7 @@ class InMemoryUISessionStorage:
             name=folder.name,
             created_at=folder.created_at,
             updated_at=folder.updated_at,
+            principal_id=folder.principal_id,
         )
 
 
@@ -257,6 +292,39 @@ class SQLiteUISessionStorage:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._initialize_schema()
+
+    def migrate_principals_once(
+        self,
+        *,
+        migration_id: str,
+        source_principal_ids: Collection[str],
+        target_principal_id: str,
+    ) -> None:
+        sources = sorted({value.strip() for value in source_principal_ids if value.strip()})
+        if not sources:
+            return
+        with self._connect() as conn:
+            migrated = conn.execute(
+                "SELECT 1 FROM ui_storage_migrations WHERE migration_id = ?",
+                (migration_id,),
+            ).fetchone()
+            if migrated is not None:
+                return
+            placeholders = ", ".join("?" for _ in sources)
+            parameters = (target_principal_id, *sources)
+            conn.execute(
+                f"UPDATE ui_sessions SET principal_id = ? WHERE principal_id IN ({placeholders})",
+                parameters,
+            )
+            conn.execute(
+                f"UPDATE ui_folders SET principal_id = ? WHERE principal_id IN ({placeholders})",
+                parameters,
+            )
+            conn.execute(
+                "INSERT INTO ui_storage_migrations (migration_id) VALUES (?)",
+                (migration_id,),
+            )
+            conn.commit()
 
     def load_sessions(self) -> list[PersistedSession]:
         sessions: list[PersistedSession] = []
@@ -446,7 +514,7 @@ class SQLiteUISessionStorage:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT folder_id, name, created_at, updated_at
+                SELECT folder_id, name, created_at, updated_at, principal_id
                 FROM ui_folders
                 """,
             ).fetchall()
@@ -458,6 +526,7 @@ class SQLiteUISessionStorage:
                         name=str(row["name"]),
                         created_at=str(row["created_at"]),
                         updated_at=str(row["updated_at"]),
+                        principal_id=_optional_str(row["principal_id"]),
                     ),
                 )
         return folders
@@ -466,19 +535,23 @@ class SQLiteUISessionStorage:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO ui_folders (folder_id, name, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO ui_folders (
+                    folder_id, name, created_at, updated_at, principal_id
+                )
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(folder_id)
                 DO UPDATE SET
                     name=excluded.name,
                     created_at=excluded.created_at,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    principal_id=excluded.principal_id
                 """,
                 (
                     folder.folder_id,
                     folder.name,
                     folder.created_at,
                     folder.updated_at,
+                    folder.principal_id,
                 ),
             )
             conn.commit()
@@ -550,9 +623,18 @@ class SQLiteUISessionStorage:
                     folder_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    principal_id TEXT
                 )
                 """,
+            )
+            self._ensure_folder_columns(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ui_storage_migrations (
+                    migration_id TEXT PRIMARY KEY
+                )
+                """
             )
             self._ensure_message_tables(conn)
             conn.commit()
@@ -733,6 +815,15 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN active_task_json TEXT")
         if "auto_state_json" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN auto_state_json TEXT")
+
+    def _ensure_folder_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(ui_folders)").fetchall()
+            if isinstance(row, sqlite3.Row)
+        }
+        if "principal_id" not in existing:
+            conn.execute("ALTER TABLE ui_folders ADD COLUMN principal_id TEXT")
 
     def _ensure_message_tables(self, conn: sqlite3.Connection) -> None:
         expected_columns = [

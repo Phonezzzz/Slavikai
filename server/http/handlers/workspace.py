@@ -8,6 +8,7 @@ from aiohttp import web
 from config.tools_config import DEFAULT_TOOLS_STATE
 from core.approval_policy import ApprovalCategory, ApprovalRequired
 from server import http_api as api
+from server.http.common.auth import _owner_principal_id
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
 from server.http.common.workspace_git import (
@@ -39,6 +40,7 @@ from server.http_api import (
     _workspace_git_diff,
     _workspace_root_for_session,
 )
+from server.principal_storage import principal_storage_paths
 from server.ui_hub import UIHub
 from shared.models import JSONValue, ToolRequest, ToolResult
 from tools.workspace_tools import (
@@ -209,8 +211,14 @@ async def handle_ui_workspace_index_run(request: web.Request) -> web.Response:
             code="PLAN_READ_ONLY_BLOCK",
         )
     root_path = await _workspace_root_for_session(hub, session_id)
+    agent_scope = _agent_scope(request, session_id)
+    storage = principal_storage_paths(
+        principal_id=agent_scope.principal_id,
+        owner_principal_id=_owner_principal_id(request.app["auth_config"]),
+        memory_root=api.PROJECT_ROOT / "memory",
+    )
     try:
-        stats = _index_workspace_root(root_path)
+        stats = _index_workspace_root(root_path, vectors_db_path=storage.vectors_db)
     except ValueError as exc:
         return error_response(
             status=400,

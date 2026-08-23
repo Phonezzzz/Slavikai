@@ -46,6 +46,7 @@ def _index(
     )
     index_workspace_root(
         root=root,
+        vectors_db_path=root / "vectors.db",
         load_embeddings_settings=_load_settings,
         resolve_provider_api_key=lambda provider: None,
         index_enabled_env="INDEX_ENABLED",
@@ -95,6 +96,7 @@ def test_index_workspace_root_reports_disabled(monkeypatch) -> None:
     monkeypatch.setenv("INDEX_ENABLED_DISABLED_BY_ENV", "0")
     result = index_workspace_root(
         root=root,
+        vectors_db_path=Path("unused-vectors.db"),
         load_embeddings_settings=_load_settings,
         resolve_provider_api_key=lambda provider: None,
         index_enabled_env="INDEX_ENABLED_DISABLED_BY_ENV",

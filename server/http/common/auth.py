@@ -124,6 +124,13 @@ def _owner_principal_id(auth_config: HttpAuthConfig) -> str:
     return "local_unauth"
 
 
+def _legacy_owner_principal_aliases(auth_config: HttpAuthConfig) -> frozenset[str]:
+    aliases = {"legacy"}
+    if auth_config.api_token:
+        aliases.add(_principal_id_from_token(auth_config.api_token))
+    return frozenset(aliases)
+
+
 def _automation_principal_id(auth_config: HttpAuthConfig) -> str:
     if auth_config.allow_unauth_local:
         return "local_unauth"
