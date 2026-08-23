@@ -110,7 +110,7 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
     model_raw = payload.get("model")
     if not isinstance(model_raw, str) or not model_raw.strip():
         return None, "model должен быть непустой строкой."
-    model = model_raw.strip()
+    model = model_raw
     messages, msg_error, tool_calling_present = _validate_messages(payload.get("messages"))
     if msg_error:
         return None, msg_error

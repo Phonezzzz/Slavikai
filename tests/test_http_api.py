@@ -283,9 +283,11 @@ def test_chat_completions_returns_meta(monkeypatch, tmp_path) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("requested_model", ["gpt-4o", " slavik ", "slavik\n"])
 def test_chat_completions_rejects_non_proxy_model_before_agent_resolution(
     monkeypatch,
     tmp_path,
+    requested_model: str,
 ) -> None:
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
@@ -296,7 +298,7 @@ def test_chat_completions_rejects_non_proxy_model_before_agent_resolution(
             resp = await client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "gpt-4o",
+                    "model": requested_model,
                     "messages": [{"role": "user", "content": "Привет"}],
                     "stream": False,
                 },
@@ -309,7 +311,7 @@ def test_chat_completions_rejects_non_proxy_model_before_agent_resolution(
             assert error.get("code") == "model_not_found"
             details = error.get("details")
             assert isinstance(details, dict)
-            assert details.get("requested_model") == "gpt-4o"
+            assert details.get("requested_model") == requested_model
             assert details.get("available_models") == ["slavik"]
             assert agent.session_id is None
             assert agent.last_chat_interaction_id is None
