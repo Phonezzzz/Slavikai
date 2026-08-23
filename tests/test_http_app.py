@@ -153,7 +153,7 @@ def test_create_app_passes_ui_embeddings_settings_to_scoped_agent(monkeypatch) -
     )
     main_config = ModelConfig(provider="local", model="test-model")
     _ = asyncio.run(
-        app["agent_provider"].get(
+        app["agent_provider"].get_for_current_task(
             AgentScope(principal_id="principal-a", session_id="session-a"),
             main_config,
         )

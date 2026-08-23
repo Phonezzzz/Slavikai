@@ -763,7 +763,7 @@ async def run_plan_runner(
         )
         return
     scope = AgentScope(principal_id=principal_id, session_id=session_id)
-    agent = await provider.get(scope, main_config)
+    agent = await provider.get_for_current_task(scope, main_config)
     agent_lock = provider.lock_for(scope)
 
     async def _security_loader(

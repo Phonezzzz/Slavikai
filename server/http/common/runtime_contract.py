@@ -227,7 +227,7 @@ async def _get_scoped_agent(
     scope: AgentScope,
     main_config: ModelConfig | None,
 ) -> AgentProtocol:
-    agent = await provider.get(scope, main_config)
+    agent = await provider.get_for_current_task(scope, main_config)
     if main_config is not None:
         async with provider.lock_for(scope):
             agent.reconfigure_models(
