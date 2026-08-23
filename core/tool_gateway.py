@@ -23,6 +23,7 @@ class ToolGateway:
     post_call: Callable[[ToolRequest, ToolResult, object | None], None] | None = None
     approval_context: ApprovalContext | None = None
     log_event: Callable[[str, str, dict[str, JSONValue] | None], None] | None = None
+    confirmed_decision: bool = False
 
     def call(self, request: ToolRequest) -> ToolResult:
         bypass_safe_mode = False
@@ -87,7 +88,11 @@ class ToolGateway:
                     )
         context = self.pre_call(request) if self.pre_call else None
         try:
-            result = self.registry.call(request, bypass_safe_mode=bypass_safe_mode)
+            result = self.registry.call(
+                request,
+                bypass_safe_mode=bypass_safe_mode,
+                confirmed_decision=self.confirmed_decision,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка инструмента %s: %s", request.name, exc)
             result = ToolResult.failure(f"Ошибка инструмента {request.name}: {exc}")

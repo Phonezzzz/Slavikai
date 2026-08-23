@@ -317,7 +317,8 @@ class AgentToolsMixin:
             packet.summary,
             {"id": packet.id, "reason": packet.reason.value},
         )
-        self._log_chat_interaction(raw_input=raw_input, response_text=response)
+        if packet.decision_type != "memory_save":
+            self._log_chat_interaction(raw_input=raw_input, response_text=response)
         if record_in_history:
             self._append_short_term([LLMMessage(role="assistant", content=response)])
         return response
@@ -391,6 +392,7 @@ class AgentToolsMixin:
         pre_call: Callable[[ToolRequest], object | None] | None = None,
         post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
         safe_mode_override: bool | None = None,
+        confirmed_decision: bool = False,
     ) -> ToolGateway:
         self.tool_registry.set_execution_policy(
             mode=getattr(self, "runtime_mode", "act"),
@@ -424,6 +426,7 @@ class AgentToolsMixin:
             post_call=_post_call,
             approval_context=self._approval_context(safe_mode_override=safe_mode_override),
             log_event=self.tracer.log,
+            confirmed_decision=confirmed_decision,
         )
 
     def _track_tool_error(self, request: ToolRequest, result: ToolResult) -> None:
@@ -696,6 +699,7 @@ class AgentToolsMixin:
         request: ToolRequest,
         *,
         safe_mode_override: bool | None = None,
+        confirmed_decision: bool = False,
     ) -> ToolResult:
         pre_call = None
         post_call = None
@@ -706,6 +710,7 @@ class AgentToolsMixin:
             pre_call=pre_call,
             post_call=post_call,
             safe_mode_override=safe_mode_override,
+            confirmed_decision=confirmed_decision,
         )
         try:
             result = gateway.call(request)

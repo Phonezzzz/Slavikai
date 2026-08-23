@@ -166,6 +166,7 @@ class AgentMWVMixin:
             pre_call: Callable[[ToolRequest], object | None] | None = None,
             post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
             safe_mode_override: bool | None = None,
+            confirmed_decision: bool = False,
         ) -> ToolGateway: ...
         def _workspace_diff_pre_call(self, request: ToolRequest) -> str | None: ...
         def _workspace_diff_post_call(

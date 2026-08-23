@@ -69,8 +69,13 @@ def test_disabled_command_lane_tool_does_not_write_tool_fail_inbox(
         ),
     )
 
-    def _fail_call(_: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
-        _ = bypass_safe_mode
+    def _fail_call(
+        _: ToolRequest,
+        *,
+        bypass_safe_mode: bool = False,
+        confirmed_decision: bool = False,
+    ) -> ToolResult:
+        del bypass_safe_mode, confirmed_decision
         return ToolResult.failure("boom")
 
     monkeypatch.setattr(agent.tool_registry, "call", _fail_call)

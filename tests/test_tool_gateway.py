@@ -8,13 +8,27 @@ class _OkRegistry:
     def __init__(self) -> None:
         self.called = False
 
-    def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
+    def call(
+        self,
+        request: ToolRequest,
+        *,
+        bypass_safe_mode: bool = False,
+        confirmed_decision: bool = False,
+    ) -> ToolResult:
+        del bypass_safe_mode, confirmed_decision
         self.called = True
         return ToolResult.success({"value": "ok"})
 
 
 class _BoomRegistry:
-    def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
+    def call(
+        self,
+        request: ToolRequest,
+        *,
+        bypass_safe_mode: bool = False,
+        confirmed_decision: bool = False,
+    ) -> ToolResult:
+        del request, bypass_safe_mode, confirmed_decision
         raise RuntimeError("boom")
 
 
