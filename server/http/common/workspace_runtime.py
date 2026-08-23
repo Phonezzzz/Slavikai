@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-from shared.models import JSONValue
+from shared.models import JSONValue, ToolRequest, ToolResult
 
 
 def _resolve_workspace_file(
@@ -54,10 +53,8 @@ def _artifact_file_payload(
 
 def _run_plan_readonly_audit(
     *,
-    root: Path,
+    call_tool: Callable[[ToolRequest], ToolResult],
     plan_audit_timeout_seconds: int,
-    workspace_index_ignored_dirs: set[str],
-    workspace_index_allowed_extensions: set[str],
     plan_audit_max_total_bytes: int,
     plan_audit_max_read_files: int,
 ) -> tuple[list[dict[str, JSONValue]], dict[str, int]]:
@@ -65,50 +62,49 @@ def _run_plan_readonly_audit(
     audit_entries: list[dict[str, JSONValue]] = []
     read_files = 0
     total_bytes = 0
-    search_calls = 0
-    for current_root, dirs, files in os.walk(root):
+    search_calls = 1
+    listing = call_tool(
+        ToolRequest(
+            "workspace_list",
+            {"path": "", "recursive": True, "max_depth": 32},
+        )
+    )
+    tree = listing.data.get("tree") if listing.ok else None
+    pending = list(tree) if isinstance(tree, list) else []
+    while pending:
         if time.monotonic() - started > plan_audit_timeout_seconds:
             break
-        dirs[:] = [name for name in dirs if name not in workspace_index_ignored_dirs]
-        current = Path(current_root)
-        for filename in files:
-            if read_files >= plan_audit_max_read_files:
-                break
-            if time.monotonic() - started > plan_audit_timeout_seconds:
-                break
-            if filename.endswith(".sqlite"):
-                continue
-            full_path = current / filename
-            suffix = full_path.suffix.lower()
-            if suffix and suffix not in workspace_index_allowed_extensions:
-                continue
-            resolved = full_path.resolve()
-            try:
-                resolved.relative_to(root)
-            except ValueError:
-                continue
-            try:
-                raw = full_path.read_bytes()
-            except Exception:  # noqa: BLE001
-                continue
-            if not raw:
-                continue
-            next_size = min(len(raw), 4000)
-            if total_bytes + next_size > plan_audit_max_total_bytes:
-                break
-            preview = raw[:next_size].decode("utf-8", errors="ignore")
-            rel_path = str(full_path.relative_to(root))
-            audit_entries.append(
-                {
-                    "kind": "read_file",
-                    "path": rel_path,
-                    "bytes": next_size,
-                    "preview": preview[:240],
-                }
-            )
-            total_bytes += next_size
-            read_files += 1
-        if read_files >= plan_audit_max_read_files or total_bytes >= plan_audit_max_total_bytes:
+        node = pending.pop(0)
+        if not isinstance(node, dict):
+            continue
+        children = node.get("children")
+        if isinstance(children, list):
+            pending[0:0] = children
+        if node.get("type") != "file":
+            continue
+        path = node.get("path")
+        if not isinstance(path, str) or not path.strip():
+            continue
+        result = call_tool(ToolRequest("workspace_read", {"path": path}))
+        content = result.data.get("output") if result.ok else None
+        if not isinstance(content, str) or not content:
+            continue
+        raw = content.encode("utf-8")
+        next_size = min(len(raw), 4000)
+        if total_bytes + next_size > plan_audit_max_total_bytes:
+            break
+        preview = raw[:next_size].decode("utf-8", errors="ignore")
+        audit_entries.append(
+            {
+                "kind": "read_file",
+                "path": path,
+                "bytes": next_size,
+                "preview": preview[:240],
+            }
+        )
+        total_bytes += next_size
+        read_files += 1
+        if read_files >= plan_audit_max_read_files:
             break
     return audit_entries, {
         "read_files": read_files,

@@ -261,6 +261,11 @@ git-check:
 		git branch -vv; \
 		exit 1; \
 	fi; \
+	expected_upstream="origin/$$branch"; \
+	if [[ "$$upstream" != "$$expected_upstream" ]]; then \
+		echo "Branch upstream must be $$expected_upstream (got $$upstream)."; \
+		exit 1; \
+	fi; \
 	read -r ahead behind < <(git rev-list --left-right --count "HEAD...$$upstream"); \
 	if [[ "$$ahead" != "0" || "$$behind" != "0" ]]; then \
 		echo "Branch must match upstream (ahead=$$ahead behind=$$behind)."; \
@@ -269,6 +274,12 @@ git-check:
 	fi; \
 	if ! git merge-base --is-ancestor origin/main HEAD; then \
 		echo "Branch is not based on current origin/main; rebase and push it first."; \
+		exit 1; \
+	fi; \
+	merge_commits="$$(git rev-list --min-parents=2 origin/main..HEAD)"; \
+	if [[ -n "$$merge_commits" ]]; then \
+		echo "PR branch contains merge commits; rebase it onto origin/main."; \
+		echo "$$merge_commits"; \
 		exit 1; \
 	fi; \
 	$(MAKE) check; \
@@ -515,12 +526,15 @@ down-prod:
 status-prod:
 	@if [[ -f "$(PROD_APP_PID_FILE)" ]]; then \
 		pid="$$(cat "$(PROD_APP_PID_FILE)")"; \
-		if kill -0 "$$pid" 2>/dev/null; then \
-			echo "Running production server: pid=$$pid"; \
-			exit 0; \
+		if ! kill -0 "$$pid" 2>/dev/null; then \
+			echo "Not running (stale pid file: $(PROD_APP_PID_FILE))"; \
+			exit 1; \
 		fi; \
-		echo "Not running (stale pid file: $(PROD_APP_PID_FILE))"; \
-		exit 1; \
+		cmd="$$(ps -p "$$pid" -o command= 2>/dev/null || true)"; \
+		case "$$cmd" in \
+			*$(PROD_VENV_PY)*-m\ server*) echo "Running production server: pid=$$pid"; exit 0;; \
+			*) echo "Not running (pid=$$pid belongs to unexpected process: $$cmd)"; exit 1;; \
+		esac; \
 	fi; \
 	echo "Not running"; \
 	exit 1

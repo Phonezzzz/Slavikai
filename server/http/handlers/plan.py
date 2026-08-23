@@ -100,14 +100,21 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
 
-    root = await _workspace_root_for_session(hub, session_id)
-    audit_log, usage = _run_plan_readonly_audit(root=root)
     try:
         agent = await _resolve_agent(request, session_id)
         if agent is None:
             return _model_not_selected_response()
+        root = await _workspace_root_for_session(hub, session_id)
         async with _agent_lock_for_request(request, session_id):
             await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+            audit_log, usage = _run_plan_readonly_audit(
+                root=root,
+                call_tool=lambda tool_request: agent.call_tool(
+                    tool_request.name,
+                    tool_request.args,
+                    raw_input="ui:plan-audit",
+                ),
+            )
             steps = await asyncio.to_thread(agent.compile_plan_steps, goal_raw.strip(), audit_log)
     except PlanCompilationError as exc:
         return error_response(

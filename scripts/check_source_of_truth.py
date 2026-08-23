@@ -108,7 +108,9 @@ def main() -> None:
         _require(target in makefile, f"missing Make target: {target[:-1]}")
     git_check_contracts = (
         "git fetch --prune origin",
+        'expected_upstream="origin/$$branch"',
         "merge-base --is-ancestor origin/main HEAD",
+        "rev-list --min-parents=2 origin/main..HEAD",
     )
     for git_check_contract in git_check_contracts:
         _require(git_check_contract in makefile, f"git-check contract drift: {git_check_contract}")
