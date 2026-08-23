@@ -41,8 +41,8 @@ export const fetchTraceDiagnostics = async (traceId: string): Promise<TraceDiagn
   }
 
   const [toolCallsPayload, tracePayload] = await Promise.all([
-    fetchJson(`/slavik/tool-calls/${encodeURIComponent(normalizedTrace)}`),
-    fetchJson(`/slavik/trace/${encodeURIComponent(normalizedTrace)}`),
+    fetchJson(`/ui/api/tool-calls/${encodeURIComponent(normalizedTrace)}`),
+    fetchJson(`/ui/api/trace/${encodeURIComponent(normalizedTrace)}`),
   ]);
 
   const toolCalls = parseRecordArray(

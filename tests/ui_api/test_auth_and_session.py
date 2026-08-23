@@ -62,6 +62,101 @@ def test_explicit_local_bypass_reports_local_identity() -> None:
     asyncio.run(run())
 
 
+def test_ui_trace_diagnostics_and_feedback_stay_in_browser_principal_lane(
+    monkeypatch,
+) -> None:
+    class FeedbackAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.feedback_ids: list[str] = []
+
+        def record_feedback_event(
+            self,
+            *,
+            interaction_id: str,
+            rating,
+            labels=None,
+            free_text=None,
+        ) -> None:
+            del rating, labels, free_text
+            self.feedback_ids.append(interaction_id)
+
+    monkeypatch.setattr(
+        "server.http.handlers.slavik._parse_trace_log",
+        lambda _path: [
+            {
+                "timestamp": "2026-01-01 00:00:00",
+                "event": "user_input",
+                "message": "hello",
+                "meta": {},
+            },
+            {
+                "timestamp": "2026-01-01 00:00:01",
+                "event": "interaction_logged",
+                "message": "done",
+                "meta": {"interaction_id": "owned-trace"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "server.http.handlers.slavik._tool_calls_for_trace_id",
+        lambda trace_id: [{"tool": "workspace_read", "ok": True}]
+        if trace_id == "owned-trace"
+        else None,
+    )
+
+    async def run() -> None:
+        agent = FeedbackAgent()
+        app = create_app(
+            agent=agent,
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token="", allow_unauth_local=True),
+        )
+        hub = app["ui_hub"]
+        owned_session = await hub.create_session("local_unauth")
+        await hub.append_message(
+            owned_session,
+            hub.create_message(role="assistant", content="ok", trace_id="owned-trace"),
+            lane="chat",
+        )
+        foreign_session = await hub.create_session("foreign-principal")
+        await hub.append_message(
+            foreign_session,
+            hub.create_message(role="assistant", content="no", trace_id="foreign-trace"),
+            lane="chat",
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            trace = await client.get("/ui/api/trace/owned-trace")
+            assert trace.status == 200
+            assert (await trace.json())["trace_id"] == "owned-trace"
+
+            tool_calls = await client.get("/ui/api/tool-calls/owned-trace")
+            assert tool_calls.status == 200
+            assert (await tool_calls.json())["tool_calls"][0]["tool"] == "workspace_read"
+
+            feedback = await client.post(
+                "/ui/api/feedback",
+                json={
+                    "interaction_id": "owned-trace",
+                    "rating": "good",
+                    "labels": [],
+                    "free_text": None,
+                },
+            )
+            assert feedback.status == 200
+            assert agent.feedback_ids == ["owned-trace"]
+
+            foreign = await client.get("/ui/api/trace/foreign-trace")
+            assert foreign.status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_login_cookie_authenticates_browser_without_exposing_token() -> None:
     async def run() -> None:
         token = "ui-browser-token"

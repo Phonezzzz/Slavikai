@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from core.agent import Agent
@@ -216,7 +217,7 @@ def test_agent_auto_mode_passes_resolved_skill_to_auto_runtime(
     assert main.calls == 0
 
 
-def test_agent_auto_mode_skips_ambiguous_skill_without_pseudo_selection(
+def test_agent_auto_mode_returns_structured_ambiguous_skill_decision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -246,14 +247,48 @@ def test_agent_auto_mode_skips_ambiguous_skill_without_pseudo_selection(
     monkeypatch.setattr(agent, "handle_auto_command", _auto_unreachable)
 
     response = agent.respond([LLMMessage(role="user", content="same trigger")])
-    report = extract_report_block(response)
+    decision = json.loads(response)
 
-    assert report["stop_reason_code"] == "BLOCKED_SKILL_AMBIGUOUS"
-    assert report["skill"] == {
-        "status": "skipped",
-        "skill_id": None,
-        "version": None,
-        "supporting_skills": [],
-        "reason": "ambiguous",
-    }
+    assert decision["reason"] == "ambiguous_skill"
+    assert any(option["action"] == "select_skill" for option in decision["options"])
+    assert agent.last_decision_packet is not None
+    assert main.calls == 0
+
+
+def test_agent_auto_mode_stream_returns_structured_ambiguous_skill_decision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent, main = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+    entries = [
+        SkillEntry(
+            id=skill_id,
+            version="1.0.0",
+            title=skill_id,
+            entrypoints=["auto"],
+            patterns=["same trigger"],
+            requires=[],
+            risk="low",
+            tests=[],
+            path=f"skills/{skill_id}/skill.md",
+            content_hash=f"hash-{skill_id}",
+            instructions=f"Instructions for {skill_id}",
+        )
+        for skill_id in ("alpha", "beta")
+    ]
+    agent.skill_index = SkillIndex(SkillManifest(manifest_version=2, skills=entries))
+
+    def _auto_unreachable(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("Ambiguous skill must stop before Auto runtime")
+
+    monkeypatch.setattr(agent, "handle_auto_command", _auto_unreachable)
+
+    events = list(agent.respond_stream([LLMMessage(role="user", content="same trigger")]))
+    text = "".join(event.text for event in events if isinstance(event, TextDelta))
+    decision = json.loads(text)
+
+    assert decision["reason"] == "ambiguous_skill"
+    assert any(option["action"] == "select_skill" for option in decision["options"])
+    assert agent.last_decision_packet is not None
     assert main.calls == 0

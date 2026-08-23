@@ -82,14 +82,14 @@ def _jwt(
     return f"{header_segment}.{payload_segment}.{_b64url(signature)}"
 
 
-def _jwk(private_key: rsa.RSAPrivateKey) -> dict[str, object]:
+def _jwk(private_key: rsa.RSAPrivateKey, *, kid: str = "test-key") -> dict[str, object]:
     numbers = private_key.public_key().public_numbers()
     exponent = numbers.e.to_bytes((numbers.e.bit_length() + 7) // 8, "big")
     modulus = numbers.n.to_bytes((numbers.n.bit_length() + 7) // 8, "big")
     return {
         "kty": "RSA",
         "alg": "RS256",
-        "kid": "test-key",
+        "kid": kid,
         "e": _b64url(exponent),
         "n": _b64url(modulus),
     }
@@ -187,6 +187,35 @@ def test_cloudflare_verifier_does_not_refetch_unknown_kids_within_cache_ttl() ->
     asyncio.run(resolve_unknown_kids())
 
     assert fetch_count == 1
+
+
+def test_cloudflare_verifier_refreshes_cached_jwks_once_for_rotated_kid() -> None:
+    old_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    rotated_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = 1_000.0
+    fetch_count = 0
+
+    async def fetch_jwks() -> object:
+        nonlocal fetch_count
+        fetch_count += 1
+        key = old_key if fetch_count == 1 else rotated_key
+        kid = "old-key" if fetch_count == 1 else "rotated-key"
+        return {"keys": [_jwk(key, kid=kid)]}
+
+    verifier = CloudflareAccessJWTVerifier(
+        issuer="https://example.cloudflareaccess.com",
+        audience="application-aud",
+        jwks_fetcher=fetch_jwks,
+        now=lambda: now,
+    )
+
+    async def resolve_rotation() -> None:
+        await verifier._key_for_kid("old-key")
+        selected = await verifier._key_for_kid("rotated-key")
+        assert selected["kid"] == "rotated-key"
+
+    asyncio.run(resolve_rotation())
+    assert fetch_count == 2
 
 
 def test_cloudflare_browser_lane_is_separate_from_bearer_automation(tmp_path: Path) -> None:

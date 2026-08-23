@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import uuid
 from collections import deque
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal, TypedDict, cast
@@ -280,6 +280,7 @@ class UIHub:
         event_buffer_ttl_seconds: int = DEFAULT_EVENT_BUFFER_TTL_SECONDS,
         legacy_principal_id: str = DEFAULT_LEGACY_PRINCIPAL_ID,
         legacy_principal_aliases: Collection[str] = (),
+        on_session_pruned: Callable[[str, str], None] | None = None,
     ) -> None:
         self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
         normalized_legacy_principal = legacy_principal_id.strip()
@@ -321,6 +322,7 @@ class UIHub:
             if event_buffer_ttl_seconds > 0
             else DEFAULT_EVENT_BUFFER_TTL_SECONDS
         )
+        self._on_session_pruned = on_session_pruned
         self._lock = asyncio.Lock()
         self._restore_sessions()
         self._restore_folders()
@@ -362,6 +364,24 @@ class UIHub:
             if state.principal_id != normalized_principal:
                 return "forbidden"
             return "owned"
+
+    async def find_owned_trace_session(
+        self,
+        trace_id: str,
+        principal_id: str,
+    ) -> str | None:
+        normalized_trace = trace_id.strip()
+        normalized_principal = self._normalize_principal_id(principal_id)
+        if not normalized_trace:
+            return None
+        async with self._lock:
+            for session_id, state in self._sessions.items():
+                if state.principal_id != normalized_principal:
+                    continue
+                for message in state.messages:
+                    if message.get("trace_id") == normalized_trace:
+                        return session_id
+        return None
 
     async def get_session_principal_id(self, session_id: str) -> str | None:
         normalized_session = session_id.strip()
@@ -1970,9 +1990,15 @@ class UIHub:
         to_remove = [session_id for session_id in session_ids if session_id in self._sessions]
         if not to_remove:
             return
+        removed_scopes = [
+            (self._sessions[session_id].principal_id, session_id) for session_id in to_remove
+        ]
         for session_id in to_remove:
             self._sessions.pop(session_id, None)
         self._storage.delete_sessions(to_remove)
+        if self._on_session_pruned is not None:
+            for principal_id, session_id in removed_scopes:
+                self._on_session_pruned(principal_id, session_id)
 
     def _parse_session_timestamp(self, value: str) -> datetime:
         try:

@@ -2,7 +2,7 @@
 
 Единый формат остановки используется для всех «stop» случаев:
 
-- skill blocked (ambiguous / deprecated)
+- skill blocked (deprecated)
 - approval_required (command lane)
 - verifier_failed (MWV)
 - mwv_internal_error
@@ -30,7 +30,6 @@ MWV_REPORT_JSON=<json>
 
 | code | когда |
 | --- | --- |
-| BLOCKED_SKILL_AMBIGUOUS | матч навыка неоднозначен |
 | BLOCKED_SKILL_DEPRECATED | навык помечен deprecated |
 | APPROVAL_REQUIRED | требуется подтверждение действия |
 | VERIFIER_FAILED | верификатор вернул FAIL/ERROR |

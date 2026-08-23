@@ -59,6 +59,7 @@ class ScopedAgentProvider[T]:
         self._locks: dict[AgentScope, asyncio.Lock] = {}
         self._creation_locks: dict[AgentScope, asyncio.Lock] = {}
         self._retirements: dict[asyncio.Task[None], _AgentEntry[T]] = {}
+        self._scheduled_releases: set[asyncio.Task[None]] = set()
         self._retirement_timeout_seconds = retirement_timeout_seconds
         self._shared_instance: T | None = None
         self._shared_lock: asyncio.Lock | None = None
@@ -112,6 +113,17 @@ class ScopedAgentProvider[T]:
         self._schedule_retirement(scope, entry)
         await asyncio.sleep(0)
 
+    def schedule_release(self, scope: AgentScope) -> None:
+        """Schedule scope retirement from a synchronous lifecycle callback."""
+        if self._shared_instance is not None or self._closed:
+            return
+        task = asyncio.create_task(
+            self.release(scope),
+            name=f"release-agent:{scope.principal_id}:{scope.session_id}",
+        )
+        self._scheduled_releases.add(task)
+        task.add_done_callback(self._scheduled_release_done)
+
     async def apply_to_existing(
         self, callback: Callable[[T], None]
     ) -> tuple[AgentApplyFailure, ...]:
@@ -154,6 +166,8 @@ class ScopedAgentProvider[T]:
                 self._close_agent(self._shared_instance)
             self._shared_instance = None
             return
+        if self._scheduled_releases:
+            await asyncio.gather(*tuple(self._scheduled_releases), return_exceptions=True)
         for scope in list(self._agents):
             await self.release(scope)
         if self._retirements:
@@ -174,6 +188,14 @@ class ScopedAgentProvider[T]:
                         continue
                     closed_entries.add(entry_id)
                     self._close_agent(entry.agent)
+
+    def _scheduled_release_done(self, task: asyncio.Task[None]) -> None:
+        self._scheduled_releases.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("Scheduled agent release failed", exc_info=error)
 
     def _borrow_for_current_task(self, entry: _AgentEntry[T]) -> None:
         task = asyncio.current_task()

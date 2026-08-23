@@ -158,9 +158,12 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         )
 
     trace_id: str | None = None
+    decision_type: str | None = None
     mwv_report: dict[str, JSONValue] | None = None
     try:
         async with agent_lock:
+            previous_trace_id = agent.last_chat_interaction_id
+            previous_decision_packet = getattr(agent, "last_decision_packet", None)
             if runtime_mode in {"ask", "auto"}:
                 if explicit_session_id is not None:
                     await _apply_agent_runtime_state(
@@ -202,6 +205,19 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             response_raw = agent.respond(parsed.messages)
             response_text, mwv_report = _split_response_and_report(response_raw)
             trace_id = agent.last_chat_interaction_id
+            if trace_id == previous_trace_id:
+                trace_id = None
+            decision_packet = getattr(agent, "last_decision_packet", None)
+            decision_type_raw = (
+                getattr(decision_packet, "decision_type", None)
+                if decision_packet is not previous_decision_packet
+                else None
+            )
+            decision_type = (
+                decision_type_raw.strip()
+                if isinstance(decision_type_raw, str) and decision_type_raw.strip()
+                else None
+            )
     except Exception as exc:  # noqa: BLE001
         return error_response(
             status=500,
@@ -242,7 +258,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             },
         )
 
-    if trace_id is None:
+    if trace_id is None and decision_type != "memory_save":
         return error_response(
             status=500,
             message="Trace ID was not generated.",

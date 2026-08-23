@@ -52,6 +52,7 @@ class CloudflareAccessJWTVerifier:
         jwks_fetcher: JWKSFetcher | None = None,
         now: Callable[[], float] = time.time,
         cache_ttl_seconds: float = 300.0,
+        unknown_kid_refresh_interval_seconds: float = 60.0,
     ) -> None:
         self.issuer = issuer.rstrip("/")
         self.audience = audience
@@ -61,6 +62,8 @@ class CloudflareAccessJWTVerifier:
         self._cache_ttl_seconds = max(1.0, cache_ttl_seconds)
         self._cached_keys: dict[str, Mapping[str, object]] = {}
         self._cache_expires_at = 0.0
+        self._unknown_kid_refresh_interval_seconds = max(1.0, unknown_kid_refresh_interval_seconds)
+        self._last_unknown_kid_refresh_at = float("-inf")
         self._cache_lock = asyncio.Lock()
 
     async def verify(self, token: str) -> VerifiedAccessClaims:
@@ -97,21 +100,29 @@ class CloudflareAccessJWTVerifier:
         now = self._now()
         if now < self._cache_expires_at and self._cached_keys:
             cached = self._cached_keys.get(kid)
-            if cached is None:
+            if cached is not None:
+                return cached
+            if now < (
+                self._last_unknown_kid_refresh_at + self._unknown_kid_refresh_interval_seconds
+            ):
                 raise CloudflareAccessTokenError("Cloudflare Access JWT kid is unknown")
-            return cached
         async with self._cache_lock:
             now = self._now()
             if now < self._cache_expires_at and self._cached_keys:
                 cached = self._cached_keys.get(kid)
-                if cached is None:
+                if cached is not None:
+                    return cached
+                if now < (
+                    self._last_unknown_kid_refresh_at + self._unknown_kid_refresh_interval_seconds
+                ):
                     raise CloudflareAccessTokenError("Cloudflare Access JWT kid is unknown")
-                return cached
+                self._last_unknown_kid_refresh_at = now
             keys = await self._fetch_keys()
             self._cached_keys = keys
             self._cache_expires_at = now + self._cache_ttl_seconds
             selected = keys.get(kid)
             if selected is None:
+                self._last_unknown_kid_refresh_at = now
                 raise CloudflareAccessTokenError("Cloudflare Access JWT kid is unknown")
             return selected
 

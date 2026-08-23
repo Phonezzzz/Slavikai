@@ -179,10 +179,14 @@ def create_app(
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )
+    provider = cast(ScopedAgentProvider[AgentProtocol], app["agent_provider"])
     app["ui_hub"] = UIHub(
         storage=resolved_ui_storage,
         legacy_principal_id=owner_principal_id,
         legacy_principal_aliases=_legacy_owner_principal_aliases(resolved_auth_config),
+        on_session_pruned=lambda principal_id, session_id: provider.schedule_release(
+            AgentScope(principal_id=principal_id, session_id=session_id)
+        ),
     )
     app.on_cleanup.append(_close_chat_generations)
     app.on_cleanup.append(_close_terminal_manager)

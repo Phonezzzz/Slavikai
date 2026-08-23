@@ -21,6 +21,7 @@ from server.http.common.runtime_contract import (
 )
 from server.http.common.runtime_model_state import RuntimeModelResolver, RuntimeModelStateStore
 from server.principal_storage import principal_storage_paths
+from server.ui_hub import UIHub
 from shared.models import LLMMessage, MemoryItem
 
 
@@ -152,6 +153,39 @@ def test_scoped_provider_release_does_not_wait_for_request_borrower() -> None:
         assert replacement.closed is False
         await provider.close()
         assert replacement.closed is True
+
+    asyncio.run(_run())
+
+
+def test_ui_session_pruning_retires_its_scoped_agent() -> None:
+    async def _run() -> None:
+        class _Agent:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        provider = ScopedAgentProvider(factory=lambda _scope, _config: _Agent())
+        hub = UIHub(
+            max_sessions=1,
+            on_session_pruned=lambda principal_id, session_id: provider.schedule_release(
+                AgentScope(principal_id, session_id)
+            ),
+        )
+        first_session = await hub.create_session("principal-a")
+        first_scope = AgentScope("principal-a", first_session)
+        first_agent = await asyncio.create_task(provider.get_for_current_task(first_scope, None))
+
+        await hub.create_session("principal-a")
+        await hub.list_sessions("principal-a")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert first_agent.closed is True
+        replacement = await provider.get_for_current_task(first_scope, None)
+        assert replacement is not first_agent
+        await provider.close()
 
     asyncio.run(_run())
 

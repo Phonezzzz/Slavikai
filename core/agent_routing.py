@@ -236,7 +236,7 @@ class AgentRoutingMixin:
                 return self._run_chat_response(messages, last_content, record_in_history)
             if runtime_mode == "auto":
                 skill_decision, skill_resolution = self._resolve_skill_run(last_content)
-                if skill_decision and skill_decision.status in {"deprecated", "ambiguous"}:
+                if skill_decision and skill_decision.status == "deprecated":
                     response = self._format_skill_block(skill_decision)
                     self._log_chat_interaction(raw_input=last_content, response_text=response)
                     if record_in_history:
@@ -388,7 +388,7 @@ class AgentRoutingMixin:
                 return
             if runtime_mode == "auto":
                 skill_decision, skill_resolution = self._resolve_skill_run(last_content)
-                if skill_decision and skill_decision.status in {"deprecated", "ambiguous"}:
+                if skill_decision and skill_decision.status == "deprecated":
                     response = self._format_skill_block(skill_decision)
                     self.last_stream_response_raw = response
                     yield from _text_response_events(response)
@@ -1013,20 +1013,6 @@ class AgentRoutingMixin:
                 route="blocked",
                 skill=self._blocked_skill_report(decision),
             )
-        if decision.status == "ambiguous":
-            ids = [match.entry.id for match in decision.alternatives]
-            listed = ", ".join(ids) if ids else "unknown"
-            return self._format_stop_response(
-                what="Найдено несколько подходящих навыков",
-                why=f"candidates={listed}",
-                next_steps=[
-                    "Укажи нужный skill_id.",
-                    "Уточни запрос, чтобы матч был однозначным.",
-                ],
-                stop_reason_code=StopReasonCode.BLOCKED_SKILL_AMBIGUOUS,
-                route="blocked",
-                skill=self._blocked_skill_report(decision),
-            )
         return "Навык не может быть применен."
 
     def _blocked_skill_report(
@@ -1046,5 +1032,5 @@ class AgentRoutingMixin:
             "skill_id": None,
             "version": None,
             "supporting_skills": [],
-            "reason": "ambiguous",
+            "reason": "unknown",
         }

@@ -553,7 +553,7 @@ export default function App() {
     rating: 'good' | 'bad',
   ): Promise<boolean> => {
     try {
-      const response = await fetch('/slavik/feedback', {
+      const response = await fetch('/ui/api/feedback', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

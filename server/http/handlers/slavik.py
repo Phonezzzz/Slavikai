@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 from aiohttp import web
 
 from core.approval_policy import ApprovalCategory
 from server.agent_provider import AgentScope
-from server.http.common.auth import _automation_principal_id
+from server.http.common.auth import _automation_principal_id, _request_principal_id
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     _CATEGORY_MAP,
+    _agent_lock_for_request,
     _build_trace_groups,
     _model_not_selected_response,
     _parse_trace_log,
@@ -19,6 +21,7 @@ from server.http_api import (
     _tool_calls_for_trace_id,
     _trace_log_path,
 )
+from server.ui_hub import UIHub
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
@@ -48,6 +51,14 @@ async def handle_trace(request: web.Request) -> web.Response:
     )
 
 
+async def handle_ui_trace(request: web.Request) -> web.Response:
+    trace_id = request.match_info.get("trace_id", "").strip()
+    ownership_error = await _require_owned_ui_trace(request, trace_id)
+    if ownership_error is not None:
+        return ownership_error
+    return await handle_trace(request)
+
+
 async def handle_tool_calls(request: web.Request) -> web.Response:
     trace_id = request.match_info.get("trace_id", "").strip()
     if not trace_id:
@@ -68,10 +79,27 @@ async def handle_tool_calls(request: web.Request) -> web.Response:
     return json_response({"trace_id": trace_id, "tool_calls": tool_calls})
 
 
+async def handle_ui_tool_calls(request: web.Request) -> web.Response:
+    trace_id = request.match_info.get("trace_id", "").strip()
+    ownership_error = await _require_owned_ui_trace(request, trace_id)
+    if ownership_error is not None:
+        return ownership_error
+    return await handle_tool_calls(request)
+
+
 async def handle_feedback(request: web.Request) -> web.Response:
-    agent = await _resolve_agent_for_base_http(request)
-    if agent is None:
-        return _model_not_selected_response()
+    return await _handle_feedback(request, require_ui_trace_owner=False)
+
+
+async def handle_ui_feedback(request: web.Request) -> web.Response:
+    return await _handle_feedback(request, require_ui_trace_owner=True)
+
+
+async def _handle_feedback(
+    request: web.Request,
+    *,
+    require_ui_trace_owner: bool,
+) -> web.Response:
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -101,6 +129,7 @@ async def handle_feedback(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
+    normalized_interaction_id = interaction_id.strip()
     if not isinstance(rating_raw, str):
         return error_response(
             status=400,
@@ -153,13 +182,22 @@ async def handle_feedback(request: web.Request) -> web.Response:
             )
         free_text = free_text_raw
 
+    session_id: str | None = None
+    if require_ui_trace_owner:
+        session_id = await _owned_ui_trace_session(request, normalized_interaction_id)
+        if session_id is None:
+            return _trace_not_found_response()
+    agent = await _resolve_agent_for_base_http(request, session_id)
+    if agent is None:
+        return _model_not_selected_response()
     try:
-        agent.record_feedback_event(
-            interaction_id=interaction_id,
-            rating=rating,
-            labels=labels,
-            free_text=free_text,
-        )
+        async with _agent_lock_for_request(request, session_id):
+            agent.record_feedback_event(
+                interaction_id=normalized_interaction_id,
+                rating=rating,
+                labels=labels,
+                free_text=free_text,
+            )
     except Exception as exc:  # noqa: BLE001
         return error_response(
             status=500,
@@ -169,6 +207,39 @@ async def handle_feedback(request: web.Request) -> web.Response:
         )
 
     return json_response({"ok": True})
+
+
+async def _owned_ui_trace_session(request: web.Request, trace_id: str) -> str | None:
+    principal_id = _request_principal_id(request)
+    if principal_id is None or not trace_id:
+        return None
+    hub = cast(UIHub, request.app["ui_hub"])
+    return await hub.find_owned_trace_session(trace_id, principal_id)
+
+
+async def _require_owned_ui_trace(
+    request: web.Request,
+    trace_id: str,
+) -> web.Response | None:
+    if not trace_id:
+        return error_response(
+            status=400,
+            message="trace_id обязателен.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if await _owned_ui_trace_session(request, trace_id) is None:
+        return _trace_not_found_response()
+    return None
+
+
+def _trace_not_found_response() -> web.Response:
+    return error_response(
+        status=404,
+        message="Trace not found.",
+        error_type="invalid_request_error",
+        code="trace_not_found",
+    )
 
 
 async def handle_approve_session(request: web.Request) -> web.Response:

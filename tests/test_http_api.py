@@ -372,6 +372,46 @@ def test_chat_completions_runtime_mode_ask_opt_in(monkeypatch, tmp_path) -> None
     asyncio.run(run())
 
 
+def test_chat_completions_returns_memory_preview_without_stale_trace(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+
+    class MemoryPreviewAgent(DummyAgent):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.last_chat_interaction_id = "stale-trace"
+            self.last_decision_packet = None
+
+        def respond(self, messages) -> str:
+            del messages
+            self.last_approval_request = None
+            self.last_decision_packet = SimpleNamespace(decision_type="memory_save")
+            return '{"decision_type":"memory_save","summary":"Confirm memory"}'
+
+    agent = MemoryPreviewAgent(trace_path)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "remember this"}],
+                    "stream": False,
+                },
+            )
+            assert resp.status == 200
+            payload = await resp.json()
+            assert payload["slavik_meta"]["trace_id"] is None
+            assert payload["choices"][0]["message"]["content"].startswith(
+                '{"decision_type":"memory_save"'
+            )
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_chat_completions_runtime_mode_auto_opt_in(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
@@ -662,6 +702,7 @@ def test_chat_completions_uses_runtime_global_main_config_for_scoped_default_age
             self.tools_enabled = {"safe_mode": True}
             self.last_approval_request = None
             self.last_chat_interaction_id: str | None = None
+            self._response_count = 0
             self.tracer = RuntimeTracer()
 
         def set_session_context(
@@ -683,7 +724,8 @@ def test_chat_completions_uses_runtime_global_main_config_for_scoped_default_age
 
         def respond(self, messages) -> str:
             del messages
-            self.last_chat_interaction_id = "trace-from-runtime-state"
+            self._response_count += 1
+            self.last_chat_interaction_id = f"trace-from-runtime-state-{self._response_count}"
             return "ok"
 
         def record_feedback_event(
