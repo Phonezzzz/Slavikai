@@ -23,63 +23,63 @@ from shared.models import JSONValue, LLMMessage, ToolResult
 
 class SessionApprovalStore:
     def __init__(self) -> None:
-        self._approved: dict[str, set[ApprovalCategory]] = {}
-        self._desktop_rules: dict[str, list[DesktopApprovalRule]] = {}
+        self._approved: dict[AgentScope, set[ApprovalCategory]] = {}
+        self._desktop_rules: dict[AgentScope, list[DesktopApprovalRule]] = {}
         self._lock = asyncio.Lock()
 
     async def approve(
-        self, session_id: str, categories: set[ApprovalCategory]
+        self, scope: AgentScope, categories: set[ApprovalCategory]
     ) -> set[ApprovalCategory]:
         async with self._lock:
-            existing = self._approved.get(session_id, set())
+            existing = self._approved.get(scope, set())
             existing.update(categories)
-            self._approved[session_id] = existing
+            self._approved[scope] = existing
             return set(existing)
 
-    async def is_approved(self, session_id: str) -> bool:
+    async def is_approved(self, scope: AgentScope) -> bool:
         async with self._lock:
-            return bool(self._approved.get(session_id))
+            return bool(self._approved.get(scope))
 
-    async def get_categories(self, session_id: str) -> set[ApprovalCategory]:
+    async def get_categories(self, scope: AgentScope) -> set[ApprovalCategory]:
         async with self._lock:
-            return set(self._approved.get(session_id, set()))
+            return set(self._approved.get(scope, set()))
 
     async def add_desktop_rule(
         self,
-        session_id: str,
+        scope: AgentScope,
         rule: DesktopApprovalRule,
     ) -> list[DesktopApprovalRule]:
         if rule.source not in {"once", "session"}:
             raise ValueError("SessionApprovalStore принимает once/session desktop rules")
         async with self._lock:
-            rules = list(self._desktop_rules.get(session_id, []))
+            rules = list(self._desktop_rules.get(scope, []))
             rules.append(rule)
-            self._desktop_rules[session_id] = rules
+            self._desktop_rules[scope] = rules
             return list(rules)
 
-    async def get_desktop_rules(self, session_id: str) -> list[DesktopApprovalRule]:
+    async def get_desktop_rules(self, scope: AgentScope) -> list[DesktopApprovalRule]:
         async with self._lock:
-            return list(self._desktop_rules.get(session_id, []))
+            return list(self._desktop_rules.get(scope, []))
 
-    async def remove_desktop_rules(self, session_id: str, rule_ids: set[str]) -> None:
+    async def remove_desktop_rules(self, scope: AgentScope, rule_ids: set[str]) -> None:
         if not rule_ids:
             return
         async with self._lock:
-            rules = self._desktop_rules.get(session_id, [])
+            rules = self._desktop_rules.get(scope, [])
             remaining = [rule for rule in rules if rule.rule_id not in rule_ids]
             if remaining:
-                self._desktop_rules[session_id] = remaining
+                self._desktop_rules[scope] = remaining
             else:
-                self._desktop_rules.pop(session_id, None)
+                self._desktop_rules.pop(scope, None)
 
-    async def clear_desktop_rules(self, session_id: str) -> None:
+    async def clear_desktop_rules(self, scope: AgentScope) -> None:
         async with self._lock:
-            self._desktop_rules.pop(session_id, None)
+            self._desktop_rules.pop(scope, None)
 
-    async def clear_session(self, session_id: str) -> None:
+    async def clear_session(self, scope: AgentScope) -> None:
         async with self._lock:
-            self._approved.pop(session_id, None)
-            self._desktop_rules.pop(session_id, None)
+            self._approved.pop(scope, None)
+            self._desktop_rules.pop(scope, None)
 
 
 class TracerProtocol(Protocol):

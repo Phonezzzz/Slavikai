@@ -15,6 +15,7 @@ from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig, ToolSpec
 from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.http.common.runtime_contract import (
+    SessionApprovalStore,
     _agent_lock_for_request,
     _resolve_agent_for_ui_session,
 )
@@ -106,6 +107,20 @@ def test_scoped_provider_owns_distinct_agents_and_locks() -> None:
         await provider.close()
         assert replacement_a.closed is True
         assert agent_b.closed is True
+
+    asyncio.run(_run())
+
+
+def test_session_approvals_are_isolated_by_principal_and_session() -> None:
+    async def _run() -> None:
+        store = SessionApprovalStore()
+        owner_scope = AgentScope("email:owner@example.com", "shared-session")
+        member_scope = AgentScope("email:member@example.com", "shared-session")
+
+        await store.approve(owner_scope, {"EXEC_ARBITRARY"})
+
+        assert await store.get_categories(owner_scope) == {"EXEC_ARBITRARY"}
+        assert await store.get_categories(member_scope) == set()
 
     asyncio.run(_run())
 

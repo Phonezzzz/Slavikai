@@ -20,6 +20,7 @@ from server.http_api import (
     UI_PROJECT_COMMANDS,
     UI_SESSION_HEADER,
     _agent_lock_for_request,
+    _agent_scope,
     _apply_agent_runtime_state,
     _build_github_import_approval_request,
     _build_ui_approval_decision,
@@ -142,7 +143,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             detail="project",
         )
 
-        approved_categories = await session_store.get_categories(session_id)
+        approved_categories = await session_store.get_categories(_agent_scope(request, session_id))
         user_message = hub.create_message(role="user", content=user_command, lane=WORKSPACE_LANE)
         await hub.append_message(session_id, user_message, lane=WORKSPACE_LANE)
         user_message_id_raw = user_message.get("message_id")

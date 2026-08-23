@@ -38,6 +38,7 @@ from server.http_api import (
     MAX_TOTAL_PAYLOAD_CHARS,
     UI_SESSION_HEADER,
     _agent_lock_for_request,
+    _agent_scope,
     _apply_agent_runtime_state,
     _build_output_artifacts,
     _build_ui_approval_decision,
@@ -680,8 +681,9 @@ async def _handle_ui_send_impl(
             detail=lane,
         )
 
-        approved_categories = await session_store.get_categories(session_id)
-        desktop_rules = await session_store.get_desktop_rules(session_id)
+        approval_scope = _agent_scope(request, session_id)
+        approved_categories = await session_store.get_categories(approval_scope)
+        desktop_rules = await session_store.get_desktop_rules(approval_scope)
         user_message = hub.create_message(
             role="user",
             content=content_raw.strip(),
@@ -1118,7 +1120,7 @@ async def _handle_ui_send_impl(
                     if isinstance(consumed_raw, list)
                     else set()
                 )
-                await session_store.remove_desktop_rules(session_id, consumed_rule_ids)
+                await session_store.remove_desktop_rules(approval_scope, consumed_rule_ids)
             response_text, mwv_report = _split_response_and_report(response_raw)
             await _publish_agent_activity(
                 hub,

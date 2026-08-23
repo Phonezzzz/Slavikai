@@ -17,6 +17,7 @@ from server.http.common.responses import error_response, json_response
 from server.http_api import (
     UI_SESSION_HEADER,
     _agent_lock_for_request,
+    _agent_scope,
     _apply_agent_runtime_state,
     _build_plan_draft,
     _build_plan_execute_decision,
@@ -554,7 +555,9 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
     }
     workspace_root = await _workspace_root_for_session(hub, session_id)
     session_store = request.app["session_store"]
-    approved_categories = sorted(await session_store.get_categories(session_id))
+    approved_categories = sorted(
+        await session_store.get_categories(_agent_scope(request, session_id))
+    )
     try:
         compiled_packet = _compile_plan_to_task_packet(
             plan=plan,

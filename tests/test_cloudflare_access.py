@@ -199,6 +199,26 @@ def test_cloudflare_browser_lane_is_separate_from_bearer_automation(tmp_path: Pa
             assert owner_payload["principal_id"] == "email:owner@example.com"
             assert owner_payload["role"] == "owner"
 
+            owner_runtime_status = await client.get(
+                "/ui/api/status",
+                headers={"Cf-Access-Jwt-Assertion": "owner-token"},
+            )
+            owner_session_id = (await owner_runtime_status.json())["session_id"]
+            automation_runtime = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer automation-token"},
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "read owner state"}],
+                    "slavik_meta": {
+                        "runtime_mode": "auto",
+                        "runtime_session_id": owner_session_id,
+                    },
+                },
+            )
+            assert automation_runtime.status == 403
+            assert (await automation_runtime.json())["error"]["code"] == "session_forbidden"
+
             member_persistent = await client.get(
                 "/ui/api/desktop/approvals",
                 headers={"Cf-Access-Jwt-Assertion": "member-token"},

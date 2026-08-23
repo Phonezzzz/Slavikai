@@ -804,7 +804,7 @@ async def run_plan_runner(
                     main_api_key=_resolve_provider_api_key(main_config.provider),
                     persist=False,
                 )
-            approved_categories = await session_store.get_categories(session_id)
+            approved_categories = await session_store.get_categories(scope)
             set_session_context = getattr(agent, "set_session_context", None)
             if callable(set_session_context):
                 set_session_context(session_id, approved_categories)

@@ -12,6 +12,7 @@ from server.http.common.runtime_contract import SessionApprovalStore
 from server.http_api import (
     SESSION_MODES,
     UI_SESSION_HEADER,
+    _agent_scope,
     _apply_agent_runtime_state,
     _load_effective_session_security,
     _normalize_auto_state,
@@ -164,10 +165,10 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
     if current_mode == "desktop" and next_mode != "desktop":
         cancellation_registry: ChatCancellationRegistry = request.app["chat_cancellation_registry"]
         await cancellation_registry.request_cancel(session_id)
-        await session_store.clear_desktop_rules(session_id)
+        await session_store.clear_desktop_rules(_agent_scope(request, session_id))
         await hub.set_session_decision(session_id, None)
     elif current_mode != "desktop" and next_mode == "desktop":
-        await session_store.clear_desktop_rules(session_id)
+        await session_store.clear_desktop_rules(_agent_scope(request, session_id))
     if next_mode == "ask":
         await hub.set_session_workflow(
             session_id,
@@ -331,7 +332,7 @@ async def handle_ui_runtime_init(request: web.Request) -> web.Response:
         if callable(resetter):
             resetter()
             reset_report["agent_transient_reset"] = True
-        approved_categories = await session_store.get_categories(session_id)
+        approved_categories = await session_store.get_categories(_agent_scope(request, session_id))
         try:
             await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
             agent.set_session_context(session_id, approved_categories)

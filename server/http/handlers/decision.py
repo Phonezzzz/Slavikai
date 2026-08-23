@@ -31,6 +31,7 @@ from server.http_api import (
     MAX_CONTENT_CHARS,
     UI_DECISION_RESPONSES,
     _agent_lock_for_request,
+    _agent_scope,
     _apply_agent_runtime_state,
     _clone_github_repository,
     _compile_plan_to_task_packet,
@@ -547,7 +548,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             else:
                 source: RuleSource = "session" if choice == "approve_session" else "once"
                 await session_store.add_desktop_rule(
-                    session_id,
+                    _agent_scope(request, session_id),
                     DesktopApprovalRule.create(
                         effect="allow",
                         scope=desktop_scope,
@@ -556,7 +557,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     ),
                 )
         elif choice == "approve_session" and required_categories:
-            await session_store.approve(session_id, required_categories)
+            await session_store.approve(_agent_scope(request, session_id), required_categories)
         if desktop_scope is not None:
             await _trace_desktop_approval_choice(
                 request,
@@ -564,7 +565,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 choice=choice,
                 scope=desktop_scope,
             )
-        approved_categories = await session_store.get_categories(session_id)
+        approved_categories = await session_store.get_categories(_agent_scope(request, session_id))
         one_call_categories = (
             approved_categories | required_categories
             if choice in {"approve_once", "edit_and_approve"}
@@ -1279,7 +1280,9 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "updated_at": _utc_now_iso(),
         }
         workspace_root = await _workspace_root_for_session(hub, session_id)
-        approved_categories = sorted(await session_store.get_categories(session_id))
+        approved_categories = sorted(
+            await session_store.get_categories(_agent_scope(request, session_id))
+        )
         try:
             compiled_packet = _compile_plan_to_task_packet(
                 plan=running_plan,

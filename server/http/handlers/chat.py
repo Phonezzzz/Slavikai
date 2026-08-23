@@ -6,8 +6,8 @@ import uuid
 
 from aiohttp import web
 
+from server.http.common.auth import _request_principal_id
 from server.http.common.chat_payload import (
-    _extract_session_id,
     _split_response_and_report,
 )
 from server.http.common.proxy_model import PUBLIC_PROXY_MODEL_ID
@@ -15,6 +15,7 @@ from server.http.common.responses import error_response, json_response
 from server.http_api import (
     TOOL_PIPELINE_ENABLED,
     _agent_lock_for_request,
+    _agent_scope,
     _apply_agent_runtime_state,
     _model_not_selected_response,
     _parse_chat_request,
@@ -69,16 +70,48 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             },
         )
 
-    session_id = _extract_session_id(request, payload) or parsed.session_id
-    if session_id is None:
-        session_id = str(uuid.uuid4())
-    runtime_session_id = parsed.runtime_session_id or session_id
+    header_session_id = request.headers.get("X-Slavik-Session", "").strip() or None
+    declared_session_ids = {
+        value
+        for value in (header_session_id, parsed.session_id, parsed.runtime_session_id)
+        if value is not None
+    }
+    if len(declared_session_ids) > 1:
+        return error_response(
+            status=400,
+            message="Все переданные session_id должны совпадать.",
+            error_type="invalid_request_error",
+            code="session_scope_mismatch",
+        )
+    explicit_session_id = next(iter(declared_session_ids), None)
+    scope = _agent_scope(request, explicit_session_id)
+    session_id = scope.session_id
+    runtime_session_id = session_id
     runtime_mode = parsed.runtime_mode
 
-    agent = await _resolve_agent_for_base_http(request, session_id)
+    if runtime_mode in {"ask", "auto"} and explicit_session_id is not None:
+        principal_id = _request_principal_id(request)
+        if principal_id is None:
+            return error_response(
+                status=401,
+                message="Unauthorized.",
+                error_type="invalid_request_error",
+                code="unauthorized",
+            )
+        try:
+            await hub.get_or_create_session(explicit_session_id, principal_id=principal_id)
+        except PermissionError:
+            return error_response(
+                status=403,
+                message="Session access forbidden.",
+                error_type="invalid_request_error",
+                code="session_forbidden",
+            )
+
+    agent = await _resolve_agent_for_base_http(request, explicit_session_id)
     if agent is None:
         return _model_not_selected_response()
-    agent_lock = _agent_lock_for_request(request, session_id)
+    agent_lock = _agent_lock_for_request(request, explicit_session_id)
 
     if runtime_mode in {"plan", "act"}:
         return error_response(
@@ -94,7 +127,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             },
         )
 
-    approved_categories = await session_store.get_categories(session_id)
+    approved_categories = await session_store.get_categories(scope)
     try:
         agent.set_session_context(session_id, approved_categories)
     except Exception as exc:  # noqa: BLE001
@@ -129,16 +162,29 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     try:
         async with agent_lock:
             if runtime_mode in {"ask", "auto"}:
-                await _apply_agent_runtime_state(
-                    agent=agent,
-                    hub=hub,
-                    session_id=runtime_session_id,
-                )
+                if explicit_session_id is not None:
+                    await _apply_agent_runtime_state(
+                        agent=agent,
+                        hub=hub,
+                        session_id=runtime_session_id,
+                    )
                 runtime_setter = getattr(agent, "set_runtime_state", None)
                 if callable(runtime_setter):
-                    active_plan_raw = getattr(agent, "runtime_active_plan", None)
-                    active_task_raw = getattr(agent, "runtime_active_task", None)
-                    auto_state_raw = getattr(agent, "runtime_auto_state", None)
+                    active_plan_raw = (
+                        getattr(agent, "runtime_active_plan", None)
+                        if explicit_session_id is not None
+                        else None
+                    )
+                    active_task_raw = (
+                        getattr(agent, "runtime_active_task", None)
+                        if explicit_session_id is not None
+                        else None
+                    )
+                    auto_state_raw = (
+                        getattr(agent, "runtime_auto_state", None)
+                        if explicit_session_id is not None
+                        else None
+                    )
                     active_plan = (
                         dict(active_plan_raw) if isinstance(active_plan_raw, dict) else None
                     )
