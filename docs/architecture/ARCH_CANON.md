@@ -34,8 +34,9 @@
   тот же provider-neutral `AgentToolLoop -> ToolGateway -> VerifierRuntime`, но с явным
   execution target `desktop`, host-only tool profile, детерминированной scoped policy
   `ALLOW|ASK|DENY` и lifecycle once/session/persistent approvals.
-- **Known partial contracts**: strict public `model="slavik"` validation ещё не готова.
-  Agent runtime state изолирован по `(principal_id, session_id)`;
+- **Public proxy model**: `/v1/models` публикует только `slavik`, а
+  `/v1/chat/completions` отклоняет любой другой `model` до Agent/session resolution.
+- **Principal isolation**: Agent runtime state изолирован по `(principal_id, session_id)`;
   Memory/canonical/vector stores изолированы по principal, а owner сохраняет legacy DB paths.
 - **Current legacy runtime**: token-cookie browser auth, крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers

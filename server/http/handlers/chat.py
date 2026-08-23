@@ -10,6 +10,7 @@ from server.http.common.chat_payload import (
     _extract_session_id,
     _split_response_and_report,
 )
+from server.http.common.proxy_model import PUBLIC_PROXY_MODEL_ID
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     TOOL_PIPELINE_ENABLED,
@@ -52,6 +53,20 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             message=error_text,
             error_type="invalid_request_error",
             code="invalid_request_error",
+        )
+    if parsed.model != PUBLIC_PROXY_MODEL_ID:
+        return error_response(
+            status=404,
+            message=(
+                f"Модель '{parsed.model}' не найдена. "
+                f"Публичный proxy model id: '{PUBLIC_PROXY_MODEL_ID}'."
+            ),
+            error_type="invalid_request_error",
+            code="model_not_found",
+            details={
+                "requested_model": parsed.model,
+                "available_models": [PUBLIC_PROXY_MODEL_ID],
+            },
         )
 
     session_id = _extract_session_id(request, payload) or parsed.session_id
@@ -208,7 +223,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": parsed.model,
+        "model": PUBLIC_PROXY_MODEL_ID,
         "choices": [
             {
                 "index": 0,

@@ -58,8 +58,9 @@ Desktop approvals также имеют explicit principal subject, при эт�
 - Plan: current contract — read-only tools только через `ToolGateway`; write/exec запрещены.
 - Auto: Auto v1 через `AgentToolLoop -> ToolGateway -> verifier` является current;
   `Ask -> Plan -> Act` FSM является target.
-- Public OpenAI-compatible API: `slavik` — единственный публичный proxy model id; strict
-  request validation ещё `partial`.
+- Public OpenAI-compatible API: current `implemented` contract — `slavik` является
+  единственным публичным proxy model id; `/v1/chat/completions` отклоняет любой другой ID до
+  Agent/session resolution.
 - Memory: current `implemented` contract — запись возможна только после отдельного явного
   `confirm` или `edit_and_confirm`; `reject` не пишет данные. Устаревший
   `auto_save_dialogue` удалён из config/runtime/UI и отклоняется settings API. Confirm endpoint

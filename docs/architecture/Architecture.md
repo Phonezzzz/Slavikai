@@ -207,8 +207,8 @@ conversational endpoint и существующий LLM/tool loop, но публ
 
 - OpenAI-совместимые endpoints: `/v1/models`, `/v1/chat/completions`.
 - `/v1/models` сейчас возвращает только публичный proxy id `slavik`; provider/model из UI
-  Settings являются внутренней runtime-конфигурацией. Проверка `model="slavik"` в chat
-  request ещё неполна и отмечена `partial` в registry claims.
+  Settings являются внутренней runtime-конфигурацией. `/v1/chat/completions` принимает только
+  exact `model="slavik"` и отклоняет остальные ID до Agent/session resolution.
 - Служебные endpoints: `/slavik/trace/{trace_id}`, `/slavik/tool-calls/{trace_id}`, `/slavik/feedback`, `/slavik/approve-session`.
 - UI API и workflow endpoints регистрируются в `server/http/routes.py`.
 - Browser UI проходит login через `/ui/api/auth/login` и работает по подписанной
