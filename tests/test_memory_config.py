@@ -16,7 +16,6 @@ from config.memory_config import (
 def test_memory_config_defaults(tmp_path: Path) -> None:
     path = tmp_path / "memory.json"
     config = load_memory_config(path)
-    assert config.auto_save_dialogue is False
     assert config.inbox_max_items == 200
     assert config.inbox_ttl_days == 30
     assert config.inbox_writes_per_minute == 6
@@ -29,7 +28,6 @@ def test_memory_config_save_and_load(tmp_path: Path) -> None:
     path = tmp_path / "memory.json"
     save_memory_config(
         MemoryConfig(
-            auto_save_dialogue=True,
             inbox_max_items=100,
             inbox_ttl_days=14,
             inbox_writes_per_minute=12,
@@ -41,7 +39,6 @@ def test_memory_config_save_and_load(tmp_path: Path) -> None:
         path,
     )
     loaded = load_memory_config(path)
-    assert loaded.auto_save_dialogue is True
     assert loaded.inbox_max_items == 100
     assert loaded.inbox_ttl_days == 14
     assert loaded.inbox_writes_per_minute == 12
@@ -71,11 +68,10 @@ def test_memory_config_context_budget_from_dict_defaults_and_overrides() -> None
 
 def test_memory_config_to_dict_includes_context_budget() -> None:
     payload = MemoryConfig(
-        auto_save_dialogue=True,
         context_budget=ContextBudgetConfig(vector_code_chars=2222),
     ).to_dict()
 
-    assert payload["auto_save_dialogue"] is True
+    assert "auto_save_dialogue" not in payload
     context_budget = payload["context_budget"]
     assert isinstance(context_budget, dict)
     assert context_budget["vector_code_chars"] == 2222
@@ -84,9 +80,8 @@ def test_memory_config_to_dict_includes_context_budget() -> None:
 
 def test_memory_config_invalid_payload(tmp_path: Path) -> None:
     path = tmp_path / "memory.json"
-    path.write_text(json.dumps({"auto_save_dialogue": "yes"}), encoding="utf-8")
-    with pytest.raises(RuntimeError):
-        load_memory_config(path)
+    path.write_text(json.dumps({"auto_save_dialogue": True}), encoding="utf-8")
+    assert "auto_save_dialogue" not in load_memory_config(path).to_dict()
 
     path.write_text(json.dumps({"inbox_max_items": -1}), encoding="utf-8")
     with pytest.raises(RuntimeError):

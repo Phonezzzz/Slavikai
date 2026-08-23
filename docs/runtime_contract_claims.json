@@ -54,16 +54,16 @@
     {
       "id": "runtime.ask.zero_side_effects",
       "scope": "runtime",
-      "status": "partial",
+      "status": "implemented",
       "owner": "runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/ARCH_CANON.md",
       "verified_by": [
         "tests/test_ask_stateless.py",
         "core/agent_routing.py",
         "core/agent_memory.py"
       ],
-      "summary": "Ask blocks tools, but explicit Memory writes and hidden vector runtime initialization still violate the target invariant."
+      "summary": "Ask performs no Memory or tool writes and all vector retrieval paths soft-degrade without hidden runtime initialization."
     },
     {
       "id": "runtime.plan.read_only_tools",
@@ -107,14 +107,18 @@
     {
       "id": "memory.explicit_confirmation",
       "scope": "memory",
-      "status": "target",
+      "status": "implemented",
       "owner": "memory",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
-        "docs/SOURCE_OF_TRUTH.md"
+        "tests/test_agent_canonical_memory.py",
+        "tests/test_ask_stateless.py",
+        "tests/ui_api/test_memory_confirmation.py",
+        "core/decision/memory_save.py",
+        "server/http/handlers/decision.py"
       ],
-      "summary": "Memory save preview with explicit confirm, edit or reject is not implemented yet."
+      "summary": "Explicit Memory requests create a preview; only confirm or edit-and-confirm writes it, while reject performs no write."
     },
     {
       "id": "api.proxy_model.slavik",

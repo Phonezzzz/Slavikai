@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 from core.approval_policy import ApprovalRequired
 from core.decision.handler import DecisionContext
+from core.decision.memory_save import build_memory_save_packet
 from core.mwv.models import StopReasonCode
 from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
@@ -69,16 +70,15 @@ class AgentRoutingMixin:
         def _reset_workspace_diffs(self) -> None: ...
         def handle_tool_command(self, command: str) -> str: ...
         def handle_auto_command(self, goal: str, *, command_lane: bool = False) -> str: ...
-        def save_to_memory(self, user_text: str, assistant_text: str) -> None: ...
         def is_explicit_memory_request(self, text: str) -> bool: ...
-        def remember_explicit_text(
+        def build_memory_save_preview(
             self,
             text: str,
             *,
             source_kind: str,
             source_id: str | None = None,
             lang_hint: str | None = None,
-        ) -> str: ...
+        ) -> dict[str, JSONValue]: ...
         def _log_chat_interaction(
             self,
             raw_input: str,
@@ -203,17 +203,25 @@ class AgentRoutingMixin:
             if last_content.startswith("/"):
                 return self.handle_tool_command(last_content)
 
+            runtime_mode = getattr(self, "runtime_mode", "ask")
             if self.is_explicit_memory_request(last_content):
-                response = self.remember_explicit_text(
+                preview = self.build_memory_save_preview(
                     last_content,
                     source_kind="chat.explicit_remember",
                 )
+                claims = preview.get("claims")
+                if isinstance(claims, list) and claims:
+                    return self._handle_decision_packet(
+                        build_memory_save_packet(preview),
+                        raw_input=last_content,
+                        record_in_history=record_in_history,
+                    )
+                response = "Не удалось выделить изменения для Memory."
                 self._log_chat_interaction(raw_input=last_content, response_text=response)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
                 return response
 
-            runtime_mode = getattr(self, "runtime_mode", "ask")
             if runtime_mode == "ask":
                 return self._run_chat_response(messages, last_content, record_in_history)
             if runtime_mode == "auto":
@@ -239,8 +247,6 @@ class AgentRoutingMixin:
             )
             if decision.skill_decision and decision.skill_decision.status == "deprecated":
                 response = self._format_skill_block(decision.skill_decision)
-                if self.memory_config.auto_save_dialogue:
-                    self.save_to_memory(last_content, response)
                 self._log_chat_interaction(raw_input=last_content, response_text=response)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
@@ -316,19 +322,28 @@ class AgentRoutingMixin:
                 yield from _text_response_events(result)
                 return
 
+            runtime_mode = getattr(self, "runtime_mode", "ask")
             if self.is_explicit_memory_request(last_content):
-                response = self.remember_explicit_text(
+                preview = self.build_memory_save_preview(
                     last_content,
                     source_kind="chat.explicit_remember",
                 )
-                self._log_chat_interaction(raw_input=last_content, response_text=response)
-                if record_in_history:
-                    self._append_short_term([LLMMessage(role="assistant", content=response)])
+                claims = preview.get("claims")
+                if isinstance(claims, list) and claims:
+                    response = self._handle_decision_packet(
+                        build_memory_save_packet(preview),
+                        raw_input=last_content,
+                        record_in_history=record_in_history,
+                    )
+                else:
+                    response = "Не удалось выделить изменения для Memory."
+                    self._log_chat_interaction(raw_input=last_content, response_text=response)
+                    if record_in_history:
+                        self._append_short_term([LLMMessage(role="assistant", content=response)])
                 self.last_stream_response_raw = response
                 yield from _text_response_events(response)
                 return
 
-            runtime_mode = getattr(self, "runtime_mode", "ask")
             if runtime_mode == "ask":
                 yield from self._run_chat_response_stream(
                     messages,

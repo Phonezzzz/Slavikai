@@ -247,7 +247,7 @@ def test_agent_plan_execution_path(tmp_path: Path) -> None:
     assert "ok" in result
 
 
-def test_agent_does_not_auto_save_dialogue_by_default(tmp_path: Path) -> None:
+def test_agent_never_auto_saves_dialogue(tmp_path: Path) -> None:
     brain = SimpleBrain("hello")
     agent = Agent(
         brain=brain,
@@ -260,11 +260,9 @@ def test_agent_does_not_auto_save_dialogue_by_default(tmp_path: Path) -> None:
 
     calls = {"count": 0}
 
-    def _save_to_memory(_prompt: str, _answer: str) -> None:
+    def _save(_item: object) -> None:
         calls["count"] += 1
 
-    agent.save_to_memory = _save_to_memory  # type: ignore[method-assign]
-    assert agent.memory_config.auto_save_dialogue is False
-
+    agent.memory.save = _save  # type: ignore[method-assign]
     _ = agent.respond([LLMMessage(role="user", content="привет")])
     assert calls["count"] == 0

@@ -64,7 +64,7 @@ def test_ui_settings_endpoint() -> None:
             assert isinstance(composer.get("long_paste_threshold_chars"), int)
             memory = settings.get("memory")
             assert isinstance(memory, dict)
-            assert isinstance(memory.get("auto_save_dialogue"), bool)
+            assert "auto_save_dialogue" not in memory
             assert isinstance(memory.get("inbox_max_items"), int)
             embeddings = memory.get("embeddings")
             assert isinstance(embeddings, dict)
@@ -142,7 +142,6 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
                     },
                     "appearance": {"theme": "oled"},
                     "memory": {
-                        "auto_save_dialogue": True,
                         "inbox_max_items": 77,
                         "inbox_ttl_days": 14,
                         "inbox_writes_per_minute": 9,
@@ -173,7 +172,7 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert appearance.get("theme") == "oled"
             memory = settings.get("memory")
             assert isinstance(memory, dict)
-            assert memory.get("auto_save_dialogue") is True
+            assert "auto_save_dialogue" not in memory
             assert memory.get("inbox_max_items") == 77
             assert memory.get("inbox_ttl_days") == 14
             assert memory.get("inbox_writes_per_minute") == 9
@@ -443,6 +442,25 @@ def test_ui_settings_update_rejects_invalid_composer_threshold() -> None:
             error = payload.get("error")
             assert isinstance(error, dict)
             assert error.get("code") == "invalid_request_error"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_settings_rejects_retired_memory_auto_save() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            response = await client.post(
+                "/ui/api/settings",
+                json={"memory": {"auto_save_dialogue": True}},
+            )
+            assert response.status == 400
+            payload = await response.json()
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "memory_confirmation_required"
         finally:
             await client.close()
 

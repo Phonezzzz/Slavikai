@@ -27,13 +27,15 @@
   Access JWT и выводит owner/member principal из verified email; token login с подписанной
   HttpOnly-cookie остаётся legacy local mode. Plan draft получает executable steps через structured
   `submit_plan` tool call; Auto отклоняет provider без native tools до запуска и применяет
-  `tool_outcomes` verifier для generic workspace. Добавлен пользовательский режим Desktop:
+  `tool_outcomes` verifier для generic workspace. Ask не выполняет Memory/tool writes и
+  передаёт `allow_runtime_init=False` во все vector retrieval paths; explicit Memory request
+  создаёт `memory_save` preview/decision, а canonical/vector write происходит только после
+  отдельного `confirm` или `edit_and_confirm`. Добавлен пользовательский режим Desktop:
   тот же provider-neutral `AgentToolLoop -> ToolGateway -> VerifierRuntime`, но с явным
   execution target `desktop`, host-only tool profile, детерминированной scoped policy
   `ALLOW|ASK|DENY` и lifecycle once/session/persistent approvals.
-- **Known partial contracts**: Ask всё ещё допускает explicit Memory write до mode gate и
-  hidden vector runtime init; explicit Memory confirmation и strict public `model="slavik"`
-  validation ещё не готовы. Agent runtime state изолирован по `(principal_id, session_id)`;
+- **Known partial contracts**: strict public `model="slavik"` validation ещё не готова.
+  Agent runtime state изолирован по `(principal_id, session_id)`;
   Memory/canonical/vector stores изолированы по principal, а owner сохраняет legacy DB paths.
 - **Current legacy runtime**: token-cookie browser auth, крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
@@ -47,7 +49,7 @@
 
 ## 1) Канонические роли режимов
 
-1. Ask = **stateless** (target; current `partial`).
+1. Ask = **stateless** (current `implemented`).
 2. Plan = **transactional read-only** (current `implemented`).
 3. Act = **isolated** (current `partial`).
 4. Auto v1 = **native tool loop** (current `implemented`).
@@ -61,7 +63,7 @@
 
 ## 2) Инварианты (обязательные)
 
-### Ask (target: stateless, 0 side effects; current: partial)
+### Ask (current: stateless, без persistent/runtime side effects)
 
 - Запрещены любые записи:
   - `save_to_memory`
@@ -71,9 +73,9 @@
 - Запрещены write/exec tool calls из ask-ветки.
 - Разрешён только read-only контекст (memory/vector read path).
 - Если vector runtime не готов, ask делает soft-degrade (ответ без vector-контекста, без hidden init).
-
-До исправления раннего explicit-memory path и `allow_runtime_init=True` это обязательный
-target invariant, а не описание текущей полной защиты.
+- Явный запрос «запомни» в Ask только формирует `memory_save` preview/decision. Он не вызывает
+  canonical/vector write; запись является отдельным действием после `confirm` или
+  `edit_and_confirm`, а `reject` не пишет данные.
 
 ### Plan (current: transactional read-only)
 

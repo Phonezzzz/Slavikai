@@ -5,9 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_PATH = Path("config/memory.json")
-# policies-first: автосохранение диалога выключено по умолчанию
-# и включается только явно через config
-DEFAULT_AUTO_SAVE_DIALOGUE = False
 DEFAULT_INBOX_MAX_ITEMS = 200
 DEFAULT_INBOX_TTL_DAYS = 30
 DEFAULT_INBOX_WRITES_PER_MINUTE = 6
@@ -89,7 +86,6 @@ class ContextBudgetConfig:
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    auto_save_dialogue: bool = DEFAULT_AUTO_SAVE_DIALOGUE
     inbox_max_items: int = DEFAULT_INBOX_MAX_ITEMS
     inbox_ttl_days: int = DEFAULT_INBOX_TTL_DAYS
     inbox_writes_per_minute: int = DEFAULT_INBOX_WRITES_PER_MINUTE
@@ -97,9 +93,6 @@ class MemoryConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> MemoryConfig:
-        raw_value = data.get("auto_save_dialogue", DEFAULT_AUTO_SAVE_DIALOGUE)
-        if not isinstance(raw_value, bool):
-            raise ValueError("auto_save_dialogue должен быть bool")
         inbox_max_items = _read_int(data, "inbox_max_items", DEFAULT_INBOX_MAX_ITEMS)
         inbox_ttl_days = _read_int(data, "inbox_ttl_days", DEFAULT_INBOX_TTL_DAYS)
         inbox_writes_per_minute = _read_int(
@@ -109,7 +102,6 @@ class MemoryConfig:
         )
         context_budget = _read_context_budget(data.get("context_budget"))
         return cls(
-            auto_save_dialogue=raw_value,
             inbox_max_items=inbox_max_items,
             inbox_ttl_days=inbox_ttl_days,
             inbox_writes_per_minute=inbox_writes_per_minute,
@@ -118,7 +110,6 @@ class MemoryConfig:
 
     def to_dict(self) -> dict[str, int | bool | dict[str, int]]:
         return {
-            "auto_save_dialogue": self.auto_save_dialogue,
             "inbox_max_items": self.inbox_max_items,
             "inbox_ttl_days": self.inbox_ttl_days,
             "inbox_writes_per_minute": self.inbox_writes_per_minute,

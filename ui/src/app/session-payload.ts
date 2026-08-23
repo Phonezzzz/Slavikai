@@ -544,6 +544,7 @@ export const parseUiDecision = (value: unknown): UiDecision | null => {
       candidate.decision_type === 'tool_approval'
       || candidate.decision_type === 'plan_execute'
       || candidate.decision_type === 'agent_decision'
+      || candidate.decision_type === 'memory_save'
         ? candidate.decision_type
         : null,
     status: candidate.status,

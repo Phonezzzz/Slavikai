@@ -138,6 +138,23 @@ class AgentProtocol(Protocol):
         raw_input: str | None = None,
     ) -> ToolResult: ...
 
+    def build_memory_save_preview(
+        self,
+        text: str,
+        *,
+        source_kind: str,
+        source_id: str | None = None,
+        lang_hint: str | None = None,
+    ) -> dict[str, JSONValue]: ...
+
+    def apply_memory_save_preview(
+        self,
+        proposed_action: dict[str, JSONValue],
+        *,
+        source_kind: str,
+        source_id: str | None = None,
+    ) -> list[dict[str, JSONValue]]: ...
+
     def record_feedback_event(
         self,
         *,

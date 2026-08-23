@@ -135,7 +135,6 @@ class AgentMWVMixin:
             raw_input: str,
             record_in_history: bool,
         ) -> str: ...
-        def save_to_memory(self, prompt: str, answer: str) -> None: ...
         def _log_chat_interaction(
             self,
             raw_input: str,
@@ -292,8 +291,6 @@ class AgentMWVMixin:
                 record_in_history=record_in_history,
             )
         response = self._format_mwv_response(run_result)
-        if self.memory_config.auto_save_dialogue:
-            self.save_to_memory(raw_input, response)
         self._log_chat_interaction(raw_input=raw_input, response_text=response)
         if record_in_history:
             self._append_short_term([LLMMessage(role="assistant", content=response)])
@@ -1253,8 +1250,6 @@ class AgentMWVMixin:
             route="mwv",
             trace_id=trace_id,
         )
-        if self.memory_config.auto_save_dialogue:
-            self.save_to_memory(raw_input, response)
         self._log_chat_interaction(raw_input=raw_input, response_text=response)
         if record_in_history:
             self._append_short_term([LLMMessage(role="assistant", content=response)])

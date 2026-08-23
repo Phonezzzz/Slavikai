@@ -252,21 +252,20 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 code="invalid_request_error",
             )
         current_memory = api._load_memory_config_runtime()
-        auto_save_dialogue = current_memory.auto_save_dialogue
         inbox_max_items = current_memory.inbox_max_items
         inbox_ttl_days = current_memory.inbox_ttl_days
         inbox_writes_per_minute = current_memory.inbox_writes_per_minute
         embeddings_settings = api._load_embeddings_settings()
         if "auto_save_dialogue" in memory_raw:
-            raw_auto_save = memory_raw.get("auto_save_dialogue")
-            if not isinstance(raw_auto_save, bool):
-                return error_response(
-                    status=400,
-                    message="memory.auto_save_dialogue должен быть bool.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            auto_save_dialogue = raw_auto_save
+            return error_response(
+                status=400,
+                message=(
+                    "memory.auto_save_dialogue больше не поддерживается: "
+                    "запись Memory требует отдельного подтверждения."
+                ),
+                error_type="invalid_request_error",
+                code="memory_confirmation_required",
+            )
         if "inbox_max_items" in memory_raw:
             raw_value = memory_raw.get("inbox_max_items")
             if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
@@ -401,7 +400,6 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             next_embeddings_settings = embeddings_settings
         api._save_memory_config_runtime(
             MemoryConfig(
-                auto_save_dialogue=auto_save_dialogue,
                 inbox_max_items=inbox_max_items,
                 inbox_ttl_days=inbox_ttl_days,
                 inbox_writes_per_minute=inbox_writes_per_minute,

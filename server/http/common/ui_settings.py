@@ -787,7 +787,6 @@ def _build_settings_payload(
                 "long_paste_threshold_chars": long_paste_threshold_chars,
             },
             "memory": {
-                "auto_save_dialogue": memory_config.auto_save_dialogue,
                 "inbox_max_items": memory_config.inbox_max_items,
                 "inbox_ttl_days": memory_config.inbox_ttl_days,
                 "inbox_writes_per_minute": memory_config.inbox_writes_per_minute,

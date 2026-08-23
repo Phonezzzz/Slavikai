@@ -71,12 +71,14 @@ export type DecisionRespondChoice =
   | 'abort'
   | 'select_skill'
   | 'adjust_threshold'
-  | 'create_candidate';
+  | 'create_candidate'
+  | 'confirm'
+  | 'edit_and_confirm';
 
 export type UiDecision = {
   id: string;
   kind: 'approval' | 'decision';
-  decision_type: 'tool_approval' | 'plan_execute' | 'agent_decision' | null;
+  decision_type: 'tool_approval' | 'plan_execute' | 'agent_decision' | 'memory_save' | null;
   status: UiDecisionStatus;
   blocking: boolean;
   reason: string;
