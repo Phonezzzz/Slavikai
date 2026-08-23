@@ -5,8 +5,12 @@ import pytest
 
 from core.agent_mwv import TaskPacketApprovalPending
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
+from core.tool_gateway import ToolGateway
 from server.http.common.workflow_runtime import compute_plan_completion_state
 from server.http_api import PLAN_AUDIT_MAX_READ_FILES
+from shared.models import ToolRequest
+from tools.tool_registry import ToolRegistry
+from tools.workspace_tools import ListFilesTool, ReadFileTool
 
 from .fakes import *
 
@@ -397,8 +401,20 @@ def test_ui_plan_execute_waiting_approval_then_resume() -> None:
 
 
 def test_ui_plan_draft_allows_audit_soft_cap(tmp_path) -> None:
+    class PlanAuditAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.registry = ToolRegistry()
+            self.registry.register("workspace_list", ListFilesTool(), capability="read")
+            self.registry.register("workspace_read", ReadFileTool(), capability="read")
+            self.registry.set_execution_policy(mode="plan")
+
+        def call_tool(self, name, args=None, raw_input=None):
+            del raw_input
+            return ToolGateway(self.registry).call(ToolRequest(name, args or {}))
+
     async def run() -> None:
-        client = await _create_client(DummyAgent())
+        client = await _create_client(PlanAuditAgent())
         try:
             status_resp = await client.get("/ui/api/status")
             status_payload = await status_resp.json()

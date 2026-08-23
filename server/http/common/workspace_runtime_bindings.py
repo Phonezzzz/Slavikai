@@ -7,7 +7,8 @@ from pathlib import Path
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server.http.common import workspace_index, workspace_paths, workspace_runtime
 from server.ui_hub import UIHub
-from shared.models import JSONValue
+from shared.models import JSONValue, ToolRequest, ToolResult
+from tools.workspace_tools import workspace_root_context
 
 
 @dataclass(frozen=True)
@@ -64,12 +65,12 @@ class WorkspaceRuntimeBindings:
         self,
         *,
         root: Path,
+        call_tool: Callable[[ToolRequest], ToolResult],
     ) -> tuple[list[dict[str, JSONValue]], dict[str, int]]:
-        return workspace_runtime._run_plan_readonly_audit(
-            root=root,
-            plan_audit_timeout_seconds=self.plan_audit_timeout_seconds,
-            workspace_index_ignored_dirs=self.workspace_index_ignored_dirs,
-            workspace_index_allowed_extensions=self.workspace_index_allowed_extensions,
-            plan_audit_max_total_bytes=self.plan_audit_max_total_bytes,
-            plan_audit_max_read_files=self.plan_audit_max_read_files,
-        )
+        with workspace_root_context(root):
+            return workspace_runtime._run_plan_readonly_audit(
+                call_tool=call_tool,
+                plan_audit_timeout_seconds=self.plan_audit_timeout_seconds,
+                plan_audit_max_total_bytes=self.plan_audit_max_total_bytes,
+                plan_audit_max_read_files=self.plan_audit_max_read_files,
+            )
