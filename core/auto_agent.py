@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from core.auto_runtime import AutoOrchestrator, AutoRunOutcome
+from core.skills.index import SkillResolution
 from core.tracer import Tracer
 from llm.types import LLMResult
 from shared.models import JSONValue, LLMMessage
@@ -84,9 +85,14 @@ class AutoAgent:
         outcome = self.run_outcome(goal)
         return outcome.text
 
-    def run_outcome(self, goal: str) -> AutoRunOutcome:
+    def run_outcome(
+        self,
+        goal: str,
+        *,
+        skill_resolution: SkillResolution | None = None,
+    ) -> AutoRunOutcome:
         self.tracer.log("auto_invoke", f"AgentToolLoop->Verifier: {goal}")
-        return self.orchestrator.run_v1(goal)
+        return self.orchestrator.run_v1(goal, skill_resolution=skill_resolution)
 
     def resume_outcome(self, run_id: str) -> AutoRunOutcome | None:
         return self.orchestrator.resume(run_id)

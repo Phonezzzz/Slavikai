@@ -12,6 +12,8 @@ patterns:
   - "запиши файл"
   - "применить патч"
 requires: []
+dependencies: []
+supporting: false
 risk: medium
 tests: []
 ---

@@ -10,6 +10,8 @@ patterns:
   - "создай документ"
   - "сделай таблицу"
 requires: []
+dependencies: []
+supporting: false
 risk: medium
 tests: []
 ---

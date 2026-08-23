@@ -23,7 +23,8 @@ class DummyWorker:
 
 
 class DummyVerifier:
-    def run(self, context: RunContext) -> VerificationResult:
+    def run(self, task: TaskPacket, context: RunContext) -> VerificationResult:
+        del task, context
         return VerificationResult(
             status=VerificationStatus.PASSED,
             command=["check"],

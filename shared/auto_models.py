@@ -159,6 +159,7 @@ class AutoState:
     merge: dict[str, JSONValue] = field(default_factory=dict)
     budgets: dict[str, JSONValue] = field(default_factory=dict)
     verifier: dict[str, JSONValue] | None = None
+    skill: dict[str, JSONValue] | None = None
     approval: dict[str, JSONValue] | None = None
     error: str | None = None
     error_code: str | None = None
@@ -179,6 +180,7 @@ class AutoState:
             "merge": dict(self.merge),
             "budgets": dict(self.budgets),
             "verifier": dict(self.verifier) if self.verifier is not None else None,
+            "skill": dict(self.skill) if self.skill is not None else None,
             "approval": dict(self.approval) if self.approval is not None else None,
             "error": self.error,
             "error_code": self.error_code,
@@ -217,6 +219,7 @@ def normalize_auto_state(value: object) -> dict[str, JSONValue] | None:
         "merge": _normalize_object(value.get("merge")) or {},
         "budgets": _normalize_object(value.get("budgets")) or {},
         "verifier": _normalize_object(value.get("verifier")),
+        "skill": _normalize_object(value.get("skill")),
         "approval": _normalize_object(value.get("approval")),
         "error": value.get("error") if isinstance(value.get("error"), str) else None,
         "error_code": (

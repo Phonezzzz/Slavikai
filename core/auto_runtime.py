@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from core.approval_policy import ApprovalRequired
 from core.mwv.models import (
@@ -24,6 +24,8 @@ from core.mwv.verifier_runtime import (
     is_repo_workspace,
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
+from core.skills.index import SkillResolution
+from core.skills.runtime import skill_run_metadata, skill_run_report
 from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ExecutedToolCall
 from shared.auto_models import (
     AUTO_CODER_POOL_DEFAULT,
@@ -124,7 +126,7 @@ class _PausedRun:
     plan: AutoPlan | None
     started_at: str
     workspace_root: Path
-    runtime: str = "legacy"
+    skill_resolution: SkillResolution | None = None
 
 
 class AutoOrchestrator:
@@ -144,6 +146,7 @@ class AutoOrchestrator:
         self,
         goal: str,
         *,
+        skill_resolution: SkillResolution | None = None,
         run_id: str | None = None,
         started_at: str | None = None,
         run_root_override: Path | None = None,
@@ -178,6 +181,11 @@ class AutoOrchestrator:
             "error": None,
             "error_code": None,
             "missing_paths": [],
+            "skill": (
+                skill_run_metadata(skill_resolution)
+                if skill_resolution is not None
+                else skill_run_report(None, status="skipped", reason="no_match")
+            ),
         }
         self._set_state(state)
 
@@ -197,6 +205,7 @@ class AutoOrchestrator:
                         route="auto",
                         plan_summary="Auto требует native tool-calling provider.",
                         execution_summary=reason,
+                        skill=_skill_state(state),
                     ),
                     status=AutoRunStatus.FAILED_WORKER,
                     stop_reason_code=StopReasonCode.WORKER_FAILED,
@@ -209,11 +218,14 @@ class AutoOrchestrator:
                 started_monotonic=started_monotonic,
             )
             if budget_stop is not None:
-                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
                 state["error"] = budget_stop
                 state["error_code"] = "budget_runtime"
-                self._set_state(state)
-                return _budget_stop_outcome(self.parent, budget_stop)
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                return _budget_stop_outcome(
+                    self.parent,
+                    budget_stop,
+                    skill=_skill_state(state),
+                )
 
             plan = AutoPlan(
                 plan_id=f"plan-{uuid.uuid4().hex}",
@@ -241,11 +253,14 @@ class AutoOrchestrator:
             self._set_status(state, AutoRunStatus.CODING)
             gateway = self.parent._build_tool_gateway()
             tool_specs = self.parent.tool_registry.list_tool_specs()
+            system_prompt = AUTO_V1_SYSTEM_PROMPT
+            if skill_resolution is not None:
+                system_prompt = f"{system_prompt}\n\n{skill_resolution.system_instruction()}"
             loop_result = AgentToolLoop(max_iterations=budgets.max_tool_calls).run(
                 brain=brain,
                 gateway=gateway,
                 messages=[
-                    LLMMessage(role="system", content=AUTO_V1_SYSTEM_PROMPT),
+                    LLMMessage(role="system", content=system_prompt),
                     LLMMessage(role="user", content=goal),
                 ],
                 tools=tool_specs,
@@ -277,8 +292,11 @@ class AutoOrchestrator:
                 state["error"] = reason
                 state["error_code"] = "budget_tool_calls"
                 self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
-                self._set_state(state)
-                return _budget_stop_outcome(self.parent, reason)
+                return _budget_stop_outcome(
+                    self.parent,
+                    reason,
+                    skill=_skill_state(state),
+                )
             if failed_calls:
                 diagnostics_raw = failed_calls[0].get("diagnostics")
                 if isinstance(diagnostics_raw, list) and diagnostics_raw:
@@ -299,6 +317,7 @@ class AutoOrchestrator:
                         route="auto",
                         plan_summary="Auto v1 выполнил задачу через native tool loop.",
                         execution_summary=first_error,
+                        skill=_skill_state(state),
                     ),
                     status=AutoRunStatus.FAILED_WORKER,
                     stop_reason_code=StopReasonCode.WORKER_FAILED,
@@ -335,6 +354,7 @@ class AutoOrchestrator:
                         attempts=(1, 1),
                         plan_summary="Auto v1 выполнил native tool loop и дошёл до verifier.",
                         execution_summary="Tool loop завершён, но verifier вернул fail/error.",
+                        skill=_skill_state(state),
                     ),
                     status=AutoRunStatus.FAILED_VERIFIER,
                     stop_reason_code=StopReasonCode.VERIFIER_FAILED,
@@ -376,6 +396,7 @@ class AutoOrchestrator:
                         f"tool_calls={len(loop_result.tool_calls)}."
                     )
                 ),
+                skill=_skill_state(state),
             )
             return AutoRunOutcome(
                 text=text,
@@ -392,7 +413,7 @@ class AutoOrchestrator:
                 plan=None,
                 started_at=started,
                 workspace_root=run_root,
-                runtime="tool_loop_v1",
+                skill_resolution=skill_resolution,
             )
             state["approval"] = {
                 "status": "required",
@@ -418,6 +439,7 @@ class AutoOrchestrator:
                     route="auto",
                     plan_summary="Auto v1 tool loop завершился внутренней ошибкой.",
                     execution_summary=str(exc),
+                    skill=_skill_state(state),
                 ),
                 status=AutoRunStatus.FAILED_INTERNAL,
                 stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
@@ -432,13 +454,12 @@ class AutoOrchestrator:
         paused = self._paused_runs.pop(run_id, None)
         if paused is None:
             return None
-        if paused.runtime != "tool_loop_v1":
-            return None
         return self.run_v1(
             paused.goal,
             run_id=paused.run_id,
             started_at=paused.started_at,
             run_root_override=paused.workspace_root,
+            skill_resolution=paused.skill_resolution,
         )
 
     def cancel(
@@ -467,6 +488,15 @@ class AutoOrchestrator:
             "error": reason,
             "error_code": None,
             "missing_paths": [],
+            "skill": (
+                skill_run_report(
+                    paused.skill_resolution,
+                    status="failed",
+                    reason=reason,
+                )
+                if paused.skill_resolution is not None
+                else skill_run_report(None, status="skipped", reason="no_match")
+            ),
         }
         return self._set_state(state)
 
@@ -567,12 +597,7 @@ class AutoOrchestrator:
             scope={"workspace_root": str(run_root)},
             verifier={"command": canonical_check_command(), "cwd": str(run_root)},
         )
-        verifier_run: Any = verifier.run
-        try:
-            return cast(VerificationResult, verifier_run(verifier_task, context))
-        except TypeError:
-            # Backward compatibility for legacy verifier stubs.
-            return cast(VerificationResult, verifier_run(context))
+        return verifier.run(verifier_task, context)
 
     def _set_status(
         self,
@@ -580,6 +605,22 @@ class AutoOrchestrator:
         status: AutoRunStatus,
     ) -> dict[str, JSONValue]:
         state["status"] = status.value
+        skill = state.get("skill")
+        if isinstance(skill, dict) and isinstance(skill.get("skill_id"), str):
+            if status == AutoRunStatus.COMPLETED:
+                skill["status"] = "completed"
+                skill.pop("reason", None)
+            elif status in {
+                AutoRunStatus.FAILED_CONFLICT,
+                AutoRunStatus.FAILED_VERIFIER,
+                AutoRunStatus.FAILED_WORKER,
+                AutoRunStatus.FAILED_INTERNAL,
+                AutoRunStatus.CANCELLED,
+            }:
+                skill["status"] = "failed"
+                reason = state.get("error")
+                if isinstance(reason, str) and reason:
+                    skill["reason"] = reason
         return self._set_state(state)
 
     def _set_state(self, state: dict[str, JSONValue]) -> dict[str, JSONValue]:
@@ -689,7 +730,12 @@ def _budget_runtime_stop(
     )
 
 
-def _budget_stop_outcome(parent_agent: Agent, reason: str) -> AutoRunOutcome:
+def _budget_stop_outcome(
+    parent_agent: Agent,
+    reason: str,
+    *,
+    skill: dict[str, JSONValue] | None = None,
+) -> AutoRunOutcome:
     next_steps = [
         "Сузь задачу и перезапусти auto.",
         "Увеличь budgets для auto-run при необходимости.",
@@ -703,12 +749,18 @@ def _budget_stop_outcome(parent_agent: Agent, reason: str) -> AutoRunOutcome:
             route="auto",
             plan_summary="Auto FSM остановлен бюджетным лимитом.",
             execution_summary=reason,
+            skill=skill,
         ),
         status=AutoRunStatus.FAILED_INTERNAL,
         stop_reason_code=StopReasonCode.BUDGET_EXHAUSTED,
         verifier=None,
         next_steps=next_steps,
     )
+
+
+def _skill_state(state: dict[str, JSONValue]) -> dict[str, JSONValue] | None:
+    raw = state.get("skill")
+    return dict(raw) if isinstance(raw, dict) else None
 
 
 def _fallback_shard(goal: str) -> AutoShard:

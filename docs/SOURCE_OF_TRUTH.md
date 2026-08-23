@@ -65,8 +65,9 @@ Desktop approvals также имеют explicit principal subject, при эт�
   `confirm` или `edit_and_confirm`; `reject` не пишет данные. Устаревший
   `auto_save_dialogue` удалён из config/runtime/UI и отклоняется settings API. Confirm endpoint
   сейчас существует только в browser UI lane; `/v1` может вернуть preview, но не применяет его.
-- Engineering skills: instructions и supporting dependencies должны внедряться per run в
-  существующий runtime без глобальной мутации Brain; current status `target`.
+- Engineering skills: current `implemented` contract — instructions и supporting dependencies
+  внедряются per run в Auto v1; MWV report/UI наблюдают выбранный skill и terminal status. Brain
+  не мутируется, tool/approval/sandbox/verifier полномочия не расширяются.
 
 ## Change protocol
 

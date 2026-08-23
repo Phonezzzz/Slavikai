@@ -18,6 +18,9 @@ class SkillEntry:
     tests: list[str]
     path: str
     content_hash: str
+    instructions: str = ""
+    dependencies: list[str] = field(default_factory=list)
+    supporting: bool = False
     deprecated: bool = False
     replaced_by: str | None = None
 

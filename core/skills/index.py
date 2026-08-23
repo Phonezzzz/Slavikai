@@ -7,10 +7,37 @@ from core.skills.manifest import DEFAULT_MANIFEST_PATH, load_manifest
 from core.skills.models import SkillEntry, SkillManifest
 
 
+class SkillResolutionError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class SkillMatch:
     entry: SkillEntry
     pattern: str
+
+
+@dataclass(frozen=True)
+class SkillResolution:
+    primary: SkillEntry
+    supporting: tuple[SkillEntry, ...]
+
+    def system_instruction(self) -> str:
+        sections = [
+            "Skill runtime instructions for this run only.",
+            "These instructions do not grant tools, permissions, approvals, sandbox access, "
+            "or authority to bypass ToolGateway or verifier.",
+        ]
+        for entry in [*self.supporting, self.primary]:
+            role = "supporting" if entry.supporting else "workflow"
+            sections.append(
+                f"\n## {role} skill: {entry.id}@{entry.version}\n{entry.instructions.strip()}"
+            )
+        sections.append(
+            "\n## Runtime boundary\nSkill instructions remain subordinate to the active "
+            "ToolGateway, approval, sandbox, safe-mode, and verifier contracts."
+        )
+        return "\n".join(sections).strip()
 
 
 SkillDecisionStatus = Literal["matched", "no_match", "deprecated", "ambiguous"]
@@ -37,6 +64,8 @@ class SkillIndex:
         self._manifest = manifest
         self._by_id = {entry.id: entry for entry in manifest.skills}
         self._patterns = _build_pattern_index(manifest.skills)
+        for entry in manifest.skills:
+            self.resolve(entry.id)
 
     @property
     def manifest(self) -> SkillManifest:
@@ -56,6 +85,45 @@ class SkillIndex:
         if decision.status == "matched":
             return decision.match
         return None
+
+    def resolve(self, skill_id: str) -> SkillResolution:
+        primary = self._by_id.get(skill_id)
+        if primary is None:
+            raise SkillResolutionError(f"Unknown skill dependency: {skill_id}")
+        supporting: list[SkillEntry] = []
+        supporting_ids: set[str] = set()
+        resolved: set[str] = set()
+        visiting: list[str] = []
+
+        def _visit(entry: SkillEntry) -> None:
+            if entry.id in resolved:
+                return
+            if entry.id in visiting:
+                cycle = " -> ".join([*visiting, entry.id])
+                raise SkillResolutionError(f"Skill dependency cycle: {cycle}")
+            visiting.append(entry.id)
+            for dependency_id in entry.dependencies:
+                dependency = self._by_id.get(dependency_id)
+                if dependency is None:
+                    raise SkillResolutionError(
+                        f"Skill {entry.id} depends on missing skill {dependency_id}"
+                    )
+                if not dependency.supporting:
+                    raise SkillResolutionError(
+                        f"Skill {entry.id} dependency {dependency_id} is not supporting"
+                    )
+                _visit(dependency)
+                if dependency.id not in supporting_ids:
+                    supporting.append(dependency)
+                    supporting_ids.add(dependency.id)
+            visiting.pop()
+            resolved.add(entry.id)
+
+        _visit(primary)
+        return SkillResolution(primary=primary, supporting=tuple(supporting))
+
+    def resolve_match(self, match: SkillMatch) -> SkillResolution:
+        return self.resolve(match.entry.id)
 
     def match_decision(self, text: str) -> SkillMatchDecision:
         normalized = text.strip().lower()
@@ -125,6 +193,8 @@ def _build_pattern_index(skills: list[SkillEntry]) -> list[tuple[str, SkillEntry
     ordered = sorted(skills, key=lambda entry: entry.id)
     indexed: list[tuple[str, SkillEntry]] = []
     for entry in ordered:
+        if entry.supporting:
+            continue
         for pattern in entry.patterns:
             normalized = pattern.strip().lower()
             if not normalized:

@@ -20,7 +20,16 @@ export type MwvReportUi = {
   execution_summary?: string;
   attempts?: { current?: number; max?: number };
   verifier?: { status?: string; duration_ms?: number | null; [k: string]: unknown };
+  skill?: SkillRunReportUi;
   [k: string]: unknown;
+};
+
+export type SkillRunReportUi = {
+  status: 'completed' | 'failed' | 'skipped';
+  skill_id: string | null;
+  version: string | null;
+  supporting_skills: Array<{ skill_id: string; version: string }>;
+  reason?: string;
 };
 
 export type MessageRuntimeMeta = {
@@ -151,6 +160,7 @@ export type AutoState = {
   coders: Array<Record<string, unknown>>;
   merge: Record<string, unknown>;
   verifier: Record<string, unknown> | null;
+  skill: SkillRunReportUi | null;
   approval: Record<string, unknown> | null;
   error: string | null;
 };

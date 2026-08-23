@@ -153,14 +153,18 @@
     {
       "id": "skills.per_run_instructions",
       "scope": "skills",
-      "status": "target",
+      "status": "implemented",
       "owner": "skills",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
-        "core/skills/manifest.py"
+        "core/skills/manifest.py",
+        "core/skills/index.py",
+        "core/auto_runtime.py",
+        "tests/test_engineering_skills_runtime.py",
+        "tests/test_auto_runtime.py"
       ],
-      "summary": "Skill metadata exists; body instructions and supporting dependencies are not injected into the runtime yet."
+      "summary": "Manifest body instructions and supporting dependencies are resolved and injected per run into Auto v1; MWV reporting observes the run without changing tool or verification authority."
     },
     {
       "id": "workflow.local_pr_preflight",

@@ -26,9 +26,11 @@ Each `skills/<skill-id>/skill.md` must start with YAML front matter. Required fi
 - `id`: unique string
 - `version`: semver (`MAJOR.MINOR.PATCH`)
 - `title`: human readable title
-- `entrypoints`: non-empty list of tool or flow identifiers
-- `patterns`: non-empty list of matching phrases (substring match)
+- `entrypoints`: tool or flow identifiers; non-empty for workflow skills
+- `patterns`: matching phrases (substring match); non-empty for workflow skills
 - `requires`: list of dependencies (can be empty)
+- `dependencies`: supporting skill ids to inject before this skill (can be empty)
+- `supporting`: `true` for dependency-only skills, otherwise `false`
 - `risk`: `low | medium | high`
 - `tests`: list of test paths (can be empty)
 
@@ -45,7 +47,12 @@ Optional fields:
 
 ## Runtime loading
 
-Runtime reads only `_generated/skills.manifest.json` and builds a pattern index.
+Runtime reads only `_generated/skills.manifest.json`; manifest version 2 embeds the complete
+Markdown body as `instructions`, dependency metadata, and a pattern index. A matched workflow
+skill is resolved with its supporting dependencies and injected into that run's system context.
+Supporting skills cannot be matched directly. Skill instructions never add tools or bypass
+`ToolGateway`, approvals, sandbox policy, safe mode, or verifier. Front-matter `entrypoints` remain
+descriptive metadata; the active ToolRegistry and ToolGateway are the only execution authority.
 File system scanning is not allowed at runtime.
 
 Dev mode (optional): set `SKILLS_DEV_MODE=1` to rebuild the manifest before loading.
@@ -66,7 +73,8 @@ Defaults can be overridden via env:
 ## Lifecycle (minimal)
 
 1. Request arrives → routing checks triggers + `SkillIndex`.
-2. If a skill matches → MWV flow executes the request.
+2. If a skill matches in Auto → Auto v1 executes it with per-run instructions; the MWV report
+   records the selected skill and terminal status.
    - Deprecated or ambiguous skill → request is blocked with an explicit message.
 3. Verifier (`scripts/check.sh`) is the only success gate.
 4. If no skill matches for MWV‑type request → candidate draft is created.

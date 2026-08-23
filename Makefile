@@ -51,8 +51,9 @@ help:
 	@echo "  make ui-type         npm run typecheck (ui)"
 	@echo "  make ui-test         npm test (ui)"
 	@echo "  make test            pytest (coverage configured in pyproject.toml)"
-	@echo "  make check           canonical project gate: UI guard + lint + format-check + type + ui-type + ui-test + test"
+	@echo "  make check           canonical gate: contracts + skills + lint + types + UI + tests"
 	@echo "  make check-contracts Validate source-of-truth registry and mechanical contracts"
+	@echo "  make skills-check    Validate skill schema and generated runtime manifest"
 	@echo "  make ci              skills lint/manifest + pytest -q (temp candidates)"
 	@echo
 	@echo "Git:"
@@ -199,7 +200,7 @@ test-behavior: venv
 	"$(VENV_PY)" -m pytest --no-cov -m behavior
 
 .PHONY: check
-check: check-no-legacy-ui check-contracts lint format-check type ui-type ui-test test
+check: check-no-legacy-ui check-contracts skills-check lint format-check type ui-type ui-test test
 
 .PHONY: check-no-legacy-ui
 check-no-legacy-ui:
@@ -208,6 +209,11 @@ check-no-legacy-ui:
 .PHONY: check-contracts
 check-contracts:
 	"$(PYTHON)" scripts/check_source_of_truth.py
+
+.PHONY: skills-check
+skills-check: venv
+	"$(VENV_PY)" skills/tools/lint_skills.py
+	"$(VENV_PY)" skills/tools/build_manifest.py --check
 
 .PHONY: guard-main
 guard-main:

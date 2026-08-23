@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.agent import Agent
+from core.skills.index import SkillIndex, SkillResolution
+from core.skills.models import SkillEntry, SkillManifest
 from llm.brain_base import Brain
 from llm.stream_model import Done, TextDelta
 from llm.types import LLMResult, ModelConfig
@@ -75,9 +77,15 @@ def test_agent_auto_mode_chat_like_request_uses_auto_runtime(tmp_path: Path, mon
     def _chat_unreachable(*_args: object, **_kwargs: object) -> str:
         raise AssertionError("Chat fallback must be disabled for runtime_mode=auto")
 
-    def _auto_stub(goal: str, *, command_lane: bool = False) -> str:
+    def _auto_stub(
+        goal: str,
+        *,
+        command_lane: bool = False,
+        skill_resolution: SkillResolution | None = None,
+    ) -> str:
         calls["goal"] = goal
         calls["command_lane"] = command_lane
+        calls["skill_resolution"] = skill_resolution
         return "auto-advisory"
 
     monkeypatch.setattr(agent, "_run_chat_response", _chat_unreachable)
@@ -89,6 +97,7 @@ def test_agent_auto_mode_chat_like_request_uses_auto_runtime(tmp_path: Path, mon
     assert main.calls == 0
     assert calls.get("goal") == "Какой софт нужен для Raspberry Pi 4 для умной колонки?"
     assert calls.get("command_lane") is False
+    assert calls.get("skill_resolution") is None
 
 
 def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, monkeypatch) -> None:
@@ -99,9 +108,15 @@ def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, mon
     def _chat_unreachable(*_args: object, **_kwargs: object) -> str:
         raise AssertionError("Chat fallback should not run for execution-like AUTO request")
 
-    def _auto_stub(goal: str, *, command_lane: bool = False) -> str:
+    def _auto_stub(
+        goal: str,
+        *,
+        command_lane: bool = False,
+        skill_resolution: SkillResolution | None = None,
+    ) -> str:
         calls["goal"] = goal
         calls["command_lane"] = command_lane
+        calls["skill_resolution"] = skill_resolution
         return "auto-run"
 
     monkeypatch.setattr(agent, "_run_chat_response", _chat_unreachable)
@@ -114,6 +129,7 @@ def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, mon
     assert main.calls == 0
     assert calls.get("goal") == "исправь тесты и обнови файл src/main.py"
     assert calls.get("command_lane") is False
+    assert calls.get("skill_resolution") is None
 
 
 def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypatch) -> None:
@@ -123,8 +139,14 @@ def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypa
     def _classifier_unreachable(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("Auto mode must not call classify_request")
 
-    def _auto_stub(goal: str, *, command_lane: bool = False) -> str:
+    def _auto_stub(
+        goal: str,
+        *,
+        command_lane: bool = False,
+        skill_resolution: SkillResolution | None = None,
+    ) -> str:
         assert command_lane is False
+        assert skill_resolution is None
         return f"auto:{goal}"
 
     monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
@@ -143,8 +165,14 @@ def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkey
     def _classifier_unreachable(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("Auto stream mode must not call classify_request")
 
-    def _auto_stub(goal: str, *, command_lane: bool = False) -> str:
+    def _auto_stub(
+        goal: str,
+        *,
+        command_lane: bool = False,
+        skill_resolution: SkillResolution | None = None,
+    ) -> str:
         assert command_lane is False
+        assert skill_resolution is None
         return f"auto-stream:{goal}"
 
     monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
@@ -154,4 +182,78 @@ def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkey
 
     assert chunks == [TextDelta(text="auto-stream:image_generate plan"), Done()]
     assert agent.last_stream_response_raw == "auto-stream:image_generate plan"
+    assert main.calls == 0
+
+
+def test_agent_auto_mode_passes_resolved_skill_to_auto_runtime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent, main = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+    captured: dict[str, SkillResolution | None] = {}
+
+    def _auto_stub(
+        goal: str,
+        *,
+        command_lane: bool = False,
+        skill_resolution: SkillResolution | None = None,
+    ) -> str:
+        assert goal == "implement spec for skill runtime"
+        assert command_lane is False
+        captured["resolution"] = skill_resolution
+        return "auto-skill"
+
+    monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
+
+    response = agent.respond([LLMMessage(role="user", content="implement spec for skill runtime")])
+
+    assert response == "auto-skill"
+    resolution = captured["resolution"]
+    assert resolution is not None
+    assert resolution.primary.id == "implement"
+    assert [entry.id for entry in resolution.supporting] == ["codebase-design"]
+    assert main.calls == 0
+
+
+def test_agent_auto_mode_skips_ambiguous_skill_without_pseudo_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent, main = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+    entries = [
+        SkillEntry(
+            id=skill_id,
+            version="1.0.0",
+            title=skill_id,
+            entrypoints=["auto"],
+            patterns=["same trigger"],
+            requires=[],
+            risk="low",
+            tests=[],
+            path=f"skills/{skill_id}/skill.md",
+            content_hash=f"hash-{skill_id}",
+            instructions=f"Instructions for {skill_id}",
+        )
+        for skill_id in ("alpha", "beta")
+    ]
+    agent.skill_index = SkillIndex(SkillManifest(manifest_version=2, skills=entries))
+
+    def _auto_unreachable(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("Ambiguous skill must stop before Auto runtime")
+
+    monkeypatch.setattr(agent, "handle_auto_command", _auto_unreachable)
+
+    response = agent.respond([LLMMessage(role="user", content="same trigger")])
+    report = extract_report_block(response)
+
+    assert report["stop_reason_code"] == "BLOCKED_SKILL_AMBIGUOUS"
+    assert report["skill"] == {
+        "status": "skipped",
+        "skill_id": None,
+        "version": None,
+        "supporting_skills": [],
+        "reason": "ambiguous",
+    }
     assert main.calls == 0

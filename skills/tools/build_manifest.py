@@ -17,13 +17,14 @@ from skills.tools.skill_utils import (
     iter_skill_files,
     load_schema,
     parse_front_matter,
+    parse_instructions,
     validate_front_matter,
 )
 
 DEFAULT_SKILLS_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA_PATH = DEFAULT_SKILLS_ROOT / "_schema" / "skill.schema.json"
 DEFAULT_OUTPUT_PATH = DEFAULT_SKILLS_ROOT / "_generated" / "skills.manifest.json"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 
 
 def build_manifest(
@@ -47,10 +48,13 @@ def build_manifest(
             "entrypoints": front.entrypoints,
             "patterns": front.patterns,
             "requires": front.requires,
+            "dependencies": front.dependencies,
+            "supporting": front.supporting,
             "risk": front.risk,
             "tests": front.tests,
             "deprecated": front.deprecated,
             "content_hash": _hash_file(skill_path),
+            "instructions": parse_instructions(skill_path),
             "path": str(skill_path.relative_to(repo_root)),
         }
         if front.replaced_by is not None:

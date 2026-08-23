@@ -6,6 +6,8 @@ import core.auto_runtime as auto_runtime
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
 from core.auto_agent import AutoAgent
 from core.mwv.models import VerificationResult, VerificationStatus
+from core.skills.index import SkillResolution
+from core.skills.models import SkillEntry
 from core.tool_gateway import ToolGateway
 from core.tool_loop import ExecutedToolCall
 from llm.types import LLMResult, ToolCall, ToolSpec
@@ -45,6 +47,9 @@ class _FakeAgent:
         self.approved_categories: set[str] = set()
         self.tracer = _FakeTracer()
         self.last_auto_state = None
+        self.last_report_kwargs = None
+        self.report_kwargs_history = []
+        self.last_stop_kwargs = None
 
     def _get_main_brain(self):
         return self._brain
@@ -53,10 +58,12 @@ class _FakeAgent:
         raise RuntimeError("not-used")
 
     def _append_report_block(self, text: str, **kwargs):  # noqa: ANN003
-        del kwargs
+        self.last_report_kwargs = kwargs
+        self.report_kwargs_history.append(kwargs)
         return text
 
     def _format_stop_response(self, **kwargs):  # noqa: ANN003
+        self.last_stop_kwargs = kwargs
         return f"stop:{kwargs.get('what', '')}"
 
 
@@ -91,8 +98,12 @@ class _ToolLoopBrain:
 class _ResponseOnlyBrain:
     supports_native_tools = True
 
+    def __init__(self) -> None:
+        self.messages_seen: list[list[LLMMessage]] = []
+
     def generate(self, messages, config=None, tools=None):  # noqa: ANN001
-        del messages, config, tools
+        del config, tools
+        self.messages_seen.append(list(messages))
         return LLMResult(text="Привет! Чем помочь?")
 
 
@@ -130,8 +141,8 @@ class _PassingVerifierRuntime:
     def __init__(self, project_root):  # noqa: ANN001
         del project_root
 
-    def run(self, context):  # noqa: ANN001
-        del context
+    def run(self, task, context):  # noqa: ANN001
+        del task, context
         return VerificationResult(
             status=VerificationStatus.PASSED,
             command=["check"],
@@ -173,12 +184,46 @@ def _completed_result(shard_id: str, coder_id: str) -> auto_runtime.CoderResult:
     )
 
 
+def _skill_resolution() -> SkillResolution:
+    supporting = SkillEntry(
+        id="codebase-design",
+        version="1.0.0",
+        title="Codebase design",
+        entrypoints=[],
+        patterns=[],
+        requires=[],
+        risk="low",
+        tests=[],
+        path="skills/engineering/codebase-design/skill.md",
+        content_hash="supporting-hash",
+        instructions="Use domain vocabulary from the repository.",
+        dependencies=[],
+        supporting=True,
+    )
+    primary = SkillEntry(
+        id="implement",
+        version="1.0.0",
+        title="Implement",
+        entrypoints=["auto"],
+        patterns=["implement"],
+        requires=[],
+        risk="medium",
+        tests=[],
+        path="skills/engineering/implement/skill.md",
+        content_hash="primary-hash",
+        instructions="Implement the requested coherent change.",
+        dependencies=["codebase-design"],
+        supporting=False,
+    )
+    return SkillResolution(primary=primary, supporting=(supporting,))
+
+
 def test_auto_agent_run_outcome_uses_auto_v1_tool_loop(monkeypatch) -> None:  # noqa: ANN001
     agent = _AutoV1Agent()
     auto = AutoAgent(agent)  # type: ignore[arg-type]
     monkeypatch.setattr(auto_runtime, "VerifierRuntime", _PassingVerifierRuntime)
 
-    outcome = auto.run_outcome("inspect workspace")
+    outcome = auto.run_outcome("inspect workspace", skill_resolution=_skill_resolution())
 
     assert outcome.status == AutoRunStatus.COMPLETED
     assert isinstance(agent._brain, _ToolLoopBrain)
@@ -194,6 +239,7 @@ def test_auto_agent_run_outcome_uses_auto_v1_tool_loop(monkeypatch) -> None:  # 
             },
         )
     ]
+    assert "implement@1.0.0" in agent._brain.messages_seen[0][0].content
     assert isinstance(agent.last_auto_state, dict)
     planner = agent.last_auto_state.get("planner")
     assert isinstance(planner, dict)
@@ -222,6 +268,62 @@ def test_auto_runtime_returns_conversation_without_forcing_tool_action(tmp_path)
     assert isinstance(verifier, dict)
     assert verifier.get("status") == VerificationStatus.PASSED.value
     assert verifier.get("verifier_profile") == "response_only"
+
+
+def test_auto_runtime_injects_skill_per_run_without_changing_tools_or_brain(tmp_path) -> None:
+    agent = _ResponseOnlyAgent()
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    resolution = _skill_resolution()
+
+    outcome = orchestrator.run_v1(
+        "implement the change",
+        skill_resolution=resolution,
+        run_root_override=tmp_path,
+    )
+    second = orchestrator.run_v1("ordinary chat", run_root_override=tmp_path)
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert second.status == AutoRunStatus.COMPLETED
+    assert isinstance(agent._brain, _ResponseOnlyBrain)
+    first_system = agent._brain.messages_seen[0][0].content
+    second_system = agent._brain.messages_seen[1][0].content
+    assert "codebase-design@1.0.0" in first_system
+    assert "implement@1.0.0" in first_system
+    assert "do not grant tools" in first_system
+    assert "codebase-design@1.0.0" not in second_system
+    assert not hasattr(agent._brain, "skill_resolution")
+    assert agent._brain.messages_seen[0][0].role == "system"
+    assert agent.report_kwargs_history[0]["skill"] == {
+        "status": "completed",
+        "skill_id": "implement",
+        "version": "1.0.0",
+        "supporting_skills": [{"skill_id": "codebase-design", "version": "1.0.0"}],
+    }
+    assert agent.report_kwargs_history[1]["skill"] == {
+        "status": "skipped",
+        "skill_id": None,
+        "version": None,
+        "supporting_skills": [],
+        "reason": "no_match",
+    }
+
+
+def test_auto_runtime_marks_selected_skill_failed_on_terminal_stop(tmp_path) -> None:
+    agent = _FakeAgent(brain_text="unused")
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+
+    outcome = orchestrator.run_v1(
+        "implement the change",
+        skill_resolution=_skill_resolution(),
+        run_root_override=tmp_path,
+    )
+
+    assert outcome.status == AutoRunStatus.FAILED_WORKER
+    assert isinstance(agent.last_auto_state, dict)
+    assert agent.last_auto_state["skill"]["status"] == "failed"
+    assert agent.last_auto_state["skill"]["skill_id"] == "implement"
+    assert agent.last_stop_kwargs is not None
+    assert agent.last_stop_kwargs["skill"]["status"] == "failed"
 
 
 def test_auto_runtime_rejects_provider_without_native_tools(tmp_path) -> None:

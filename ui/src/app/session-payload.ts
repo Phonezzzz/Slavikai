@@ -17,6 +17,7 @@ import type {
   SelectedModel,
   SessionMode,
   SessionSummary,
+  SkillRunReportUi,
   TaskExecutionState,
   UiDecision,
 } from './types';
@@ -630,6 +631,7 @@ export const parseAutoState = (value: unknown): AutoState | null => {
     coders?: unknown;
     merge?: unknown;
     verifier?: unknown;
+    skill?: unknown;
     approval?: unknown;
     error?: unknown;
   };
@@ -684,10 +686,40 @@ export const parseAutoState = (value: unknown): AutoState | null => {
     verifier: candidate.verifier && typeof candidate.verifier === 'object'
       ? (candidate.verifier as Record<string, unknown>)
       : null,
+    skill: parseSkillRunReport(candidate.skill),
     approval: candidate.approval && typeof candidate.approval === 'object'
       ? (candidate.approval as Record<string, unknown>)
       : null,
     error: typeof candidate.error === 'string' ? candidate.error : null,
+  };
+};
+
+const parseSkillRunReport = (value: unknown): SkillRunReportUi | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  const status = candidate.status;
+  if (status !== 'completed' && status !== 'failed' && status !== 'skipped') {
+    return null;
+  }
+  const supportingSkills = Array.isArray(candidate.supporting_skills)
+    ? candidate.supporting_skills.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          return [];
+        }
+        const supporting = entry as Record<string, unknown>;
+        return typeof supporting.skill_id === 'string' && typeof supporting.version === 'string'
+          ? [{ skill_id: supporting.skill_id, version: supporting.version }]
+          : [];
+      })
+    : [];
+  return {
+    status,
+    skill_id: typeof candidate.skill_id === 'string' ? candidate.skill_id : null,
+    version: typeof candidate.version === 'string' ? candidate.version : null,
+    supporting_skills: supportingSkills,
+    ...(typeof candidate.reason === 'string' ? { reason: candidate.reason } : {}),
   };
 };
 
@@ -866,9 +898,13 @@ export const parseMwvReport = (value: unknown): MwvReportUi | null => {
   if (report.verifier && typeof report.verifier === 'object' && !Array.isArray(report.verifier)) {
     normalized.verifier = report.verifier as { status?: string; duration_ms?: number | null; [k: string]: unknown };
   }
+  const parsedSkill = parseSkillRunReport(report.skill);
+  if (parsedSkill) {
+    normalized.skill = parsedSkill;
+  }
 
   for (const [key, entry] of Object.entries(report)) {
-    if (!(key in normalized)) {
+    if (key !== 'skill' && !(key in normalized)) {
       normalized[key] = entry;
     }
   }

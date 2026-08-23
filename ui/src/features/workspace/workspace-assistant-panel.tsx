@@ -213,6 +213,13 @@ export function WorkspaceAssistantPanel({
             goal: {autoState.goal}
           </div>
         ) : null}
+        {autoState?.skill ? (
+          <div className="mt-1 truncate text-[#666]">
+            skill: {autoState.skill.skill_id && autoState.skill.version
+              ? `${autoState.skill.skill_id}@${autoState.skill.version}`
+              : 'none'} · {autoState.skill.status}
+          </div>
+        ) : null}
       </div>
 
       {computerEvents.length > 0 ? (

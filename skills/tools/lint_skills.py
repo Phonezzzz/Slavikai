@@ -13,6 +13,7 @@ from skills.tools.skill_utils import (
     iter_skill_files,
     load_schema,
     parse_front_matter,
+    parse_instructions,
     validate_front_matter,
 )
 
@@ -35,6 +36,7 @@ def lint_skills(skills_root: Path, schema_path: Path) -> list[str]:
         try:
             front = parse_front_matter(path)
             validate_front_matter(front, schema, path)
+            parse_instructions(path)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{path}: {exc}")
             continue

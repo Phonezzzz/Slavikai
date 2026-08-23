@@ -1,14 +1,93 @@
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "skills": [
     {
-      "content_hash": "a832d351b17613329503ecf0e4464f4229965f3fc22063de82d22838a267a815",
+      "content_hash": "25aae5c1756f199d4e36539e6e785a35d6939b712bfb38e0347881d4dd1a274d",
+      "dependencies": [
+        "codebase-design"
+      ],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "terminal_exec"
+      ],
+      "id": "code-review",
+      "instructions": "# Code review\n\nReview the diff against a verified fixed point and the current repository, not a prior summary.\nCheck three independent axes: repository standards, requested specification, and mechanism/runtime\nintegrity. For mechanism integrity, look for prose or regex pretending to be structured input,\nfallbacks that bypass the native runtime, direct actions outside ToolGateway, duplicate reachable\nruntimes, weakened approvals/sandbox/verifier, and tests that prove only an end effect.\n\nReport only actionable findings, ordered by severity, with tight file/line evidence. Verify each\nclaim against current code. Do not mutate files, git state, issues, or PRs during a review unless\nthe user separately asked for fixes or repository actions.",
+      "path": "skills/engineering/code-review/skill.md",
+      "patterns": [
+        "code review",
+        "\u0440\u0435\u0432\u044c\u044e \u043a\u043e\u0434\u0430",
+        "\u043f\u0440\u043e\u0432\u0435\u0440\u044c diff",
+        "review the changes"
+      ],
+      "requires": [],
+      "risk": "low",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Code review",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "b60b7020b05cc82d1d0047c0c9417a3f7839def74a998bae4a1085d1bd89a242",
+      "dependencies": [],
+      "deprecated": false,
+      "entrypoints": [],
+      "id": "codebase-design",
+      "instructions": "# Codebase design\n\nUse module, interface, implementation, seam, adapter, depth, leverage, and locality consistently.\nA deep module gives callers substantial behaviour through a small interface. Put tests at the same\npublic seam callers use. Accept dependencies rather than constructing hidden globals; return\nobservable results rather than relying on side channels. Apply the deletion test: a useful module\nconcentrates complexity that would otherwise spread across callers. Introduce an adapter seam only\nwhen behaviour actually varies across it.",
+      "path": "skills/engineering/codebase-design/skill.md",
+      "patterns": [],
+      "requires": [],
+      "risk": "low",
+      "supporting": true,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Deep-module design vocabulary",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "9cda4ce878ecc430aba8b458125182b5672bc42a94c45ff648a7d5eb069b9fff",
+      "dependencies": [],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "workspace_write",
+        "workspace_patch",
+        "terminal_exec"
+      ],
+      "id": "diagnosing-bugs",
+      "instructions": "# Diagnosing bugs\n\nBuild a tight, red-capable feedback loop before choosing a cause. Reproduce the user's exact\nsymptom, minimise the scenario, then rank falsifiable hypotheses and change one variable at a\ntime. Prefer a regression test at the real public seam before the fix. Re-run the original repro\nand the regression test after the fix, remove temporary instrumentation, and report the actual\nroot cause.\n\nRedact secrets from commands, output, traces, and artifacts. If no reliable loop can be built,\nstate exactly what evidence is missing instead of presenting a hypothesis as a diagnosis.\n\nDo not stage, commit, push, switch branches, rebase, or merge unless the user explicitly requested\nthat repository action outside this skill run.",
+      "path": "skills/engineering/diagnosing-bugs/skill.md",
+      "patterns": [
+        "diagnose",
+        "debug this",
+        "\u0434\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u0440\u0443\u0439",
+        "\u0440\u0430\u0437\u0431\u0435\u0440\u0438\u0441\u044c \u0441 \u0431\u0430\u0433\u043e\u043c",
+        "\u043f\u043e\u0447\u0435\u043c\u0443 \u043f\u0430\u0434\u0430\u0435\u0442"
+      ],
+      "requires": [],
+      "risk": "medium",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Diagnosing bugs",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "bf0e28f24ecfa7c72313daae979614fa662604d6aa6b1594cd429f106c94315b",
+      "dependencies": [],
       "deprecated": false,
       "entrypoints": [
         "workspace_write",
         "workspace_patch"
       ],
       "id": "doc-generator",
+      "instructions": "# Document generation\n\nGenerate basic documents or tables in the workspace.",
       "path": "skills/doc-generator/skill.md",
       "patterns": [
         "\u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u0439 \u043e\u0442\u0447\u0435\u0442",
@@ -17,17 +96,347 @@
       ],
       "requires": [],
       "risk": "medium",
+      "supporting": false,
       "tests": [],
       "title": "Document generation",
       "version": "1.0.0"
     },
     {
-      "content_hash": "3dad3d1f9ad37bb17889c4e49d9c8259394ce958b61364e33fd92f6e25e18b01",
+      "content_hash": "bdd1c8f79ad33b0f55e98f17e4cbc4bcdd25f9e05cc80d519972fcdaaa93c930",
+      "dependencies": [],
+      "deprecated": false,
+      "entrypoints": [],
+      "id": "domain-modeling",
+      "instructions": "# Domain modeling\n\nUse the repository's existing canonical vocabulary and challenge contradictions between prose and\ncurrent code. Sharpen overloaded terms with concrete scenarios. Keep glossary facts separate from\nimplementation decisions and specifications. Treat CONTEXT.md and ADRs as explicit artifacts:\nnever create or edit them merely because a term or trade-off was discussed; first obtain specific\nauthorization for that write.",
+      "path": "skills/engineering/domain-modeling/skill.md",
+      "patterns": [],
+      "requires": [],
+      "risk": "low",
+      "supporting": true,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Domain-model discipline",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "2793873c63e987db9071d53d94e294ffce5d4cfd80758d298fb675e61a4efdbe",
+      "dependencies": [
+        "grilling",
+        "domain-modeling"
+      ],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read"
+      ],
+      "id": "grill-with-docs",
+      "instructions": "# Grill with docs\n\nUse only for a genuinely ambiguous, consequential design. Ask the current frontier of decision\nblockers, include a recommended answer, and do not ask for facts available from repository or\ntools. Stop questioning when no material blocker remains.\n\nSummarize glossary or ADR candidates, but do not create or edit CONTEXT.md, ADRs, specs, or tickets\nwithout separate explicit confirmation.",
+      "path": "skills/engineering/grill-with-docs/skill.md",
+      "patterns": [
+        "grill with docs",
+        "\u0434\u043e\u043f\u0440\u043e\u0441\u0438 \u043f\u043e \u0434\u0438\u0437\u0430\u0439\u043d\u0443",
+        "\u043f\u0440\u043e\u0432\u0435\u0440\u044c \u0440\u0435\u0448\u0435\u043d\u0438\u0435 \u0432\u043e\u043f\u0440\u043e\u0441\u0430\u043c\u0438"
+      ],
+      "requires": [],
+      "risk": "low",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Decision grilling with documentation",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "d0b6d4240d38efaa45afc56a5ddc3bd0545402ccec1ea84331d776a28bc65d7e",
+      "dependencies": [],
+      "deprecated": false,
+      "entrypoints": [],
+      "id": "grilling",
+      "instructions": "# Grilling\n\nModel decisions as a dependency tree, but ask only questions whose answers materially change the\nresult and cannot be discovered from current files, tools, or accepted context. Ask the available\nfrontier together, provide one recommended answer for each blocker, and wait only when a user\ndecision is truly required. Do not turn routine implementation into an exhaustive interview.",
+      "path": "skills/engineering/grilling/skill.md",
+      "patterns": [],
+      "requires": [],
+      "risk": "low",
+      "supporting": true,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Decision-blocker questioning",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "9896da3c3b6d5980d4215415e03ca0647fa2c8d70d04ab2b326a763d6f5e9d09",
+      "dependencies": [],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read"
+      ],
+      "id": "handoff",
+      "instructions": "# Handoff\n\nProduce a compact continuation record: objective, accepted decisions, current repository and git\nstate, completed work with evidence, open work, blockers, verification results, and exact next\nstep. Reference existing artifacts instead of duplicating them and redact secrets or personal\ndata.\n\nReturn the handoff in the response unless the user explicitly asks for a file. Do not mutate the\nrepository or git state while preparing it.",
+      "path": "skills/engineering/handoff/skill.md",
+      "patterns": [
+        "handoff",
+        "\u043f\u0435\u0440\u0435\u0434\u0430\u0439 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u043c\u0443 \u0430\u0433\u0435\u043d\u0442\u0443",
+        "\u0441\u0434\u0435\u043b\u0430\u0439 \u043f\u0435\u0440\u0435\u0434\u0430\u0447\u0443 \u043a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u0430",
+        "session handoff"
+      ],
+      "requires": [],
+      "risk": "low",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Session handoff",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "5f2b0884c28c788824a0b9741e35ee7125581f51725cbf938150c47752561a5f",
+      "dependencies": [
+        "codebase-design"
+      ],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "workspace_write",
+        "workspace_patch",
+        "terminal_exec"
+      ],
+      "id": "implement",
+      "instructions": "# Implement\n\nImplement the requested specification or ticket as the smallest coherent change. Establish the\nbaseline, follow the real execution path and state ownership, use vertical test-driven slices at\npublic seams, and run focused checks plus the canonical project gate. Finish with a full diff\nreview for accidental edits, pseudo-runtime paths, weakened policy controls, and scope creep.\n\nThis workflow never stages, commits, pushes, creates or switches branches, merges, rebases, or\npublishes a PR automatically. Those actions require explicit user authorization outside the skill\ninstructions. Do not weaken approvals, sandbox, ToolGateway, or verifier to make tests pass.",
+      "path": "skills/engineering/implement/skill.md",
+      "patterns": [
+        "implement spec",
+        "\u0440\u0435\u0430\u043b\u0438\u0437\u0443\u0439 spec",
+        "\u0432\u044b\u043f\u043e\u043b\u043d\u0438 \u0442\u0438\u043a\u0435\u0442\u044b",
+        "implement the ticket"
+      ],
+      "requires": [],
+      "risk": "high",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Implement approved work",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "591307dac9030040a98ffeba0b6410b855ff12b854b9ec925a00a7ea2214d5c2",
+      "dependencies": [
+        "codebase-design",
+        "grilling",
+        "domain-modeling"
+      ],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "terminal_exec"
+      ],
+      "id": "improve-codebase-architecture",
+      "instructions": "# Improve codebase architecture\n\nPerform a non-mutating scan focused on recently changing or explicitly named modules. Find shallow\ninterfaces, lost locality, duplicated seams, and places where deleting an abstraction merely moves\ncomplexity to callers. Verify friction against current code and tests; do not propose speculative\nlayers.\n\nReport a small ranked set of deepening opportunities with evidence, trade-offs, recommendation\nstrength, and the best first change. Do not automatically generate HTML, open applications, edit\nCONTEXT.md, create ADRs, or implement a candidate. Those are separate user-authorized actions.",
+      "path": "skills/engineering/improve-codebase-architecture/skill.md",
+      "patterns": [
+        "improve codebase architecture",
+        "\u0443\u043b\u0443\u0447\u0448\u0438 \u0430\u0440\u0445\u0438\u0442\u0435\u043a\u0442\u0443\u0440\u0443",
+        "architecture review",
+        "\u0430\u0440\u0445\u0438\u0442\u0435\u043a\u0442\u0443\u0440\u043d\u044b\u0439 \u0430\u0443\u0434\u0438\u0442"
+      ],
+      "requires": [],
+      "risk": "low",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Improve codebase architecture",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "bfe58004a14b605f133bdfe352afd7d5b91ce366bf51a12a9b77905b59669693",
+      "dependencies": [
+        "codebase-design"
+      ],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "workspace_write",
+        "workspace_patch"
+      ],
+      "id": "prototype",
+      "instructions": "# Prototype\n\nBuild the smallest throwaway artifact that answers one stated design question. Make it obvious\nthat the artifact is a prototype, trivial to run, isolated from production persistence, and able\nto expose the relevant state after each action. Skip production abstractions and polish.\n\nSummarize the decision learned and identify what should be discarded or carried into production.\nDo not create a branch, commit, or other git history automatically, and do not leave the prototype\nreachable from production runtime unless the user explicitly chooses that outcome.",
+      "path": "skills/engineering/prototype/skill.md",
+      "patterns": [
+        "prototype",
+        "\u043f\u0440\u043e\u0442\u043e\u0442\u0438\u043f",
+        "sanity-check the design",
+        "\u043f\u0440\u043e\u0432\u0435\u0440\u044c \u0438\u0434\u0435\u044e \u043f\u0440\u043e\u0442\u043e\u0442\u0438\u043f\u043e\u043c"
+      ],
+      "requires": [],
+      "risk": "medium",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Throwaway prototype",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "90d930c859eea54eef3b55e7706d40ba74df9e644eb1cca72b8d713f0bf6bcb2",
+      "dependencies": [],
+      "deprecated": false,
+      "entrypoints": [
+        "web",
+        "workspace_list",
+        "workspace_read"
+      ],
+      "id": "research",
+      "instructions": "# Research\n\nInvestigate the question against primary sources: official documentation, specifications, source\ncode, first-party APIs, or research papers. Trace material claims to the source that owns them,\nseparate verified facts from inference, and note meaningful conflicts between sources.\n\nReturn the findings in the current response unless the user explicitly asked for a repository\nartifact. Do not create background agents, files, tickets, or external posts automatically.",
+      "path": "skills/engineering/research/skill.md",
+      "patterns": [
+        "research",
+        "\u043f\u0440\u043e\u0432\u0435\u0434\u0438 \u0438\u0441\u0441\u043b\u0435\u0434\u043e\u0432\u0430\u043d\u0438\u0435",
+        "\u0438\u0441\u0441\u043b\u0435\u0434\u0443\u0439 \u0432\u043e\u043f\u0440\u043e\u0441",
+        "\u043f\u0440\u043e\u0432\u0435\u0440\u044c \u043f\u043e \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430\u0446\u0438\u0438"
+      ],
+      "requires": [],
+      "risk": "low",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Primary-source research",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "10f65c25504ad6ffa413b14c83931e46c3637588d72218ef471ea97cafbadd80",
+      "dependencies": [],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "workspace_write",
+        "workspace_patch",
+        "terminal_exec"
+      ],
+      "id": "resolving-merge-conflicts",
+      "instructions": "# Resolving merge conflicts\n\nInspect the in-progress git operation and find the primary intent behind both sides of every\nconflict. Resolve hunks without inventing unrelated behaviour, preserve both intents where they\nare compatible, and run the repository's focused and canonical checks.\n\nDo not abort, stage, commit, continue a merge/rebase, push, or rewrite history automatically. Stop\nbefore git finalization and report the resolved files, remaining conflicts, checks, and the exact\nhuman-approved next operation.",
+      "path": "skills/engineering/resolving-merge-conflicts/skill.md",
+      "patterns": [
+        "resolve merge conflicts",
+        "\u0440\u0430\u0437\u0440\u0435\u0448\u0438 \u043a\u043e\u043d\u0444\u043b\u0438\u043a\u0442\u044b",
+        "rebase conflict",
+        "merge conflict"
+      ],
+      "requires": [],
+      "risk": "high",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Resolve merge conflicts",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "2dcce0d0fa3fc3a8153f92fb39e13060fa96ca3752843391538baef7256892ca",
+      "dependencies": [
+        "codebase-design"
+      ],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "workspace_write",
+        "workspace_patch",
+        "terminal_exec"
+      ],
+      "id": "tdd",
+      "instructions": "# Test-driven development\n\nWork in vertical red-green slices. Identify the public seam from the request and repository\ncontracts, write one test that fails for the missing behaviour, run it red, implement only enough\nto make it green, and repeat. Tests must observe public behaviour and use independent expected\nvalues; do not assert private helpers or reproduce the implementation inside the assertion.\n\nIf the seam is materially ambiguous, stop on that decision rather than inventing a new public\ncontract. Run focused tests during the loop and the repository's canonical gate at the end.",
+      "path": "skills/engineering/tdd/skill.md",
+      "patterns": [
+        "test-driven",
+        "red-green-refactor",
+        "\u0447\u0435\u0440\u0435\u0437 tdd",
+        "\u0441\u043d\u0430\u0447\u0430\u043b\u0430 \u0442\u0435\u0441\u0442"
+      ],
+      "requires": [],
+      "risk": "medium",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Test-driven development",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "69d716178a733058b39b075b795b37e5937453df11e57acdb21f7843874be17f",
+      "dependencies": [
+        "codebase-design"
+      ],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "workspace_write"
+      ],
+      "id": "to-spec",
+      "instructions": "# To spec\n\nSynthesize already accepted decisions into a specification; do not restart an interview. Verify\nthe current repository state and use its domain vocabulary. Cover the problem, user-visible\nsolution, numbered user stories, implementation decisions, public contracts, testing seams,\nacceptance criteria, out-of-scope items, and unresolved blockers.\n\nDo not publish to an issue tracker or write into the repository unless the user explicitly asked\nfor that destination. Do not silently create or update CONTEXT.md or ADRs.",
+      "path": "skills/engineering/to-spec/skill.md",
+      "patterns": [
+        "to spec",
+        "\u0441\u0434\u0435\u043b\u0430\u0439 spec",
+        "\u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u044c \u0441\u043f\u0435\u0446\u0438\u0444\u0438\u043a\u0430\u0446\u0438\u044e",
+        "\u043e\u0444\u043e\u0440\u043c\u0438 \u043a\u0430\u043a \u0441\u043f\u0435\u0446\u0438\u0444\u0438\u043a\u0430\u0446\u0438\u044e"
+      ],
+      "requires": [],
+      "risk": "medium",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Conversation to specification",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "447577f25df2eca21a0316c4f74f5a3dfc9f4f9cb6694976fd2f45f7143be31d",
+      "dependencies": [
+        "codebase-design"
+      ],
+      "deprecated": false,
+      "entrypoints": [
+        "workspace_list",
+        "workspace_read",
+        "workspace_write"
+      ],
+      "id": "to-tickets",
+      "instructions": "# To tickets\n\nBreak the accepted plan or specification into narrow vertical slices. Each ticket must deliver a\ncomplete, independently verifiable path and state its blocking edges and acceptance criteria.\nKeep a slice small enough for one focused implementation run. Use expand-migrate-contract only\nwhen a wide mechanical change cannot remain green as a vertical slice.\n\nPresent the proposed dependency graph before publishing. Do not create local files, GitHub issues,\nlabels, or tracker relationships unless the user explicitly requested publication.",
+      "path": "skills/engineering/to-tickets/skill.md",
+      "patterns": [
+        "to tickets",
+        "\u0440\u0430\u0437\u0431\u0435\u0439 \u043d\u0430 \u0442\u0438\u043a\u0435\u0442\u044b",
+        "\u043d\u0430\u0440\u0435\u0436\u044c \u043d\u0430 \u0437\u0430\u0434\u0430\u0447\u0438",
+        "\u0441\u0434\u0435\u043b\u0430\u0439 tickets"
+      ],
+      "requires": [],
+      "risk": "medium",
+      "supporting": false,
+      "tests": [
+        "tests/test_engineering_skills_runtime.py"
+      ],
+      "title": "Specification to tickets",
+      "version": "1.0.0"
+    },
+    {
+      "content_hash": "ad5308d241acb7799235d0a5d351c50d6511cfe356346581266d9baadb9e08d1",
+      "dependencies": [],
       "deprecated": false,
       "entrypoints": [
         "web"
       ],
       "id": "web-search",
+      "instructions": "# Web search\n\nSearch the web and summarize results.",
       "path": "skills/web-search/skill.md",
       "patterns": [
         "\u043f\u043e\u0438\u0441\u043a \u0432 \u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442\u0435",
@@ -36,12 +445,14 @@
       ],
       "requires": [],
       "risk": "medium",
+      "supporting": false,
       "tests": [],
       "title": "Web search",
       "version": "1.0.0"
     },
     {
-      "content_hash": "617efde5d518270de6a2fe1c536213f3f6da08f8f94858aaabd9b5a801aca815",
+      "content_hash": "c8cf1d5949fb4da4ca70cdd87aee9a869345f3fa22113f1eb36408ab606bd6df",
+      "dependencies": [],
       "deprecated": false,
       "entrypoints": [
         "workspace_list",
@@ -50,6 +461,7 @@
         "workspace_patch"
       ],
       "id": "workspace-files",
+      "instructions": "# Workspace file operations\n\nRead, write, list, and patch files inside the workspace.",
       "path": "skills/workspace-files/skill.md",
       "patterns": [
         "\u043f\u0440\u043e\u0447\u0438\u0442\u0430\u0439 \u0444\u0430\u0439\u043b",
@@ -58,6 +470,7 @@
       ],
       "requires": [],
       "risk": "medium",
+      "supporting": false,
       "tests": [],
       "title": "Workspace file operations",
       "version": "1.0.0"

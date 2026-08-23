@@ -3,16 +3,30 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from core.skills.index import SkillIndex
-from core.skills.manifest import load_manifest
+from core.skills.manifest import SkillManifestError, load_manifest
 
 
 def _write_manifest(path: Path, skills: list[dict[str, object]]) -> None:
+    for skill in skills:
+        skill.setdefault("dependencies", [])
+        skill.setdefault("supporting", False)
+        skill.setdefault("instructions", f"Instructions for {skill.get('id', 'skill')}")
     payload = {
-        "manifest_version": 1,
+        "manifest_version": 2,
         "skills": skills,
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_manifest_rejects_unsupported_version(tmp_path: Path) -> None:
+    path = tmp_path / "skills.manifest.json"
+    path.write_text(json.dumps({"manifest_version": 1, "skills": []}), encoding="utf-8")
+
+    with pytest.raises(SkillManifestError, match="Unsupported skills manifest version"):
+        load_manifest(path, dev_mode=False)
 
 
 def test_skill_index_match(tmp_path: Path) -> None:

@@ -6,7 +6,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from core.approval_policy import ApprovalCategory, ApprovalRequest, ApprovalRequired
 from core.decision.handler import DecisionEvent
@@ -190,6 +190,7 @@ class AgentMWVMixin:
             verifier: VerificationResult | None = None,
             plan_summary: str | None = None,
             execution_summary: str | None = None,
+            skill: dict[str, JSONValue] | None = None,
         ) -> str: ...
         def _append_report_block(
             self,
@@ -203,6 +204,7 @@ class AgentMWVMixin:
             stop_reason_code: StopReasonCode | None,
             plan_summary: str | None = None,
             execution_summary: str | None = None,
+            skill: dict[str, JSONValue] | None = None,
         ) -> str: ...
 
     last_plan: TaskPlan | None
@@ -237,13 +239,7 @@ class AgentMWVMixin:
             return result
 
         def _verifier(task: TaskPacket, run_context: RunContext) -> VerificationResult:
-            try:
-                result = verifier_runtime.run(task, run_context)
-            except TypeError:
-                # Backward compatibility for legacy verifier runtime stubs:
-                # run(context) -> VerificationResult
-                legacy_run = cast(Callable[[RunContext], VerificationResult], verifier_runtime.run)
-                result = legacy_run(run_context)
+            result = verifier_runtime.run(task, run_context)
             self.tracer.log(
                 "mwv_verifier_done",
                 result.status.value,
@@ -712,11 +708,7 @@ class AgentMWVMixin:
             return worker.run(task, run_context)
 
         def _verifier(task: TaskPacket, run_context: RunContext) -> VerificationResult:
-            try:
-                return verifier_runtime.run(task, run_context)
-            except TypeError:
-                legacy_run = cast(Callable[[RunContext], VerificationResult], verifier_runtime.run)
-                return legacy_run(run_context)
+            return verifier_runtime.run(task, run_context)
 
         return manager.run_flow(packet.messages, context, worker=_worker, verifier=_verifier)
 

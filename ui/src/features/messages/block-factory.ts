@@ -4,6 +4,7 @@ import type {
   MessageBlock,
   MessageRenderContext,
   RenderableMessage,
+  SkillMessageBlock,
   TextMessageBlock,
   ToolActivity,
   VerifierMessageBlock,
@@ -132,6 +133,22 @@ const buildVerifierBlock = (meta: MessageRuntimeMeta | null): VerifierMessageBlo
   };
 };
 
+const buildSkillBlock = (meta: MessageRuntimeMeta | null): SkillMessageBlock | null => {
+  const skill = meta?.mwvReport?.skill;
+  if (!skill) {
+    return null;
+  }
+  const identity = skill.skill_id && skill.version
+    ? `${skill.skill_id}@${skill.version}`
+    : 'No matched skill';
+  return {
+    kind: 'skill',
+    id: 'skill-0',
+    summary: `${identity} · ${skill.status}`,
+    skill,
+  };
+};
+
 const buildToolBlocks = (
   context: MessageRenderContext,
   runtimeMeta: MessageRuntimeMeta | null,
@@ -188,6 +205,10 @@ export const buildMessageBlocks = (
 
   if (isAssistant) {
     output.push(...buildToolBlocks(context, runtimeMeta, message.toolActivity));
+    const skillBlock = buildSkillBlock(runtimeMeta);
+    if (skillBlock) {
+      output.push(skillBlock);
+    }
   }
 
   if (context === 'workspace' && isAssistant) {

@@ -30,7 +30,7 @@ from core.mwv.models import (
 from core.mwv.routing import RouteDecision
 from core.rule_engine import PolicyApplication
 from core.skills.candidates import CandidateDraft, sanitize_text, suggest_patterns
-from core.skills.index import SkillMatch
+from core.skills.index import SkillMatch, SkillResolution
 from core.skills.models import SkillRisk
 from core.tool_gateway import ToolGateway
 from llm.brain_base import Brain
@@ -878,10 +878,19 @@ class AgentToolsMixin:
             },
         )
 
-    def handle_auto_command(self, goal: str, *, command_lane: bool = False) -> str:
+    def handle_auto_command(
+        self,
+        goal: str,
+        *,
+        command_lane: bool = False,
+        skill_resolution: SkillResolution | None = None,
+    ) -> str:
         goal_clean = goal.strip() or "auto run"
         self.tracer.log("auto_invoke", f"Auto v1 tool loop: {goal_clean}")
-        outcome = self.auto_agent.run_outcome(goal_clean)
+        outcome = self.auto_agent.run_outcome(
+            goal_clean,
+            skill_resolution=skill_resolution,
+        )
         if command_lane:
             return self._strip_report_block(outcome.text)
         return outcome.text
@@ -972,10 +981,13 @@ class AgentToolsMixin:
         next_steps: list[str] | None,
         stop_reason_code: StopReasonCode | None,
         ux_contract: UXContractSummary,
+        skill: dict[str, JSONValue] | None = None,
     ) -> str:
         payload: dict[str, JSONValue] = {"route": route, "trace_id": trace_id}
         payload["plan_summary"] = ux_contract.plan_summary
         payload["execution_summary"] = ux_contract.execution_summary
+        if skill is not None:
+            payload["skill"] = dict(skill)
         is_stop = stop_reason_code is not None
         if attempts is not None:
             payload["attempts"] = {"current": attempts[0], "max": attempts[1]}
@@ -1057,6 +1069,7 @@ class AgentToolsMixin:
         stop_reason_code: StopReasonCode | None,
         plan_summary: str | None = None,
         execution_summary: str | None = None,
+        skill: dict[str, JSONValue] | None = None,
     ) -> str:
         ux_contract = self._build_ux_contract(
             route=route,
@@ -1072,6 +1085,7 @@ class AgentToolsMixin:
             next_steps=next_steps,
             stop_reason_code=stop_reason_code,
             ux_contract=ux_contract,
+            skill=skill,
         )
         if not text:
             return report
@@ -1090,6 +1104,7 @@ class AgentToolsMixin:
         verifier: VerificationResult | None = None,
         plan_summary: str | None = None,
         execution_summary: str | None = None,
+        skill: dict[str, JSONValue] | None = None,
     ) -> str:
         steps = next_steps or ["Уточни запрос или попробуй снова."]
         lines = [
@@ -1119,6 +1134,7 @@ class AgentToolsMixin:
             stop_reason_code=stop_reason_code,
             plan_summary=plan_summary or what,
             execution_summary=execution_summary or why,
+            skill=skill,
         )
 
     def _handle_approval_required(

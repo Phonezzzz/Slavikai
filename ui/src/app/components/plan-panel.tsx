@@ -163,6 +163,11 @@ export function PlanPanel({
           <div>run: {autoState?.run_id ?? 'none'}</div>
           <div>status: {autoState?.status ?? 'idle'}</div>
           <div>pool: {autoState?.pool_size ?? '-'}</div>
+          <div>
+            skill: {autoState?.skill?.skill_id && autoState.skill.version
+              ? `${autoState.skill.skill_id}@${autoState.skill.version}`
+              : 'none'} · {autoState?.skill?.status ?? 'skipped'}
+          </div>
         </div>
       ) : null}
 

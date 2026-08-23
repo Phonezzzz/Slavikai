@@ -81,6 +81,13 @@ export type VerifierMessageBlock = {
   traceId: string | null;
 };
 
+export type SkillMessageBlock = {
+  kind: 'skill';
+  id: string;
+  summary: string;
+  skill: NonNullable<MwvReportUi['skill']>;
+};
+
 export type DecisionMessageBlock = {
   kind: 'decision';
   id: string;
@@ -91,6 +98,7 @@ export type MessageBlock =
   | TextMessageBlock
   | CodeMessageBlock
   | ToolMessageBlock
+  | SkillMessageBlock
   | VerifierMessageBlock
   | DecisionMessageBlock;
 

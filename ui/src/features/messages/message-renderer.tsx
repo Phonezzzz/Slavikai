@@ -5,6 +5,7 @@ import { buildMessageBlocks } from './block-factory';
 import { CodeBlock } from './blocks/code-block';
 import { DecisionBlock } from './blocks/decision-block';
 import { TextBlock } from './blocks/text-block';
+import { SkillBlock } from './blocks/skill-block';
 import { ToolBlock } from './blocks/tool-block';
 import { VerifierBlock } from './blocks/verifier-block';
 import type { MessageBlock, MessageRendererProps } from './types';
@@ -36,6 +37,12 @@ const isRenderableVerifierBlock = (
   block: MessageBlock,
 ): block is Extract<MessageBlock, { kind: 'verifier' }> => {
   return block.kind === 'verifier';
+};
+
+const isRenderableSkillBlock = (
+  block: MessageBlock,
+): block is Extract<MessageBlock, { kind: 'skill' }> => {
+  return block.kind === 'skill';
 };
 
 export function MessageRenderer({
@@ -111,6 +118,18 @@ export function MessageRenderer({
                   summary={block.summary}
                   report={block.report}
                   activity={block.activity}
+                  open={Boolean(detailsOpenByKey[key])}
+                  onToggle={() => toggleDetails(block.id)}
+                />
+              );
+            }
+            if (isRenderableSkillBlock(block)) {
+              const key = detailsKey(message.message.messageId, block.id);
+              return (
+                <SkillBlock
+                  key={block.id}
+                  summary={block.summary}
+                  skill={block.skill}
                   open={Boolean(detailsOpenByKey[key])}
                   onToggle={() => toggleDetails(block.id)}
                 />

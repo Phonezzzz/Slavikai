@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from core.desktop_runtime import DesktopRuntime
     from core.mwv.models import VerificationResult
     from core.rule_engine import PolicyApplication
-    from core.skills.index import SkillIndex, SkillMatch
+    from core.skills.index import SkillIndex, SkillMatch, SkillResolution
     from core.tool_gateway import ToolGateway
     from core.tracer import Tracer
     from llm.brain_base import Brain
@@ -69,7 +69,13 @@ class AgentRoutingMixin:
         def _reset_approval_state(self) -> None: ...
         def _reset_workspace_diffs(self) -> None: ...
         def handle_tool_command(self, command: str) -> str: ...
-        def handle_auto_command(self, goal: str, *, command_lane: bool = False) -> str: ...
+        def handle_auto_command(
+            self,
+            goal: str,
+            *,
+            command_lane: bool = False,
+            skill_resolution: SkillResolution | None = None,
+        ) -> str: ...
         def is_explicit_memory_request(self, text: str) -> bool: ...
         def build_memory_save_preview(
             self,
@@ -158,6 +164,7 @@ class AgentRoutingMixin:
             stop_reason_code: StopReasonCode | None,
             plan_summary: str | None = None,
             execution_summary: str | None = None,
+            skill: dict[str, JSONValue] | None = None,
         ) -> str: ...
         def _inc_metric(self, metric_key: str) -> None: ...
         def _format_stop_response(
@@ -173,6 +180,7 @@ class AgentRoutingMixin:
             verifier: VerificationResult | None = None,
             plan_summary: str | None = None,
             execution_summary: str | None = None,
+            skill: dict[str, JSONValue] | None = None,
         ) -> str: ...
 
     _last_user_input: str | None
@@ -227,7 +235,31 @@ class AgentRoutingMixin:
             if runtime_mode == "ask":
                 return self._run_chat_response(messages, last_content, record_in_history)
             if runtime_mode == "auto":
-                result = self.handle_auto_command(last_content)
+                skill_decision, skill_resolution = self._resolve_skill_run(last_content)
+                if skill_decision and skill_decision.status in {"deprecated", "ambiguous"}:
+                    response = self._format_skill_block(skill_decision)
+                    self._log_chat_interaction(raw_input=last_content, response_text=response)
+                    if record_in_history:
+                        self._append_short_term([LLMMessage(role="assistant", content=response)])
+                    return response
+                decision_packet = self.decision_handler.evaluate(
+                    DecisionContext(
+                        user_input=last_content,
+                        route="auto",
+                        routing_reason="auto_skill_match",
+                        skill_decision=skill_decision,
+                    ),
+                )
+                if decision_packet is not None:
+                    return self._handle_decision_packet(
+                        decision_packet,
+                        raw_input=last_content,
+                        record_in_history=record_in_history,
+                    )
+                result = self.handle_auto_command(
+                    last_content,
+                    skill_resolution=skill_resolution,
+                )
                 self._log_chat_interaction(raw_input=last_content, response_text=result)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=result)])
@@ -355,7 +387,33 @@ class AgentRoutingMixin:
                 )
                 return
             if runtime_mode == "auto":
-                response = self.handle_auto_command(last_content)
+                skill_decision, skill_resolution = self._resolve_skill_run(last_content)
+                if skill_decision and skill_decision.status in {"deprecated", "ambiguous"}:
+                    response = self._format_skill_block(skill_decision)
+                    self.last_stream_response_raw = response
+                    yield from _text_response_events(response)
+                    return
+                decision_packet = self.decision_handler.evaluate(
+                    DecisionContext(
+                        user_input=last_content,
+                        route="auto",
+                        routing_reason="auto_skill_match",
+                        skill_decision=skill_decision,
+                    ),
+                )
+                if decision_packet is not None:
+                    response = self._handle_decision_packet(
+                        decision_packet,
+                        raw_input=last_content,
+                        record_in_history=record_in_history,
+                    )
+                    self.last_stream_response_raw = response
+                    yield from _text_response_events(response)
+                    return
+                response = self.handle_auto_command(
+                    last_content,
+                    skill_resolution=skill_resolution,
+                )
                 self.last_stream_response_raw = response
                 yield from _text_response_events(response)
                 return
@@ -891,6 +949,19 @@ class AgentRoutingMixin:
             self._append_short_term([LLMMessage(role="assistant", content=final_text)])
         return final_text
 
+    def _resolve_skill_run(
+        self,
+        user_input: str,
+    ) -> tuple[SkillMatchDecision | None, SkillResolution | None]:
+        if self.skill_index is None:
+            self._apply_skill_decision(None)
+            return None, None
+        decision = self.skill_index.match_decision(user_input)
+        self._apply_skill_decision(decision)
+        if decision.status != "matched" or decision.match is None:
+            return decision, None
+        return decision, self.skill_index.resolve_match(decision.match)
+
     def _apply_skill_decision(self, decision: SkillMatchDecision | None) -> None:
         self._last_skill_match = None
         if decision is None:
@@ -940,6 +1011,7 @@ class AgentRoutingMixin:
                 ],
                 stop_reason_code=StopReasonCode.BLOCKED_SKILL_DEPRECATED,
                 route="blocked",
+                skill=self._blocked_skill_report(decision),
             )
         if decision.status == "ambiguous":
             ids = [match.entry.id for match in decision.alternatives]
@@ -953,5 +1025,26 @@ class AgentRoutingMixin:
                 ],
                 stop_reason_code=StopReasonCode.BLOCKED_SKILL_AMBIGUOUS,
                 route="blocked",
+                skill=self._blocked_skill_report(decision),
             )
         return "Навык не может быть применен."
+
+    def _blocked_skill_report(
+        self,
+        decision: SkillMatchDecision,
+    ) -> dict[str, JSONValue]:
+        if decision.status == "deprecated" and decision.match is not None:
+            return {
+                "status": "skipped",
+                "skill_id": decision.match.entry.id,
+                "version": decision.match.entry.version,
+                "supporting_skills": [],
+                "reason": "deprecated",
+            }
+        return {
+            "status": "skipped",
+            "skill_id": None,
+            "version": None,
+            "supporting_skills": [],
+            "reason": "ambiguous",
+        }

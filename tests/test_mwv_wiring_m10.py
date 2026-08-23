@@ -70,7 +70,7 @@ def test_m10_code_route_returns_mwv_report(tmp_path: Path, monkeypatch) -> None:
         )
 
     class DummyVerifierRuntime:
-        def run(self, _context: object) -> VerificationResult:
+        def run(self, _task: object, _context: object) -> VerificationResult:
             return VerificationResult(
                 status=VerificationStatus.PASSED,
                 command=["check"],
@@ -112,7 +112,7 @@ def test_m10_verifier_failure_returns_diagnostics(tmp_path: Path, monkeypatch) -
         )
 
     class DummyVerifierRuntime:
-        def run(self, _context: object) -> VerificationResult:
+        def run(self, _task: object, _context: object) -> VerificationResult:
             return VerificationResult(
                 status=VerificationStatus.FAILED,
                 command=["check"],

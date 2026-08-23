@@ -11,6 +11,7 @@ from core.skills.models import SkillEntry, SkillManifest, SkillRisk
 DEFAULT_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
 DEFAULT_MANIFEST_PATH = DEFAULT_SKILLS_ROOT / "_generated" / "skills.manifest.json"
 DEFAULT_BUILD_SCRIPT = DEFAULT_SKILLS_ROOT / "tools" / "build_manifest.py"
+SUPPORTED_MANIFEST_VERSION = 2
 
 
 class SkillManifestError(RuntimeError):
@@ -55,6 +56,11 @@ def _parse_manifest(data: object) -> SkillManifest:
     manifest_version = data.get("manifest_version")
     if not isinstance(manifest_version, int):
         raise SkillManifestError("manifest_version must be an integer")
+    if manifest_version != SUPPORTED_MANIFEST_VERSION:
+        raise SkillManifestError(
+            f"Unsupported skills manifest version: {manifest_version}; "
+            f"expected {SUPPORTED_MANIFEST_VERSION}"
+        )
     raw_skills = data.get("skills")
     if not isinstance(raw_skills, list):
         raise SkillManifestError("skills must be a list")
@@ -73,10 +79,15 @@ def _parse_entry(raw: dict[str, object]) -> SkillEntry:
     entrypoints = _require_str_list(raw, "entrypoints")
     patterns = _require_str_list(raw, "patterns")
     requires = _require_str_list(raw, "requires")
+    dependencies = _require_str_list(raw, "dependencies")
+    supporting = _require_bool(raw, "supporting")
     risk = _require_risk(raw, "risk")
     tests = _require_str_list(raw, "tests")
     path = _require_str(raw, "path")
     content_hash = _require_str(raw, "content_hash")
+    instructions = _require_str(raw, "instructions")
+    if not instructions.strip():
+        raise SkillManifestError("instructions must be a non-empty string")
     deprecated = _optional_bool(raw, "deprecated", False)
     replaced_by = _optional_str(raw, "replaced_by")
     return SkillEntry(
@@ -86,10 +97,13 @@ def _parse_entry(raw: dict[str, object]) -> SkillEntry:
         entrypoints=entrypoints,
         patterns=patterns,
         requires=requires,
+        dependencies=dependencies,
+        supporting=supporting,
         risk=risk,
         tests=tests,
         path=path,
         content_hash=content_hash,
+        instructions=instructions,
         deprecated=deprecated,
         replaced_by=replaced_by,
     )
@@ -126,6 +140,13 @@ def _optional_bool(raw: dict[str, object], key: str, default: bool) -> bool:
     value = raw.get(key, default)
     if not isinstance(value, bool):
         raise SkillManifestError(f"{key} must be boolean")
+    return value
+
+
+def _require_bool(raw: dict[str, object], key: str) -> bool:
+    value = raw.get(key)
+    if not isinstance(value, bool):
+        raise SkillManifestError(f"{key} must be a boolean")
     return value
 
 

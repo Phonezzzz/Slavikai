@@ -53,7 +53,7 @@ def test_decision_packet_on_verifier_fail(tmp_path: Path, monkeypatch) -> None:
         )
 
     class DummyVerifierRuntime:
-        def run(self, _context: object) -> VerificationResult:
+        def run(self, _task: object, _context: object) -> VerificationResult:
             return VerificationResult(
                 status=VerificationStatus.FAILED,
                 command=["check"],

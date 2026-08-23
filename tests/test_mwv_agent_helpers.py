@@ -246,7 +246,7 @@ def test_mwv_flow_runs_through_worker_and_verifier(
         return WorkResult(task_id=task.task_id, status=WorkStatus.SUCCESS, summary="ok")
 
     class DummyVerifierRuntime:
-        def run(self, _context: RunContext) -> VerificationResult:
+        def run(self, _task: TaskPacket, _context: RunContext) -> VerificationResult:
             return VerificationResult(
                 status=VerificationStatus.PASSED,
                 command=["check"],

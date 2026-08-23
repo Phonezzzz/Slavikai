@@ -17,6 +17,8 @@ class SkillFrontMatter:
     entrypoints: list[str]
     patterns: list[str]
     requires: list[str]
+    dependencies: list[str]
+    supporting: bool
     risk: str
     tests: list[str]
     deprecated: bool
@@ -52,6 +54,21 @@ def parse_front_matter(path: Path) -> SkillFrontMatter:
     return _coerce_front_matter(normalized, path)
 
 
+def parse_instructions(path: Path) -> str:
+    raw = path.read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(f"Front matter must start at top of file: {path}")
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() != "---":
+            continue
+        instructions = "\n".join(lines[idx + 1 :]).strip()
+        if not instructions:
+            raise ValueError(f"Skill instructions body must be non-empty: {path}")
+        return instructions
+    raise ValueError(f"Front matter closing marker not found: {path}")
+
+
 def validate_front_matter(front: SkillFrontMatter, schema: SchemaData, path: Path) -> None:
     payload: dict[str, object] = {
         "id": front.id,
@@ -60,6 +77,8 @@ def validate_front_matter(front: SkillFrontMatter, schema: SchemaData, path: Pat
         "entrypoints": front.entrypoints,
         "patterns": front.patterns,
         "requires": front.requires,
+        "dependencies": front.dependencies,
+        "supporting": front.supporting,
         "risk": front.risk,
         "tests": front.tests,
         "deprecated": front.deprecated,
@@ -97,11 +116,13 @@ def _coerce_front_matter(front: dict[str, object], path: Path) -> SkillFrontMatt
         id=_require_str(front, "id", path),
         version=_require_str(front, "version", path),
         title=_require_str(front, "title", path),
-        entrypoints=_require_str_list(front, "entrypoints", path),
-        patterns=_require_str_list(front, "patterns", path),
-        requires=_optional_str_list(front, "requires", path),
+        entrypoints=_require_str_list_field(front, "entrypoints", path),
+        patterns=_require_str_list_field(front, "patterns", path),
+        requires=_require_str_list_field(front, "requires", path),
+        dependencies=_require_str_list_field(front, "dependencies", path),
+        supporting=_require_bool(front, "supporting", path),
         risk=_require_str(front, "risk", path),
-        tests=_optional_str_list(front, "tests", path),
+        tests=_require_str_list_field(front, "tests", path),
         deprecated=_optional_bool(front, "deprecated", path, False),
         replaced_by=_optional_str(front, "replaced_by", path),
     )
@@ -114,26 +135,25 @@ def _require_str(front: dict[str, object], key: str, path: Path) -> str:
     return value
 
 
-def _require_str_list(front: dict[str, object], key: str, path: Path) -> list[str]:
+def _require_str_list_field(
+    front: dict[str, object],
+    key: str,
+    path: Path,
+) -> list[str]:
     value = front.get(key)
-    if not isinstance(value, list) or not value:
-        raise ValueError(f"{key} must be a non-empty list: {path}")
-    items = [item for item in value if isinstance(item, str) and item]
-    if len(items) != len(value):
-        raise ValueError(f"{key} must contain only strings: {path}")
-    return items
-
-
-def _optional_str_list(front: dict[str, object], key: str, path: Path) -> list[str]:
-    value = front.get(key, [])
-    if value is None:
-        return []
     if not isinstance(value, list):
         raise ValueError(f"{key} must be a list: {path}")
     items = [item for item in value if isinstance(item, str) and item]
     if len(items) != len(value):
         raise ValueError(f"{key} must contain only strings: {path}")
     return items
+
+
+def _require_bool(front: dict[str, object], key: str, path: Path) -> bool:
+    value = front.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be boolean: {path}")
+    return value
 
 
 def _optional_bool(front: dict[str, object], key: str, path: Path, default: bool) -> bool:

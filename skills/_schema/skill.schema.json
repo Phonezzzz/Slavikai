@@ -10,6 +10,8 @@
     "entrypoints",
     "patterns",
     "requires",
+    "dependencies",
+    "supporting",
     "risk",
     "tests"
   ],
@@ -31,16 +33,14 @@
       "items": {
         "type": "string",
         "minLength": 1
-      },
-      "minItems": 1
+      }
     },
     "patterns": {
       "type": "array",
       "items": {
         "type": "string",
         "minLength": 1
-      },
-      "minItems": 1
+      }
     },
     "requires": {
       "type": "array",
@@ -48,6 +48,17 @@
         "type": "string",
         "minLength": 1
       }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+      },
+      "uniqueItems": true
+    },
+    "supporting": {
+      "type": "boolean"
     },
     "risk": {
       "type": "string",
@@ -69,6 +80,19 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "supporting": {"const": false}
+        }
+      },
+      "then": {
+        "properties": {
+          "entrypoints": {"minItems": 1},
+          "patterns": {"minItems": 1}
+        }
+      }
+    },
     {
       "if": {
         "properties": {

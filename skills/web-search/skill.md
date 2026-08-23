@@ -9,6 +9,8 @@ patterns:
   - "найди в интернете"
   - "web search"
 requires: []
+dependencies: []
+supporting: false
 risk: medium
 tests: []
 ---
