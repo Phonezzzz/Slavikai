@@ -230,7 +230,27 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
                 project_root / "server" / "http" / "handlers" / "desktop.py",
             ),
         )
-        self.desktop_policy_runtime = DesktopPolicyRuntime(self.desktop_policy_store.list_rules())
+        try:
+            persistent_desktop_rules = self.desktop_policy_store.list_rules()
+        except (OSError, ValueError) as exc:
+            persistent_desktop_rules = []
+            load_errors = self.desktop_policy_store.list_load_errors()
+            self.logger.error(
+                "Desktop approval store rejected; persistent approvals disabled fail-closed",
+                extra={
+                    "path": str(self.desktop_policy_store.path),
+                    "errors": load_errors or [str(exc)],
+                },
+            )
+            self.tracer.log(
+                "desktop_policy_store_invalid",
+                "Persistent Desktop approvals disabled fail-closed",
+                {
+                    "path": str(self.desktop_policy_store.path),
+                    "errors": load_errors or [str(exc)],
+                },
+            )
+        self.desktop_policy_runtime = DesktopPolicyRuntime(persistent_desktop_rules)
         self.tool_registry = ToolRegistry(safe_block=SAFE_MODE_TOOLS_OFF)
         self.web_tool = WebSearchTool()
         self._register_tools()
@@ -601,7 +621,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             },
             model_exposed=False,
             confirmed_decision_only=True,
-            execution_targets={"sandbox"},
+            execution_targets={"sandbox", "desktop"},
         )
 
     def close_desktop_resources(self) -> None:

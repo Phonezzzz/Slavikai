@@ -362,12 +362,30 @@ class DesktopPolicyStore:
             self._write_locked(next_rules)
             return True
 
+    def reset_invalid_store(self) -> list[str]:
+        """Явно очищает только повреждённое persistent-хранилище и возвращает причины."""
+        with self._lock:
+            try:
+                self._load_locked()
+            except (OSError, ValueError) as exc:
+                errors = list(self._load_errors) or [str(exc)]
+            else:
+                raise ValueError("Desktop approval store валиден; reset запрещён")
+            self._write_locked([])
+            self._load_errors = []
+            return errors
+
     def _load_locked(self) -> list[DesktopApprovalRule]:
         self._load_errors = []
         if not self.path.exists():
             return []
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            self._load_errors.append(f"store invalid: {exc}")
+            raise
         if not isinstance(raw, list):
+            self._load_errors.append("store invalid: expected JSON array")
             raise ValueError("Desktop approval store должен содержать JSON-массив")
         rules: list[DesktopApprovalRule] = []
         migrated = False

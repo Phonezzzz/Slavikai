@@ -24,10 +24,15 @@ async def handle_desktop_approval_rules_list(request: web.Request) -> web.Respon
         rules = store.list_rules(subject_principal_id=principal_id)
     except (OSError, ValueError) as exc:
         return error_response(
-            status=500,
+            status=409,
             message=f"Не удалось прочитать Desktop approval rules: {exc}",
-            error_type="internal_error",
-            code="desktop_approval_store_error",
+            error_type="invalid_request_error",
+            code="desktop_approval_store_invalid",
+            details={
+                "path": str(store.path),
+                "load_errors": store.list_load_errors(),
+                "recovery_endpoint": "/ui/api/desktop/approvals/reset-invalid",
+            },
         )
     return json_response(
         {
@@ -135,6 +140,41 @@ async def handle_desktop_approval_rule_delete(request: web.Request) -> web.Respo
             code="desktop_approval_rule_not_found",
         )
     return json_response({"ok": True, "removed_rule_id": rule_id})
+
+
+async def handle_desktop_approval_rules_reset_invalid(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
+    payload, error = await _json_object(request)
+    if error is not None:
+        return error
+    if payload is None:
+        raise RuntimeError("JSON helper returned no payload and no error")
+    if payload.get("confirm") is not True:
+        return error_response(
+            status=400,
+            message="Для reset повреждённого Desktop approval store требуется confirm=true.",
+            error_type="invalid_request_error",
+            code="desktop_approval_reset_confirmation_required",
+        )
+    store: DesktopPolicyStore = request.app["desktop_policy_store"]
+    try:
+        discarded_errors = store.reset_invalid_store()
+    except (OSError, ValueError) as exc:
+        return error_response(
+            status=409,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="desktop_approval_store_not_invalid",
+        )
+    return json_response(
+        {
+            "ok": True,
+            "rules": [],
+            "discarded_load_errors": discarded_errors,
+        }
+    )
 
 
 async def _json_object(

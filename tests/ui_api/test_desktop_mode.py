@@ -200,6 +200,45 @@ def test_desktop_persistent_approval_crud_api(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_desktop_invalid_approval_store_has_explicit_owner_recovery(tmp_path: Path) -> None:
+    async def run() -> None:
+        store_path = tmp_path / "desktop-approvals.json"
+        store_path.write_text("{not-json", encoding="utf-8")
+        client = await _create_client(
+            DummyAgent(),
+            desktop_policy_store=DesktopPolicyStore(store_path),
+        )
+        try:
+            listing = await client.get("/ui/api/desktop/approvals")
+            assert listing.status == 409
+            listing_error = (await listing.json()).get("error")
+            assert isinstance(listing_error, dict)
+            assert listing_error.get("code") == "desktop_approval_store_invalid"
+
+            missing_confirmation = await client.post(
+                "/ui/api/desktop/approvals/reset-invalid",
+                json={"confirm": False},
+            )
+            assert missing_confirmation.status == 400
+
+            reset = await client.post(
+                "/ui/api/desktop/approvals/reset-invalid",
+                json={"confirm": True},
+            )
+            assert reset.status == 200
+            reset_payload = await reset.json()
+            assert reset_payload.get("rules") == []
+            assert reset_payload.get("discarded_load_errors")
+
+            recovered = await client.get("/ui/api/desktop/approvals")
+            assert recovered.status == 200
+            assert (await recovered.json()).get("rules") == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_desktop_always_allow_decision_persists_exact_scope(tmp_path: Path) -> None:
     async def run() -> None:
         store = DesktopPolicyStore(tmp_path / "desktop-approvals.json")

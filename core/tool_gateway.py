@@ -27,7 +27,13 @@ class ToolGateway:
 
     def call(self, request: ToolRequest) -> ToolResult:
         bypass_safe_mode = False
-        if self.approval_context is not None:
+        confirmed_server_tool = False
+        if self.confirmed_decision:
+            descriptor = self.registry.get_descriptor(request.name)
+            confirmed_server_tool = bool(
+                descriptor is not None and descriptor.confirmed_decision_only
+            )
+        if self.approval_context is not None and not confirmed_server_tool:
             decision, scope = decide_request(
                 context=self.approval_context,
                 request=request,

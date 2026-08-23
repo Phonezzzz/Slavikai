@@ -452,6 +452,7 @@ class AgentToolsMixin:
             "отключ",
             "не зарегистрирован",
             "требуется подтверждение",
+            "confirmed_decision_required",
             "approval",
         )
         return not any(marker in error_text for marker in ignore_markers)

@@ -292,6 +292,21 @@ def test_policy_store_rejects_all_rules_when_one_persistent_rule_is_invalid(
     assert "command_pattern больше не поддерживается" in store.list_load_errors()[0]
 
 
+def test_policy_store_requires_explicit_reset_and_recovers_invalid_store(
+    tmp_path: Path,
+) -> None:
+    store_path = tmp_path / "desktop-approvals.json"
+    store_path.write_text("{not-json", encoding="utf-8")
+    store = DesktopPolicyStore(store_path)
+
+    errors = store.reset_invalid_store()
+
+    assert errors and "store invalid" in errors[0]
+    assert store.list_rules() == []
+    with pytest.raises(ValueError, match="store валиден"):
+        store.reset_invalid_store()
+
+
 def test_transfer_checks_protected_source_and_destination(tmp_path: Path) -> None:
     request = ToolRequest(
         "desktop_file_transfer",

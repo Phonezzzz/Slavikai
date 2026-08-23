@@ -107,6 +107,10 @@ def register_routes(app: web.Application) -> None:
         "/ui/api/desktop/approvals",
         desktop.handle_desktop_approval_rule_create,
     )
+    app.router.add_post(
+        "/ui/api/desktop/approvals/reset-invalid",
+        desktop.handle_desktop_approval_rules_reset_invalid,
+    )
     app.router.add_patch(
         "/ui/api/desktop/approvals/{rule_id}",
         desktop.handle_desktop_approval_rule_update,

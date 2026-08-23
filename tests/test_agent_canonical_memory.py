@@ -6,6 +6,7 @@ import numpy as np
 
 from config.memory_config import ContextBudgetConfig
 from core.agent import Agent
+from core.desktop_policy import DesktopPolicyStore
 from core.mwv.models import MWVMessage
 from core.mwv.routing import RouteDecision
 from llm.brain_base import Brain
@@ -141,6 +142,50 @@ def test_agent_confirmed_preview_persists_exact_claim(tmp_path, monkeypatch) -> 
     tool_calls = agent.get_recent_tool_calls()
     assert tool_calls[-1].tool == "memory_save_confirmed"
     assert tool_calls[-1].ok is True
+
+
+def test_agent_confirmed_memory_save_is_available_in_desktop_mode(tmp_path, monkeypatch) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    agent.runtime_mode = "desktop"
+    preview = agent.build_memory_save_preview(
+        "remember my editor is neovim",
+        source_kind="chat.explicit_remember",
+        source_id="desktop-session",
+    )
+
+    result = agent.apply_confirmed_memory_save(
+        preview,
+        source_kind="chat.explicit_remember",
+        source_id="desktop-session",
+    )
+
+    assert result.ok
+    assert result.data["saved"] is True
+
+
+def test_agent_starts_fail_closed_with_invalid_desktop_policy_store(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store_path = tmp_path / "desktop-approvals.json"
+    store_path.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setattr(
+        "memory.vector_index.VectorIndex._get_model",
+        lambda _self, _name: DummyModel(),
+    )
+
+    agent = Agent(
+        brain=StaticBrain(),
+        desktop_policy_store=DesktopPolicyStore(store_path),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "canonical.db"),
+    )
+
+    assert agent.desktop_policy_runtime._rules == []  # noqa: SLF001
+    assert any(
+        event.get("event") == "desktop_policy_store_invalid" for event in agent.tracer.read_recent()
+    )
 
 
 def test_agent_confirmed_memory_reports_vector_sync_failure_as_partial_success(

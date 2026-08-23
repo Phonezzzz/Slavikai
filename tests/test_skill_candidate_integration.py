@@ -66,3 +66,16 @@ def test_tool_error_candidate_deduped(tmp_path: Path) -> None:
         agent._track_tool_error(request, result)  # noqa: SLF001
     files = list((tmp_path / "skills" / "_candidates").glob("*.md"))
     assert len(files) == 1
+
+
+def test_confirmed_decision_block_does_not_create_tool_error_candidate(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    request = ToolRequest(name="memory_save_confirmed", args={})
+    result = ToolResult.failure(
+        "CONFIRMED_DECISION_REQUIRED: tool доступен только после явного подтверждения."
+    )
+
+    for _ in range(SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD):
+        agent._track_tool_error(request, result)  # noqa: SLF001
+
+    assert list((tmp_path / "skills" / "_candidates").glob("*.md")) == []

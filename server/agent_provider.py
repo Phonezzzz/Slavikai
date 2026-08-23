@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from llm.types import ModelConfig
+
+DEFAULT_AGENT_RETIREMENT_TIMEOUT_SECONDS = 5.0
+logger = logging.getLogger("SlavikAI.AgentProvider")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,12 +46,20 @@ class AgentApplyFailure:
 class ScopedAgentProvider[T]:
     """Владеет одним mutable Agent и lock на principal/session scope."""
 
-    def __init__(self, *, factory: Callable[[AgentScope, ModelConfig | None], T]) -> None:
+    def __init__(
+        self,
+        *,
+        factory: Callable[[AgentScope, ModelConfig | None], T],
+        retirement_timeout_seconds: float = DEFAULT_AGENT_RETIREMENT_TIMEOUT_SECONDS,
+    ) -> None:
+        if retirement_timeout_seconds <= 0:
+            raise ValueError("retirement_timeout_seconds must be positive")
         self._factory = factory
         self._agents: dict[AgentScope, _AgentEntry[T]] = {}
         self._locks: dict[AgentScope, asyncio.Lock] = {}
         self._creation_locks: dict[AgentScope, asyncio.Lock] = {}
-        self._retirements: set[asyncio.Task[None]] = set()
+        self._retirements: dict[asyncio.Task[None], _AgentEntry[T]] = {}
+        self._retirement_timeout_seconds = retirement_timeout_seconds
         self._shared_instance: T | None = None
         self._shared_lock: asyncio.Lock | None = None
         self._closed = False
@@ -97,7 +109,8 @@ class ScopedAgentProvider[T]:
             entry = self._agents.pop(scope, None)
         if entry is None:
             return
-        await self._retire_removed_entry(scope, entry)
+        self._schedule_retirement(scope, entry)
+        await asyncio.sleep(0)
 
     async def apply_to_existing(
         self, callback: Callable[[T], None]
@@ -125,10 +138,9 @@ class ScopedAgentProvider[T]:
                         self._agents.pop(scope, None)
                         retired.append((scope, entry))
         for scope, entry in retired:
-            try:
-                await self._retire_removed_entry(scope, entry)
-            except Exception as close_exc:  # noqa: BLE001
-                failures.append(AgentApplyFailure(scope=scope, error=close_exc))
+            self._schedule_retirement(scope, entry)
+        if retired:
+            await asyncio.sleep(0)
         return tuple(failures)
 
     async def close(self) -> None:
@@ -145,7 +157,23 @@ class ScopedAgentProvider[T]:
         for scope in list(self._agents):
             await self.release(scope)
         if self._retirements:
-            await asyncio.gather(*tuple(self._retirements), return_exceptions=True)
+            snapshot = dict(self._retirements)
+            _, pending = await asyncio.wait(
+                tuple(snapshot),
+                timeout=self._retirement_timeout_seconds,
+            )
+            if pending:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                closed_entries: set[int] = set()
+                for task in pending:
+                    entry = snapshot[task]
+                    entry_id = id(entry)
+                    if entry_id in closed_entries:
+                        continue
+                    closed_entries.add(entry_id)
+                    self._close_agent(entry.agent)
 
     def _borrow_for_current_task(self, entry: _AgentEntry[T]) -> None:
         task = asyncio.current_task()
@@ -167,7 +195,7 @@ class ScopedAgentProvider[T]:
         if not entry.borrowers:
             entry.idle.set()
 
-    async def _retire_removed_entry(
+    def _schedule_retirement(
         self,
         scope: AgentScope,
         entry: _AgentEntry[T],
@@ -179,9 +207,16 @@ class ScopedAgentProvider[T]:
             self._retire_entry(entry, self.lock_for(scope)),
             name=f"retire-agent:{scope.principal_id}:{scope.session_id}",
         )
-        self._retirements.add(retirement)
-        retirement.add_done_callback(self._retirements.discard)
-        await asyncio.shield(retirement)
+        self._retirements[retirement] = entry
+        retirement.add_done_callback(self._retirement_done)
+
+    def _retirement_done(self, task: asyncio.Task[None]) -> None:
+        self._retirements.pop(task, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error("Agent retirement failed", exc_info=error)
 
     async def _retire_entry(self, entry: _AgentEntry[T], run_lock: asyncio.Lock) -> None:
         await entry.idle.wait()

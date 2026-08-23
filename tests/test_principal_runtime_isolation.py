@@ -112,7 +112,7 @@ def test_scoped_provider_owns_distinct_agents_and_locks() -> None:
     asyncio.run(_run())
 
 
-def test_scoped_provider_release_waits_for_request_borrower() -> None:
+def test_scoped_provider_release_does_not_wait_for_request_borrower() -> None:
     async def _run() -> None:
         class _Agent:
             def __init__(self) -> None:
@@ -140,18 +140,56 @@ def test_scoped_provider_release_waits_for_request_borrower() -> None:
         release_task = asyncio.create_task(provider.release(scope))
         await asyncio.sleep(0)
 
-        assert release_task.done() is False
+        await release_task
         assert original.closed is False
         replacement = await provider.get_for_current_task(scope, None)
         assert replacement is not original
 
         finish_request.set()
         await request_task
-        await release_task
+        await asyncio.sleep(0)
         assert original.closed is True
         assert replacement.closed is False
         await provider.close()
         assert replacement.closed is True
+
+    asyncio.run(_run())
+
+
+def test_scoped_provider_shutdown_forces_bounded_retirement() -> None:
+    async def _run() -> None:
+        class _Agent:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        provider = ScopedAgentProvider(
+            factory=lambda _scope, _config: _Agent(),
+            retirement_timeout_seconds=0.01,
+        )
+        scope = AgentScope("principal-a", "session-a")
+        borrowed = asyncio.Event()
+        never_finish = asyncio.Event()
+        agent: _Agent | None = None
+
+        async def _request() -> None:
+            nonlocal agent
+            agent = await provider.get_for_current_task(scope, None)
+            borrowed.set()
+            await never_finish.wait()
+
+        request_task = asyncio.create_task(_request())
+        await borrowed.wait()
+        assert agent is not None
+
+        await provider.release(scope)
+        await asyncio.wait_for(provider.close(), timeout=0.2)
+
+        assert agent.closed is True
+        request_task.cancel()
+        await asyncio.gather(request_task, return_exceptions=True)
 
     asyncio.run(_run())
 

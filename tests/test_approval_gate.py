@@ -75,3 +75,52 @@ def test_safe_mode_disabled_allows_tool() -> None:
     result = gateway.call(ToolRequest(name="shell", args={"command": "rm -rf /"}))
     assert result.ok is True
     assert called["ok"] is True
+
+
+def test_confirmed_server_tool_bypasses_only_desktop_action_policy() -> None:
+    registry = ToolRegistry()
+    called: list[str] = []
+
+    def handler(request: ToolRequest) -> ToolResult:
+        called.append(request.name)
+        return ToolResult.success({"output": "ok"})
+
+    registry.register(
+        "memory_save_confirmed",
+        handler,
+        enabled=True,
+        capability="write",
+        model_exposed=False,
+        confirmed_decision_only=True,
+        execution_targets={"desktop"},
+    )
+    registry.register(
+        "unrelated_write",
+        handler,
+        enabled=True,
+        capability="write",
+        execution_targets={"desktop"},
+    )
+    registry.set_execution_policy(mode="desktop")
+    context = ApprovalContext(
+        safe_mode=True,
+        session_id="s1",
+        approved_categories=set(),
+        execution_target="desktop",
+    )
+
+    confirmed = ToolGateway(
+        registry,
+        approval_context=context,
+        confirmed_decision=True,
+    ).call(ToolRequest(name="memory_save_confirmed"))
+    unrelated = ToolGateway(
+        registry,
+        approval_context=context,
+        confirmed_decision=True,
+    ).call(ToolRequest(name="unrelated_write"))
+
+    assert confirmed.ok is True
+    assert not unrelated.ok
+    assert unrelated.error == "POLICY_DENY: desktop_tool_unknown"
+    assert called == ["memory_save_confirmed"]
