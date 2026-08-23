@@ -43,9 +43,10 @@
   пользователи являются members;
 - browser identity и Bearer auth для `/v1` automation — разные auth lanes.
 
-Этот contract пока имеет статус `target`/`partial`: текущая token-cookie browser auth остаётся
-reachable legacy, а полная principal isolation ещё не реализована. До завершения security PR
-нельзя описывать внешний multi-user deployment как защищённый этим target contract.
+Cloudflare browser identity contract реализован в отдельном production mode; token-cookie
+browser auth остаётся reachable legacy для локального запуска. Полная principal isolation
+Memory/vector/runtime state ещё имеет статус `partial`, поэтому multi-user deployment пока
+нельзя считать полностью изолированным.
 
 ## Binding runtime decisions
 

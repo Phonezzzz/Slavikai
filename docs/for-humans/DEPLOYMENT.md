@@ -65,7 +65,20 @@ make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000
 клиентов остаётся Bearer auth: `Authorization: Bearer <SLAVIK_API_TOKEN>`.
 
 Это текущая legacy browser auth, а не реализация целевого owner/member deployment за
-Cloudflare Access. Статус security claims см. в `docs/runtime_contract_claims.json`.
+Cloudflare Access. Для production за Access используй отдельный browser auth mode:
+
+```dotenv
+SLAVIK_API_TOKEN=replace-with-a-long-random-automation-token
+SLAVIK_BROWSER_AUTH=cloudflare
+SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
+SLAVIK_CLOUDFLARE_ACCESS_AUD=your-access-application-aud
+SLAVIK_OWNER_EMAIL=owner@example.com
+```
+
+Cloudflare email OTP остаётся единственным browser login: origin проверяет Access JWT через
+team JWKS, включая signature, `iss`, `aud`, `exp`, `nbf` и email. `/v1/*` и `/slavik/*`
+по-прежнему используют отдельный `Authorization: Bearer <SLAVIK_API_TOKEN>` lane. Не передавай
+Bearer token в browser UI и не включай `SLAVIK_ALLOW_UNAUTH_LOCAL` вместе с Cloudflare mode.
 
 Для локальной разработки без auth можно явно задать
 `SLAVIK_ALLOW_UNAUTH_LOCAL=true`. На публичном интерфейсе этот режим не использовать.

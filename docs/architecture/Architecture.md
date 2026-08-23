@@ -10,9 +10,9 @@ Computer Mode product invariant ("not a manual IDE", live agent execution surfac
 
 ## Цель
 
-SlavikAI сейчас работает как server-side agent runtime с частичной principal-scoped session
-изоляцией и legacy token-cookie browser auth. Целевой owner/member deployment за Cloudflare
-Access ещё не реализован полностью. После PR-0..PR-14 в коде есть tool-calling contract,
+SlavikAI сейчас работает как server-side agent runtime с Cloudflare Access owner/member
+browser identity и частичной principal isolation. Legacy token-cookie auth остаётся для
+локального запуска; Memory/vector/Agent state ещё не изолированы полностью. После PR-0..PR-14 в коде есть tool-calling contract,
 read-only chat integration через `AgentToolLoop`, auto v1 через `AgentToolLoop`,
 split chat/workspace API paths, debug-only command lane и единый terminal backend.
 После PR-15 runtime tools имеют LLM descriptions/JSON Schema. После PR-16 auto mode

@@ -8,13 +8,20 @@ from core.desktop_policy import (
     DesktopPolicyStore,
     PolicyEffect,
 )
+from server.http.common.auth import _request_principal_id, _require_owner
 from server.http.common.responses import error_response, json_response
 
 
 async def handle_desktop_approval_rules_list(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        raise RuntimeError("Owner request has no principal")
     store: DesktopPolicyStore = request.app["desktop_policy_store"]
     try:
-        rules = store.list_rules()
+        rules = store.list_rules(subject_principal_id=principal_id)
     except (OSError, ValueError) as exc:
         return error_response(
             status=500,
@@ -22,10 +29,22 @@ async def handle_desktop_approval_rules_list(request: web.Request) -> web.Respon
             error_type="internal_error",
             code="desktop_approval_store_error",
         )
-    return json_response({"ok": True, "rules": [rule.to_dict() for rule in rules]})
+    return json_response(
+        {
+            "ok": True,
+            "rules": [rule.to_dict() for rule in rules],
+            "load_warnings": store.list_load_errors(),
+        }
+    )
 
 
 async def handle_desktop_approval_rule_create(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        raise RuntimeError("Owner request has no principal")
     payload, error = await _json_object(request)
     if error is not None:
         return error
@@ -40,6 +59,7 @@ async def handle_desktop_approval_rule_create(request: web.Request) -> web.Respo
             scope=scope,
             source="persistent",
             description=description_raw if isinstance(description_raw, str) else "",
+            subject_principal_id=principal_id,
         )
         store: DesktopPolicyStore = request.app["desktop_policy_store"]
         store.add_rule(rule)
@@ -54,6 +74,9 @@ async def handle_desktop_approval_rule_create(request: web.Request) -> web.Respo
 
 
 async def handle_desktop_approval_rule_update(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
     payload, error = await _json_object(request)
     if error is not None:
         return error
@@ -90,6 +113,9 @@ async def handle_desktop_approval_rule_update(request: web.Request) -> web.Respo
 
 
 async def handle_desktop_approval_rule_delete(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
     rule_id = request.match_info.get("rule_id", "").strip()
     store: DesktopPolicyStore = request.app["desktop_policy_store"]
     try:

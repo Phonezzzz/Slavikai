@@ -53,6 +53,7 @@ class AgentToolLoop:
         history = list(messages)
         executed: list[ExecutedToolCall] = []
         final_text = ""
+        allowed_tool_names = {tool.name for tool in tools}
 
         for iteration in range(1, self.max_iterations + 1):
             if cancellation_requested(cancellation_token):
@@ -118,8 +119,10 @@ class AgentToolLoop:
                         iterations=iteration,
                         cancelled=True,
                     )
-                tool_result = gateway.call(
-                    ToolRequest(name=tool_call.name, args=dict(tool_call.arguments))
+                tool_result = _dispatch_model_tool_call(
+                    gateway=gateway,
+                    tool_call=tool_call,
+                    allowed_tool_names=allowed_tool_names,
                 )
                 executed.append(ExecutedToolCall(call=tool_call, result=tool_result))
                 history.append(
@@ -161,6 +164,7 @@ class AgentToolLoop:
         history = list(messages)
         executed: list[ExecutedToolCall] = []
         visible_text = ""
+        allowed_tool_names = {tool.name for tool in tools}
 
         for iteration in range(1, self.max_iterations + 1):
             if cancellation_requested(cancellation_token):
@@ -296,8 +300,10 @@ class AgentToolLoop:
                         iterations=iteration,
                         cancelled=True,
                     )
-                tool_result = gateway.call(
-                    ToolRequest(name=tool_call.name, args=dict(tool_call.arguments))
+                tool_result = _dispatch_model_tool_call(
+                    gateway=gateway,
+                    tool_call=tool_call,
+                    allowed_tool_names=allowed_tool_names,
                 )
                 if cancellation_requested(cancellation_token):
                     yield Done(finish_reason="cancelled")
@@ -329,6 +335,20 @@ class AgentToolLoop:
             iterations=self.max_iterations,
             error=message,
         )
+
+
+def _dispatch_model_tool_call(
+    *,
+    gateway: ToolGateway,
+    tool_call: ToolCall,
+    allowed_tool_names: set[str],
+) -> ToolResult:
+    if tool_call.name not in allowed_tool_names:
+        return ToolResult.failure(
+            f"MODEL_TOOL_NOT_EXPOSED: tool '{tool_call.name}' was not provided to the model.",
+            meta={"policy_reason": "model_tool_not_exposed"},
+        )
+    return gateway.call(ToolRequest(name=tool_call.name, args=dict(tool_call.arguments)))
 
 
 def _assistant_message(

@@ -54,6 +54,8 @@ class ClipboardBackend(Protocol):
 class DesktopLaunchControl(Protocol):
     def drain_launches(self) -> list[subprocess.Popen[bytes]]: ...
 
+    def restore_launches(self, processes: Sequence[subprocess.Popen[bytes]]) -> None: ...
+
 
 class DesktopProcessTracker(Protocol):
     def forget_launched_process(self, pid: int) -> None: ...
@@ -514,8 +516,10 @@ class DesktopUnverifiedLaunchCleanupTool:
         if request.args:
             return ToolResult.failure("Desktop launch cleanup does not accept arguments.")
         terminated: list[int] = []
+        killed: list[int] = []
         already_exited: list[int] = []
         failed: list[int] = []
+        retry: list[subprocess.Popen[bytes]] = []
         for process in self._control.drain_launches():
             pid = process.pid
             try:
@@ -524,20 +528,37 @@ class DesktopUnverifiedLaunchCleanupTool:
                     try:
                         process.wait(timeout=3)
                     except subprocess.TimeoutExpired:
-                        failed.append(pid)
+                        try:
+                            os.killpg(pid, signal.SIGKILL)
+                            process.wait(timeout=3)
+                        except (OSError, subprocess.TimeoutExpired):
+                            if process.poll() is None:
+                                failed.append(pid)
+                                retry.append(process)
+                            else:
+                                killed.append(pid)
+                        else:
+                            killed.append(pid)
                     else:
                         terminated.append(pid)
                 else:
                     already_exited.append(pid)
             except OSError:
-                failed.append(pid)
-            finally:
+                if process.poll() is None:
+                    failed.append(pid)
+                    retry.append(process)
+                else:
+                    already_exited.append(pid)
+            if pid not in failed:
                 self._process_tracker.forget_launched_process(pid)
+        self._control.restore_launches(retry)
         details: dict[str, JSONValue] = {
             "operation": "rollback",
             "terminated_pids": terminated,
+            "killed_pids": killed,
             "already_exited_pids": already_exited,
             "failed_pids": failed,
+            "retained_pids": failed,
             "verified": not failed,
         }
         if failed:

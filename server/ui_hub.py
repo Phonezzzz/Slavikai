@@ -276,8 +276,11 @@ class UIHub:
         subscriber_drop_policy: SubscriberDropPolicy = DEFAULT_SUBSCRIBER_DROP_POLICY,
         event_buffer_size: int = DEFAULT_EVENT_BUFFER_SIZE,
         event_buffer_ttl_seconds: int = DEFAULT_EVENT_BUFFER_TTL_SECONDS,
+        legacy_principal_id: str = DEFAULT_LEGACY_PRINCIPAL_ID,
     ) -> None:
         self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
+        normalized_legacy_principal = legacy_principal_id.strip()
+        self._legacy_principal_id = normalized_legacy_principal or DEFAULT_LEGACY_PRINCIPAL_ID
         self._sessions: dict[str, _SessionState] = {}
         self._folders: dict[str, _FolderState] = {}
         self._session_ttl_seconds = session_ttl_seconds
@@ -1516,7 +1519,9 @@ class UIHub:
 
     def _normalize_principal_id(self, value: str | None) -> str:
         normalized = value.strip() if isinstance(value, str) else ""
-        return normalized or DEFAULT_LEGACY_PRINCIPAL_ID
+        if not normalized or normalized == DEFAULT_LEGACY_PRINCIPAL_ID:
+            return self._legacy_principal_id
+        return normalized
 
     def _normalize_mode(self, value: str | None) -> SessionMode:
         normalized = value.strip().lower() if isinstance(value, str) else ""
@@ -1784,6 +1789,7 @@ class UIHub:
             state.event_buffer.popleft()
 
     def _restore_sessions(self) -> None:
+        migrated_session_ids: list[str] = []
         for item in self._storage.load_sessions():
             domains = split_persisted_session_domains(item)
             restored = legacy_session_from_domain_records(domains)
@@ -1793,8 +1799,9 @@ class UIHub:
                 decision_id = decision.get("id")
                 if isinstance(decision_id, str):
                     last_decision_id = decision_id
+            principal_id = self._normalize_principal_id(restored.principal_id)
             self._sessions[restored.session_id] = _SessionState(
-                principal_id=self._normalize_principal_id(restored.principal_id),
+                principal_id=principal_id,
                 messages=[dict(message) for message in restored.messages],
                 output_text=restored.output_text,
                 output_updated_at=restored.output_updated_at,
@@ -1821,6 +1828,10 @@ class UIHub:
                 created_at=restored.created_at,
                 updated_at=restored.updated_at,
             )
+            if restored.principal_id != principal_id:
+                migrated_session_ids.append(restored.session_id)
+        for session_id in migrated_session_ids:
+            self._persist_session_locked(session_id)
 
     def _restore_folders(self) -> None:
         for item in self._storage.load_folders():

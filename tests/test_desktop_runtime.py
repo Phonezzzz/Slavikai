@@ -3,7 +3,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from core.desktop_runtime import DESKTOP_SYSTEM_PROMPT, DesktopExecutionControl, DesktopRuntime
+from core.desktop_runtime import (
+    DESKTOP_SYSTEM_PROMPT,
+    DesktopExecutionControl,
+    DesktopRunCoordinator,
+    DesktopRuntime,
+)
 from core.desktop_security import DesktopPathSecurity
 from core.mwv.models import VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
@@ -129,6 +134,24 @@ def test_desktop_runtime_reuses_native_loop_and_requires_verification(tmp_path: 
         "desktop_file_write",
         "desktop_verify",
     ]
+
+
+def test_shared_desktop_coordinator_returns_busy_without_running_model(tmp_path: Path) -> None:
+    coordinator = DesktopRunCoordinator()
+    assert coordinator.try_acquire()
+    brain = ScriptedBrain([LLMResult(text="must not run")])
+
+    try:
+        outcome = DesktopRuntime(
+            DesktopParent(brain, _desktop_registry(tmp_path)),
+            run_coordinator=coordinator,
+        ).run("do it")
+    finally:
+        coordinator.release()
+
+    assert outcome.loop_result.error == "desktop_host_busy"
+    assert outcome.text == "Desktop task stopped: another Desktop run is active."
+    assert brain.messages_seen == []
 
 
 def test_verifier_rejection_causes_bounded_correction(tmp_path: Path) -> None:
@@ -418,7 +441,7 @@ def test_tool_observations_are_marked_untrusted(tmp_path: Path) -> None:
         brain=brain,
         gateway=ToolGateway(registry),
         messages=[LLMMessage(role="user", content="read")],
-        tools=[],
+        tools=registry.list_tool_specs(),
     )
 
     tool_message = next(message for message in result.messages if message.role == "tool")

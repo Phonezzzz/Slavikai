@@ -22,7 +22,7 @@ from core.container_computer_backend import ContainerComputerBackend
 from core.decision.handler import DecisionHandler
 from core.decision.models import DecisionPacket
 from core.desktop_policy import DesktopPolicyRuntime, DesktopPolicyStore
-from core.desktop_runtime import DesktopExecutionControl, DesktopRuntime
+from core.desktop_runtime import DesktopExecutionControl, DesktopRunCoordinator, DesktopRuntime
 from core.desktop_security import DesktopPathSecurity
 from core.mwv.manager import ManagerRuntime
 from core.mwv.verifier_runtime import VerifierRuntime
@@ -173,6 +173,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         embeddings_openai_api_key: str | None = None,
         desktop_policy_store: DesktopPolicyStore | None = None,
         desktop_home: Path | None = None,
+        desktop_run_coordinator: DesktopRunCoordinator | None = None,
     ) -> None:
         self.main_config = main_config
         self.main_api_key = main_api_key
@@ -200,7 +201,10 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.auto_agent = AutoAgent(self)
         self.auto_agent.set_progress_callback(self._record_auto_progress)
         self.desktop_execution_control = DesktopExecutionControl()
-        self.desktop_runtime = DesktopRuntime(self)
+        self.desktop_runtime = DesktopRuntime(
+            self,
+            run_coordinator=desktop_run_coordinator,
+        )
         self.tools_enabled = enable_tools or self._load_tools()
         self.desktop_policy_store = desktop_policy_store or DesktopPolicyStore()
         project_root = Path(__file__).resolve().parents[1]

@@ -227,6 +227,43 @@ def test_unverified_launch_cleanup_terminates_tracked_process(tmp_path: Path) ->
     assert status.ok and status.data["running"] is False
 
 
+def test_unverified_launch_cleanup_escalates_and_retains_failed_process(monkeypatch) -> None:
+    class StubbornProcess:
+        pid = 43210
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: int) -> None:
+            raise subprocess.TimeoutExpired(cmd=["stubborn"], timeout=timeout)
+
+    class ProcessTracker:
+        def __init__(self) -> None:
+            self.forgotten: list[int] = []
+
+        def forget_launched_process(self, pid: int) -> None:
+            self.forgotten.append(pid)
+
+    signals: list[int] = []
+    monkeypatch.setattr(
+        system_tools_module.os,
+        "killpg",
+        lambda _pid, signal_number: signals.append(signal_number),
+    )
+    control = DesktopExecutionControl()
+    control.register_launch(StubbornProcess())  # type: ignore[arg-type]
+    tracker = ProcessTracker()
+    tool = DesktopUnverifiedLaunchCleanupTool(control, tracker)  # type: ignore[arg-type]
+
+    first = tool.handle(ToolRequest("desktop_cleanup_unverified_launches", {}))
+    second = tool.handle(ToolRequest("desktop_cleanup_unverified_launches", {}))
+
+    assert not first.ok and not second.ok
+    assert first.meta["retained_pids"] == [43210]
+    assert signals == [system_tools_module.signal.SIGTERM, system_tools_module.signal.SIGKILL] * 2
+    assert tracker.forgotten == []
+
+
 def test_generic_shell_refuses_typed_service_package_and_process_actions(tmp_path: Path) -> None:
     tool = DesktopShellTool(_security(tmp_path))
 

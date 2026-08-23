@@ -4,12 +4,14 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_MAX_REQUEST_BYTES = 1_000_000
 DEFAULT_PATH = Path("config/http_server.json")
 DEFAULT_ALLOW_UNAUTH_LOCAL = False
+BrowserAuthMode = Literal["token", "cloudflare"]
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,10 @@ class HttpServerConfig:
 class HttpAuthConfig:
     api_token: str
     allow_unauth_local: bool = DEFAULT_ALLOW_UNAUTH_LOCAL
+    browser_auth_mode: BrowserAuthMode = "token"
+    cloudflare_access_issuer: str = ""
+    cloudflare_access_aud: str = ""
+    owner_email: str = ""
 
 
 def load_http_server_config(path: Path = DEFAULT_PATH) -> HttpServerConfig:
@@ -89,9 +95,23 @@ def resolve_http_auth_config() -> HttpAuthConfig:
     api_token_raw = os.getenv("SLAVIK_API_TOKEN", "")
     allow_unauth_raw = os.getenv("SLAVIK_ALLOW_UNAUTH_LOCAL", "")
     allow_unauth_local = allow_unauth_raw.strip().lower() == "true"
+    browser_auth_raw = os.getenv("SLAVIK_BROWSER_AUTH", "token").strip().lower()
+    browser_auth_mode: BrowserAuthMode
+    if browser_auth_raw == "token":
+        browser_auth_mode = "token"
+    elif browser_auth_raw == "cloudflare":
+        browser_auth_mode = "cloudflare"
+    else:
+        raise ValueError("SLAVIK_BROWSER_AUTH должен быть token|cloudflare.")
+    team_domain = os.getenv("SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN", "").strip()
+    issuer = _cloudflare_issuer(team_domain)
     return HttpAuthConfig(
         api_token=api_token_raw.strip(),
         allow_unauth_local=allow_unauth_local,
+        browser_auth_mode=browser_auth_mode,
+        cloudflare_access_issuer=issuer,
+        cloudflare_access_aud=os.getenv("SLAVIK_CLOUDFLARE_ACCESS_AUD", "").strip(),
+        owner_email=os.getenv("SLAVIK_OWNER_EMAIL", "").strip().casefold(),
     )
 
 
@@ -99,4 +119,24 @@ def ensure_http_auth_boot_config(auth_config: HttpAuthConfig | None = None) -> H
     resolved = auth_config or resolve_http_auth_config()
     if not resolved.allow_unauth_local and not resolved.api_token:
         raise RuntimeError("SLAVIK_API_TOKEN is required unless SLAVIK_ALLOW_UNAUTH_LOCAL=true.")
+    if resolved.browser_auth_mode == "cloudflare":
+        if resolved.allow_unauth_local:
+            raise RuntimeError("SLAVIK_ALLOW_UNAUTH_LOCAL must be false with Cloudflare auth.")
+        if not resolved.cloudflare_access_issuer:
+            raise RuntimeError("SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN is required.")
+        if not resolved.cloudflare_access_aud:
+            raise RuntimeError("SLAVIK_CLOUDFLARE_ACCESS_AUD is required.")
+        if not resolved.owner_email or "@" not in resolved.owner_email:
+            raise RuntimeError("SLAVIK_OWNER_EMAIL is required and must be an email.")
     return resolved
+
+
+def _cloudflare_issuer(team_domain: str) -> str:
+    normalized = team_domain.strip().rstrip("/")
+    if not normalized:
+        return ""
+    if normalized.startswith("https://"):
+        return normalized
+    if "://" in normalized:
+        raise ValueError("Cloudflare Access team domain должен использовать https.")
+    return f"https://{normalized}"

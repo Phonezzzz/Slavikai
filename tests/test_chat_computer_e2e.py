@@ -114,7 +114,7 @@ def test_tool_loop_executes_workspace_read(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="Show me README.md")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     assert result.text == "The README contains: Hello world."
@@ -139,7 +139,7 @@ def test_tool_loop_result_text_is_llm_response_not_raw_json(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="read x.py")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     assert "File has been read successfully." == result.text
@@ -163,7 +163,7 @@ def test_tool_result_appears_in_message_history(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="read a.txt")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     tool_messages = [m for m in result.messages if m.role == "tool"]
@@ -190,7 +190,7 @@ def test_no_lane_computer_in_messages(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="read b.py")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     for msg in result.messages:
@@ -220,7 +220,7 @@ def test_activity_log_captures_tool_started_event(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="read c.py")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     events = activity_log.drain()
@@ -245,7 +245,7 @@ def test_activity_log_captures_file_read_event(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="read d.py")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     events = activity_log.drain()
@@ -272,7 +272,7 @@ def test_activity_log_includes_path(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="read src/main.py")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     events = activity_log.drain()
@@ -297,7 +297,7 @@ def test_activity_log_drain_clears_events(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="x")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     activity_log.drain()
@@ -360,7 +360,7 @@ def test_agent_computer_runtime_activity_is_separate_from_chat_body(
         brain=brain,
         gateway=gateway,
         messages=[LLMMessage(role="user", content="read f.py")],
-        tools=[],
+        tools=gateway.registry.list_tool_specs(),
     )
 
     # Drain computer events separately — they must not appear as chat messages
@@ -400,7 +400,7 @@ def test_tool_failure_propagates_through_loop() -> None:
         brain=brain,
         gateway=gw,
         messages=[LLMMessage(role="user", content="read missing.py")],
-        tools=[],
+        tools=registry.list_tool_specs(),
     )
 
     assert result.text == "Sorry, file was not found."
@@ -443,7 +443,7 @@ def test_multiple_tool_calls_in_one_iteration() -> None:
         brain=brain,
         gateway=gw,
         messages=[LLMMessage(role="user", content="read both")],
-        tools=[],
+        tools=registry.list_tool_specs(),
     )
 
     assert len(result.tool_calls) == 2
