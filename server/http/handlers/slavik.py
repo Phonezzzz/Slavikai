@@ -5,6 +5,8 @@ import logging
 from aiohttp import web
 
 from core.approval_policy import ApprovalCategory
+from server.agent_provider import AgentScope
+from server.http.common.auth import _automation_principal_id
 from server.http.common.responses import error_response, json_response
 from server.http_api import (
     _CATEGORY_MAP,
@@ -229,28 +231,20 @@ async def handle_approve_session(request: web.Request) -> web.Response:
 
     approved_categories: set[ApprovalCategory] = set()
     if categories:
-        approved_categories = await session_store.approve(session_id.strip(), categories)
-        agent = await _resolve_agent_for_base_http(request, session_id.strip())
-        if agent is not None:
-            try:
-                agent.tracer.log(
-                    "approval_granted",
-                    "Session approval granted",
-                    {
-                        "session_id": session_id.strip(),
-                        "categories": sorted(approved_categories),
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Failed to log approval_granted",
-                    exc_info=True,
-                    extra={
-                        "session_id": session_id.strip(),
-                        "categories": sorted(approved_categories),
-                        "error": str(exc),
-                    },
-                )
+        auth_config = request.app["auth_config"]
+        approval_scope = AgentScope(
+            principal_id=_automation_principal_id(auth_config),
+            session_id=session_id.strip(),
+        )
+        approved_categories = await session_store.approve(approval_scope, categories)
+        logger.info(
+            "Automation session approval granted",
+            extra={
+                "principal_id": approval_scope.principal_id,
+                "session_id": approval_scope.session_id,
+                "categories": sorted(approved_categories),
+            },
+        )
     return json_response(
         {
             "session_id": session_id.strip(),

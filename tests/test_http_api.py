@@ -701,7 +701,6 @@ def test_chat_completions_uses_runtime_global_main_config_for_scoped_default_age
             )
             first = await client.post(
                 "/v1/chat/completions",
-                headers={"X-Slavik-Session": "runtime-session"},
                 json={
                     "model": "slavik",
                     "messages": [{"role": "user", "content": "Привет"}],
@@ -711,7 +710,6 @@ def test_chat_completions_uses_runtime_global_main_config_for_scoped_default_age
             assert first.status == 200
             second = await client.post(
                 "/v1/chat/completions",
-                headers={"X-Slavik-Session": "runtime-session"},
                 json={
                     "model": "slavik",
                     "messages": [{"role": "user", "content": "Ещё раз"}],
@@ -719,11 +717,48 @@ def test_chat_completions_uses_runtime_global_main_config_for_scoped_default_age
                 },
             )
             assert second.status == 200
+            first_meta = (await first.json()).get("slavik_meta")
+            second_meta = (await second.json()).get("slavik_meta")
+            assert isinstance(first_meta, dict)
+            assert isinstance(second_meta, dict)
+            assert first_meta.get("session_id") == "__principal__"
+            assert second_meta.get("session_id") == "__principal__"
             assert len(captured_main_configs) == 1
             captured = captured_main_configs[0]
             assert captured is not None
             assert captured.provider == "openrouter"
             assert captured.model == "gryphe/mythomax-l2-13b"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_chat_completions_rejects_mismatched_runtime_session_scope(monkeypatch, tmp_path) -> None:
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+
+    async def run() -> None:
+        client = await _create_client(agent, trace_path, monkeypatch)
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"X-Slavik-Session": "session-a"},
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                    "slavik_meta": {
+                        "runtime_mode": "auto",
+                        "runtime_session_id": "session-b",
+                    },
+                },
+            )
+
+            assert response.status == 400
+            payload = await response.json()
+            assert payload["error"]["code"] == "session_scope_mismatch"
+            assert agent.runtime_state_calls == []
         finally:
             await client.close()
 

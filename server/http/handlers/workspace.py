@@ -21,6 +21,7 @@ from server.http.common.workspace_paths import browse_directories
 from server.http_api import (
     POLICY_PROFILES,
     UI_SESSION_HEADER,
+    _agent_scope,
     _build_ui_approval_decision,
     _decision_workflow_context,
     _index_workspace_root,
@@ -129,7 +130,7 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
 
     require_approval = profile == "yolo"
     required_category = "FS_OUTSIDE_WORKSPACE"
-    approved = await session_store.get_categories(session_id)
+    approved = await session_store.get_categories(_agent_scope(request, session_id))
     if not require_approval or required_category in approved:
         await hub.set_workspace_root(session_id, str(target_root))
         response = json_response(
@@ -325,7 +326,7 @@ async def _check_git_write_approval(
     from core.approval_policy import ApprovalPrompt, ApprovalRequest
 
     session_store = request.app["session_store"]
-    approved_categories = await session_store.get_categories(session_id)
+    approved_categories = await session_store.get_categories(_agent_scope(request, session_id))
     required: list[ApprovalCategory] = ["EXEC_ARBITRARY"]
     missing = [c for c in required if c not in approved_categories]
     if not missing:
@@ -499,7 +500,7 @@ async def _resolve_workspace_session(
     if session_id is None:
         return None, None, set(), _session_forbidden_response()
     agent = await api._resolve_agent(request, session_id)
-    approved_categories = await session_store.get_categories(session_id)
+    approved_categories = await session_store.get_categories(_agent_scope(request, session_id))
     return agent, session_id, approved_categories, None
 
 

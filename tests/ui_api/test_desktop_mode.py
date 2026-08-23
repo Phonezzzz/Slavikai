@@ -10,6 +10,7 @@ from core.desktop_policy import (
     DesktopApprovalScope,
     DesktopPolicyStore,
 )
+from server.agent_provider import AgentScope
 
 from .fakes import *
 
@@ -117,6 +118,9 @@ def test_desktop_mode_transition_and_session_approval_lifecycle(tmp_path: Path) 
             assert enter_payload.get("mode") == "desktop"
 
             session_store = client.server.app["session_store"]
+            principal_id = await client.server.app["ui_hub"].get_session_principal_id(session_id)
+            assert isinstance(principal_id, str)
+            scope = AgentScope(principal_id=principal_id, session_id=session_id)
             rule = DesktopApprovalRule.create(
                 effect="allow",
                 source="session",
@@ -127,9 +131,9 @@ def test_desktop_mode_transition_and_session_approval_lifecycle(tmp_path: Path) 
                     risk_class="destructive",
                 ),
             )
-            await session_store.add_desktop_rule(session_id, rule)
-            await session_store.approve(session_id, {"NETWORK_RISK"})
-            assert await session_store.get_desktop_rules(session_id) == [rule]
+            await session_store.add_desktop_rule(scope, rule)
+            await session_store.approve(scope, {"NETWORK_RISK"})
+            assert await session_store.get_desktop_rules(scope) == [rule]
 
             leave = await client.post(
                 "/ui/api/mode",
@@ -137,8 +141,8 @@ def test_desktop_mode_transition_and_session_approval_lifecycle(tmp_path: Path) 
                 json={"mode": "ask"},
             )
             assert leave.status == 200
-            assert await session_store.get_desktop_rules(session_id) == []
-            assert await session_store.get_categories(session_id) == {"NETWORK_RISK"}
+            assert await session_store.get_desktop_rules(scope) == []
+            assert await session_store.get_categories(scope) == {"NETWORK_RISK"}
         finally:
             await client.close()
 
@@ -272,6 +276,9 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path) -> None:
             status = await client.get("/ui/api/status")
             session_id = (await status.json()).get("session_id")
             assert isinstance(session_id, str)
+            principal_id = await client.server.app["ui_hub"].get_session_principal_id(session_id)
+            assert isinstance(principal_id, str)
+            scope = AgentScope(principal_id=principal_id, session_id=session_id)
             await _select_local_model(client, session_id)
             enter = await client.post(
                 "/ui/api/mode",
@@ -308,7 +315,7 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path) -> None:
             assert approve.status == 200, (
                 payload,
                 agent.desktop_rule_snapshots,
-                await client.server.app["session_store"].get_desktop_rules(session_id),
+                await client.server.app["session_store"].get_desktop_rules(scope),
             )
             resume = payload.get("resume")
             assert isinstance(resume, dict) and resume.get("ok") is True
@@ -318,7 +325,7 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path) -> None:
                 agent.desktop_clear_count,
                 await client.server.app["ui_hub"].get_session_workflow(session_id),
             )
-            assert await client.server.app["session_store"].get_desktop_rules(session_id) == []
+            assert await client.server.app["session_store"].get_desktop_rules(scope) == []
             assert any(
                 event == "desktop_approval_decision"
                 and message == "approve_once"

@@ -124,6 +124,14 @@ def _owner_principal_id(auth_config: HttpAuthConfig) -> str:
     return "local_unauth"
 
 
+def _automation_principal_id(auth_config: HttpAuthConfig) -> str:
+    if auth_config.allow_unauth_local:
+        return "local_unauth"
+    if auth_config.api_token:
+        return _principal_id_from_token(auth_config.api_token)
+    raise RuntimeError("Automation principal is unavailable")
+
+
 async def _resolve_ui_request_identity(
     request: web.Request,
     auth_config: HttpAuthConfig,
