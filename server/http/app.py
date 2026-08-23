@@ -23,7 +23,7 @@ from llm.types import ModelConfig
 from server import http_api as api
 from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.embedding_download import EmbeddingDownloadManager
-from server.http.common.auth import _owner_principal_id
+from server.http.common.auth import _legacy_owner_principal_aliases, _owner_principal_id
 from server.http.common.chat_cancellation import ChatCancellationRegistry
 from server.http.common.idempotency import IdempotencyStore
 from server.http.common.request_identity import (
@@ -179,6 +179,7 @@ def create_app(
     app["ui_hub"] = UIHub(
         storage=resolved_ui_storage,
         legacy_principal_id=owner_principal_id,
+        legacy_principal_aliases=_legacy_owner_principal_aliases(resolved_auth_config),
     )
     app.on_cleanup.append(_close_chat_generations)
     app.on_cleanup.append(_close_terminal_manager)

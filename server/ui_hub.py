@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal, TypedDict, cast
@@ -259,6 +260,7 @@ class _SessionState:
 
 @dataclass
 class _FolderState:
+    principal_id: str
     name: str
     created_at: str = field(default_factory=_utc_iso_now)
     updated_at: str = field(default_factory=_utc_iso_now)
@@ -277,10 +279,25 @@ class UIHub:
         event_buffer_size: int = DEFAULT_EVENT_BUFFER_SIZE,
         event_buffer_ttl_seconds: int = DEFAULT_EVENT_BUFFER_TTL_SECONDS,
         legacy_principal_id: str = DEFAULT_LEGACY_PRINCIPAL_ID,
+        legacy_principal_aliases: Collection[str] = (),
     ) -> None:
         self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
         normalized_legacy_principal = legacy_principal_id.strip()
         self._legacy_principal_id = normalized_legacy_principal or DEFAULT_LEGACY_PRINCIPAL_ID
+        legacy_aliases = {
+            alias.strip()
+            for alias in legacy_principal_aliases
+            if isinstance(alias, str) and alias.strip()
+        }
+        legacy_aliases.add(DEFAULT_LEGACY_PRINCIPAL_ID)
+        migration_subject = hashlib.sha256(self._legacy_principal_id.encode("utf-8")).hexdigest()[
+            :16
+        ]
+        self._storage.migrate_principals_once(
+            migration_id=f"owner-principal-v1:{migration_subject}",
+            source_principal_ids=legacy_aliases,
+            target_principal_id=self._legacy_principal_id,
+        )
         self._sessions: dict[str, _SessionState] = {}
         self._folders: dict[str, _FolderState] = {}
         self._session_ttl_seconds = session_ttl_seconds
@@ -307,6 +324,7 @@ class UIHub:
         self._lock = asyncio.Lock()
         self._restore_sessions()
         self._restore_folders()
+        self._reconcile_session_folders()
 
     async def get_or_create_session(self, session_id: str | None, principal_id: str) -> str:
         normalized = session_id.strip() if session_id else ""
@@ -582,10 +600,13 @@ class UIHub:
                 for item in items
             ]
 
-    async def list_folders(self) -> list[dict[str, JSONValue]]:
+    async def list_folders(self, principal_id: str) -> list[dict[str, JSONValue]]:
+        normalized_principal = self._normalize_principal_id(principal_id)
         async with self._lock:
             items: list[dict[str, JSONValue]] = []
             for folder_id, state in self._folders.items():
+                if state.principal_id != normalized_principal:
+                    continue
                 items.append(
                     {
                         "folder_id": folder_id,
@@ -597,13 +618,17 @@ class UIHub:
             items.sort(key=lambda item: str(item["updated_at"]), reverse=True)
             return items
 
-    async def create_folder(self, name: str) -> dict[str, JSONValue]:
+    async def create_folder(self, name: str, principal_id: str) -> dict[str, JSONValue]:
         normalized = name.strip()
         if not normalized:
             raise ValueError("folder name required")
+        normalized_principal = self._normalize_principal_id(principal_id)
         async with self._lock:
             for folder_id, state in self._folders.items():
-                if state.name.lower() == normalized.lower():
+                if (
+                    state.principal_id == normalized_principal
+                    and state.name.lower() == normalized.lower()
+                ):
                     return {
                         "folder_id": folder_id,
                         "name": state.name,
@@ -613,6 +638,7 @@ class UIHub:
             folder_id = uuid.uuid4().hex
             now = _utc_iso_now()
             self._folders[folder_id] = _FolderState(
+                principal_id=normalized_principal,
                 name=normalized,
                 created_at=now,
                 updated_at=now,
@@ -623,6 +649,7 @@ class UIHub:
                     name=normalized,
                     created_at=now,
                     updated_at=now,
+                    principal_id=normalized_principal,
                 ),
             )
             return {
@@ -659,7 +686,8 @@ class UIHub:
                 raise KeyError("session not found")
             normalized_folder = folder_id.strip() if folder_id else None
             if normalized_folder:
-                if normalized_folder not in self._folders:
+                folder = self._folders.get(normalized_folder)
+                if folder is None or folder.principal_id != state.principal_id:
                     raise KeyError("folder not found")
             if state.folder_id == normalized_folder:
                 return {"session_id": session_id, "folder_id": normalized_folder}
@@ -750,6 +778,10 @@ class UIHub:
                 if existing is not None and existing.principal_id != normalized_principal:
                     continue
                 subscribers = dict(existing.subscribers) if existing is not None else {}
+                folder_id = item.folder_id.strip() if item.folder_id else None
+                folder = self._folders.get(folder_id) if folder_id is not None else None
+                if folder is None or folder.principal_id != normalized_principal:
+                    folder_id = None
                 self._sessions[item.session_id] = _SessionState(
                     principal_id=normalized_principal,
                     messages=[dict(message) for message in item.messages],
@@ -764,7 +796,7 @@ class UIHub:
                     model_provider=item.model_provider,
                     model_id=item.model_id,
                     title_override=item.title_override,
-                    folder_id=item.folder_id,
+                    folder_id=folder_id,
                     workspace_root=item.workspace_root,
                     policy_profile=self._normalize_policy_profile(item.policy_profile),
                     tools_state=(self._normalize_tools_state(item.tools_state)),
@@ -1531,6 +1563,9 @@ class UIHub:
             return self._legacy_principal_id
         return normalized
 
+    def _normalize_persisted_principal_id(self, value: str | None) -> str:
+        return self._normalize_principal_id(value)
+
     def _normalize_mode(self, value: str | None) -> SessionMode:
         normalized = value.strip().lower() if isinstance(value, str) else ""
         if normalized == "plan":
@@ -1807,7 +1842,7 @@ class UIHub:
                 decision_id = decision.get("id")
                 if isinstance(decision_id, str):
                     last_decision_id = decision_id
-            principal_id = self._normalize_principal_id(restored.principal_id)
+            principal_id = self._normalize_persisted_principal_id(restored.principal_id)
             self._sessions[restored.session_id] = _SessionState(
                 principal_id=principal_id,
                 messages=[dict(message) for message in restored.messages],
@@ -1842,12 +1877,38 @@ class UIHub:
             self._persist_session_locked(session_id)
 
     def _restore_folders(self) -> None:
+        migrated_folder_ids: list[str] = []
         for item in self._storage.load_folders():
+            principal_id = self._normalize_persisted_principal_id(item.principal_id)
             self._folders[item.folder_id] = _FolderState(
+                principal_id=principal_id,
                 name=item.name,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
             )
+            if item.principal_id != principal_id:
+                migrated_folder_ids.append(item.folder_id)
+        for folder_id in migrated_folder_ids:
+            state = self._folders[folder_id]
+            self._storage.save_folder(
+                PersistedFolder(
+                    folder_id=folder_id,
+                    name=state.name,
+                    created_at=state.created_at,
+                    updated_at=state.updated_at,
+                    principal_id=state.principal_id,
+                )
+            )
+
+    def _reconcile_session_folders(self) -> None:
+        for session_id, state in self._sessions.items():
+            if state.folder_id is None:
+                continue
+            folder = self._folders.get(state.folder_id)
+            if folder is not None and folder.principal_id == state.principal_id:
+                continue
+            state.folder_id = None
+            self._persist_session_locked(session_id)
 
     def _persist_session_locked(self, session_id: str) -> None:
         state = self._sessions.get(session_id)

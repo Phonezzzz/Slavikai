@@ -40,9 +40,15 @@ class WorkspaceRuntimeBindings:
             workspace_root=self._workspace_root(),
         )
 
-    def index_workspace_root(self, root: Path) -> dict[str, JSONValue]:
+    def index_workspace_root(
+        self,
+        root: Path,
+        *,
+        vectors_db_path: Path,
+    ) -> dict[str, JSONValue]:
         return workspace_index.index_workspace_root(
             root=root,
+            vectors_db_path=vectors_db_path,
             load_embeddings_settings=self.load_embeddings_settings_fn,
             resolve_provider_api_key=self.resolve_provider_api_key_fn,
             index_enabled_env=self.index_enabled_env,

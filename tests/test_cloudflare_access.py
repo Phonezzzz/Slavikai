@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -19,7 +20,12 @@ from server.http.common.request_identity import (
     CloudflareAccessTokenError,
     VerifiedAccessClaims,
 )
-from server.ui_session_storage import InMemoryUISessionStorage, PersistedSession
+from server.principal_storage import principal_storage_paths
+from server.ui_session_storage import (
+    InMemoryUISessionStorage,
+    PersistedFolder,
+    PersistedSession,
+)
 from tests.ui_api.fakes import DummyAgent
 
 
@@ -301,15 +307,28 @@ def test_cloudflare_browser_lane_is_separate_from_bearer_automation(tmp_path: Pa
 
 def test_cloudflare_owner_receives_legacy_sessions(tmp_path: Path) -> None:
     storage = InMemoryUISessionStorage()
-    storage.save_session(
-        PersistedSession(
-            session_id="legacy-session",
-            principal_id="legacy",
+    token_principal = f"principal_{hashlib.sha256(b'automation-token').hexdigest()[:16]}"
+    for session_id, principal_id in (
+        ("legacy-session", "legacy"),
+        ("token-cookie-session", token_principal),
+    ):
+        storage.save_session(
+            PersistedSession(
+                session_id=session_id,
+                principal_id=principal_id,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                status="ok",
+                decision=None,
+                messages=[],
+            )
+        )
+    storage.save_folder(
+        PersistedFolder(
+            folder_id="legacy-folder",
+            name="Legacy",
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
-            status="ok",
-            decision=None,
-            messages=[],
         )
     )
     app = create_app(
@@ -327,6 +346,161 @@ def test_cloudflare_owner_receives_legacy_sessions(tmp_path: Path) -> None:
     )
 
     sessions = storage.load_sessions()
+    folders = storage.load_folders()
 
-    assert sessions[0].principal_id == "email:owner@example.com"
+    assert {session.principal_id for session in sessions} == {"email:owner@example.com"}
+    assert folders[0].principal_id == "email:owner@example.com"
     assert app["ui_hub"] is not None
+
+    storage.save_session(
+        PersistedSession(
+            session_id="new-automation-session",
+            principal_id=token_principal,
+            created_at="2026-01-02T00:00:00+00:00",
+            updated_at="2026-01-02T00:00:00+00:00",
+            status="ok",
+            decision=None,
+            messages=[],
+        )
+    )
+    restarted = create_app(
+        agent=DummyAgent(),
+        ui_storage=storage,
+        auth_config=HttpAuthConfig(
+            api_token="automation-token",
+            browser_auth_mode="cloudflare",
+            cloudflare_access_issuer="https://example.cloudflareaccess.com",
+            cloudflare_access_aud="application-aud",
+            owner_email="owner@example.com",
+        ),
+        cloudflare_access_verifier=StubAccessVerifier({}),
+        desktop_policy_store=DesktopPolicyStore(tmp_path / "desktop-approvals-restart.json"),
+    )
+    restarted_sessions = {item.session_id: item for item in storage.load_sessions()}
+    assert restarted_sessions["new-automation-session"].principal_id == token_principal
+    assert restarted["ui_hub"] is not None
+
+
+def test_cloudflare_folders_are_isolated_by_principal(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = create_app(
+            agent=DummyAgent(),
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(
+                api_token="automation-token",
+                browser_auth_mode="cloudflare",
+                cloudflare_access_issuer="https://example.cloudflareaccess.com",
+                cloudflare_access_aud="application-aud",
+                owner_email="owner@example.com",
+            ),
+            cloudflare_access_verifier=StubAccessVerifier(
+                {
+                    "owner-token": VerifiedAccessClaims(email="owner@example.com"),
+                    "member-token": VerifiedAccessClaims(email="member@example.com"),
+                }
+            ),
+            desktop_policy_store=DesktopPolicyStore(tmp_path / "desktop-approvals.json"),
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            owner_headers = {"Cf-Access-Jwt-Assertion": "owner-token"}
+            member_headers = {"Cf-Access-Jwt-Assertion": "member-token"}
+            owner_create = await client.post(
+                "/ui/api/folders", headers=owner_headers, json={"name": "Work"}
+            )
+            member_create = await client.post(
+                "/ui/api/folders", headers=member_headers, json={"name": "Work"}
+            )
+            owner_folder = (await owner_create.json())["folder"]
+            member_folder = (await member_create.json())["folder"]
+            assert owner_folder["folder_id"] != member_folder["folder_id"]
+
+            owner_list = await client.get("/ui/api/folders", headers=owner_headers)
+            member_list = await client.get("/ui/api/folders", headers=member_headers)
+            assert (await owner_list.json())["folders"] == [owner_folder]
+            assert (await member_list.json())["folders"] == [member_folder]
+
+            owner_session_response = await client.post("/ui/api/sessions", headers=owner_headers)
+            owner_session = (await owner_session_response.json())["session"]
+            foreign_assignment = await client.put(
+                f"/ui/api/sessions/{owner_session['session_id']}/folder",
+                headers=owner_headers,
+                json={"folder_id": member_folder["folder_id"]},
+            )
+            assert foreign_assignment.status == 404
+            assert (await foreign_assignment.json())["error"]["code"] == "folder_not_found"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_workspace_index_uses_principal_vector_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_paths: list[Path] = []
+
+    def capture_index(_root: Path, *, vectors_db_path: Path) -> dict[str, object]:
+        captured_paths.append(vectors_db_path)
+        return {
+            "ok": True,
+            "indexed_code": 0,
+            "indexed_docs": 0,
+            "skipped": 0,
+        }
+
+    monkeypatch.setattr(
+        "server.http.handlers.workspace._index_workspace_root",
+        capture_index,
+    )
+
+    async def run() -> None:
+        app = create_app(
+            agent=DummyAgent(),
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(
+                api_token="automation-token",
+                browser_auth_mode="cloudflare",
+                cloudflare_access_issuer="https://example.cloudflareaccess.com",
+                cloudflare_access_aud="application-aud",
+                owner_email="owner@example.com",
+            ),
+            cloudflare_access_verifier=StubAccessVerifier(
+                {
+                    "owner-token": VerifiedAccessClaims(email="owner@example.com"),
+                    "member-token": VerifiedAccessClaims(email="member@example.com"),
+                }
+            ),
+            desktop_policy_store=DesktopPolicyStore(tmp_path / "desktop-approvals.json"),
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            for token in ("owner-token", "member-token"):
+                headers = {"Cf-Access-Jwt-Assertion": token}
+                session_response = await client.post("/ui/api/sessions", headers=headers)
+                session_id = (await session_response.json())["session"]["session_id"]
+                response = await client.post(
+                    "/ui/api/workspace/index",
+                    headers={**headers, "X-Slavik-Session": session_id},
+                )
+                assert response.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+    memory_root = Path(__file__).resolve().parents[1] / "memory"
+    owner = principal_storage_paths(
+        principal_id="email:owner@example.com",
+        owner_principal_id="email:owner@example.com",
+        memory_root=memory_root,
+    )
+    member = principal_storage_paths(
+        principal_id="email:member@example.com",
+        owner_principal_id="email:owner@example.com",
+        memory_root=memory_root,
+    )
+    assert captured_paths == [owner.vectors_db, member.vectors_db]

@@ -367,12 +367,28 @@ async def handle_ui_sessions_list(request: web.Request) -> web.Response:
 
 async def handle_ui_folders_list(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
-    folders = await hub.list_folders()
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
+    folders = await hub.list_folders(principal_id)
     return json_response({"folders": folders})
 
 
 async def handle_ui_folders_create(request: web.Request) -> web.Response:
     hub: UIHub = request.app["ui_hub"]
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
+        return error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
+        )
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -398,7 +414,7 @@ async def handle_ui_folders_create(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
     try:
-        folder = await hub.create_folder(name_raw)
+        folder = await hub.create_folder(name_raw, principal_id)
     except ValueError:
         return error_response(
             status=400,
