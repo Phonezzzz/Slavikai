@@ -53,9 +53,6 @@ from server.http.common import (
     workflow_runtime as _workflow_runtime,
 )
 from server.http.common.auth import (
-    AUTH_PROTECTED_PREFIXES as AUTH_PROTECTED_PREFIXES,
-)
-from server.http.common.auth import (
     _ensure_session_owned as _ensure_session_owned,
 )
 from server.http.common.auth import (
@@ -63,9 +60,6 @@ from server.http.common.auth import (
 )
 from server.http.common.auth import (
     _extract_ui_session_id as _extract_ui_session_id,
-)
-from server.http.common.auth import (
-    _is_auth_protected_path as _is_auth_protected_path,
 )
 from server.http.common.auth import (
     _principal_id_from_token as _principal_id_from_token,

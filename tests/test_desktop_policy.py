@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -251,6 +252,44 @@ def test_legacy_command_pattern_is_rejected_instead_of_broadening_scope() -> Non
                 "command_pattern": "git *",
             }
         )
+
+
+def test_policy_store_skips_invalid_legacy_rule_without_broadening(tmp_path: Path) -> None:
+    store_path = tmp_path / "desktop-approvals.json"
+    store_path.write_text(
+        json.dumps(
+            [
+                {
+                    "rule_id": "legacy-pattern",
+                    "effect": "allow",
+                    "source": "persistent",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "scope": {
+                        "tool": "desktop_shell",
+                        "action": "execute",
+                        "command_pattern": "git *",
+                    },
+                },
+                DesktopApprovalRule.create(
+                    effect="deny",
+                    source="persistent",
+                    scope=DesktopApprovalScope(
+                        tool="desktop_file_delete",
+                        action="delete",
+                        target_pattern="/tmp/protected",
+                    ),
+                ).to_dict(),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    store = DesktopPolicyStore(store_path)
+
+    rules = store.list_rules()
+
+    assert len(rules) == 1
+    assert rules[0].effect == "deny"
+    assert "command_pattern больше не поддерживается" in store.list_load_errors()[0]
 
 
 def test_transfer_checks_protected_source_and_destination(tmp_path: Path) -> None:

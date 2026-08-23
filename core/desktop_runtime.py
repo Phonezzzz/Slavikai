@@ -61,7 +61,6 @@ class DesktopExecutionControl:
     def bind(self, token: asyncio.Event | None) -> None:
         with self._lock:
             self._token = token
-            self._launched_processes.clear()
 
     def clear(self) -> None:
         with self._lock:
@@ -81,6 +80,25 @@ class DesktopExecutionControl:
             self._launched_processes.clear()
             return launched
 
+    def restore_launches(self, processes: Sequence[subprocess.Popen[bytes]]) -> None:
+        with self._lock:
+            for process in processes:
+                if process.poll() is None:
+                    self._launched_processes[process.pid] = process
+
+
+class DesktopRunCoordinator:
+    """One non-blocking lease for the shared physical Desktop host."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        return self._lock.acquire(blocking=False)
+
+    def release(self) -> None:
+        self._lock.release()
+
 
 @dataclass(frozen=True, slots=True)
 class DesktopRunOutcome:
@@ -90,12 +108,42 @@ class DesktopRunOutcome:
 
 
 class DesktopRuntime:
-    def __init__(self, parent: DesktopAgentProtocol, *, max_iterations: int = 12) -> None:
+    def __init__(
+        self,
+        parent: DesktopAgentProtocol,
+        *,
+        max_iterations: int = 12,
+        run_coordinator: DesktopRunCoordinator | None = None,
+    ) -> None:
         self.parent = parent
         self.max_iterations = max(2, max_iterations)
         self.verifier = VerifierRuntime()
+        self.run_coordinator = run_coordinator or DesktopRunCoordinator()
 
     def run(
+        self,
+        goal: str,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> DesktopRunOutcome:
+        if not self.run_coordinator.try_acquire():
+            verification = _failed_verification("desktop_host_busy")
+            empty = AgentToolLoopResult(
+                text="",
+                messages=[],
+                error="desktop_host_busy",
+            )
+            return DesktopRunOutcome(
+                text="Desktop task stopped: another Desktop run is active.",
+                verification=verification,
+                loop_result=empty,
+            )
+        try:
+            return self._run_with_lease(goal, cancellation_token=cancellation_token)
+        finally:
+            self.run_coordinator.release()
+
+    def _run_with_lease(
         self,
         goal: str,
         *,
@@ -160,17 +208,18 @@ class DesktopRuntime:
             self.parent.desktop_execution_control.clear()
         verification = self._verify(loop_result.tool_calls)
         if loop_result.cancelled:
-            self._cleanup_unverified_launches(gateway)
+            cleanup = self._cleanup_unverified_launches(gateway)
+            cleanup_suffix = _cleanup_failure_suffix(cleanup)
             return DesktopRunOutcome(
-                text="Desktop task cancelled before further host actions.",
+                text=f"Desktop task cancelled before further host actions.{cleanup_suffix}",
                 verification=_failed_verification("desktop_task_cancelled"),
                 loop_result=loop_result,
             )
         if loop_result.error is not None or verification.status != VerificationStatus.PASSED:
-            self._cleanup_unverified_launches(gateway)
+            cleanup = self._cleanup_unverified_launches(gateway)
             reason = loop_result.error or verification.error or "desktop_verification_failed"
             return DesktopRunOutcome(
-                text=f"Desktop task stopped: {reason}",
+                text=f"Desktop task stopped: {reason}{_cleanup_failure_suffix(cleanup)}",
                 verification=verification,
                 loop_result=loop_result,
             )
@@ -183,7 +232,22 @@ class DesktopRuntime:
         return self.verifier.verify_desktop_observations(observations)
 
     def _cleanup_unverified_launches(self, gateway: ToolGateway) -> ToolResult:
-        return gateway.call(ToolRequest("desktop_cleanup_unverified_launches", {}))
+        result = gateway.call(ToolRequest("desktop_cleanup_unverified_launches", {}))
+        tracer = getattr(self.parent, "tracer", None)
+        log = getattr(tracer, "log", None)
+        if callable(log):
+            log(
+                "desktop_unverified_launch_cleanup",
+                "Unverified Desktop launch rollback completed"
+                if result.ok
+                else "Unverified Desktop launch rollback failed",
+                {
+                    "ok": result.ok,
+                    "error": result.error,
+                    "details": dict(result.data),
+                },
+            )
+        return result
 
     def _close_resources(self) -> None:
         close = getattr(self.parent, "close_desktop_resources", None)
@@ -215,3 +279,10 @@ def _failed_verification(reason: str) -> VerificationResult:
         excerpt=reason,
         verifier_profile="desktop_observation",
     )
+
+
+def _cleanup_failure_suffix(result: ToolResult) -> str:
+    if result.ok:
+        return ""
+    reason = result.error or "unknown cleanup error"
+    return f"; desktop_cleanup_failed: {reason}"

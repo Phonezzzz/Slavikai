@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop
+from llm.stream_model import Done, ToolCallCompleted
 from llm.types import LLMResult, ToolCall, ToolSpec
 from shared.models import LLMMessage, ToolResult
 from tools.tool_registry import ToolRegistry
@@ -71,8 +72,68 @@ def test_agent_tool_loop_stops_after_max_iterations() -> None:
         brain=AlwaysToolBrain(),  # type: ignore[arg-type]
         gateway=ToolGateway(registry),
         messages=[LLMMessage(role="user", content="go")],
-        tools=[],
+        tools=registry.list_tool_specs(),
     )
 
     assert result.iterations == 2
     assert len(result.tool_calls) == 2
+
+
+def test_agent_tool_loop_blocks_registered_tool_not_exposed_to_model() -> None:
+    class HiddenToolBrain:
+        def generate(self, messages, config=None, tools=None):  # type: ignore[override]
+            del messages, config, tools
+            return LLMResult(
+                text="hidden",
+                tool_calls=[ToolCall(id="hidden-1", name="runtime_cleanup", arguments={})],
+            )
+
+    calls: list[str] = []
+    registry = ToolRegistry()
+    registry.register(
+        "runtime_cleanup",
+        lambda request: calls.append(request.name) or ToolResult.success({}),
+        model_exposed=False,
+    )
+
+    result = AgentToolLoop(max_iterations=1).run(
+        brain=HiddenToolBrain(),  # type: ignore[arg-type]
+        gateway=ToolGateway(registry),
+        messages=[LLMMessage(role="user", content="go")],
+        tools=registry.list_tool_specs(),
+    )
+
+    assert calls == []
+    assert result.tool_calls[0].result.meta["policy_reason"] == "model_tool_not_exposed"
+
+
+def test_streaming_tool_loop_blocks_registered_tool_not_exposed_to_model() -> None:
+    class HiddenStreamingBrain:
+        def generate_stream_events(self, messages, config=None, tools=None):  # type: ignore[override]
+            del messages, config, tools
+            yield ToolCallCompleted(
+                call=ToolCall(id="hidden-stream-1", name="runtime_cleanup", arguments={})
+            )
+            yield Done()
+
+    calls: list[str] = []
+    registry = ToolRegistry()
+    registry.register(
+        "runtime_cleanup",
+        lambda request: calls.append(request.name) or ToolResult.success({}),
+        model_exposed=False,
+    )
+
+    events = list(
+        AgentToolLoop(max_iterations=1).run_stream_events(
+            brain=HiddenStreamingBrain(),  # type: ignore[arg-type]
+            gateway=ToolGateway(registry),
+            messages=[LLMMessage(role="user", content="go")],
+            tools=registry.list_tool_specs(),
+        )
+    )
+
+    completed = next(event for event in events if isinstance(event, ToolCallCompleted))
+    assert calls == []
+    assert completed.result is not None
+    assert completed.result.meta["policy_reason"] == "model_tool_not_exposed"

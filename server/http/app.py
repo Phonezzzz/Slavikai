@@ -19,10 +19,16 @@ from config.http_server_config import (
 )
 from config.model_store import load_model_configs
 from core.desktop_policy import DesktopPolicyStore
+from core.desktop_runtime import DesktopRunCoordinator
 from server import http_api as api
 from server.embedding_download import EmbeddingDownloadManager
+from server.http.common.auth import _owner_principal_id
 from server.http.common.chat_cancellation import ChatCancellationRegistry
 from server.http.common.idempotency import IdempotencyStore
+from server.http.common.request_identity import (
+    CloudflareAccessJWTVerifier,
+    CloudflareAccessVerifier,
+)
 from server.http.common.runtime_contract import AgentProtocol, SessionApprovalStore
 from server.http.common.runtime_model_state import (
     RuntimeModelResolver,
@@ -84,6 +90,7 @@ def create_app(
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
     auth_config: HttpAuthConfig | None = None,
+    cloudflare_access_verifier: CloudflareAccessVerifier | None = None,
     desktop_policy_store: DesktopPolicyStore | None = None,
 ) -> web.Application:
     _load_project_dotenv()
@@ -94,6 +101,14 @@ def create_app(
         middlewares=[api.auth_gate_middleware],
     )
     app["auth_config"] = resolved_auth_config
+    if resolved_auth_config.browser_auth_mode == "cloudflare":
+        app["cloudflare_access_verifier"] = (
+            cloudflare_access_verifier
+            or CloudflareAccessJWTVerifier(
+                issuer=resolved_auth_config.cloudflare_access_issuer,
+                audience=resolved_auth_config.cloudflare_access_aud,
+            )
+        )
     app["http_api_logger"] = logger
     app["settings_snapshot_builder"] = api._build_settings_payload
     runtime_model_state = build_runtime_model_state_from_persisted(
@@ -101,8 +116,12 @@ def create_app(
     )
     app["runtime_model_state"] = runtime_model_state
     app["runtime_model_resolver"] = RuntimeModelResolver(runtime_model_state)
+    owner_principal_id = _owner_principal_id(resolved_auth_config)
+    desktop_run_coordinator = DesktopRunCoordinator()
+    app["desktop_run_coordinator"] = desktop_run_coordinator
     resolved_desktop_policy_store = desktop_policy_store or DesktopPolicyStore(
-        api.PROJECT_ROOT / ".run" / "desktop_approvals.json"
+        api.PROJECT_ROOT / ".run" / "desktop_approvals.json",
+        legacy_subject_principal_id=owner_principal_id,
     )
     app["desktop_policy_store"] = resolved_desktop_policy_store
     if agent is None:
@@ -122,6 +141,7 @@ def create_app(
                     embeddings_openai_model=embeddings_settings.openai_model,
                     embeddings_openai_api_key=api._resolve_provider_api_key("openai"),
                     desktop_policy_store=resolved_desktop_policy_store,
+                    desktop_run_coordinator=desktop_run_coordinator,
                 ),
             )
 
@@ -139,7 +159,10 @@ def create_app(
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )
-    app["ui_hub"] = UIHub(storage=resolved_ui_storage)
+    app["ui_hub"] = UIHub(
+        storage=resolved_ui_storage,
+        legacy_principal_id=owner_principal_id,
+    )
     app.on_cleanup.append(_close_chat_generations)
     app.on_cleanup.append(_close_terminal_manager)
     app.on_cleanup.append(_close_embedding_downloads)

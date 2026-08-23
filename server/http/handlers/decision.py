@@ -16,6 +16,7 @@ from core.desktop_policy import (
     DesktopPolicyStore,
     RuleSource,
 )
+from server.http.common.auth import _request_principal_id, _require_owner
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
@@ -221,6 +222,10 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
+    if choice == "always_allow":
+        owner_error = _require_owner(request)
+        if owner_error is not None:
+            return owner_error
 
     current_decision = _normalize_ui_decision(
         await hub.get_session_decision(session_id),
@@ -497,12 +502,20 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         }:
             if choice == "always_allow":
                 persistent_store: DesktopPolicyStore = request.app["desktop_policy_store"]
+                principal_id = _request_principal_id(request)
+                if principal_id is None:
+                    return {
+                        "ok": False,
+                        "error": "request_principal_missing",
+                        "source_endpoint": source_endpoint,
+                    }
                 persistent_store.add_rule(
                     DesktopApprovalRule.create(
                         effect="allow",
                         scope=desktop_scope,
                         source="persistent",
                         description="Approved from Desktop UI",
+                        subject_principal_id=principal_id,
                     )
                 )
             else:

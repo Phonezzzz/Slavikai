@@ -337,12 +337,13 @@ class AgentToolsMixin:
     def set_desktop_policy_context(
         self,
         rules: list[DesktopApprovalRule],
+        principal_id: str = "legacy",
     ) -> None:
-        persistent = self.desktop_policy_store.list_rules()
+        persistent = self.desktop_policy_store.list_rules(subject_principal_id=principal_id)
         self.desktop_policy_runtime = DesktopPolicyRuntime([*persistent, *rules])
 
     def clear_desktop_policy_context(self) -> None:
-        self.desktop_policy_runtime = DesktopPolicyRuntime(self.desktop_policy_store.list_rules())
+        self.desktop_policy_runtime = DesktopPolicyRuntime()
 
     def drain_consumed_desktop_rule_ids(self) -> list[str]:
         return self.desktop_policy_runtime.drain_consumed_rule_ids()

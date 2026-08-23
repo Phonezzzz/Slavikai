@@ -42,7 +42,12 @@ class DesktopApprovalAgent(DummyAgent):
         self.completed = 0
         self.tracer = CapturingTracer()
 
-    def set_desktop_policy_context(self, rules: list[DesktopApprovalRule]) -> None:
+    def set_desktop_policy_context(
+        self,
+        rules: list[DesktopApprovalRule],
+        principal_id: str = "legacy",
+    ) -> None:
+        del principal_id
         self.desktop_rules = list(rules)
         self.desktop_rule_snapshots.append(list(rules))
 

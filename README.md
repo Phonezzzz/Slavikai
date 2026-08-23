@@ -7,7 +7,8 @@ SlavikAI — self-hosted AI workspace с browser UI, сессиями, памя�
 
 ## Что уже можно использовать
 
-- Browser UI с текущим legacy token login и сохранением истории чатов.
+- Browser UI с Cloudflare Access owner/member auth для production и legacy token login для
+  локального beta-запуска.
 - DeepSeek, OpenRouter, xAI, Inception и OpenAI-compatible local chat providers.
 - Выбор глобальной chat-модели и API key через `Settings → API Keys`.
 - Local или OpenAI embeddings; local model скачивается через
@@ -82,8 +83,8 @@ make check
 
 ## Статус beta
 
-Beta предназначена для контролируемого self-hosted использования. Текущая browser auth ещё
-не реализует целевой Cloudflare Access owner/member contract и полную principal isolation.
-До завершения соответствующего security PR не открывай UI нескольким внешним пользователям.
-Не выдавай проекту доступ к критичным workspace или production secrets без ограничений
-approvals и OS user.
+Beta предназначена для контролируемого self-hosted использования. Cloudflare Access JWT
+проверяется origin-сервером, но полная principal isolation Memory/vector/runtime state ещё не
+завершена. До завершения isolation PR не открывай один instance нескольким внешним
+пользователям. Не выдавай проекту доступ к критичным workspace или production secrets без
+ограничений approvals и OS user.

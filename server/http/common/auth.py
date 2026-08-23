@@ -10,12 +10,19 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from config.http_server_config import HttpAuthConfig
+from server.http.common.request_identity import (
+    CloudflareAccessTokenError,
+    CloudflareAccessVerifier,
+    IdentityRole,
+    RequestIdentity,
+    normalize_email,
+    principal_id_for_email,
+)
 from server.http.common.responses import error_response
 
 if TYPE_CHECKING:
     from server.ui_hub import UIHub
 
-AUTH_PROTECTED_PREFIXES: tuple[str, ...] = ("/ui/api/", "/v1/", "/slavik/")
 AUTH_PUBLIC_PATHS: frozenset[str] = frozenset(
     {"/ui/api/auth/status", "/ui/api/auth/login", "/ui/api/auth/logout"}
 )
@@ -52,12 +59,6 @@ def _extract_bearer_token(request: web.Request) -> str | None:
         return None
     normalized = token.strip()
     return normalized or None
-
-
-def _is_auth_protected_path(path: str) -> bool:
-    if path in AUTH_PUBLIC_PATHS:
-        return False
-    return any(path.startswith(prefix) for prefix in AUTH_PROTECTED_PREFIXES)
 
 
 def _principal_id_from_token(token: str) -> str:
@@ -114,17 +115,117 @@ def _resolve_request_principal_id(
     return None
 
 
+def _owner_principal_id(auth_config: HttpAuthConfig) -> str:
+    if auth_config.browser_auth_mode == "cloudflare":
+        return principal_id_for_email(auth_config.owner_email)
+    if auth_config.allow_unauth_local:
+        return "local_unauth"
+    if auth_config.api_token:
+        return _principal_id_from_token(auth_config.api_token)
+    return "local_unauth"
+
+
+async def _resolve_ui_request_identity(
+    request: web.Request,
+    auth_config: HttpAuthConfig,
+) -> RequestIdentity | None:
+    if auth_config.browser_auth_mode == "cloudflare":
+        token = request.headers.get("Cf-Access-Jwt-Assertion", "").strip()
+        if not token:
+            return None
+        verifier: CloudflareAccessVerifier = request.app["cloudflare_access_verifier"]
+        try:
+            claims = await verifier.verify(token)
+        except CloudflareAccessTokenError as exc:
+            logging.getLogger("SlavikAI.HttpAPI").warning(
+                "Cloudflare Access assertion rejected",
+                extra={"reason": str(exc), "remote": request.remote},
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger("SlavikAI.HttpAPI").error(
+                "Cloudflare Access verification failed closed",
+                extra={"error": str(exc), "remote": request.remote},
+            )
+            return None
+        owner_email = normalize_email(auth_config.owner_email)
+        role: IdentityRole = "owner" if claims.email == owner_email else "member"
+        return RequestIdentity(
+            principal_id=principal_id_for_email(claims.email),
+            email=claims.email,
+            role=role,
+            auth_method="cloudflare_access",
+        )
+    if auth_config.allow_unauth_local:
+        return RequestIdentity(
+            principal_id="local_unauth",
+            role="owner",
+            auth_method="local",
+        )
+    presented_token = _extract_bearer_token(request)
+    if presented_token is not None:
+        principal_id = _principal_id_for_presented_token(presented_token, auth_config)
+        if principal_id is not None:
+            return RequestIdentity(
+                principal_id=principal_id,
+                role="owner",
+                auth_method="bearer",
+            )
+    presented_cookie = request.cookies.get(UI_AUTH_COOKIE, "").strip()
+    if presented_cookie:
+        principal_id = _principal_id_for_ui_cookie(presented_cookie, auth_config)
+        if principal_id is not None:
+            return RequestIdentity(
+                principal_id=principal_id,
+                role="owner",
+                auth_method="cookie",
+            )
+    return None
+
+
+def _resolve_automation_request_identity(
+    request: web.Request,
+    auth_config: HttpAuthConfig,
+) -> RequestIdentity | None:
+    if auth_config.allow_unauth_local:
+        return RequestIdentity(
+            principal_id="local_unauth",
+            role="automation",
+            auth_method="local",
+        )
+    presented_token = _extract_bearer_token(request)
+    if presented_token is None:
+        return None
+    principal_id = _principal_id_for_presented_token(presented_token, auth_config)
+    if principal_id is None:
+        return None
+    return RequestIdentity(
+        principal_id=principal_id,
+        role="automation",
+        auth_method="bearer",
+    )
+
+
 @web.middleware
 async def auth_gate_middleware(
     request: web.Request,
     handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
 ) -> web.StreamResponse:
-    if not _is_auth_protected_path(request.path):
+    is_ui_api = request.path.startswith("/ui/api/")
+    is_automation_api = request.path.startswith(("/v1/", "/slavik/"))
+    if not is_ui_api and not is_automation_api:
         return await handler(request)
     auth_config: HttpAuthConfig = request.app["auth_config"]
-    principal_id = _resolve_request_principal_id(request, auth_config)
-    if principal_id is not None:
-        request["principal_id"] = principal_id
+    if is_ui_api and auth_config.browser_auth_mode == "token" and request.path in AUTH_PUBLIC_PATHS:
+        return await handler(request)
+    identity = (
+        await _resolve_ui_request_identity(request, auth_config)
+        if is_ui_api
+        else _resolve_automation_request_identity(request, auth_config)
+    )
+    if identity is not None:
+        request["request_identity"] = identity
+        request["principal_id"] = identity.principal_id
         return await handler(request)
     if request.path == "/ui/api/settings":
         logger_raw = request.app.get("http_api_logger")
@@ -170,6 +271,23 @@ def _request_principal_id(request: web.Request) -> str | None:
         return None
     normalized = principal_raw.strip()
     return normalized or None
+
+
+def _request_identity(request: web.Request) -> RequestIdentity | None:
+    identity = request.get("request_identity")
+    return identity if isinstance(identity, RequestIdentity) else None
+
+
+def _require_owner(request: web.Request) -> web.Response | None:
+    identity = _request_identity(request)
+    if identity is not None and identity.role == "owner":
+        return None
+    return error_response(
+        status=403,
+        message="Owner access required.",
+        error_type="invalid_request_error",
+        code="owner_required",
+    )
 
 
 def _require_admin_bearer(request: web.Request) -> web.Response | None:

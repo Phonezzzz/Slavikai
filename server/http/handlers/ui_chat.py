@@ -13,6 +13,7 @@ from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
 from llm.types import ModelConfig
+from server.http.common.auth import _request_principal_id
 from server.http.common.chat_cancellation import (
     ActiveChatGeneration,
     ChatCancellationRegistry,
@@ -813,7 +814,10 @@ async def _handle_ui_send_impl(
                 if mode == "desktop":
                     if not callable(set_desktop_policy_context):
                         raise RuntimeError("Desktop policy context is unavailable")
-                    set_desktop_policy_context(desktop_rules)
+                    principal_id = _request_principal_id(request)
+                    if principal_id is None:
+                        raise RuntimeError("Request principal is unavailable")
+                    set_desktop_policy_context(desktop_rules, principal_id)
                 elif callable(clear_desktop_policy_context):
                     clear_desktop_policy_context()
             except Exception as exc:  # noqa: BLE001

@@ -9,9 +9,11 @@ from config.http_server_config import (
     DEFAULT_HOST,
     DEFAULT_MAX_REQUEST_BYTES,
     DEFAULT_PORT,
+    HttpAuthConfig,
     HttpServerConfig,
     ensure_http_auth_boot_config,
     load_http_server_config,
+    resolve_http_auth_config,
     resolve_http_server_config,
 )
 
@@ -106,3 +108,35 @@ def test_server_fails_start_without_api_token_when_local_unauth_disabled(
 
     with pytest.raises(RuntimeError):
         ensure_http_auth_boot_config()
+
+
+def test_cloudflare_auth_config_requires_complete_verified_identity_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SLAVIK_API_TOKEN", "automation-token")
+    monkeypatch.setenv("SLAVIK_BROWSER_AUTH", "cloudflare")
+    monkeypatch.setenv(
+        "SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN",
+        "team.cloudflareaccess.com",
+    )
+    monkeypatch.setenv("SLAVIK_CLOUDFLARE_ACCESS_AUD", "application-aud")
+    monkeypatch.setenv("SLAVIK_OWNER_EMAIL", "Owner@Example.COM")
+
+    resolved = ensure_http_auth_boot_config(resolve_http_auth_config())
+
+    assert resolved.cloudflare_access_issuer == "https://team.cloudflareaccess.com"
+    assert resolved.owner_email == "owner@example.com"
+
+
+def test_cloudflare_auth_config_rejects_local_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = HttpAuthConfig(
+        api_token="automation-token",
+        allow_unauth_local=True,
+        browser_auth_mode="cloudflare",
+        cloudflare_access_issuer="https://team.cloudflareaccess.com",
+        cloudflare_access_aud="application-aud",
+        owner_email="owner@example.com",
+    )
+
+    with pytest.raises(RuntimeError, match="ALLOW_UNAUTH_LOCAL"):
+        ensure_http_auth_boot_config(config)

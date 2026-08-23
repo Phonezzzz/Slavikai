@@ -23,15 +23,16 @@
   вынес layout/resize state и quick-open indexing/filtering в feature-модули,
   Workspace переименован в Computer (inspector/runtime для chat session), добавлены
   `AgentComputerRuntime`, `ComputerBackend` Protocol, `LocalComputerBackend` (default),
-  `ContainerComputerBackend` (opt-in/inactive). Browser auth использует token login и
-  подписанную HttpOnly-cookie; Plan draft получает executable steps через structured
+  `ContainerComputerBackend` (opt-in/inactive). Production browser auth проверяет Cloudflare
+  Access JWT и выводит owner/member principal из verified email; token login с подписанной
+  HttpOnly-cookie остаётся legacy local mode. Plan draft получает executable steps через structured
   `submit_plan` tool call; Auto отклоняет provider без native tools до запуска и применяет
   `tool_outcomes` verifier для generic workspace. Добавлен пользовательский режим Desktop:
   тот же provider-neutral `AgentToolLoop -> ToolGateway -> VerifierRuntime`, но с явным
   execution target `desktop`, host-only tool profile, детерминированной scoped policy
   `ALLOW|ASK|DENY` и lifecycle once/session/persistent approvals.
 - **Known partial contracts**: Ask всё ещё допускает explicit Memory write до mode gate и
-  hidden vector runtime init; browser Cloudflare identity, полная principal isolation,
+  hidden vector runtime init; полная principal isolation Agent/Memory/vector state,
   explicit Memory confirmation и strict public `model="slavik"` validation ещё не готовы.
 - **Current legacy runtime**: token-cookie browser auth, крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers

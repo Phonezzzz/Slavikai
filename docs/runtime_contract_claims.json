@@ -23,27 +23,30 @@
     {
       "id": "auth.browser.cloudflare_access",
       "scope": "security",
-      "status": "target",
+      "status": "implemented",
       "owner": "security",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
-        "docs/SOURCE_OF_TRUTH.md"
+        "tests/test_cloudflare_access.py",
+        "server/http/common/request_identity.py"
       ],
-      "summary": "Cloudflare Access JWT validation and verified-email principals are not implemented yet."
+      "summary": "Production browser auth validates Access JWT signature and claims, derives verified-email principals and keeps Bearer automation separate."
     },
     {
       "id": "identity.principal_isolation",
       "scope": "security",
       "status": "partial",
       "owner": "security",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/ui_api/test_auth_and_session.py",
-        "server/http/common/auth.py"
+        "server/http/common/auth.py",
+        "tests/test_cloudflare_access.py",
+        "tests/test_desktop_policy.py"
       ],
-      "summary": "Session ownership exists, but runtime state, Memory, vectors and persistent approvals are not fully principal-scoped."
+      "summary": "Sessions and persistent Desktop approvals are principal-scoped, but Agent runtime state, Memory and vectors are not fully isolated yet."
     },
     {
       "id": "runtime.ask.zero_side_effects",
@@ -126,15 +129,18 @@
     {
       "id": "desktop.shared_host_policy",
       "scope": "security",
-      "status": "partial",
+      "status": "implemented",
       "owner": "desktop",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/ARCH_CANON.md",
       "verified_by": [
         "tests/test_desktop_policy.py",
-        "tests/test_desktop_runtime.py"
+        "tests/test_desktop_runtime.py",
+        "tests/test_desktop_system_tools.py",
+        "tests/test_tool_loop.py",
+        "tests/test_cloudflare_access.py"
       ],
-      "summary": "Desktop policy exists, but owner-only persistence, global host serialization and PR 35 hardening are incomplete."
+      "summary": "Desktop uses owner-scoped persistent approvals, one shared-host run lease, dispatch allowlisting and observable retryable rollback."
     },
     {
       "id": "skills.per_run_instructions",

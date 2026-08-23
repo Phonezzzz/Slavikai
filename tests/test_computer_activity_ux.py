@@ -267,7 +267,7 @@ def test_drain_computer_events_returns_json_serializable_dicts() -> None:
         brain=brain,
         gateway=gw,
         messages=[LLMMessage(role="user", content="read a.py")],
-        tools=[],
+        tools=registry.list_tool_specs(),
     )
     events = log.drain()
     assert len(events) >= 1
@@ -301,7 +301,7 @@ def test_drain_then_hub_append_computer_events_round_trip() -> None:
             brain=brain,
             gateway=gw,
             messages=[LLMMessage(role="user", content="read a.py")],
-            tools=[],
+            tools=registry.list_tool_specs(),
         )
         events = log.drain()
         assert len(events) >= 1
@@ -362,7 +362,7 @@ def test_assistant_message_content_is_prose_not_raw_json() -> None:
             brain=brain,
             gateway=gw,
             messages=[LLMMessage(role="user", content="read a.py")],
-            tools=[],
+            tools=registry.list_tool_specs(),
         )
         # The final text is prose
         assert loop_result.text == "The file says: hello"
@@ -405,7 +405,7 @@ def test_tool_failure_assistant_prose_not_error_json() -> None:
             brain=brain,
             gateway=gw,
             messages=[LLMMessage(role="user", content="read missing.py")],
-            tools=[],
+            tools=registry.list_tool_specs(),
         )
         assert loop_result.text == "Sorry, the file was not found."
         assert not loop_result.text.startswith("{")

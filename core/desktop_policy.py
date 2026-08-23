@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import threading
@@ -16,6 +17,7 @@ PolicyEffect = Literal["allow", "ask", "deny"]
 RuleSource = Literal["builtin", "once", "session", "persistent"]
 
 DEFAULT_DESKTOP_POLICY_PATH = Path(".run/desktop_approvals.json")
+logger = logging.getLogger("SlavikAI.DesktopPolicy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +144,7 @@ class DesktopApprovalRule:
     source: RuleSource
     created_at: str
     description: str = ""
+    subject_principal_id: str = "legacy"
 
     def to_dict(self) -> dict[str, JSONValue]:
         return {
@@ -151,6 +154,7 @@ class DesktopApprovalRule:
             "source": self.source,
             "created_at": self.created_at,
             "description": self.description,
+            "subject_principal_id": self.subject_principal_id,
         }
 
     @classmethod
@@ -161,6 +165,7 @@ class DesktopApprovalRule:
         scope: DesktopApprovalScope,
         source: RuleSource,
         description: str = "",
+        subject_principal_id: str = "legacy",
     ) -> DesktopApprovalRule:
         return cls(
             rule_id=f"desktop-rule-{uuid.uuid4().hex}",
@@ -169,6 +174,7 @@ class DesktopApprovalRule:
             source=source,
             created_at=datetime.now(UTC).isoformat(),
             description=description.strip(),
+            subject_principal_id=subject_principal_id.strip() or "legacy",
         )
 
     @classmethod
@@ -188,6 +194,7 @@ class DesktopApprovalRule:
         if not isinstance(created_at, str) or not created_at.strip():
             raise ValueError("created_at должен быть непустой строкой")
         description_raw = raw.get("description")
+        subject_raw = raw.get("subject_principal_id")
         return cls(
             rule_id=rule_id.strip(),
             effect=effect,
@@ -195,6 +202,11 @@ class DesktopApprovalRule:
             source=source,
             created_at=created_at.strip(),
             description=description_raw.strip() if isinstance(description_raw, str) else "",
+            subject_principal_id=(
+                subject_raw.strip()
+                if isinstance(subject_raw, str) and subject_raw.strip()
+                else "legacy"
+            ),
         )
 
 
@@ -271,13 +283,33 @@ class DesktopPolicyRuntime:
 
 
 class DesktopPolicyStore:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        legacy_subject_principal_id: str = "legacy",
+    ) -> None:
         self.path = (path or DEFAULT_DESKTOP_POLICY_PATH).expanduser().resolve()
+        normalized_subject = legacy_subject_principal_id.strip()
+        self._legacy_subject_principal_id = normalized_subject or "legacy"
         self._lock = threading.Lock()
+        self._load_errors: list[str] = []
 
-    def list_rules(self) -> list[DesktopApprovalRule]:
+    def list_rules(
+        self,
+        *,
+        subject_principal_id: str | None = None,
+    ) -> list[DesktopApprovalRule]:
         with self._lock:
-            return self._load_locked()
+            rules = self._load_locked()
+            if subject_principal_id is None:
+                return rules
+            normalized_subject = subject_principal_id.strip()
+            return [rule for rule in rules if rule.subject_principal_id == normalized_subject]
+
+    def list_load_errors(self) -> list[str]:
+        with self._lock:
+            return list(self._load_errors)
 
     def add_rule(self, rule: DesktopApprovalRule) -> DesktopApprovalRule:
         if rule.source != "persistent":
@@ -331,12 +363,34 @@ class DesktopPolicyStore:
             return True
 
     def _load_locked(self) -> list[DesktopApprovalRule]:
+        self._load_errors = []
         if not self.path.exists():
             return []
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(raw, list):
             raise ValueError("Desktop approval store должен содержать JSON-массив")
-        return [DesktopApprovalRule.from_dict(item) for item in raw]
+        rules: list[DesktopApprovalRule] = []
+        migrated = False
+        for index, item in enumerate(raw):
+            try:
+                rule = DesktopApprovalRule.from_dict(item)
+                if rule.subject_principal_id == "legacy":
+                    rule = replace(
+                        rule,
+                        subject_principal_id=self._legacy_subject_principal_id,
+                    )
+                    migrated = True
+                rules.append(rule)
+            except ValueError as exc:
+                message = f"rule[{index}] skipped: {exc}"
+                self._load_errors.append(message)
+                logger.warning(
+                    "Invalid Desktop approval rule skipped",
+                    extra={"path": str(self.path), "index": index, "error": str(exc)},
+                )
+        if migrated and not self._load_errors:
+            self._write_locked(rules)
+        return rules
 
     def _write_locked(self, rules: list[DesktopApprovalRule]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
