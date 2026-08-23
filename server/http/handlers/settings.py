@@ -10,7 +10,7 @@ from aiohttp.multipart import BodyPartReader
 from config.memory_config import MemoryConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server import http_api as api
-from server.agent_provider import ScopedAgentProvider
+from server.agent_provider import AgentApplyFailure, ScopedAgentProvider
 from server.http.common.auth import _require_owner
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import RuntimeModelStateProtocol
@@ -18,6 +18,27 @@ from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 _SANDBOX_AUDIO_ROOT = Path("sandbox/audio").resolve()
+
+
+def _log_agent_apply_failures(
+    operation: str,
+    failures: tuple[AgentApplyFailure, ...],
+) -> None:
+    for failure in failures:
+        scope = failure.scope
+        logger.warning(
+            "Persisted settings could not be applied to an existing Agent",
+            extra={
+                "operation": operation,
+                "principal_id": scope.principal_id if scope is not None else "static",
+                "session_id": scope.session_id if scope is not None else "static",
+            },
+            exc_info=(
+                type(failure.error),
+                failure.error,
+                failure.error.__traceback__,
+            ),
+        )
 
 
 def _openai_error_message(response: object) -> str | None:
@@ -586,7 +607,8 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                     persist=False,
                 )
 
-            await agent_provider.apply_to_existing(_apply_main_model)
+            failures = await agent_provider.apply_to_existing(_apply_main_model)
+            _log_agent_apply_failures("main_model", failures)
 
     if next_embeddings_settings is not None:
         agent_provider = cast(ScopedAgentProvider[api.AgentProtocol], request.app["agent_provider"])
@@ -609,7 +631,8 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             elif callable(set_embeddings_model):
                 set_embeddings_model(embeddings_model_for_agent)
 
-        await agent_provider.apply_to_existing(_apply_embeddings)
+        failures = await agent_provider.apply_to_existing(_apply_embeddings)
+        _log_agent_apply_failures("embeddings", failures)
 
     return json_response(api._build_settings_payload())
 
@@ -763,7 +786,8 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
             if callable(update_tools_enabled):
                 update_tools_enabled(next_tools_state)
 
-        await agent_provider.apply_to_existing(_apply_tools)
+        failures = await agent_provider.apply_to_existing(_apply_tools)
+        _log_agent_apply_failures("tools", failures)
 
     return json_response(api._build_settings_payload())
 

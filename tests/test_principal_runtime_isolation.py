@@ -84,10 +84,10 @@ def test_scoped_provider_owns_distinct_agents_and_locks() -> None:
         scope_a = AgentScope("principal-a", "session-a")
         scope_b = AgentScope("principal-a", "session-b")
         first_a, second_a = await asyncio.gather(
-            provider.get(scope_a, config),
-            provider.get(scope_a, config),
+            provider.get_for_current_task(scope_a, config),
+            provider.get_for_current_task(scope_a, config),
         )
-        agent_b = await provider.get(scope_b, config)
+        agent_b = await provider.get_for_current_task(scope_b, config)
 
         assert first_a is second_a
         assert first_a is not agent_b
@@ -96,17 +96,101 @@ def test_scoped_provider_owns_distinct_agents_and_locks() -> None:
         assert scope_a_lock is provider.lock_for(scope_a)
         assert scope_a_lock is not provider.lock_for(scope_b)
         visited: list[AgentScope] = []
-        await provider.apply_to_existing(lambda item: visited.append(item.scope))
+        failures = await provider.apply_to_existing(lambda item: visited.append(item.scope))
         assert visited == [scope_a, scope_b]
+        assert failures == ()
 
         await provider.release(scope_a)
         assert first_a.closed is True
         assert provider.lock_for(scope_a) is scope_a_lock
-        replacement_a = await provider.get(scope_a, config)
+        replacement_a = await provider.get_for_current_task(scope_a, config)
         assert replacement_a is not first_a
         await provider.close()
         assert replacement_a.closed is True
         assert agent_b.closed is True
+
+    asyncio.run(_run())
+
+
+def test_scoped_provider_release_waits_for_request_borrower() -> None:
+    async def _run() -> None:
+        class _Agent:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        provider = ScopedAgentProvider(factory=lambda _scope, _config: _Agent())
+        scope = AgentScope("principal-a", "session-a")
+        borrowed = asyncio.Event()
+        finish_request = asyncio.Event()
+        original: _Agent | None = None
+
+        async def _request() -> None:
+            nonlocal original
+            original = await provider.get_for_current_task(scope, None)
+            borrowed.set()
+            await finish_request.wait()
+            assert original.closed is False
+
+        request_task = asyncio.create_task(_request())
+        await borrowed.wait()
+        assert original is not None
+        release_task = asyncio.create_task(provider.release(scope))
+        await asyncio.sleep(0)
+
+        assert release_task.done() is False
+        assert original.closed is False
+        replacement = await provider.get_for_current_task(scope, None)
+        assert replacement is not original
+
+        finish_request.set()
+        await request_task
+        await release_task
+        assert original.closed is True
+        assert replacement.closed is False
+        await provider.close()
+        assert replacement.closed is True
+
+    asyncio.run(_run())
+
+
+def test_scoped_provider_settings_failure_evicts_only_failed_agent() -> None:
+    async def _run() -> None:
+        class _Agent:
+            def __init__(self, scope: AgentScope) -> None:
+                self.scope = scope
+                self.closed = False
+                self.updated = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        provider = ScopedAgentProvider(
+            factory=lambda scope, _config: _Agent(scope),
+        )
+        failed_scope = AgentScope("principal-a", "failed")
+        healthy_scope = AgentScope("principal-a", "healthy")
+        failed = await provider.get_for_current_task(failed_scope, None)
+        healthy = await provider.get_for_current_task(healthy_scope, None)
+
+        def _apply(agent: _Agent) -> None:
+            if agent.scope == failed_scope:
+                raise RuntimeError("reconfigure failed")
+            agent.updated = True
+
+        failures = await provider.apply_to_existing(_apply)
+
+        assert len(failures) == 1
+        assert failures[0].scope == failed_scope
+        assert str(failures[0].error) == "reconfigure failed"
+        assert failed.closed is True
+        assert healthy.updated is True
+        assert healthy.closed is False
+        replacement = await provider.get_for_current_task(failed_scope, None)
+        assert replacement is not failed
+        await provider.close()
 
     asyncio.run(_run())
 
@@ -207,9 +291,15 @@ def test_agent_memory_vectors_and_runtime_state_are_principal_session_isolated(
     async def _run() -> None:
         provider = ScopedAgentProvider(factory=_factory)
         config = ModelConfig(provider="local", model="test-model")
-        owner_a = await provider.get(AgentScope(owner_principal, "owner-a"), config)
-        owner_b = await provider.get(AgentScope(owner_principal, "owner-b"), config)
-        member = await provider.get(AgentScope(member_principal, "member-a"), config)
+        owner_a = await provider.get_for_current_task(
+            AgentScope(owner_principal, "owner-a"), config
+        )
+        owner_b = await provider.get_for_current_task(
+            AgentScope(owner_principal, "owner-b"), config
+        )
+        member = await provider.get_for_current_task(
+            AgentScope(member_principal, "member-a"), config
+        )
 
         assert owner_a is not owner_b
         assert owner_a.memory is not owner_b.memory
