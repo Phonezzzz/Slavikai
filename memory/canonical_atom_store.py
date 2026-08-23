@@ -151,39 +151,47 @@ class CanonicalAtomStore:
         return cursor.rowcount > 0
 
     def upsert(self, atom: CanonicalAtom) -> CanonicalAtom:
-        payload = self._atom_for_write(atom)
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO canonical_atom (
-                    atom_id,
-                    stable_key,
-                    claim_type,
-                    value_json,
-                    confidence,
-                    support_count,
-                    contradict_count,
-                    last_seen_at,
-                    status,
-                    summary_text,
-                    pinned
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(stable_key) DO UPDATE SET
-                    atom_id=excluded.atom_id,
-                    claim_type=excluded.claim_type,
-                    value_json=excluded.value_json,
-                    confidence=excluded.confidence,
-                    support_count=excluded.support_count,
-                    contradict_count=excluded.contradict_count,
-                    last_seen_at=excluded.last_seen_at,
-                    status=excluded.status,
-                    summary_text=excluded.summary_text
-                """,
-                payload,
-            )
-        persisted = self.get_by_stable_key(atom.stable_key)
-        if persisted is None:
-            raise RuntimeError("atom missing after upsert")
+        return self.upsert_many([atom])[0]
+
+    def upsert_many(self, atoms: list[CanonicalAtom]) -> list[CanonicalAtom]:
+        if not atoms:
+            return []
+        with self.conn.transaction(immediate=True):
+            for atom in atoms:
+                self.conn.execute(
+                    """
+                    INSERT INTO canonical_atom (
+                        atom_id,
+                        stable_key,
+                        claim_type,
+                        value_json,
+                        confidence,
+                        support_count,
+                        contradict_count,
+                        last_seen_at,
+                        status,
+                        summary_text,
+                        pinned
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(stable_key) DO UPDATE SET
+                        atom_id=excluded.atom_id,
+                        claim_type=excluded.claim_type,
+                        value_json=excluded.value_json,
+                        confidence=excluded.confidence,
+                        support_count=excluded.support_count,
+                        contradict_count=excluded.contradict_count,
+                        last_seen_at=excluded.last_seen_at,
+                        status=excluded.status,
+                        summary_text=excluded.summary_text
+                    """,
+                    self._atom_for_write(atom),
+                )
+            persisted: list[CanonicalAtom] = []
+            for atom in atoms:
+                stored = self.get_by_stable_key(atom.stable_key)
+                if stored is None:
+                    raise RuntimeError("atom missing after batch upsert")
+                persisted.append(stored)
         return persisted
 
     def create_atom(

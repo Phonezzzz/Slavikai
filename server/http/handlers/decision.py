@@ -28,6 +28,7 @@ from server.http.common.workspace_git import (
 )
 from server.http.handlers.ui_chat import handle_ui_send_resume
 from server.http_api import (
+    MAX_CONTENT_CHARS,
     UI_DECISION_RESPONSES,
     _agent_lock_for_request,
     _apply_agent_runtime_state,
@@ -326,6 +327,15 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+        if choice == "edit_and_confirm" and edited_action is not None:
+            edited_text_raw = edited_action.get("text")
+            if isinstance(edited_text_raw, str) and len(edited_text_raw) > MAX_CONTENT_CHARS:
+                return error_response(
+                    status=413,
+                    message=(f"edited_action.text превышает лимит {MAX_CONTENT_CHARS} символов."),
+                    error_type="invalid_request_error",
+                    code="payload_too_large",
+                )
     elif decision_type == "tool_approval":
         if choice in {"edit_plan"}:
             return error_response(
@@ -1121,19 +1131,48 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     source_id=session_id,
                 )
             try:
-                applied = agent.apply_memory_save_preview(
+                result = agent.apply_confirmed_memory_save(
                     proposed_action,
                     source_kind="chat.explicit_remember",
                     source_id=session_id,
                 )
-            except (TypeError, ValueError) as exc:
+            except Exception:  # noqa: BLE001
+                request.app["http_api_logger"].exception(
+                    "Confirmed Memory tool call failed unexpectedly"
+                )
                 return {
                     "ok": False,
                     "source_endpoint": "memory.save",
-                    "error": "memory_preview_invalid",
-                    "details": {"message": str(exc)},
+                    "error": "memory_write_failed",
                     "resume_started": False,
                 }
+            if not result.ok:
+                result_meta = result.meta if isinstance(result.meta, dict) else {}
+                result_code_raw = result_meta.get("code")
+                result_code = (
+                    result_code_raw
+                    if isinstance(result_code_raw, str) and result_code_raw.strip()
+                    else "memory_write_failed"
+                )
+                message_raw = result_meta.get("message")
+                details = (
+                    {"message": message_raw}
+                    if isinstance(message_raw, str) and message_raw.strip()
+                    else None
+                )
+                return {
+                    "ok": False,
+                    "source_endpoint": "memory.save",
+                    "error": result_code,
+                    "details": details,
+                    "resume_started": False,
+                }
+            applied_raw = result.data.get("claims")
+            applied = applied_raw if isinstance(applied_raw, list) else []
+            index_status_raw = result.data.get("index_status")
+            index_status = index_status_raw if isinstance(index_status_raw, str) else "complete"
+            index_errors_raw = result.data.get("index_errors")
+            index_errors = index_errors_raw if isinstance(index_errors_raw, list) else []
         return {
             "ok": True,
             "source_endpoint": "memory.save",
@@ -1142,6 +1181,8 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "saved": True,
                 "claims": applied,
                 "proposed_action": proposed_action,
+                "index_status": index_status,
+                "index_errors": index_errors,
             },
             "resume_started": False,
         }
@@ -1671,6 +1712,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         "invalid_memory_edit",
         "memory_preview_invalid",
         "model_not_selected",
+        "memory_write_failed",
     }
     resume_error_code: str | None = None
     if isinstance(resume, dict):
@@ -1701,11 +1743,12 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "invalid_memory_edit": "Для сохранения Memory нужен непустой edited_action.text.",
             "memory_preview_invalid": "Memory preview недействителен; создайте новый preview.",
             "model_not_selected": "Сначала выберите модель, затем повторите подтверждение.",
+            "memory_write_failed": "Не удалось сохранить Memory; подтверждение можно повторить.",
         }
         details_raw = resume.get("details")
         details = details_raw if isinstance(details_raw, dict) else None
         return error_response(
-            status=409,
+            status=503 if resume_error_code == "memory_write_failed" else 409,
             message=message_by_code.get(
                 resume_error_code,
                 "Невозможно продолжить: конфликт состояния.",

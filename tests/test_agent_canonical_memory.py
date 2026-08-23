@@ -109,6 +109,7 @@ def test_agent_explicit_remember_response_builds_preview_without_write(
     assert decision["default_option_id"] == "reject"
     assert decision["proposed_action"]["claims"][0]["stable_key"] == ("preference:response_length")
     assert agent._canonical_store.get_by_stable_key("preference:response_length") is None
+    assert agent._interaction_store.get_recent() == []
 
 
 def test_agent_confirmed_preview_persists_exact_claim(tmp_path, monkeypatch) -> None:
@@ -121,12 +122,15 @@ def test_agent_confirmed_preview_persists_exact_claim(tmp_path, monkeypatch) -> 
 
     assert agent._canonical_store.get_by_stable_key("preference:response_length") is None
 
-    applied = agent.apply_memory_save_preview(
+    result = agent.apply_confirmed_memory_save(
         preview,
         source_kind="chat.explicit_remember",
         source_id="session-confirmed",
     )
 
+    assert result.ok
+    applied = result.data.get("claims")
+    assert isinstance(applied, list)
     assert applied[0]["stable_key"] == "preference:response_length"
     atom = agent._canonical_store.get_by_stable_key("preference:response_length")
     assert atom is not None
@@ -134,6 +138,71 @@ def test_agent_confirmed_preview_persists_exact_claim(tmp_path, monkeypatch) -> 
         "raw": "я предпочитаю короткие ответы",
         "value": "короткие ответы",
     }
+    tool_calls = agent.get_recent_tool_calls()
+    assert tool_calls[-1].tool == "memory_save_confirmed"
+    assert tool_calls[-1].ok is True
+
+
+def test_agent_confirmed_memory_reports_vector_sync_failure_as_partial_success(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    preview = agent.build_memory_save_preview(
+        "remember my editor is neovim",
+        source_kind="chat.explicit_remember",
+        source_id="session-vector-failure",
+    )
+
+    def fail_vector_sync(_atom) -> None:
+        raise RuntimeError("vector unavailable")
+
+    monkeypatch.setattr(agent._atom_embedding_index, "sync_atom", fail_vector_sync)
+
+    result = agent.apply_confirmed_memory_save(
+        preview,
+        source_kind="chat.explicit_remember",
+        source_id="session-vector-failure",
+    )
+
+    assert result.ok
+    assert result.data["saved"] is True
+    assert result.data["index_status"] == "partial"
+    assert result.data["index_errors"] == [
+        {
+            "stable_key": "fact:my_editor_is_neovim",
+            "code": "vector_sync_failed",
+        }
+    ]
+    assert agent._canonical_store.get_by_stable_key("fact:my_editor_is_neovim") is not None
+
+
+def test_agent_confirmed_memory_rejects_unknown_claim_type_without_raising(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _build_agent(tmp_path, monkeypatch)
+    result = agent.apply_confirmed_memory_save(
+        {
+            "text": "bad claim type",
+            "claims": [
+                {
+                    "claim_type": "made_up",
+                    "stable_key": "fact:bad",
+                    "value_json": {"value": "bad"},
+                    "confidence": 0.9,
+                    "summary_text": "bad",
+                }
+            ],
+        },
+        source_kind="chat.explicit_remember",
+        source_id="session-invalid-preview",
+    )
+
+    assert not result.ok
+    assert result.meta is not None
+    assert result.meta["code"] == "memory_preview_invalid"
+    assert agent._canonical_store.get_by_stable_key("fact:bad") is None
 
 
 def test_agent_explicit_remember_stream_builds_preview_without_write(
@@ -185,11 +254,12 @@ def test_agent_memory_preview_uses_llm_enrichment_and_waits_for_confirm(
     assert "environment:editor" in proposed_keys
     assert agent._canonical_store.get_by_stable_key("environment:editor") is None
 
-    agent.apply_memory_save_preview(
+    result = agent.apply_confirmed_memory_save(
         proposed_action,
         source_kind="chat.explicit_remember",
         source_id="session-enriched",
     )
+    assert result.ok
     atom = agent._canonical_store.get_by_stable_key("environment:editor")
     assert atom is not None
     assert atom.value_json == {"value": "neovim"}

@@ -14,8 +14,25 @@ class CanonicalAggregator:
 
     def upsert_claim(self, claim: Claim) -> CanonicalAtom:
         existing = self._store.get_by_stable_key(claim.stable_key)
+        atom = self._merge_claim(existing, claim)
+        return self._store.upsert(atom)
+
+    def upsert_claims(self, claims: list[Claim]) -> list[CanonicalAtom]:
+        with self._store.conn.transaction(immediate=True):
+            pending: dict[str, CanonicalAtom] = {}
+            order: list[str] = []
+            for claim in claims:
+                existing = pending.get(claim.stable_key)
+                if existing is None:
+                    existing = self._store.get_by_stable_key(claim.stable_key)
+                    order.append(claim.stable_key)
+                pending[claim.stable_key] = self._merge_claim(existing, claim)
+            return self._store.upsert_many([pending[stable_key] for stable_key in order])
+
+    @staticmethod
+    def _merge_claim(existing: CanonicalAtom | None, claim: Claim) -> CanonicalAtom:
         if existing is None:
-            atom = CanonicalAtom(
+            return CanonicalAtom(
                 atom_id=f"atom-{uuid.uuid4().hex}",
                 stable_key=claim.stable_key,
                 claim_type=claim.claim_type,
@@ -27,14 +44,13 @@ class CanonicalAggregator:
                 status=AtomStatus.ACTIVE,
                 summary_text=claim.summary_text,
             )
-            return self._store.upsert(atom)
 
         if _values_equal(existing.value_json, claim.value_json):
             boosted_confidence = min(1.0, max(existing.confidence, claim.confidence) + 0.03)
             next_status = (
                 AtomStatus.ACTIVE if existing.status is AtomStatus.CONFLICT else existing.status
             )
-            updated = CanonicalAtom(
+            return CanonicalAtom(
                 atom_id=existing.atom_id,
                 stable_key=existing.stable_key,
                 claim_type=existing.claim_type,
@@ -46,10 +62,9 @@ class CanonicalAggregator:
                 status=next_status,
                 summary_text=_deterministic_summary(existing.stable_key, existing.value_json),
             )
-            return self._store.upsert(updated)
 
         downgraded_confidence = max(0.0, min(existing.confidence, claim.confidence) - 0.15)
-        conflicted = CanonicalAtom(
+        return CanonicalAtom(
             atom_id=existing.atom_id,
             stable_key=existing.stable_key,
             claim_type=existing.claim_type,
@@ -61,7 +76,6 @@ class CanonicalAggregator:
             status=AtomStatus.CONFLICT,
             summary_text=_deterministic_summary(existing.stable_key, existing.value_json),
         )
-        return self._store.upsert(conflicted)
 
     def resolve_conflict(
         self,

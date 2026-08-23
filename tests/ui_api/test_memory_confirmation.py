@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 
 from core.decision.memory_save import build_memory_save_packet
-from shared.models import JSONValue
+from server.http_api import MAX_CONTENT_CHARS
+from shared.models import JSONValue, ToolResult
 from tests.ui_api.fakes import DummyAgent, _create_client, _select_local_model
 
 
@@ -11,6 +12,7 @@ class _MemoryConfirmationAgent(DummyAgent):
     def __init__(self) -> None:
         super().__init__()
         self.applied: list[dict[str, JSONValue]] = []
+        self.fail_write = False
 
     @staticmethod
     def _preview(text: str) -> dict[str, JSONValue]:
@@ -43,25 +45,36 @@ class _MemoryConfirmationAgent(DummyAgent):
         del source_kind, source_id, lang_hint
         return self._preview(text)
 
-    def apply_memory_save_preview(
+    def apply_confirmed_memory_save(
         self,
         proposed_action: dict[str, JSONValue],
         *,
         source_kind: str,
         source_id: str | None = None,
-    ) -> list[dict[str, JSONValue]]:
+    ) -> ToolResult:
+        if self.fail_write:
+            return ToolResult.failure(
+                "canonical unavailable",
+                meta={"code": "memory_write_failed"},
+            )
         stored = dict(proposed_action)
         stored["source_kind"] = source_kind
         stored["source_id"] = source_id
         self.applied.append(stored)
-        return [
+        return ToolResult.success(
             {
-                "stable_key": "fact:confirmed",
-                "status": "active",
-                "claim_type": "fact",
-                "confidence": 0.9,
+                "claims": [
+                    {
+                        "stable_key": "fact:confirmed",
+                        "status": "active",
+                        "claim_type": "fact",
+                        "confidence": 0.9,
+                    }
+                ],
+                "index_status": "complete",
+                "index_errors": [],
             }
-        ]
+        )
 
 
 def test_memory_save_requires_confirm_and_supports_edit_or_reject() -> None:
@@ -155,6 +168,50 @@ def test_memory_save_requires_confirm_and_supports_edit_or_reject() -> None:
             claims = agent.applied[1]["claims"]
             assert isinstance(claims, list)
             assert claims[0]["stable_key"] == "fact:confirmed"
+
+            failed_preview = await _request_preview("remember retry me")
+            agent.fail_write = True
+            failed = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": failed_preview["id"],
+                    "choice": "confirm",
+                },
+            )
+            assert failed.status == 503
+            assert len(agent.applied) == 2
+
+            agent.fail_write = False
+            retried = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": failed_preview["id"],
+                    "choice": "confirm",
+                },
+            )
+            assert retried.status == 200
+            assert len(agent.applied) == 3
+
+            oversized_preview = await _request_preview("remember bounded edit")
+            oversized = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session_id},
+                json={
+                    "session_id": session_id,
+                    "decision_id": oversized_preview["id"],
+                    "choice": "edit_and_confirm",
+                    "edited_action": {"text": "x" * (MAX_CONTENT_CHARS + 1)},
+                },
+            )
+            assert oversized.status == 413
+            oversized_error = (await oversized.json()).get("error")
+            assert isinstance(oversized_error, dict)
+            assert oversized_error.get("code") == "payload_too_large"
+            assert len(agent.applied) == 3
         finally:
             await client.close()
 

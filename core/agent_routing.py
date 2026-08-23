@@ -136,6 +136,7 @@ class AgentRoutingMixin:
             request: ToolRequest,
             *,
             safe_mode_override: bool | None = None,
+            confirmed_decision: bool = False,
         ) -> ToolResult: ...
         def _build_tool_gateway(
             self,
@@ -143,6 +144,7 @@ class AgentRoutingMixin:
             pre_call: Callable[[ToolRequest], object | None] | None = None,
             post_call: Callable[[ToolRequest, ToolResult, object | None], None] | None = None,
             safe_mode_override: bool | None = None,
+            confirmed_decision: bool = False,
         ) -> ToolGateway: ...
         def _append_report_block(
             self,

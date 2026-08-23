@@ -37,6 +37,7 @@ class ToolDescriptor:
     parameters_schema: dict[str, JSONValue] = field(default_factory=dict)
     chat_exposed: bool = False
     model_exposed: bool = True
+    confirmed_decision_only: bool = False
     execution_targets: frozenset[ExecutionTarget] = frozenset({"sandbox"})
 
 
@@ -69,8 +70,11 @@ class ToolRegistry:
         parameters_schema: dict[str, JSONValue] | None = None,
         chat_exposed: bool = False,
         model_exposed: bool = True,
+        confirmed_decision_only: bool = False,
         execution_targets: set[str] | None = None,
     ) -> None:
+        if confirmed_decision_only and model_exposed:
+            raise ValueError("confirmed_decision_only tool не может быть model_exposed")
         resolved: ToolHandler
         if isinstance(handler, Tool):
             resolved = handler.handle
@@ -89,6 +93,7 @@ class ToolRegistry:
             parameters_schema=parameters_schema or {},
             chat_exposed=chat_exposed,
             model_exposed=model_exposed,
+            confirmed_decision_only=confirmed_decision_only,
             execution_targets=self._normalize_execution_targets(execution_targets),
         )
         self._logger.info(
@@ -140,7 +145,13 @@ class ToolRegistry:
             )
         ]
 
-    def call(self, request: ToolRequest, *, bypass_safe_mode: bool = False) -> ToolResult:
+    def call(
+        self,
+        request: ToolRequest,
+        *,
+        bypass_safe_mode: bool = False,
+        confirmed_decision: bool = False,
+    ) -> ToolResult:
         descriptor = self._tools.get(request.name)
         if not descriptor:
             self._logger.warning("tool_not_found", extra={"tool": request.name})
@@ -151,6 +162,18 @@ class ToolRegistry:
                 args=request.args,
             )
             return ToolResult.failure(f"Инструмент {request.name} не зарегистрирован")
+
+        if descriptor.confirmed_decision_only and not confirmed_decision:
+            error = (
+                f"CONFIRMED_DECISION_REQUIRED: tool '{request.name}' доступен только после "
+                "явного подтверждения пользователя."
+            )
+            self._logger.info(
+                "tool_confirmed_decision_blocked",
+                extra={"tool": request.name},
+            )
+            self._log_call(request.name, ok=False, error=error, args=request.args)
+            return ToolResult.failure(error)
 
         if self._execution_target not in descriptor.execution_targets:
             error = (
@@ -164,7 +187,11 @@ class ToolRegistry:
             self._log_call(request.name, ok=False, error=error, args=request.args)
             return ToolResult.failure(error)
 
-        mode_error = self._mode_policy_error(request.name, descriptor.capability)
+        mode_error = self._mode_policy_error(
+            request.name,
+            descriptor.capability,
+            confirmed_decision=(confirmed_decision and descriptor.confirmed_decision_only),
+        )
         if mode_error is not None:
             self._logger.info("tool_mode_blocked", extra={"tool": request.name, "mode": self._mode})
             self._log_call(request.name, ok=False, error=mode_error, args=request.args)
@@ -335,7 +362,11 @@ class ToolRegistry:
         self,
         tool_name: str,
         capability: ToolCapability,
+        *,
+        confirmed_decision: bool = False,
     ) -> str | None:
+        if confirmed_decision:
+            return None
         if self._mode == "ask" and capability != "read":
             return "ASK_READ_ONLY_BLOCK: ask-режим допускает только read-only инструменты."
         if self._mode == "plan" and capability != "read":

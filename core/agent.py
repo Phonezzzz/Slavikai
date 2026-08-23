@@ -582,6 +582,27 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             model_exposed=False,
             execution_targets={"desktop"},
         )
+        self.tool_registry.register(
+            "memory_save_confirmed",
+            self._handle_confirmed_memory_save_tool,
+            enabled=True,
+            capability="write",
+            risk_classes=["write"],
+            description="Persist a server-validated Memory preview after explicit confirmation.",
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "proposed_action": {"type": "object"},
+                    "source_kind": {"type": "string"},
+                    "source_id": {"type": ["string", "null"]},
+                },
+                "required": ["proposed_action", "source_kind"],
+                "additionalProperties": False,
+            },
+            model_exposed=False,
+            confirmed_decision_only=True,
+            execution_targets={"sandbox"},
+        )
 
     def close_desktop_resources(self) -> None:
         self.desktop_browser_tool.close()

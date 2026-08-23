@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
@@ -27,7 +28,7 @@ from shared.memory_companion_models import (
     FeedbackRating,
     InteractionLog,
 )
-from shared.models import JSONValue, LLMMessage, MemoryKind
+from shared.models import JSONValue, LLMMessage, MemoryKind, ToolRequest, ToolResult
 from shared.policy_models import (
     PolicyRule,
     PolicyScope,
@@ -37,6 +38,7 @@ from shared.policy_models import (
 
 if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
+    from core.tool_gateway import ToolGateway
     from core.tracer import Tracer
     from memory.atom_embedding_index import AtomEmbeddingIndex
     from memory.canonical_aggregator import CanonicalAggregator
@@ -86,6 +88,21 @@ class AgentMemoryMixin:
         last_context_text: str | None
         last_hints_used: list[str]
         last_hints_meta: list[dict[str, str]]
+
+        def _build_tool_gateway(
+            self,
+            *,
+            pre_call: Callable[[ToolRequest], object | None] | None = None,
+            post_call: Callable[[ToolRequest, ToolResult, object | None], None] | None = None,
+            safe_mode_override: bool | None = None,
+            confirmed_decision: bool = False,
+        ) -> ToolGateway: ...
+        def _log_tool_interaction(
+            self,
+            raw_input: str,
+            request: ToolRequest,
+            result: ToolResult,
+        ) -> None: ...
 
     def get_recent_feedback_events(self, limit: int = 50) -> list[FeedbackEvent]:
         return self._interaction_store.get_recent_feedback(user_id=self.user_id, limit=limit)
@@ -305,13 +322,112 @@ class AgentMemoryMixin:
             "claims": [self._claim_to_preview_payload(claim) for claim in claims],
         }
 
-    def apply_memory_save_preview(
+    def apply_confirmed_memory_save(
         self,
         proposed_action: dict[str, JSONValue],
         *,
         source_kind: str,
         source_id: str | None = None,
-    ) -> list[dict[str, JSONValue]]:
+    ) -> ToolResult:
+        request = ToolRequest(
+            name="memory_save_confirmed",
+            args={
+                "proposed_action": proposed_action,
+                "source_kind": source_kind,
+                "source_id": source_id,
+            },
+        )
+        result = self._build_tool_gateway(confirmed_decision=True).call(request)
+        try:
+            self._log_tool_interaction("ui:memory.confirm", request, result)
+        except Exception:  # noqa: BLE001
+            self.logger.exception("Confirmed Memory tool observation failed")
+            self.tracer.log(
+                "memory_tool_observation_failed",
+                "Confirmed Memory result could not be stored in Memory Companion",
+                {"tool": request.name, "result_ok": result.ok},
+            )
+        return result
+
+    def _handle_confirmed_memory_save_tool(self, request: ToolRequest) -> ToolResult:
+        proposed_raw = request.args.get("proposed_action")
+        source_kind_raw = request.args.get("source_kind")
+        source_id_raw = request.args.get("source_id")
+        if not isinstance(proposed_raw, dict):
+            return ToolResult.failure(
+                "Memory preview должен быть объектом.",
+                meta={"code": "memory_preview_invalid"},
+            )
+        if not isinstance(source_kind_raw, str) or not source_kind_raw.strip():
+            return ToolResult.failure(
+                "Memory source_kind обязателен.",
+                meta={"code": "memory_preview_invalid"},
+            )
+        if source_id_raw is not None and not isinstance(source_id_raw, str):
+            return ToolResult.failure(
+                "Memory source_id должен быть строкой или null.",
+                meta={"code": "memory_preview_invalid"},
+            )
+        proposed_action = {str(key): value for key, value in proposed_raw.items()}
+        try:
+            claims = self._claims_from_memory_save_preview(
+                proposed_action,
+                source_kind=source_kind_raw.strip(),
+                source_id=source_id_raw,
+            )
+        except (TypeError, ValueError) as exc:
+            return ToolResult.failure(
+                "Memory preview недействителен.",
+                meta={"code": "memory_preview_invalid", "message": str(exc)},
+            )
+        try:
+            atoms = self._canonical_aggregator.upsert_claims(claims)
+        except Exception:  # noqa: BLE001
+            self.logger.exception("Confirmed Memory canonical write failed")
+            return ToolResult.failure(
+                "Не удалось сохранить canonical Memory.",
+                meta={"code": "memory_write_failed"},
+            )
+
+        applied = [self._applied_atom_payload(atom) for atom in atoms]
+        index_errors: list[dict[str, JSONValue]] = []
+        for atom in atoms:
+            try:
+                self._atom_embedding_index.sync_atom(atom)
+            except Exception:  # noqa: BLE001
+                self.logger.exception(
+                    "Confirmed Memory vector sync failed for %s",
+                    atom.stable_key,
+                )
+                index_errors.append({"stable_key": atom.stable_key, "code": "vector_sync_failed"})
+        index_status = "complete" if not index_errors else "partial"
+        self.tracer.log(
+            "memory_claims_applied",
+            f"Applied {len(applied)} confirmed claims",
+            {
+                "claims": applied,
+                "source_kind": source_kind_raw.strip(),
+                "source_id": source_id_raw,
+                "index_status": index_status,
+                "index_errors": index_errors,
+            },
+        )
+        return ToolResult.success(
+            {
+                "saved": True,
+                "claims": applied,
+                "index_status": index_status,
+                "index_errors": index_errors,
+            }
+        )
+
+    def _claims_from_memory_save_preview(
+        self,
+        proposed_action: dict[str, JSONValue],
+        *,
+        source_kind: str,
+        source_id: str | None,
+    ) -> list[Claim]:
         claims_raw = proposed_action.get("claims")
         if not isinstance(claims_raw, list) or not claims_raw:
             raise ValueError("Memory preview не содержит claims.")
@@ -333,7 +449,10 @@ class AgentMemoryMixin:
                 raise ValueError("Memory preview summary_text обязателен.")
             if isinstance(confidence_raw, bool) or not isinstance(confidence_raw, (int, float)):
                 raise ValueError("Memory preview confidence должен быть числом.")
-            claim_type = ClaimType(claim_type_raw.strip())
+            try:
+                claim_type = ClaimType(claim_type_raw.strip())
+            except ValueError as exc:
+                raise ValueError("Memory preview claim_type недействителен.") from exc
             claims.append(
                 Claim(
                     claim_type=claim_type,
@@ -347,7 +466,7 @@ class AgentMemoryMixin:
                     created_at=created_at,
                 )
             )
-        return self._apply_memory_claims(claims)
+        return claims
 
     def _extract_memory_claims_from_text(
         self,
@@ -371,18 +490,11 @@ class AgentMemoryMixin:
         ]
 
     def _apply_memory_claims(self, claims: list[Claim]) -> list[dict[str, JSONValue]]:
+        atoms = self._canonical_aggregator.upsert_claims(claims)
         applied: list[dict[str, JSONValue]] = []
-        for claim in claims:
-            atom = self._canonical_aggregator.upsert_claim(claim)
+        for atom in atoms:
             self._atom_embedding_index.sync_atom(atom)
-            applied.append(
-                {
-                    "stable_key": atom.stable_key,
-                    "status": atom.status.value,
-                    "claim_type": atom.claim_type.value,
-                    "confidence": atom.confidence,
-                }
-            )
+            applied.append(self._applied_atom_payload(atom))
         if applied:
             first_claim = claims[0]
             self.tracer.log(
@@ -395,6 +507,15 @@ class AgentMemoryMixin:
                 },
             )
         return applied
+
+    @staticmethod
+    def _applied_atom_payload(atom: CanonicalAtom) -> dict[str, JSONValue]:
+        return {
+            "stable_key": atom.stable_key,
+            "status": atom.status.value,
+            "claim_type": atom.claim_type.value,
+            "confidence": atom.confidence,
+        }
 
     @staticmethod
     def _claim_to_preview_payload(claim: Claim) -> dict[str, JSONValue]:

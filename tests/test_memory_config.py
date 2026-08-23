@@ -81,7 +81,8 @@ def test_memory_config_to_dict_includes_context_budget() -> None:
 def test_memory_config_invalid_payload(tmp_path: Path) -> None:
     path = tmp_path / "memory.json"
     path.write_text(json.dumps({"auto_save_dialogue": True}), encoding="utf-8")
-    assert "auto_save_dialogue" not in load_memory_config(path).to_dict()
+    with pytest.raises(RuntimeError, match="auto_save_dialogue удалён"):
+        load_memory_config(path)
 
     path.write_text(json.dumps({"inbox_max_items": -1}), encoding="utf-8")
     with pytest.raises(RuntimeError):

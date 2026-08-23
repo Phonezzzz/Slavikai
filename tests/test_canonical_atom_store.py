@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from memory.canonical_atom_store import CanonicalAtomStore
-from shared.canonical_atom_models import AtomStatus, ClaimType, utc_now_iso
+from shared.canonical_atom_models import AtomStatus, CanonicalAtom, ClaimType, utc_now_iso
 
 
 def test_canonical_atom_store_create_read_update(tmp_path) -> None:
@@ -46,6 +48,42 @@ def test_canonical_atom_store_create_read_update(tmp_path) -> None:
     rows = store.conn.execute("SELECT COUNT(*) FROM canonical_atom").fetchone()
     assert rows is not None
     assert int(rows[0]) == 1
+
+
+def test_canonical_atom_store_batch_upsert_rolls_back_as_one_transaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = CanonicalAtomStore(str(tmp_path / "canonical_atoms.db"))
+    atoms = [
+        CanonicalAtom(
+            atom_id=f"atom-{index}",
+            stable_key=f"fact:item_{index}",
+            claim_type=ClaimType.FACT,
+            value_json={"value": index},
+            confidence=0.8,
+            support_count=1,
+            contradict_count=0,
+            last_seen_at=utc_now_iso(),
+            status=AtomStatus.ACTIVE,
+            summary_text=f"item {index}",
+        )
+        for index in (1, 2)
+    ]
+    original_execute = store.conn.execute
+
+    def fail_second_insert(sql: str, parameters: tuple[object, ...] = ()):
+        if "INSERT INTO canonical_atom" in sql and parameters[1] == "fact:item_2":
+            raise sqlite3.OperationalError("forced batch failure")
+        return original_execute(sql, parameters)
+
+    monkeypatch.setattr(store.conn, "execute", fail_second_insert)
+
+    with pytest.raises(sqlite3.OperationalError, match="forced batch failure"):
+        store.upsert_many(atoms)
+
+    assert store.get_by_stable_key("fact:item_1") is None
+    assert store.get_by_stable_key("fact:item_2") is None
 
 
 def test_canonical_atom_store_value_json_roundtrip(tmp_path) -> None:

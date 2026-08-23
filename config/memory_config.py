@@ -93,6 +93,10 @@ class MemoryConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> MemoryConfig:
+        if "auto_save_dialogue" in data:
+            raise ValueError(
+                "auto_save_dialogue удалён; Memory сохраняется только после явного подтверждения"
+            )
         inbox_max_items = _read_int(data, "inbox_max_items", DEFAULT_INBOX_MAX_ITEMS)
         inbox_ttl_days = _read_int(data, "inbox_ttl_days", DEFAULT_INBOX_TTL_DAYS)
         inbox_writes_per_minute = _read_int(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
 
@@ -41,6 +43,22 @@ class ThreadLocalSQLiteConnection:
 
     def rollback(self) -> None:
         self._connection().rollback()
+
+    @contextmanager
+    def transaction(self, *, immediate: bool = False) -> Iterator[None]:
+        connection = self._connection()
+        owns_transaction = not connection.in_transaction
+        if owns_transaction:
+            connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+        try:
+            yield
+        except BaseException:
+            if owns_transaction:
+                connection.rollback()
+            raise
+        else:
+            if owns_transaction:
+                connection.commit()
 
     def close(self) -> None:
         with self._lifecycle_lock:
