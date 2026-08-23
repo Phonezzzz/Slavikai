@@ -123,15 +123,16 @@
     {
       "id": "api.proxy_model.slavik",
       "scope": "api",
-      "status": "partial",
+      "status": "implemented",
       "owner": "api",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "server/http/handlers/models.py",
+        "server/http/handlers/chat.py",
         "tests/test_http_api.py"
       ],
-      "summary": "The model list exposes only slavik, but chat request model validation is not yet strict."
+      "summary": "The public API exposes and accepts only the exact proxy model id slavik; all other IDs are rejected before Agent resolution."
     },
     {
       "id": "desktop.shared_host_policy",
