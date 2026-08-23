@@ -28,10 +28,13 @@ cd Slavikai
 cp .env.example .env
 ```
 
-Заполни минимум две переменные в `.env`:
+Заполни browser identity, automation token и provider key в `.env`:
 
 ```dotenv
-SLAVIK_API_TOKEN=replace-with-a-long-random-token
+SLAVIK_API_TOKEN=replace-with-a-long-random-automation-token
+SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
+SLAVIK_CLOUDFLARE_ACCESS_AUD=your-access-application-aud
+SLAVIK_OWNER_EMAIL=owner@example.com
 DEEPSEEK_API_KEY=replace-with-your-deepseek-key
 ```
 
@@ -42,7 +45,7 @@ make install-beta
 make run-prod PROD_HOST=127.0.0.1 PROD_PORT=8000
 ```
 
-Открой `http://127.0.0.1:8000`, войди с `SLAVIK_API_TOKEN`, затем:
+Открой production-домен через Cloudflare Access email OTP, затем:
 
 1. В `Settings → API Keys` проверь DeepSeek key.
 2. В `Default chat model` выбери DeepSeek, нажми `Load models`, выбери модель и
@@ -59,7 +62,8 @@ SLAVIK_API_TOKEN=replace-with-the-same-token make smoke-prod
 
 ## Production-заметки
 
-- Не публикуй порт без auth: `SLAVIK_API_TOKEN` обязателен для production.
+- Не публикуй origin port: browser UI должен быть доступен только через Cloudflare Access;
+  `SLAVIK_API_TOKEN` используется отдельно для `/v1` automation.
 - За пределами localhost используй reverse proxy с TLS и оставляй backend на
   `127.0.0.1`, если внешний bind не нужен.
 - Пример systemd unit: [`deploy/slavikai.service.example`](deploy/slavikai.service.example).

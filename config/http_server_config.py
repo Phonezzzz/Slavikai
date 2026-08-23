@@ -34,7 +34,7 @@ class HttpServerConfig:
 class HttpAuthConfig:
     api_token: str
     allow_unauth_local: bool = DEFAULT_ALLOW_UNAUTH_LOCAL
-    browser_auth_mode: BrowserAuthMode = "token"
+    browser_auth_mode: BrowserAuthMode = "cloudflare"
     cloudflare_access_issuer: str = ""
     cloudflare_access_aud: str = ""
     owner_email: str = ""
@@ -97,7 +97,7 @@ def resolve_http_auth_config() -> HttpAuthConfig:
     api_token_raw = os.getenv("SLAVIK_API_TOKEN", "")
     allow_unauth_raw = os.getenv("SLAVIK_ALLOW_UNAUTH_LOCAL", "")
     allow_unauth_local = allow_unauth_raw.strip().lower() == "true"
-    browser_auth_raw = os.getenv("SLAVIK_BROWSER_AUTH", "token").strip().lower()
+    browser_auth_raw = os.getenv("SLAVIK_BROWSER_AUTH", "cloudflare").strip().lower()
     browser_auth_mode: BrowserAuthMode
     if browser_auth_raw == "token":
         browser_auth_mode = "token"
@@ -121,15 +121,19 @@ def ensure_http_auth_boot_config(auth_config: HttpAuthConfig | None = None) -> H
     resolved = auth_config or resolve_http_auth_config()
     if not resolved.allow_unauth_local and not resolved.api_token:
         raise RuntimeError("SLAVIK_API_TOKEN is required unless SLAVIK_ALLOW_UNAUTH_LOCAL=true.")
-    if resolved.browser_auth_mode == "cloudflare":
-        if resolved.allow_unauth_local:
-            raise RuntimeError("SLAVIK_ALLOW_UNAUTH_LOCAL must be false with Cloudflare auth.")
-        if not resolved.cloudflare_access_issuer:
-            raise RuntimeError("SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN is required.")
-        if not resolved.cloudflare_access_aud:
-            raise RuntimeError("SLAVIK_CLOUDFLARE_ACCESS_AUD is required.")
-        if normalize_email(resolved.owner_email) is None:
-            raise RuntimeError("SLAVIK_OWNER_EMAIL is required and must be a valid email.")
+    if resolved.allow_unauth_local:
+        return resolved
+    if resolved.browser_auth_mode != "cloudflare":
+        raise RuntimeError(
+            "SLAVIK_BROWSER_AUTH=token is not supported for server boot; "
+            "use Cloudflare Access browser auth."
+        )
+    if not resolved.cloudflare_access_issuer:
+        raise RuntimeError("SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN is required.")
+    if not resolved.cloudflare_access_aud:
+        raise RuntimeError("SLAVIK_CLOUDFLARE_ACCESS_AUD is required.")
+    if normalize_email(resolved.owner_email) is None:
+        raise RuntimeError("SLAVIK_OWNER_EMAIL is required and must be a valid email.")
     return resolved
 
 

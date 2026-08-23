@@ -105,9 +105,6 @@ def _resolve_request_principal_id(
 ) -> str | None:
     if auth_config.allow_unauth_local:
         return "local_unauth"
-    presented_token = _extract_bearer_token(request)
-    if presented_token is not None:
-        return _principal_id_for_presented_token(presented_token, auth_config)
     presented_cookie = request.cookies.get(UI_AUTH_COOKIE, "").strip()
     if presented_cookie:
         return _principal_id_for_ui_cookie(presented_cookie, auth_config)
@@ -115,19 +112,22 @@ def _resolve_request_principal_id(
 
 
 def _owner_principal_id(auth_config: HttpAuthConfig) -> str:
-    if auth_config.browser_auth_mode == "cloudflare":
-        return principal_id_for_email(auth_config.owner_email)
     if auth_config.allow_unauth_local:
         return "local_unauth"
+    if auth_config.browser_auth_mode == "cloudflare":
+        return principal_id_for_email(auth_config.owner_email)
     if auth_config.api_token:
         return _principal_id_from_token(auth_config.api_token)
     return "local_unauth"
 
 
 def _legacy_owner_principal_aliases(auth_config: HttpAuthConfig) -> frozenset[str]:
-    aliases = {"legacy"}
+    aliases = {"legacy", "local_unauth"}
     if auth_config.api_token:
         aliases.add(_principal_id_from_token(auth_config.api_token))
+    admin_token = os.environ.get("SLAVIK_ADMIN_TOKEN", "").strip()
+    if admin_token:
+        aliases.add(_principal_id_from_token(admin_token))
     return frozenset(aliases)
 
 
@@ -143,6 +143,12 @@ async def _resolve_ui_request_identity(
     request: web.Request,
     auth_config: HttpAuthConfig,
 ) -> RequestIdentity | None:
+    if auth_config.allow_unauth_local:
+        return RequestIdentity(
+            principal_id="local_unauth",
+            role="owner",
+            auth_method="local",
+        )
     if auth_config.browser_auth_mode == "cloudflare":
         token = request.headers.get("Cf-Access-Jwt-Assertion", "").strip()
         if not token:
@@ -170,21 +176,6 @@ async def _resolve_ui_request_identity(
             role=role,
             auth_method="cloudflare_access",
         )
-    if auth_config.allow_unauth_local:
-        return RequestIdentity(
-            principal_id="local_unauth",
-            role="owner",
-            auth_method="local",
-        )
-    presented_token = _extract_bearer_token(request)
-    if presented_token is not None:
-        principal_id = _principal_id_for_presented_token(presented_token, auth_config)
-        if principal_id is not None:
-            return RequestIdentity(
-                principal_id=principal_id,
-                role="owner",
-                auth_method="bearer",
-            )
     presented_cookie = request.cookies.get(UI_AUTH_COOKIE, "").strip()
     if presented_cookie:
         principal_id = _principal_id_for_ui_cookie(presented_cookie, auth_config)

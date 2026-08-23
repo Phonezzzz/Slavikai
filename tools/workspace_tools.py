@@ -100,13 +100,30 @@ def _ensure_in_workspace(raw_path: str) -> Path:
     return candidate
 
 
-def _read_file(path: Path) -> str:
+def _read_file(path: Path, *, max_bytes: int | None = None) -> tuple[str, int, bool]:
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"Файл не найден: {path}")
     size = path.stat().st_size
     if size > MAX_FILE_BYTES:
         raise ValueError("Файл слишком большой для чтения.")
-    return path.read_text(encoding="utf-8")
+    if max_bytes is not None and (max_bytes <= 0 or max_bytes > MAX_FILE_BYTES):
+        raise ValueError(f"max_bytes должен быть в диапазоне 1..{MAX_FILE_BYTES}.")
+    limit = max_bytes or MAX_FILE_BYTES
+    with path.open("rb") as handle:
+        raw = handle.read(limit + 1)
+    truncated = len(raw) > limit
+    prefix = raw[:limit]
+    while prefix:
+        try:
+            content = prefix.decode("utf-8")
+            break
+        except UnicodeDecodeError as exc:
+            if not truncated or exc.reason != "unexpected end of data" or exc.end != len(prefix):
+                raise ValueError("Файл не является корректным UTF-8 текстом.") from exc
+            prefix = prefix[: exc.start]
+    else:
+        content = ""
+    return content, len(prefix), truncated
 
 
 def _is_allowed_workspace_file(path: Path) -> bool:
@@ -381,12 +398,23 @@ class ReadFileTool:
         raw_path = str(request.args.get("path") or "").strip()
         if not raw_path:
             return ToolResult.failure("Не указан путь файла.")
+        max_bytes_raw = request.args.get("max_bytes")
+        if max_bytes_raw is not None and type(max_bytes_raw) is not int:
+            return ToolResult.failure("max_bytes должен быть целым числом.")
+        max_bytes = max_bytes_raw if type(max_bytes_raw) is int else None
         try:
             path = _ensure_in_workspace(raw_path)
             if not _is_allowed_workspace_file(path):
                 return ToolResult.failure("Расширение файла запрещено для чтения.")
-            content = _read_file(path)
-            return ToolResult.success({"output": content, "path": str(path)})
+            content, bytes_read, truncated = _read_file(path, max_bytes=max_bytes)
+            return ToolResult.success(
+                {
+                    "output": content,
+                    "path": str(path),
+                    "bytes_read": bytes_read,
+                    "truncated": truncated,
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(str(exc))
 
@@ -527,7 +555,7 @@ class ApplyPatchTool:
             path = _ensure_in_workspace(raw_path)
             if not _is_allowed_workspace_file(path):
                 return ToolResult.failure("Расширение файла запрещено для patch.")
-            original = _read_file(path)
+            original, _, _ = _read_file(path)
             try:
                 patched = _apply_unified_patch(original, diff_text)
             except Exception as exc:  # noqa: BLE001

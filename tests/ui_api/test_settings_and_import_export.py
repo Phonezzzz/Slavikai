@@ -22,7 +22,10 @@ def test_ui_settings_unauthorized_logs_snapshot(monkeypatch) -> None:
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token="ui-auth-required", allow_unauth_local=False),
+            auth_config=HttpAuthConfig(
+                api_token="ui-auth-required",
+                browser_auth_mode="token",
+            ),
         )
         server = TestServer(app)
         client = TestClient(server)

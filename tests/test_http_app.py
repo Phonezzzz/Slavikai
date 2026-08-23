@@ -36,14 +36,22 @@ def test_create_app_invokes_dotenv_loader(monkeypatch) -> None:
         agent=StubAgent(),
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(
+            api_token=TEST_API_TOKEN,
+            allow_unauth_local=False,
+            browser_auth_mode="token",
+        ),
     )
     assert calls == ["loaded"]
 
 
 def test_run_server_loads_dotenv_before_auth_validation(monkeypatch) -> None:
     calls: list[str] = []
-    auth_config = HttpAuthConfig(api_token="from-dotenv", allow_unauth_local=False)
+    auth_config = HttpAuthConfig(
+        api_token="from-dotenv",
+        allow_unauth_local=False,
+        browser_auth_mode="token",
+    )
 
     monkeypatch.setattr(http_app, "_load_project_dotenv", lambda: calls.append("dotenv"))
 
@@ -78,7 +86,7 @@ def test_create_app_attaches_runtime_model_state_and_resolver(monkeypatch) -> No
         agent=StubAgent(),
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
     )
 
     assert "runtime_model_state" in app
@@ -94,7 +102,7 @@ def test_create_app_hydrates_runtime_model_state_from_persisted_config(monkeypat
         agent=StubAgent(),
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
     )
 
     runtime_state = app["runtime_model_state"]
@@ -112,7 +120,7 @@ def test_create_app_leaves_runtime_model_state_empty_when_persisted_missing(monk
         agent=StubAgent(),
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
     )
 
     runtime_state = app["runtime_model_state"]
@@ -149,7 +157,7 @@ def test_create_app_passes_ui_embeddings_settings_to_scoped_agent(monkeypatch) -
     app = http_app.create_app(
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
     )
     main_config = ModelConfig(provider="local", model="test-model")
     _ = asyncio.run(

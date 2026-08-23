@@ -43,9 +43,10 @@
   пользователи являются members;
 - browser identity и Bearer auth для `/v1` automation — разные auth lanes.
 
-Cloudflare browser identity contract реализован в отдельном production mode; token-cookie
-browser auth остаётся reachable legacy для локального запуска. Runtime Agent создаётся на
-scope `(principal_id, session_id)`; owner использует существующие `memory/*.db`, а members —
+Cloudflare browser identity является production default; token browser mode отклоняется
+canonical server boot. Для локальной разработки доступен только явный unauth-local bypass.
+Runtime Agent создаётся на scope `(principal_id, session_id)`; owner использует существующие
+`memory/*.db`, а members —
 изолированные hashed principal directories для Memory, canonical atoms и vectors. Persistent
 Desktop approvals также имеют explicit principal subject, при этом один общий host coordinator
 по-прежнему допускает только один Desktop run одновременно.

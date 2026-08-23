@@ -190,7 +190,18 @@ TOOL_METADATA: dict[str, ToolMetadata] = {
     "workspace_read": ToolMetadata(
         description="Read a text file from the selected workspace.",
         parameters_schema=_schema(
-            {"path": {"type": "string", "description": "File path relative to workspace root."}},
+            {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to workspace root.",
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2_000_000,
+                    "description": "Optional maximum UTF-8 prefix bytes to return.",
+                },
+            },
             required=["path"],
         ),
     ),

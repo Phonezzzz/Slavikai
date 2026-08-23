@@ -22,6 +22,18 @@ def _secure_cookie_required(request: web.Request) -> bool:
 
 async def handle_ui_auth_status(request: web.Request) -> web.Response:
     auth_config: HttpAuthConfig = request.app["auth_config"]
+    if auth_config.allow_unauth_local:
+        identity = _request_identity(request)
+        return json_response(
+            {
+                "ok": True,
+                "authenticated": identity is not None,
+                "auth_required": False,
+                "auth_method": "local",
+                "principal_id": identity.principal_id if identity is not None else None,
+                "role": identity.role if identity is not None else None,
+            }
+        )
     if auth_config.browser_auth_mode == "cloudflare":
         identity = _request_identity(request)
         return json_response(

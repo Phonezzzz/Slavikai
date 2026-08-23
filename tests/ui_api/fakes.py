@@ -37,6 +37,7 @@ from core.mwv.models import (
 from core.tracer import Tracer
 from llm.stream_model import Done, TextDelta
 from memory.categorized_memory_store import CategorizedMemoryStore
+from server.http.common.auth import UI_AUTH_COOKIE, _ui_auth_cookie_value
 from server.http_api import _resolve_workspace_root_candidate, create_app
 from server.ui_hub import UIHub
 from server.ui_session_storage import (
@@ -49,7 +50,7 @@ from shared.models import JSONValue, ToolResult
 from tools.tool_logger import ToolCallLogger
 
 TEST_API_TOKEN = "test-ui-api-token"
-TEST_AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+TEST_AUTH_HEADERS = {"Cookie": f"{UI_AUTH_COOKIE}={_ui_auth_cookie_value(TEST_API_TOKEN)}"}
 
 
 class DummyAgent:
@@ -753,7 +754,11 @@ async def _create_client(
         agent=agent,
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(
+            api_token=TEST_API_TOKEN,
+            allow_unauth_local=False,
+            browser_auth_mode="token",
+        ),
         desktop_policy_store=desktop_policy_store,
     )
     server = TestServer(app)

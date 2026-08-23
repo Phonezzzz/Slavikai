@@ -1269,7 +1269,7 @@ def test_ui_chat_send_decision_isolated_between_sessions() -> None:
             agent=DecisionEchoAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         app["ui_hub"] = DelayedFirstUserMessageHub("session-a")
         server = TestServer(app)
@@ -1967,7 +1967,7 @@ def test_ui_chat_send_no_decision_leak_from_other_session() -> None:
             agent=DecisionOnlyForSessionAAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)

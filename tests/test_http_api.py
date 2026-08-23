@@ -155,7 +155,11 @@ async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> Te
         agent=agent,
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(
+            api_token=TEST_API_TOKEN,
+            allow_unauth_local=False,
+            browser_auth_mode="token",
+        ),
     )
     server = TestServer(app)
     client = TestClient(server, headers=TEST_AUTH_HEADERS)
@@ -170,7 +174,11 @@ async def _create_client_without_agent(trace_path: Path, monkeypatch) -> TestCli
         agent=None,
         max_request_bytes=1_000_000,
         ui_storage=InMemoryUISessionStorage(),
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(
+            api_token=TEST_API_TOKEN,
+            allow_unauth_local=False,
+            browser_auth_mode="token",
+        ),
     )
     server = TestServer(app)
     client = TestClient(server, headers=TEST_AUTH_HEADERS)
@@ -193,7 +201,11 @@ def test_auth_gate_rejects_missing_bearer(monkeypatch, tmp_path) -> None:
             agent=agent,
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(
+                api_token=TEST_API_TOKEN,
+                allow_unauth_local=False,
+                browser_auth_mode="token",
+            ),
         )
         server = TestServer(app)
         client = TestClient(server)
@@ -221,7 +233,11 @@ def test_auth_gate_accepts_valid_bearer(monkeypatch, tmp_path) -> None:
             agent=agent,
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(
+                api_token=TEST_API_TOKEN,
+                allow_unauth_local=False,
+                browser_auth_mode="token",
+            ),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)

@@ -11,8 +11,8 @@ Computer Mode product invariant ("not a manual IDE", live agent execution surfac
 ## Цель
 
 SlavikAI сейчас работает как server-side agent runtime с Cloudflare Access owner/member
-browser identity и principal isolation. Legacy token-cookie auth остаётся для
-локального запуска. Mutable Agent/runtime state принадлежит `(principal_id, session_id)`,
+browser identity и principal isolation. Для local development доступен только явный
+unauth-local bypass. Mutable Agent/runtime state принадлежит `(principal_id, session_id)`,
 Memory/vector stores принадлежат principal; owner продолжает использовать существующие legacy
 DB paths. После PR-0..PR-14 в коде есть tool-calling contract,
 read-only chat integration через `AgentToolLoop`, auto v1 через `AgentToolLoop`,
@@ -211,8 +211,8 @@ conversational endpoint и существующий LLM/tool loop, но публ
   exact `model="slavik"` и отклоняет остальные ID до Agent/session resolution.
 - Служебные endpoints: `/slavik/trace/{trace_id}`, `/slavik/tool-calls/{trace_id}`, `/slavik/feedback`, `/slavik/approve-session`.
 - UI API и workflow endpoints регистрируются в `server/http/routes.py`.
-- Browser UI проходит login через `/ui/api/auth/login` и работает по подписанной
-  `HttpOnly`, `SameSite=Strict` cookie. `/v1/*` и service clients сохраняют Bearer auth.
+- Browser UI получает identity только из проверенного Cloudflare Access JWT email claim.
+  `/v1/*` и service clients используют отдельный Bearer auth, который не принимается UI API.
 - Plan draft формируется через structured `submit_plan` tool call. Каждый executable step
   содержит ровно одну `allowed_tool_kinds`, совпадающую `inputs.operation`, и `tool_args`.
 

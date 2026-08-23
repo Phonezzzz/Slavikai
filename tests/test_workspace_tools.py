@@ -49,6 +49,32 @@ def test_read_write_and_list_files() -> None:
     assert target_path in paths
 
 
+def test_workspace_read_returns_bounded_utf8_prefix() -> None:
+    target_path = "bounded.txt"
+    (WORKSPACE_ROOT / target_path).write_text("ab€tail", encoding="utf-8")
+
+    result = ReadFileTool().handle(
+        _make_request("workspace_read", {"path": target_path, "max_bytes": 4})
+    )
+
+    assert result.ok
+    assert result.data["output"] == "ab"
+    assert result.data["bytes_read"] == 2
+    assert result.data["truncated"] is True
+
+
+def test_workspace_read_rejects_invalid_utf8_prefix() -> None:
+    target_path = "invalid.txt"
+    (WORKSPACE_ROOT / target_path).write_bytes(b"ok\xffbad")
+
+    result = ReadFileTool().handle(
+        _make_request("workspace_read", {"path": target_path, "max_bytes": 6})
+    )
+
+    assert not result.ok
+    assert "UTF-8" in (result.error or "")
+
+
 def test_apply_patch_dry_run_and_apply() -> None:
     file_path = "patch_me.txt"
     WriteFileTool().handle(

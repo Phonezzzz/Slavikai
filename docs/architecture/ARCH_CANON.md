@@ -24,8 +24,9 @@
   Workspace переименован в Computer (inspector/runtime для chat session), добавлены
   `AgentComputerRuntime`, `ComputerBackend` Protocol, `LocalComputerBackend` (default),
   `ContainerComputerBackend` (opt-in/inactive). Production browser auth проверяет Cloudflare
-  Access JWT и выводит owner/member principal из verified email; token login с подписанной
-  HttpOnly-cookie остаётся legacy local mode. Plan draft получает executable steps через structured
+  Access JWT и выводит owner/member principal из verified email. Cloudflare Access JWT является
+  единственным production browser identity; local development
+  использует только явный unauth-local bypass. Plan draft получает executable steps через structured
   `submit_plan` tool call; Auto отклоняет provider без native tools до запуска и применяет
   `tool_outcomes` verifier для generic workspace. Ask не выполняет Memory/tool writes и
   передаёт `allow_runtime_init=False` во все vector retrieval paths; explicit Memory request
@@ -38,7 +39,7 @@
   `/v1/chat/completions` отклоняет любой другой `model` до Agent/session resolution.
 - **Principal isolation**: Agent runtime state изолирован по `(principal_id, session_id)`;
   Memory/canonical/vector stores изолированы по principal, а owner сохраняет legacy DB paths.
-- **Current legacy runtime**: token-cookie browser auth, крупные `core/agent_mwv.py`, `core/agent_tools.py`,
+- **Current legacy runtime**: крупные `core/agent_mwv.py`, `core/agent_tools.py`,
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой
   архитектурой.

@@ -294,7 +294,7 @@ def test_ui_workspace_tree_and_file_get_without_selected_model(tmp_path) -> None
             agent=None,
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)
@@ -347,7 +347,7 @@ def test_ui_workspace_tree_returns_truncation_meta_on_large_directory(tmp_path) 
             agent=None,
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)
@@ -390,7 +390,7 @@ def test_ui_workspace_tree_clamps_max_depth(tmp_path) -> None:
             agent=None,
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)
@@ -505,7 +505,7 @@ def test_create_app_keeps_workspace_root_and_policy_on_boot(tmp_path) -> None:
         agent=DummyAgent(),
         max_request_bytes=1_000_000,
         ui_storage=storage,
-        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+        auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
     )
 
     sessions = storage.load_sessions()
@@ -699,7 +699,7 @@ def test_ui_workspace_browse_lists_directories_in_sandbox(tmp_path) -> None:
             agent=None,
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)
@@ -792,7 +792,7 @@ def test_ui_workspace_browse_rejects_symlink_escape(tmp_path) -> None:
             agent=None,
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)

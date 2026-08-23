@@ -64,7 +64,7 @@ help:
 	@echo "Run:"
 	@echo "  make run             Run UI in foreground"
 	@echo "  make run-prod        Run server in foreground for production host/port"
-	@echo "  make smoke-prod      Check health, settings, and models on a running server"
+	@echo "  make smoke-prod      Check health and Bearer automation models on a running server"
 	@echo "  make up-prod         Run production server in background via venv-prod"
 	@echo "  make down-prod       Stop background production server"
 	@echo "  make status-prod     Show background production server status"
@@ -324,7 +324,7 @@ smoke-prod:
 deploy-example:
 	@echo "Production deploy:"
 	@echo "  cp .env.example .env"
-	@echo "  # Set SLAVIK_API_TOKEN and DEEPSEEK_API_KEY in .env"
+	@echo "  # Set Cloudflare Access identity variables, SLAVIK_API_TOKEN, and DEEPSEEK_API_KEY"
 	@echo "  make install-beta"
 	@echo "  make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000"
 	@echo "  SLAVIK_API_TOKEN=*** make smoke-prod"

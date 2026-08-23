@@ -128,7 +128,16 @@ def test_cloudflare_auth_config_requires_complete_verified_identity_contract(
     assert resolved.owner_email == "owner@example.com"
 
 
-def test_cloudflare_auth_config_rejects_local_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cloudflare_browser_auth_is_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SLAVIK_BROWSER_AUTH", raising=False)
+
+    assert HttpAuthConfig(api_token="automation-token").browser_auth_mode == "cloudflare"
+    assert resolve_http_auth_config().browser_auth_mode == "cloudflare"
+
+
+def test_explicit_local_bypass_does_not_require_cloudflare_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = HttpAuthConfig(
         api_token="automation-token",
         allow_unauth_local=True,
@@ -138,7 +147,16 @@ def test_cloudflare_auth_config_rejects_local_bypass(monkeypatch: pytest.MonkeyP
         owner_email="owner@example.com",
     )
 
-    with pytest.raises(RuntimeError, match="ALLOW_UNAUTH_LOCAL"):
+    assert ensure_http_auth_boot_config(config) == config
+
+
+def test_token_browser_mode_is_rejected_for_server_boot() -> None:
+    config = HttpAuthConfig(
+        api_token="automation-token",
+        browser_auth_mode="token",
+    )
+
+    with pytest.raises(RuntimeError, match="not supported"):
         ensure_http_auth_boot_config(config)
 
 

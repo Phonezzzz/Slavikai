@@ -3,19 +3,23 @@ from __future__ import annotations
 import sqlite3
 
 from llm.types import ModelConfig
-from server.http.common.auth import UI_AUTH_COOKIE
+from server.http.common.auth import UI_AUTH_COOKIE, _ui_auth_cookie_value
 
 # ruff: noqa: F403,F405
 from .fakes import *
 
 
-def test_ui_api_requires_bearer_by_default() -> None:
+def test_ui_api_requires_browser_identity_by_default() -> None:
     async def run() -> None:
         app = create_app(
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token="ui-auth-required", allow_unauth_local=False),
+            auth_config=HttpAuthConfig(
+                api_token="ui-auth-required",
+                allow_unauth_local=False,
+                browser_auth_mode="token",
+            ),
         )
         server = TestServer(app)
         client = TestClient(server)
@@ -33,6 +37,31 @@ def test_ui_api_requires_bearer_by_default() -> None:
     asyncio.run(run())
 
 
+def test_explicit_local_bypass_reports_local_identity() -> None:
+    async def run() -> None:
+        app = create_app(
+            agent=DummyAgent(),
+            max_request_bytes=1_000_000,
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token="", allow_unauth_local=True),
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get("/ui/api/auth/status")
+            payload = await response.json()
+            assert response.status == 200
+            assert payload["authenticated"] is True
+            assert payload["auth_required"] is False
+            assert payload["auth_method"] == "local"
+            assert payload["principal_id"] == "local_unauth"
+            assert payload["role"] == "owner"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_login_cookie_authenticates_browser_without_exposing_token() -> None:
     async def run() -> None:
         token = "ui-browser-token"
@@ -40,7 +69,11 @@ def test_ui_login_cookie_authenticates_browser_without_exposing_token() -> None:
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=token, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(
+                api_token=token,
+                allow_unauth_local=False,
+                browser_auth_mode="token",
+            ),
         )
         client = TestClient(TestServer(app))
         await client.start_server()
@@ -65,11 +98,12 @@ def test_ui_login_cookie_authenticates_browser_without_exposing_token() -> None:
             )
             assert protected.status == 200
 
+            client.session.cookie_jar.clear()
             bearer = await client.get(
                 "/ui/api/status",
                 headers={"Authorization": f"Bearer {token}"},
             )
-            assert bearer.status == 200
+            assert bearer.status == 401
 
             logout = await client.post("/ui/api/auth/logout")
             assert logout.status == 200
@@ -1499,7 +1533,7 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             agent=DecisionEchoAgent(),
             max_request_bytes=1_000_000,
             ui_storage=storage_before,
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server_before = TestServer(app_before)
         client_before = TestClient(server_before, headers=TEST_AUTH_HEADERS)
@@ -1537,7 +1571,7 @@ def test_ui_sessions_persist_after_restart(tmp_path) -> None:
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=storage_after,
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server_after = TestServer(app_after)
         client_after = TestClient(server_after, headers=TEST_AUTH_HEADERS)
@@ -1609,7 +1643,7 @@ def test_ui_chat_send_uses_restored_session_model_as_runtime_override(
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=storage_before,
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server_before = TestServer(app_before)
         client_before = TestClient(server_before, headers=TEST_AUTH_HEADERS)
@@ -1639,7 +1673,7 @@ def test_ui_chat_send_uses_restored_session_model_as_runtime_override(
             agent=agent_after,
             max_request_bytes=1_000_000,
             ui_storage=storage_after,
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         runtime_model_state = app_after["runtime_model_state"]
         await runtime_model_state.set_global_main(None)
@@ -1908,7 +1942,7 @@ def test_ui_session_policy_persist_after_restart(tmp_path) -> None:
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=storage_before,
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server_before = TestServer(app_before)
         client_before = TestClient(server_before, headers=TEST_AUTH_HEADERS)
@@ -1942,7 +1976,7 @@ def test_ui_session_policy_persist_after_restart(tmp_path) -> None:
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=storage_after,
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server_after = TestServer(app_after)
         client_after = TestClient(server_after, headers=TEST_AUTH_HEADERS)
@@ -2112,7 +2146,7 @@ def test_foreign_session_returns_403_consistently(monkeypatch) -> None:
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)
@@ -2127,11 +2161,15 @@ def test_foreign_session_returns_403_consistently(monkeypatch) -> None:
             model_id = await _select_local_model(client, session_id)
 
             foreign_headers = {
-                "Authorization": "Bearer secondary-principal-token",
+                "Cookie": (
+                    f"{UI_AUTH_COOKIE}={_ui_auth_cookie_value('secondary-principal-token')}"
+                ),
                 "X-Slavik-Session": session_id,
             }
             foreign_payload = {
-                "Authorization": "Bearer secondary-principal-token",
+                "Cookie": (
+                    f"{UI_AUTH_COOKIE}={_ui_auth_cookie_value('secondary-principal-token')}"
+                ),
             }
 
             session_get_resp = await client.get(

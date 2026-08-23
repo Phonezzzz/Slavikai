@@ -20,7 +20,10 @@ make install-beta
 Минимальный `.env`:
 
 ```dotenv
-SLAVIK_API_TOKEN=replace-with-a-long-random-token
+SLAVIK_API_TOKEN=replace-with-a-long-random-automation-token
+SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
+SLAVIK_CLOUDFLARE_ACCESS_AUD=your-access-application-aud
+SLAVIK_OWNER_EMAIL=owner@example.com
 DEEPSEEK_API_KEY=replace-with-your-deepseek-key
 ```
 
@@ -60,28 +63,14 @@ export OPENAI_API_KEY="..."
 make run-prod PROD_HOST=0.0.0.0 PROD_PORT=8000
 ```
 
-При открытии UI введи `SLAVIK_API_TOKEN` в форме входа. Сервер установит подписанную
-`HttpOnly`, `SameSite=Strict` cookie; сам token в cookie не сохраняется. Для внешних API
-клиентов остаётся Bearer auth: `Authorization: Bearer <SLAVIK_API_TOKEN>`.
-
-Это текущая legacy browser auth, а не реализация целевого owner/member deployment за
-Cloudflare Access. Для production за Access используй отдельный browser auth mode:
-
-```dotenv
-SLAVIK_API_TOKEN=replace-with-a-long-random-automation-token
-SLAVIK_BROWSER_AUTH=cloudflare
-SLAVIK_CLOUDFLARE_ACCESS_TEAM_DOMAIN=your-team.cloudflareaccess.com
-SLAVIK_CLOUDFLARE_ACCESS_AUD=your-access-application-aud
-SLAVIK_OWNER_EMAIL=owner@example.com
-```
-
 Cloudflare email OTP остаётся единственным browser login: origin проверяет Access JWT через
 team JWKS, включая signature, `iss`, `aud`, `exp`, `nbf` и email. `/v1/*` и `/slavik/*`
-по-прежнему используют отдельный `Authorization: Bearer <SLAVIK_API_TOKEN>` lane. Не передавай
-Bearer token в browser UI и не включай `SLAVIK_ALLOW_UNAUTH_LOCAL` вместе с Cloudflare mode.
+используют отдельный `Authorization: Bearer <SLAVIK_API_TOKEN>` lane. Bearer token не
+аутентифицирует `/ui/api/*` и не должен передаваться browser UI.
 
 Для локальной разработки без auth можно явно задать
-`SLAVIK_ALLOW_UNAUTH_LOCAL=true`. На публичном интерфейсе этот режим не использовать.
+`SLAVIK_ALLOW_UNAUTH_LOCAL=true`. Этот режим предназначен только для loopback/local development;
+на публичном интерфейсе его не использовать.
 
 ## 3) HTTP-конфиг (опционально)
 
@@ -105,11 +94,12 @@ Bearer token в browser UI и не включай `SLAVIK_ALLOW_UNAUTH_LOCAL` в
 
 ```bash
 curl -sS http://127.0.0.1:8000/healthz
-curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/ui/api/status
 curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/v1/models
-curl -sS -H "Authorization: Bearer $SLAVIK_API_TOKEN" http://127.0.0.1:8000/ui/api/settings
 make smoke-prod
 ```
+
+UI-проверку выполняй через домен за Cloudflare Access; прямой Bearer-запрос к `/ui/api/*`
+должен возвращать `401`.
 
 `/v1/models` возвращает один публичный proxy model id `slavik`. Реальный provider/model
 выбирается в Settings и не является публичным model id этого API.
@@ -145,6 +135,6 @@ sudo systemctl status slavikai
 - `curl /healthz` возвращает `status=ok` и `ui_built=true`.
 - Целевая модель видна в списке моделей выбранного провайдера в UI.
 - Для выбранного провайдера выставлен корректный API key.
-- `SLAVIK_API_TOKEN` задан, UI login и Bearer smoke-check проходят.
+- Cloudflare Access email OTP открывает UI, а Bearer smoke-check проходит только для `/v1/*`.
 - Plan/Auto используют provider с native tools: `deepseek` или `local`.
 - Для local embeddings установлен beta bundle и модель имеет статус `ready` в UI.

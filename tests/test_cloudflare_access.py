@@ -15,6 +15,10 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from config.http_server_config import HttpAuthConfig
 from core.desktop_policy import DesktopPolicyStore
 from server.http.app import create_app
+from server.http.common.auth import (
+    _legacy_owner_principal_aliases,
+    _principal_id_from_token,
+)
 from server.http.common.request_identity import (
     CloudflareAccessJWTVerifier,
     CloudflareAccessTokenError,
@@ -38,6 +42,26 @@ class StubAccessVerifier:
         if claims is None:
             raise CloudflareAccessTokenError("invalid")
         return claims
+
+
+def test_owner_migration_includes_all_legacy_browser_principals(monkeypatch) -> None:
+    monkeypatch.setenv("SLAVIK_ADMIN_TOKEN", "legacy-admin-token")
+    aliases = _legacy_owner_principal_aliases(
+        HttpAuthConfig(
+            api_token="legacy-api-token",
+            browser_auth_mode="cloudflare",
+            cloudflare_access_issuer="https://example.cloudflareaccess.com",
+            cloudflare_access_aud="application-aud",
+            owner_email="owner@example.com",
+        )
+    )
+
+    assert aliases == {
+        "legacy",
+        "local_unauth",
+        _principal_id_from_token("legacy-api-token"),
+        _principal_id_from_token("legacy-admin-token"),
+    }
 
 
 def _b64url(value: bytes) -> str:

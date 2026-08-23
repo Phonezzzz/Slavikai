@@ -100,5 +100,28 @@ def test_plan_audit_uses_gateway_tool_requests_only() -> None:
         "workspace_read",
         "workspace_read",
     ]
+    assert requests[1].args == {"path": "a.py", "max_bytes": 4000}
+    assert requests[2].args == {"path": "src/b.py", "max_bytes": 4000}
     assert [entry["path"] for entry in entries] == ["a.py", "src/b.py"]
     assert usage == {"read_files": 2, "total_bytes": 28, "search_calls": 1}
+
+
+def test_plan_audit_limits_each_tool_read_to_remaining_budget() -> None:
+    requests: list[ToolRequest] = []
+
+    def call_tool(request: ToolRequest) -> ToolResult:
+        requests.append(request)
+        if request.name == "workspace_list":
+            return ToolResult.success({"tree": [{"name": "a.py", "type": "file", "path": "a.py"}]})
+        return ToolResult.success({"output": "12345"})
+
+    entries, usage = _run_plan_readonly_audit(
+        call_tool=call_tool,
+        plan_audit_timeout_seconds=5,
+        plan_audit_max_total_bytes=5,
+        plan_audit_max_read_files=100,
+    )
+
+    assert requests[-1].args == {"path": "a.py", "max_bytes": 5}
+    assert entries[0]["bytes"] == 5
+    assert usage["total_bytes"] == 5

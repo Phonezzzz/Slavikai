@@ -14,6 +14,7 @@ from llm.stream_model import (
     Usage,
 )
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
+from server.http.common.auth import UI_AUTH_COOKIE, _ui_auth_cookie_value
 from shared.models import LLMMessage, ToolResult
 
 from .fakes import *
@@ -578,7 +579,7 @@ def test_session_ownership_enforced_for_stream_workspace_decision_delete_files_o
             agent=DummyAgent(),
             max_request_bytes=1_000_000,
             ui_storage=InMemoryUISessionStorage(),
-            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, allow_unauth_local=False),
+            auth_config=HttpAuthConfig(api_token=TEST_API_TOKEN, browser_auth_mode="token"),
         )
         server = TestServer(app)
         client = TestClient(server, headers=TEST_AUTH_HEADERS)
@@ -593,11 +594,15 @@ def test_session_ownership_enforced_for_stream_workspace_decision_delete_files_o
             await _select_local_model(client, session_id)
 
             foreign_headers = {
-                "Authorization": "Bearer secondary-principal-token",
+                "Cookie": (
+                    f"{UI_AUTH_COOKIE}={_ui_auth_cookie_value('secondary-principal-token')}"
+                ),
                 "X-Slavik-Session": session_id,
             }
             foreign_payload = {
-                "Authorization": "Bearer secondary-principal-token",
+                "Cookie": (
+                    f"{UI_AUTH_COOKIE}={_ui_auth_cookie_value('secondary-principal-token')}"
+                ),
             }
 
             stream_resp = await client.get(

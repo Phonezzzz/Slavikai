@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
@@ -70,36 +71,39 @@ def _run_plan_readonly_audit(
         )
     )
     tree = listing.data.get("tree") if listing.ok else None
-    pending = list(tree) if isinstance(tree, list) else []
+    pending = deque(tree) if isinstance(tree, list) else deque()
     while pending:
         if time.monotonic() - started > plan_audit_timeout_seconds:
             break
-        node = pending.pop(0)
+        node = pending.popleft()
         if not isinstance(node, dict):
             continue
         children = node.get("children")
         if isinstance(children, list):
-            pending[0:0] = children
+            pending.extendleft(reversed(children))
         if node.get("type") != "file":
             continue
         path = node.get("path")
         if not isinstance(path, str) or not path.strip():
             continue
-        result = call_tool(ToolRequest("workspace_read", {"path": path}))
+        remaining_bytes = plan_audit_max_total_bytes - total_bytes
+        if remaining_bytes <= 0:
+            break
+        read_limit = min(remaining_bytes, 4000)
+        result = call_tool(ToolRequest("workspace_read", {"path": path, "max_bytes": read_limit}))
         content = result.data.get("output") if result.ok else None
         if not isinstance(content, str) or not content:
             continue
         raw = content.encode("utf-8")
-        next_size = min(len(raw), 4000)
-        if total_bytes + next_size > plan_audit_max_total_bytes:
-            break
-        preview = raw[:next_size].decode("utf-8", errors="ignore")
+        if len(raw) > read_limit:
+            continue
+        next_size = len(raw)
         audit_entries.append(
             {
                 "kind": "read_file",
                 "path": path,
                 "bytes": next_size,
-                "preview": preview[:240],
+                "preview": content[:240],
             }
         )
         total_bytes += next_size

@@ -107,7 +107,10 @@ def create_app(
         middlewares=[api.auth_gate_middleware],
     )
     app["auth_config"] = resolved_auth_config
-    if resolved_auth_config.browser_auth_mode == "cloudflare":
+    if (
+        resolved_auth_config.browser_auth_mode == "cloudflare"
+        and not resolved_auth_config.allow_unauth_local
+    ):
         app["cloudflare_access_verifier"] = (
             cloudflare_access_verifier
             or CloudflareAccessJWTVerifier(
