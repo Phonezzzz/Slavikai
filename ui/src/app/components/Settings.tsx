@@ -1,7 +1,22 @@
-import { Download, RefreshCcw, Upload } from 'lucide-react';
+import {
+  Activity,
+  Bot,
+  BrainCircuit,
+  Database,
+  Download,
+  KeyRound,
+  Palette,
+  RefreshCcw,
+  TextCursorInput,
+  Upload,
+} from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import type { ChangeEvent, ReactNode } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+
+import { StatusBadge, type StatusTone } from './ui/status-badge';
+import { ToggleSwitch } from './ui/toggle-switch';
+import { useFocusTrap } from '../use-focus-trap';
 
 interface SettingsProps {
   isOpen: boolean;
@@ -147,6 +162,16 @@ const TAB_ITEMS: Array<{ id: SettingsTab; title: string }> = [
   { id: 'data', title: 'Data' },
   { id: 'diagnostics', title: 'Diagnostics' },
 ];
+
+const TAB_ICONS: Record<SettingsTab, typeof KeyRound> = {
+  api: KeyRound,
+  assistant: Bot,
+  appearance: Palette,
+  composer: TextCursorInput,
+  memory: BrainCircuit,
+  data: Database,
+  diagnostics: Activity,
+};
 
 const THRESHOLD_PRESETS = [8000, 12000, 25000];
 
@@ -596,42 +621,30 @@ const parseImportPayloadText = (text: string): ImportPreview & { payload: { sess
   };
 };
 
-type ToggleSwitchProps = {
-  checked: boolean;
-  disabled?: boolean;
-  label: string;
-  onToggle: () => void;
-};
-
-function ToggleSwitch({ checked, disabled = false, label, onToggle }: ToggleSwitchProps) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onToggle}
-      className={`relative inline-flex h-6 w-10 shrink-0 items-center rounded-full p-[2px] transition-colors ${
-        checked ? 'bg-emerald-500/75' : 'bg-zinc-700'
-      } disabled:cursor-not-allowed disabled:opacity-40`}
-    >
-      <span
-        className={`block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${
-          checked ? 'translate-x-4' : 'translate-x-0'
-        }`}
-      />
-    </button>
-  );
-}
-
 type ScopeBadgeProps = {
   children: string;
 };
 
 function ScopeBadge({ children }: ScopeBadgeProps) {
+  const normalized = children.toLowerCase();
+  const tone: StatusTone =
+    normalized === 'advanced'
+      ? 'waiting'
+      : normalized.includes('danger')
+        ? 'error'
+        : normalized.includes('read')
+          ? 'neutral'
+          : 'neutral';
   return (
-    <span className="rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] uppercase tracking-[0.18em] text-zinc-400">
+    <span
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] ${
+        tone === 'waiting'
+          ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+          : tone === 'error'
+            ? 'border-rose-500/30 bg-rose-500/10 text-rose-300'
+            : 'border-zinc-700 bg-zinc-800/60 text-zinc-400'
+      }`}
+    >
       {children}
     </span>
   );
@@ -646,16 +659,36 @@ type SectionCardProps = {
 
 function SectionCard({ title, description, scope, children }: SectionCardProps) {
   return (
-    <section className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div>
-          <div className="text-sm font-medium text-zinc-100">{title}</div>
-          <p className="mt-1 text-xs text-zinc-400">{description}</p>
+    <section className="border-t border-zinc-800/70 pt-4 pb-5 first:border-t-0 first:pt-0">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-zinc-100">{title}</div>
+          <p className="mt-0.5 text-xs text-zinc-500">{description}</p>
         </div>
         {scope ? <ScopeBadge>{scope}</ScopeBadge> : null}
       </div>
       {children}
     </section>
+  );
+}
+
+function Row({
+  label,
+  description,
+  children,
+}: {
+  label: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2.5 first:pt-0 last:pb-0">
+      <div className="min-w-0">
+        <div className="text-[13px] text-zinc-200">{label}</div>
+        {description ? <div className="mt-0.5 text-xs text-zinc-500">{description}</div> : null}
+      </div>
+      <div className="shrink-0">{children}</div>
+    </div>
   );
 }
 
@@ -707,12 +740,11 @@ export function Settings({
   const [importPayloadText, setImportPayloadText] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const modalRef = useRef<HTMLDivElement | null>(null);
 
-  const selectedStyle = useMemo(
-    () => RESPONSE_STYLE_OPTIONS.find((option) => option.value === tone) || RESPONSE_STYLE_OPTIONS[0],
-    [tone],
-  );
   const presetIsCustom = !THRESHOLD_PRESETS.includes(longPasteThresholdChars);
+
+  useFocusTrap(isOpen, modalRef);
 
   const applyParsedSettings = (parsed: ParsedSettings): void => {
     setProviders(parsed.providers);
@@ -789,6 +821,19 @@ export function Settings({
     }
     void loadSettings();
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return undefined;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
 
   useEffect(() => {
     if (!isOpen || embeddingRuntime.state !== 'downloading') {
@@ -1059,27 +1104,30 @@ export function Settings({
           />
 
           <motion.div
+            ref={modalRef}
             initial={{ opacity: 0, scale: 0.97, y: 20 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 20 }}
             className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Settings"
           >
-            <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/60">
-              <div className="flex items-center justify-between border-b border-zinc-800 p-6">
-                <div>
-                  <div className="mb-1 text-xs tracking-[0.18em] text-zinc-500">GLOBAL SETTINGS</div>
-                  <h2 className="text-xl font-semibold text-zinc-100">Preferences and Diagnostics</h2>
-                  <p className="mt-1 text-sm text-zinc-400">
-                    Persistent settings for the assistant, composer behavior, memory, and data tools.
+            <div className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/60">
+              <div className="flex items-center justify-between gap-4 border-b border-zinc-800 px-5 py-4">
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold text-zinc-100">Settings</h2>
+                  <p className="mt-0.5 truncate text-xs text-zinc-500">
+                    Assistant, providers, memory, and data tools.
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex shrink-0 items-center gap-2">
                   <button
                     type="button"
                     onClick={() => {
                       void loadSettings();
                     }}
-                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800"
                   >
                     Refresh
                   </button>
@@ -1089,14 +1137,14 @@ export function Settings({
                       void handleSave();
                     }}
                     disabled={saving || loading}
-                    className="rounded-lg border border-zinc-600 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="rounded-md border border-zinc-600 bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {saving ? 'Saving...' : 'Save changes'}
                   </button>
                   <button
                     type="button"
                     onClick={onClose}
-                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800"
                   >
                     Close
                   </button>
@@ -1104,75 +1152,78 @@ export function Settings({
               </div>
 
               <div className="flex min-h-0 flex-1 overflow-hidden">
-                <div className="w-56 border-r border-zinc-800 p-4">
-                  <div className="space-y-1">
+                <nav className="w-48 shrink-0 border-r border-zinc-800 p-2.5">
+                  <div className="space-y-0.5">
                     {TAB_ITEMS.map((tab) => (
                       <button
                         key={tab.id}
                         type="button"
                         onClick={() => setActiveTab(tab.id)}
-                        className={`w-full rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                        className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors ${
                           activeTab === tab.id
-                            ? 'bg-zinc-200 text-zinc-900'
-                            : 'text-zinc-300 hover:bg-zinc-900'
+                            ? 'bg-zinc-800 text-zinc-100'
+                            : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
                         }`}
                       >
+                        {(() => {
+                          const Icon = TAB_ICONS[tab.id];
+                          return <Icon className="h-4 w-4 shrink-0" />;
+                        })()}
                         {tab.title}
                       </button>
                     ))}
                   </div>
-                </div>
+                </nav>
 
-                <div className="min-h-0 flex-1 overflow-y-auto p-6" data-scrollbar="auto">
-                  {status ? <div className="mb-4 text-sm text-zinc-300">{status}</div> : null}
-                  {loading ? <div className="text-sm text-zinc-400">Loading settings...</div> : null}
+                <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5" data-scrollbar="auto">
+                  {status ? (
+                    <div className="mb-4 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-300">
+                      {status}
+                    </div>
+                  ) : null}
+                  {loading ? (
+                    <div className="text-sm text-zinc-400">Loading settings...</div>
+                  ) : null}
 
                   {!loading && activeTab === 'api' ? (
-                    <div className="space-y-6">
+                    <div>
                       <SectionCard
                         title="Provider API keys"
                         description="Keys are validated before they are saved to config/api_keys.json. Environment variables always take priority."
                         scope="Global"
                       >
-                        <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-zinc-400">
-                          Saved values remain masked and are never returned by the settings API. Leave a field untouched to keep its current value.
-                        </div>
-                        <div className="space-y-4">
+                        <p className="mb-3 text-xs text-zinc-500">
+                          Saved keys stay masked and are never returned by the API. Environment
+                          variables always take priority.
+                        </p>
+                        <div>
                           {providers.map((provider) => (
                             <div
                               key={provider.provider}
-                              className="rounded-xl border border-zinc-800 bg-zinc-950 p-4"
+                              className="border-b border-zinc-800/60 py-3 first:pt-0 last:border-b-0 last:pb-0"
                             >
-                              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                                <div>
-                                  <div className="font-medium text-zinc-100">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span className="text-[13px] font-medium text-zinc-100">
                                     {PROVIDER_LABELS[provider.provider]}
-                                  </div>
-                                  <div className="mt-1 font-mono text-xs text-zinc-500">
-                                    {provider.api_key_env}
-                                  </div>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span
-                                    className={`rounded-md px-2 py-1 text-xs font-medium ${
-                                      provider.api_key_set
-                                        ? 'bg-emerald-500/20 text-emerald-300'
-                                        : 'bg-amber-500/20 text-amber-300'
-                                    }`}
-                                  >
-                                    {provider.api_key_set ? 'key available' : 'key missing'}
                                   </span>
-                                  <span className="rounded-md bg-zinc-800 px-2 py-1 text-xs text-zinc-300">
+                                  <span className="truncate font-mono text-[11px] text-zinc-500">
+                                    {provider.api_key_env}
+                                  </span>
+                                </div>
+                                <div className="flex shrink-0 items-center gap-2">
+                                  <StatusBadge tone={provider.api_key_set ? 'success' : 'waiting'}>
+                                    {provider.api_key_set ? 'key set' : 'key missing'}
+                                  </StatusBadge>
+                                  <span className="text-[11px] text-zinc-500">
                                     {sourceLabel(provider.api_key_source)}
                                   </span>
                                   {providerDirty[provider.provider] ? (
-                                    <span className="rounded-md bg-sky-500/20 px-2 py-1 text-xs text-sky-300">
-                                      unsaved
-                                    </span>
+                                    <StatusBadge tone="active">unsaved</StatusBadge>
                                   ) : null}
                                 </div>
                               </div>
-                              <div className="flex flex-col gap-2 sm:flex-row">
+                              <div className="mt-2 flex items-center gap-2">
                                 <input
                                   type="password"
                                   autoComplete="new-password"
@@ -1190,7 +1241,7 @@ export function Settings({
                                     }));
                                   }}
                                   placeholder={providerKeyPlaceholder(provider)}
-                                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                                  className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
                                 />
                                 {provider.api_key_stored ? (
                                   <button
@@ -1205,23 +1256,23 @@ export function Settings({
                                         [provider.provider]: true,
                                       }));
                                     }}
-                                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
+                                    className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800"
                                   >
-                                    Remove saved key
+                                    Remove
                                   </button>
                                 ) : null}
                               </div>
                               {provider.api_key_source === 'env' ? (
-                                <div className="mt-2 text-xs text-zinc-500">
-                                  {provider.api_key_env} overrides any key saved in the file.
+                                <div className="mt-1.5 text-xs text-zinc-500">
+                                  {provider.api_key_env} overrides any saved file key.
                                 </div>
                               ) : null}
                               {provider.last_check_error ? (
-                                <div className="mt-2 text-xs text-rose-300">
+                                <div className="mt-1.5 text-xs text-rose-300">
                                   {provider.last_check_error}
                                 </div>
                               ) : provider.api_key_valid === true ? (
-                                <div className="mt-2 text-xs text-emerald-300">
+                                <div className="mt-1.5 text-xs text-emerald-300">
                                   The saved key passed provider validation.
                                 </div>
                               ) : null}
@@ -1284,31 +1335,45 @@ export function Settings({
                   ) : null}
 
                   {!loading && activeTab === 'assistant' ? (
-                    <div className="space-y-6">
+                    <div>
                       <SectionCard
                         title="Response style"
                         description="Choose the default tone for answers in the UI."
                         scope="Global"
                       >
-                        <div className="grid gap-3 md:grid-cols-2">
+                        <div>
                           {RESPONSE_STYLE_OPTIONS.map((option) => (
                             <button
                               key={option.value}
                               type="button"
                               onClick={() => setTone(option.value)}
-                              className={`rounded-xl border p-4 text-left transition-colors ${
+                              className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors ${
                                 tone === option.value
-                                  ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
-                                  : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-900'
+                                  ? 'bg-zinc-800/70'
+                                  : 'hover:bg-zinc-900'
                               }`}
                             >
-                              <div className="text-sm font-medium">{option.label}</div>
-                              <div className="mt-2 text-xs text-zinc-400">{option.description}</div>
+                              <span
+                                className={`h-3.5 w-3.5 shrink-0 rounded-full border ${
+                                  tone === option.value
+                                    ? 'border-zinc-200 bg-zinc-200'
+                                    : 'border-zinc-600'
+                                }`}
+                              />
+                              <span className="min-w-0">
+                                <span
+                                  className={`block text-[13px] ${
+                                    tone === option.value ? 'text-zinc-100' : 'text-zinc-300'
+                                  }`}
+                                >
+                                  {option.label}
+                                </span>
+                                <span className="block text-xs text-zinc-500">
+                                  {option.description}
+                                </span>
+                              </span>
                             </button>
                           ))}
-                        </div>
-                        <div className="mt-4 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-zinc-400">
-                          Active style: <span className="text-zinc-200">{selectedStyle.label}</span> • {selectedStyle.description}
                         </div>
                       </SectionCard>
 
@@ -1346,88 +1411,74 @@ export function Settings({
                   ) : null}
 
                   {!loading && activeTab === 'appearance' ? (
-                    <div className="space-y-6">
+                    <div>
                       <SectionCard
                         title="Theme"
                         description="Choose the app background style."
                         scope="Global"
                       >
-                        <div className="grid gap-3 md:grid-cols-2">
+                        <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-900 p-0.5">
                           {APPEARANCE_THEME_OPTIONS.map((option) => (
                             <button
                               key={option.value}
                               type="button"
                               onClick={() => setAppearanceTheme(option.value)}
-                              className={`rounded-xl border p-4 text-left transition-colors ${
+                              className={`rounded px-3 py-1.5 text-[13px] transition-colors ${
                                 appearanceTheme === option.value
-                                  ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
-                                  : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-900'
+                                  ? 'bg-zinc-700 text-zinc-100'
+                                  : 'text-zinc-400 hover:text-zinc-200'
                               }`}
                             >
-                              <div className="text-sm font-medium">{option.label}</div>
-                              <div className="mt-2 text-xs text-zinc-400">{option.description}</div>
+                              {option.label}
                             </button>
                           ))}
                         </div>
+                        <p className="mt-2 text-xs text-zinc-500">
+                          {
+                            APPEARANCE_THEME_OPTIONS.find(
+                              (option) => option.value === appearanceTheme,
+                            )?.description
+                          }
+                        </p>
                       </SectionCard>
                     </div>
                   ) : null}
 
                   {!loading && activeTab === 'composer' ? (
-                    <div className="space-y-6">
+                    <div>
                       <SectionCard
                         title="Long paste handling"
                         description="Decide when large pasted text should become a file attachment in the message composer."
                         scope="Global"
                       >
-                        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="text-sm font-medium text-zinc-100">Convert long paste to file</div>
-                              <p className="mt-1 text-xs text-zinc-400">
-                                Applies to the message composer before sending.
-                              </p>
+                        <Row label="Convert long paste to file" description="Applies to the message composer before sending.">
+                          <ToggleSwitch
+                            checked={longPasteToFileEnabled}
+                            label="Convert long paste to file"
+                            onToggle={() => setLongPasteToFileEnabled((current) => !current)}
+                          />
+                        </Row>
+                        <div className="border-t border-zinc-800/60 pt-3">
+                          <div className="mb-2 text-[13px] text-zinc-200">
+                            Treat pasted text as a file when longer than
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap gap-1">
+                              {THRESHOLD_PRESETS.map((preset) => (
+                                <button
+                                  key={preset}
+                                  type="button"
+                                  onClick={() => setLongPasteThresholdChars(preset)}
+                                  className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                                    longPasteThresholdChars === preset
+                                      ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
+                                      : 'border-zinc-700 text-zinc-400 hover:bg-zinc-900'
+                                  }`}
+                                >
+                                  {formatThresholdPreset(preset)}
+                                </button>
+                              ))}
                             </div>
-                            <ToggleSwitch
-                              checked={longPasteToFileEnabled}
-                              label="Convert long paste to file"
-                              onToggle={() => setLongPasteToFileEnabled((current) => !current)}
-                            />
-                          </div>
-                        </div>
-
-                        <div className="space-y-3">
-                          <div className="text-sm font-medium text-zinc-200">
-                            Treat pasted text as file when longer than...
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {THRESHOLD_PRESETS.map((preset) => (
-                              <button
-                                key={preset}
-                                type="button"
-                                onClick={() => setLongPasteThresholdChars(preset)}
-                                className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
-                                  longPasteThresholdChars === preset
-                                    ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
-                                    : 'border-zinc-700 bg-zinc-950 text-zinc-400 hover:bg-zinc-900'
-                                }`}
-                              >
-                                {formatThresholdPreset(preset)}
-                              </button>
-                            ))}
-                            <button
-                              type="button"
-                              className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
-                                presetIsCustom
-                                  ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
-                                  : 'border-zinc-700 bg-zinc-950 text-zinc-400'
-                              }`}
-                            >
-                              Custom
-                            </button>
-                          </div>
-                          <label className="block">
-                            <span className="mb-1 block text-xs font-medium text-zinc-300">Character threshold</span>
                             <input
                               type="number"
                               min={1000}
@@ -1439,80 +1490,75 @@ export function Settings({
                                   setLongPasteThresholdChars(next);
                                 }
                               }}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                              className={`w-28 rounded-md border bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:outline-none ${
+                                presetIsCustom ? 'border-zinc-500' : 'border-zinc-700'
+                              }`}
                             />
-                          </label>
+                          </div>
                         </div>
                       </SectionCard>
                     </div>
                   ) : null}
 
                   {!loading && activeTab === 'memory' ? (
-                    <div className="space-y-6">
+                    <div>
                       <SectionCard
                         title="Memory behavior"
                         description="Memory writes require a separate preview and explicit confirmation."
                         scope="Global"
                       >
-                        <div className="grid gap-4 md:grid-cols-2">
-                          <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                            <div className="text-sm font-medium text-zinc-100">Explicit confirmation</div>
-                            <p className="mt-1 text-xs text-zinc-400">
-                              Slavik previews each requested Memory change. Nothing is saved until you confirm or edit it.
-                            </p>
-                          </div>
-
-                          <label className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                            <span className="mb-2 block text-sm font-medium text-zinc-200">Inbox size</span>
-                            <span className="mb-2 block text-xs text-zinc-400">Maximum items kept in the inbox.</span>
-                            <input
-                              type="number"
-                              min={1}
-                              value={memoryInboxMaxItems}
-                              onChange={(event) => {
-                                const next = Number.parseInt(event.target.value, 10);
-                                if (!Number.isNaN(next)) {
-                                  setMemoryInboxMaxItems(next);
-                                }
-                              }}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
-                            />
-                          </label>
-
-                          <label className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                            <span className="mb-2 block text-sm font-medium text-zinc-200">Retention window</span>
-                            <span className="mb-2 block text-xs text-zinc-400">How many days inbox entries stay available.</span>
-                            <input
-                              type="number"
-                              min={1}
-                              value={memoryInboxTtlDays}
-                              onChange={(event) => {
-                                const next = Number.parseInt(event.target.value, 10);
-                                if (!Number.isNaN(next)) {
-                                  setMemoryInboxTtlDays(next);
-                                }
-                              }}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
-                            />
-                          </label>
-
-                          <label className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                            <span className="mb-2 block text-sm font-medium text-zinc-200">Write rate limit</span>
-                            <span className="mb-2 block text-xs text-zinc-400">Maximum memory writes allowed per minute.</span>
-                            <input
-                              type="number"
-                              min={1}
-                              value={memoryInboxWritesPerMinute}
-                              onChange={(event) => {
-                                const next = Number.parseInt(event.target.value, 10);
-                                if (!Number.isNaN(next)) {
-                                  setMemoryInboxWritesPerMinute(next);
-                                }
-                              }}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
-                            />
-                          </label>
-                        </div>
+                        <p className="mb-3 text-xs text-zinc-500">
+                          Slavik previews each requested Memory change. Nothing is saved until
+                          you confirm or edit it.
+                        </p>
+                        <Row label="Inbox size" description="Maximum items kept in the inbox.">
+                          <input
+                            type="number"
+                            min={1}
+                            value={memoryInboxMaxItems}
+                            onChange={(event) => {
+                              const next = Number.parseInt(event.target.value, 10);
+                              if (!Number.isNaN(next)) {
+                                setMemoryInboxMaxItems(next);
+                              }
+                            }}
+                            className="w-28 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                          />
+                        </Row>
+                        <Row
+                          label="Retention window"
+                          description="How many days inbox entries stay available."
+                        >
+                          <input
+                            type="number"
+                            min={1}
+                            value={memoryInboxTtlDays}
+                            onChange={(event) => {
+                              const next = Number.parseInt(event.target.value, 10);
+                              if (!Number.isNaN(next)) {
+                                setMemoryInboxTtlDays(next);
+                              }
+                            }}
+                            className="w-28 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                          />
+                        </Row>
+                        <Row
+                          label="Write rate limit"
+                          description="Maximum memory writes allowed per minute."
+                        >
+                          <input
+                            type="number"
+                            min={1}
+                            value={memoryInboxWritesPerMinute}
+                            onChange={(event) => {
+                              const next = Number.parseInt(event.target.value, 10);
+                              if (!Number.isNaN(next)) {
+                                setMemoryInboxWritesPerMinute(next);
+                              }
+                            }}
+                            className="w-28 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                          />
+                        </Row>
                       </SectionCard>
 
                       <SectionCard
@@ -1520,101 +1566,105 @@ export function Settings({
                         description="Embedding provider and model used for indexing and semantic retrieval."
                         scope="Advanced"
                       >
-                        <div className="grid gap-2 md:grid-cols-2">
+                        <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-900 p-0.5">
                           {(['local', 'openai'] as EmbeddingsProvider[]).map((provider) => (
                             <button
                               key={provider}
                               type="button"
                               onClick={() => setEmbeddingsProvider(provider)}
-                              className={`rounded-xl border p-4 text-left transition-colors ${
+                              className={`rounded px-3 py-1.5 text-[13px] transition-colors ${
                                 embeddingsProvider === provider
-                                  ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
-                                  : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-900'
+                                  ? 'bg-zinc-700 text-zinc-100'
+                                  : 'text-zinc-400 hover:text-zinc-200'
                               }`}
                             >
-                              <div className="text-sm font-medium">
-                                {provider === 'local' ? 'Local embeddings' : 'OpenAI embeddings'}
-                              </div>
-                              <div className="mt-2 text-xs text-zinc-400">
-                                {provider === 'local'
-                                  ? 'Uses a local sentence-transformer model.'
-                                  : 'Uses the OpenAI key from the environment or API Keys settings.'}
-                              </div>
+                              {provider === 'local' ? 'Local' : 'OpenAI'}
                             </button>
                           ))}
                         </div>
+                        <p className="mt-2 text-xs text-zinc-500">
+                          {embeddingsProvider === 'local'
+                            ? 'Uses a local sentence-transformer model.'
+                            : 'Uses the OpenAI key from the environment or API Keys settings.'}
+                        </p>
 
                         {embeddingsProvider === 'local' ? (
-                          <div className="mt-4 space-y-3">
-                            <label className="block">
-                              <span className="mb-2 block text-sm font-medium text-zinc-300">Local embedding model</span>
+                          <div className="mt-3 space-y-3">
+                            <Row label="Local embedding model">
                               <input
                                 type="text"
                                 value={embeddingsLocalModel}
                                 onChange={(event) => setEmbeddingsLocalModel(event.target.value)}
-                                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                                className="w-64 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
                               />
-                            </label>
-                            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                              <div>
-                                <div className="flex items-center gap-2 text-sm text-zinc-200">
-                                  Model files
-                                  <span className={`rounded-md px-2 py-1 text-xs font-medium ${
-                                    embeddingRuntime.state === 'ready'
-                                      ? 'bg-emerald-500/20 text-emerald-300'
-                                      : embeddingRuntime.state === 'error' || embeddingRuntime.state === 'package_missing'
-                                        ? 'bg-rose-500/20 text-rose-300'
-                                        : 'bg-amber-500/20 text-amber-300'
-                                  }`}>
-                                    {embeddingRuntime.state.replace('_', ' ')}
-                                  </span>
-                                </div>
-                                <p className="mt-2 text-xs text-zinc-400">
-                                  {embeddingRuntime.error
-                                    || (embeddingRuntime.state === 'ready'
-                                      ? `${embeddingRuntime.model} is available locally.`
-                                      : 'Save the model name first, then download it once for offline runtime use.')}
-                                </p>
-                              </div>
+                            </Row>
+                            <Row
+                              label="Model files"
+                              description={
+                                embeddingRuntime.error
+                                  ? embeddingRuntime.error
+                                  : embeddingRuntime.state === 'ready'
+                                    ? `${embeddingRuntime.model} is available locally.`
+                                    : 'Save the model name first, then download it once.'
+                              }
+                            >
+                              <StatusBadge
+                                tone={
+                                  embeddingRuntime.state === 'ready'
+                                    ? 'success'
+                                    : embeddingRuntime.state === 'error' ||
+                                        embeddingRuntime.state === 'package_missing'
+                                      ? 'error'
+                                      : 'waiting'
+                                }
+                              >
+                                {embeddingRuntime.state.replace('_', ' ')}
+                              </StatusBadge>
                               <button
                                 type="button"
-                                onClick={() => { void handleDownloadEmbeddings(); }}
-                                disabled={embeddingRuntime.state === 'downloading' || !embeddingsLocalModel.trim()}
-                                className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                                onClick={() => {
+                                  void handleDownloadEmbeddings();
+                                }}
+                                disabled={
+                                  embeddingRuntime.state === 'downloading' ||
+                                  !embeddingsLocalModel.trim()
+                                }
+                                className="ml-3 inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
                               >
-                                <Download className="h-4 w-4" />
+                                <Download className="h-3.5 w-3.5" />
                                 {embeddingRuntime.state === 'downloading'
                                   ? 'Downloading...'
                                   : embeddingRuntime.state === 'ready'
                                     ? 'Check again'
                                     : 'Download model'}
                               </button>
-                            </div>
+                            </Row>
                           </div>
                         ) : (
-                          <label className="mt-4 block">
-                            <span className="mb-2 block text-sm font-medium text-zinc-300">OpenAI embedding model</span>
+                          <div className="mt-3">
+                            <Row label="OpenAI embedding model">
                             <input
                               type="text"
                               value={embeddingsOpenaiModel}
                               onChange={(event) => setEmbeddingsOpenaiModel(event.target.value)}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                                className="w-64 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
                             />
-                          </label>
+                            </Row>
+                          </div>
                         )}
                       </SectionCard>
                     </div>
                   ) : null}
 
                   {!loading && activeTab === 'data' ? (
-                    <div className="space-y-6">
+                    <div>
                       <SectionCard
                         title="Export chats"
                         description="Download the current chat database as JSON."
                         scope="Global"
                       >
-                        <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                          <div className="text-sm text-zinc-300">
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="text-xs text-zinc-500">
                             Export includes session history and message data available to this UI principal.
                           </div>
                           <button
@@ -1623,7 +1673,7 @@ export function Settings({
                               void handleExportChats();
                             }}
                             disabled={exportingChats}
-                            className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                            className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
                           >
                             <Download className="h-4 w-4" />
                             {exportingChats ? 'Exporting...' : 'Export chats'}
@@ -1678,9 +1728,9 @@ export function Settings({
                         </div>
 
                         {importPreview ? (
-                          <div className="mt-4 rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-sm text-zinc-300">
-                            <div className="font-medium text-zinc-100">{importPreview.fileName}</div>
-                            <div className="mt-2 text-xs text-zinc-400">
+                          <div className="mt-3 text-xs text-zinc-400">
+                            <div className="font-medium text-zinc-200">{importPreview.fileName}</div>
+                            <div className="mt-1 text-zinc-500">
                               {importPreview.sessionsCount} session{importPreview.sessionsCount === 1 ? '' : 's'} •{' '}
                               {importPreview.messagesCount} message{importPreview.messagesCount === 1 ? '' : 's'}
                             </div>
@@ -1691,14 +1741,14 @@ export function Settings({
                   ) : null}
 
                   {!loading && activeTab === 'diagnostics' ? (
-                    <div className="space-y-6">
+                    <div>
                       <SectionCard
                         title="Read-only diagnostics"
                         description="Connection status for providers and audio backends."
                         scope="Read only"
                       >
-                        <div className="flex items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                          <div className="text-sm text-zinc-300">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-xs text-zinc-500">
                             Runtime checks use environment keys first, then keys saved under API Keys.
                           </div>
                           <button
@@ -1706,7 +1756,7 @@ export function Settings({
                             onClick={() => {
                               void loadSettings();
                             }}
-                            className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800"
+                            className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800"
                           >
                             <RefreshCcw className="h-4 w-4" />
                             Recheck connections
@@ -1719,45 +1769,29 @@ export function Settings({
                         description="Status for the text-to-speech backend configured from environment variables."
                         scope="Read only"
                       >
-                        <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                          <div className="mb-3 flex items-center justify-between">
-                            <h3 className="font-medium text-zinc-100">OpenAI TTS backend</h3>
+                        <div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-[13px] font-medium text-zinc-100">
+                              OpenAI TTS backend
+                            </span>
                             <div className="flex items-center gap-2">
-                              <span
-                                className={`rounded-md px-2 py-1 text-xs font-medium ${
-                                  ttsBackend.backend_ready
-                                    ? 'bg-emerald-500/20 text-emerald-300'
-                                    : 'bg-amber-500/20 text-amber-300'
-                                }`}
+                              <StatusBadge
+                                tone={ttsBackend.backend_ready ? 'success' : 'waiting'}
                               >
-                                {ttsBackend.backend_ready ? 'backend ready' : 'backend not ready'}
-                              </span>
-                              <span
-                                className={`rounded-md px-2 py-1 text-xs font-medium ${
-                                  ttsBackend.api_key_set
-                                    ? 'bg-emerald-500/20 text-emerald-300'
-                                    : 'bg-amber-500/20 text-amber-300'
-                                }`}
-                              >
+                                {ttsBackend.backend_ready ? 'ready' : 'not ready'}
+                              </StatusBadge>
+                              <StatusBadge tone={ttsBackend.api_key_set ? 'success' : 'waiting'}>
                                 {ttsBackend.api_key_set ? 'key set' : 'key missing'}
-                              </span>
+                              </StatusBadge>
                             </div>
                           </div>
-                          <div className="space-y-2 text-xs text-zinc-400">
-                            <div>
-                              Provider: <span className="text-zinc-300">{PROVIDER_LABELS[ttsBackend.provider]}</span>
-                            </div>
-                            <div>
-                              Env: <span className="font-mono text-zinc-300">{ttsBackend.api_key_env}</span>
-                            </div>
+                          <div className="mt-2 space-y-1 text-xs text-zinc-500">
                             <div className="break-all">Endpoint: {ttsBackend.endpoint}</div>
                             <div>
                               Model: <span className="font-mono text-zinc-300">{ttsBackend.model}</span>
-                            </div>
-                            <div>
+                              {' · '}
                               Voice: <span className="font-mono text-zinc-300">{ttsBackend.voice}</span>
-                            </div>
-                            <div>
+                              {' · '}
                               Format: <span className="font-mono text-zinc-300">{ttsBackend.format}</span>
                             </div>
                           </div>
@@ -1769,7 +1803,7 @@ export function Settings({
                         description="API key presence, validation status, and model endpoint probes."
                         scope="Read only"
                       >
-                        <div className="space-y-4">
+                        <div>
                           {providers.map((provider) => {
                             const runtime = isModelProvider(provider.provider)
                               ? providerRuntime[provider.provider]
@@ -1785,69 +1819,63 @@ export function Settings({
                                     : providerRuntimeError
                                       ? 'probe failed'
                                       : 'unknown';
-                            const runtimeClass = providerRuntimeLoading
-                              ? 'bg-zinc-800 text-zinc-300'
+                            const runtimeTone: StatusTone = providerRuntimeLoading
+                              ? 'neutral'
                               : runtime?.error || providerRuntimeError
-                                ? 'bg-rose-500/20 text-rose-300'
+                                ? 'error'
                                 : runtime && runtime.modelsCount > 0
-                                  ? 'bg-emerald-500/20 text-emerald-300'
-                                  : 'bg-amber-500/20 text-amber-300';
+                                  ? 'success'
+                                  : 'waiting';
                             const runtimeDetail = runtime?.error ?? providerRuntimeError;
 
                             return (
-                              <div key={provider.provider} className="rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-                                <div className="mb-3 flex items-center justify-between">
-                                  <h3 className="font-medium text-zinc-100">{PROVIDER_LABELS[provider.provider]}</h3>
-                                  <div className="flex items-center gap-2">
-                                    <span
-                                      className={`rounded-md px-2 py-1 text-xs font-medium ${
-                                        provider.api_key_set
-                                          ? 'bg-emerald-500/20 text-emerald-300'
-                                          : 'bg-amber-500/20 text-amber-300'
-                                      }`}
+                              <div
+                                key={provider.provider}
+                                className="border-b border-zinc-800/60 py-3 first:pt-0 last:border-b-0 last:pb-0"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="flex min-w-0 items-center gap-2">
+                                    <span className="text-[13px] font-medium text-zinc-100">
+                                      {PROVIDER_LABELS[provider.provider]}
+                                    </span>
+                                    <span className="font-mono text-[11px] text-zinc-500">
+                                      {provider.api_key_env}
+                                    </span>
+                                  </div>
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    <StatusBadge
+                                      tone={provider.api_key_set ? 'success' : 'waiting'}
                                     >
                                       {provider.api_key_set ? 'key set' : 'key missing'}
-                                    </span>
-                                    <span className="rounded-md bg-zinc-800 px-2 py-1 text-xs text-zinc-400">
-                                      {sourceLabel(provider.api_key_source)}
-                                    </span>
-                                    <span
-                                      className={`rounded-md px-2 py-1 text-xs font-medium ${
+                                    </StatusBadge>
+                                    <StatusBadge
+                                      tone={
                                         provider.api_key_valid === true
-                                          ? 'bg-emerald-500/20 text-emerald-300'
+                                          ? 'success'
                                           : provider.api_key_valid === false
-                                            ? 'bg-rose-500/20 text-rose-300'
-                                            : 'bg-zinc-800 text-zinc-300'
-                                      }`}
+                                            ? 'error'
+                                            : 'neutral'
+                                      }
                                     >
                                       {provider.api_key_valid === true
                                         ? 'key valid'
                                         : provider.api_key_valid === false
                                           ? 'key invalid'
-                                          : 'key unchecked'}
-                                    </span>
+                                          : 'unchecked'}
+                                    </StatusBadge>
                                     {isModelProvider(provider.provider) ? (
-                                      <span className={`rounded-md px-2 py-1 text-xs font-medium ${runtimeClass}`}>
-                                        {runtimeLabel}
-                                      </span>
+                                      <StatusBadge tone={runtimeTone}>{runtimeLabel}</StatusBadge>
                                     ) : null}
                                   </div>
                                 </div>
-                                <div className="space-y-2 text-xs text-zinc-400">
-                                  <div>
-                                    Env: <span className="font-mono text-zinc-300">{provider.api_key_env}</span>
-                                  </div>
+                                <div className="mt-1 space-y-1 text-xs text-zinc-500">
                                   <div className="break-all">Endpoint: {provider.endpoint}</div>
                                   {provider.last_checked_at ? <div>Last check: {provider.last_checked_at}</div> : null}
                                   {provider.last_check_error ? (
-                                    <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-2 py-1.5 text-rose-200">
-                                      Validation: {provider.last_check_error}
-                                    </div>
+                                    <div className="text-rose-300">Validation: {provider.last_check_error}</div>
                                   ) : null}
                                   {isModelProvider(provider.provider) && runtimeDetail ? (
-                                    <div className="rounded-md border border-rose-700/40 bg-rose-900/20 px-2 py-1.5 text-rose-200">
-                                      Runtime: {runtimeDetail}
-                                    </div>
+                                    <div className="text-rose-300">Runtime: {runtimeDetail}</div>
                                   ) : null}
                                 </div>
                               </div>

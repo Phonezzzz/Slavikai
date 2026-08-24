@@ -13,6 +13,7 @@ type ChatSessionScreenProps = {
   cancelling: boolean;
   modelLabel: string;
   modelProvider: string | null;
+  sessionTitle: string | null;
   statusMessage: string | null;
   longPasteToFileEnabled: boolean;
   longPasteThresholdChars: number;
@@ -47,6 +48,7 @@ export function ChatSessionScreen({
   cancelling,
   modelLabel,
   modelProvider,
+  sessionTitle,
   statusMessage,
   longPasteToFileEnabled,
   longPasteThresholdChars,
@@ -84,6 +86,7 @@ export function ChatSessionScreen({
           onSendFeedback={onSendFeedback}
           modelName={modelLabel}
           modelProvider={modelProvider}
+          sessionTitle={sessionTitle}
           onOpenSessionDrawer={onOpenSessionDrawer}
           statusMessage={statusMessage}
           longPasteToFileEnabled={longPasteToFileEnabled}
@@ -101,10 +104,10 @@ export function ChatSessionScreen({
       {!artifactPanelOpen ? (
         <button
           onClick={onOpenArtifactPanel}
-          className="absolute right-4 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-[#1f1f24] bg-[#141418] shadow-lg shadow-black/30 transition-all hover:border-[#2a2a30] hover:bg-[#1b1b20]"
+          className="absolute right-4 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 shadow-lg shadow-black/30 transition-all hover:border-zinc-800 hover:bg-zinc-800"
           title="Open Artifacts"
         >
-          <PanelRight className="w-4.5 h-4.5 text-[#888]" />
+          <PanelRight className="w-4.5 h-4.5 text-zinc-400" />
         </button>
       ) : null}
 

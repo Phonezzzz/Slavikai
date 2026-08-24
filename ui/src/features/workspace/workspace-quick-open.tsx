@@ -62,19 +62,19 @@ export function WorkspaceQuickOpen({
     >
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
       <div
-        className="relative w-[760px] max-w-[92vw] max-h-[70vh] overflow-hidden rounded-xl border border-[#242430] bg-[#0f0f13] shadow-2xl shadow-black/70"
+        className="relative w-[760px] max-w-[92vw] max-h-[70vh] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/70"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="border-b border-[#1f1f26] px-4 py-3">
+        <div className="border-b border-zinc-800 px-4 py-3">
           <div className="mb-2 flex items-center justify-between gap-3 text-[11px] text-[#8f8fa1]">
             <span>Quick Open</span>
             <span>
-              primary: <kbd className="rounded border border-[#334164] bg-[#162037] px-1 py-0.5 text-[#a8c6ff]">Ctrl+Space</kbd>
+              primary: <kbd className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-zinc-300">Ctrl+Space</kbd>
               {' '}
-              secondary: <kbd className="rounded border border-[#2a2a34] bg-[#171720] px-1 py-0.5 text-[#a7a7b7]">Ctrl+D</kbd>
+              secondary: <kbd className="rounded border border-zinc-800 bg-zinc-900 px-1 py-0.5 text-[#a7a7b7]">Ctrl+D</kbd>
             </span>
           </div>
-          <div className="flex items-center gap-2 rounded-md border border-[#2a2a31] bg-[#111117] px-3 py-2">
+          <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
             <Search className="h-4 w-4 text-[#6f6f7d]" />
             <input
               ref={inputRef}
@@ -108,12 +108,12 @@ export function WorkspaceQuickOpen({
                 }
               }}
               placeholder="Search files by name or path..."
-              className="flex-1 bg-transparent text-[13px] text-[#d8d8e2] outline-none placeholder:text-[#5f5f6d]"
+              className="flex-1 bg-transparent text-[13px] text-zinc-300 outline-none placeholder:text-zinc-500"
             />
             {query ? (
               <button
                 onClick={() => onQueryChange('')}
-                className="rounded p-1 text-[#747482] hover:bg-[#1a1a22] hover:text-[#b8b8c2]"
+                className="rounded p-1 text-[#747482] hover:bg-zinc-800 hover:text-zinc-400"
                 aria-label="Clear query"
                 title="Clear query"
               >
@@ -140,8 +140,8 @@ export function WorkspaceQuickOpen({
                 key={item.path}
                 onClick={() => onSelect(item.path)}
                 onMouseEnter={() => setCursor(index)}
-                className={`flex w-full items-center justify-between gap-3 border-b border-[#16161d] px-4 py-2.5 text-left ${
-                  index === safeCursor ? 'bg-[#1b1f2a] text-[#dce3ff]' : 'text-[#c7c7d0] hover:bg-[#161620]'
+                className={`flex w-full items-center justify-between gap-3 border-b border-zinc-900 px-4 py-2.5 text-left ${
+                  index === safeCursor ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-900'
                 }`}
                 title={item.path}
               >

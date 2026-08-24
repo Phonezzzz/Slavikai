@@ -147,7 +147,7 @@ export function WorkspaceIde({
   const [quickOpenItems, setQuickOpenItems] = useState<WorkspaceQuickOpenItem[]>([]);
   const [recentPaths, setRecentPaths] = useState<string[]>([]);
   const [computerTab, setComputerTab] = useState<
-    'overview' | 'activity' | 'terminal' | 'changes' | 'checks' | 'environment' | 'files' | 'logs'
+    'overview' | 'files' | 'changes' | 'terminal'
   >('overview');
 
   const {
@@ -1081,24 +1081,20 @@ export function WorkspaceIde({
     : null;
   const COMPUTER_TABS = [
     { id: 'overview' as const, label: 'Overview' },
-    { id: 'activity' as const, label: 'Activity' },
-    { id: 'terminal' as const, label: 'Terminal' },
-    { id: 'changes' as const, label: 'Changes' },
-    { id: 'checks' as const, label: 'Checks' },
-    { id: 'environment' as const, label: 'Environment' },
     { id: 'files' as const, label: 'Files' },
-    { id: 'logs' as const, label: 'Logs' },
+    { id: 'changes' as const, label: 'Changes' },
+    { id: 'terminal' as const, label: 'Terminal' },
   ];
 
   const tabBtnClass = (id: typeof computerTab) =>
     `px-3 py-1 text-[11px] rounded-md transition-colors ${
       computerTab === id
-        ? 'bg-[#1c1c24] text-[#d2d2d9]'
-        : 'text-[#5a5a65] hover:text-[#9a9aa3] hover:bg-[#141418]'
+        ? 'bg-zinc-800 text-zinc-300'
+        : 'text-zinc-500 hover:text-zinc-400 hover:bg-zinc-900'
     }`;
 
   return (
-    <div className="h-full min-h-0 flex flex-col bg-[#0a0a0d] text-[#d2d2d9]">
+    <div className="h-full min-h-0 flex flex-col bg-zinc-950 text-zinc-300">
       <WorkspaceToolbar
         modelLabel={modelLabel}
         indexing={indexing}
@@ -1117,7 +1113,7 @@ export function WorkspaceIde({
         onOpenRepositoryPanel={onOpenRepositoryPanel}
       />
 
-      <div className="h-8 border-b border-[#1f1f24] flex items-center px-2 gap-0.5 shrink-0 overflow-x-auto">
+      <div className="h-8 border-b border-zinc-800 flex items-center px-2 gap-0.5 shrink-0 overflow-x-auto">
         {COMPUTER_TABS.map((tab) => (
           <button
             key={tab.id}
@@ -1149,47 +1145,21 @@ export function WorkspaceIde({
           />
         )}
 
-        {computerTab === 'activity' && (
-          <div className="h-full overflow-auto px-3 py-3 space-y-1" data-computer-tab-content="activity">
-            {computerEvents.length === 0 ? (
-              <div className="text-[12px] text-[#777]">No activity yet.</div>
-            ) : (
-              computerEvents.map((ev, idx) => (
-                <div
-                  key={`${ev.ts}-${idx}`}
-                  className={`flex items-center gap-2 text-[11px] font-mono ${ev.ok === false ? 'text-red-400' : 'text-[#6a6a75]'}`}
-                >
-                  <span className="shrink-0 text-[#5a5a65]">
-                    {new Date(ev.ts).toLocaleTimeString()}
-                  </span>
-                  <span className={`shrink-0 w-20 ${ev.ok === false ? 'text-red-400' : 'text-[#5a8a5a]'}`}>
-                    {ev.kind}
-                  </span>
-                  <span className="truncate text-[#8a8a94]">{ev.path ?? ev.command ?? ev.tool}</span>
-                  {ev.duration_ms !== undefined ? (
-                    <span className="shrink-0 text-[#555]">{ev.duration_ms}ms</span>
-                  ) : null}
-                </div>
-              ))
-            )}
-          </div>
-        )}
-
         {computerTab === 'terminal' && (
           <div className="h-full flex flex-col" data-computer-tab-content="terminal">
-            <div className="flex-1 overflow-auto px-3 py-2 font-mono text-[11px] text-[#8a8a94]">
+            <div className="flex-1 overflow-auto px-3 py-2 font-mono text-[11px] text-zinc-400">
               {terminalLines.map((line, idx) => (
                 <div key={idx} className="whitespace-pre-wrap break-all leading-5">{line}</div>
               ))}
               <div ref={terminalEndRef} />
             </div>
             {terminalPendingText ? (
-              <div className="border-t border-[#1f1f24] px-3 py-2 text-[11px] text-amber-300">
+              <div className="border-t border-zinc-800 px-3 py-2 text-[11px] text-amber-300">
                 {terminalPendingText}
               </div>
             ) : null}
-            <div className="border-t border-[#1f1f24] flex items-center gap-2 px-3 py-2">
-              <span className="text-[#6a6a75] font-mono text-[11px] select-none">$</span>
+            <div className="border-t border-zinc-800 flex items-center gap-2 px-3 py-2">
+              <span className="text-zinc-500 font-mono text-[11px] select-none">$</span>
               <input
                 value={terminalInput}
                 onChange={(event) => setTerminalInput(event.target.value)}
@@ -1200,10 +1170,10 @@ export function WorkspaceIde({
                 }}
                 disabled={!sessionId || terminalBusy || isDecisionBlocking}
                 placeholder="command..."
-                className="flex-1 bg-transparent outline-none text-[11px] font-mono text-[#c0c0cc] placeholder-[#444] disabled:opacity-50"
+                className="flex-1 bg-transparent outline-none text-[11px] font-mono text-zinc-300 placeholder-zinc-600 disabled:opacity-50"
               />
               {terminalBusy ? (
-                <span className="text-[#6a6a75] text-[10px] shrink-0">running…</span>
+                <span className="text-zinc-500 text-[10px] shrink-0">running…</span>
               ) : null}
             </div>
           </div>
@@ -1219,18 +1189,6 @@ export function WorkspaceIde({
               refreshToken={gitRefreshToken}
               decisionOutcome={gitDecisionOutcome}
             />
-          </div>
-        )}
-
-        {computerTab === 'checks' && (
-          <div className="h-full px-3 py-3 text-[12px] text-[#777]" data-computer-tab-content="checks">
-            Checks — no data.
-          </div>
-        )}
-
-        {computerTab === 'environment' && (
-          <div className="h-full px-3 py-3 text-[12px] text-[#777]" data-computer-tab-content="environment">
-            Environment — placeholder.
           </div>
         )}
 
@@ -1286,7 +1244,7 @@ export function WorkspaceIde({
                 />
                 <button
                   onMouseDown={startExplorerResize}
-                  className="cursor-col-resize bg-[#121218] hover:bg-[#1b1b23]"
+                  className="cursor-col-resize bg-zinc-900 hover:bg-zinc-800"
                   aria-label="Resize explorer"
                   title="Resize explorer"
                 />
@@ -1325,13 +1283,6 @@ export function WorkspaceIde({
           </div>
         )}
 
-        {computerTab === 'logs' && (
-          <div className="h-full overflow-auto px-3 py-2 font-mono text-[11px] text-[#6a6a75]" data-computer-tab-content="logs">
-            {terminalLines.map((line, idx) => (
-              <div key={idx} className="whitespace-pre-wrap break-all leading-5">{line}</div>
-            ))}
-          </div>
-        )}
       </div>
 
       {projectPickerOpen ? (

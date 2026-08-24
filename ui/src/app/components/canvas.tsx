@@ -34,6 +34,7 @@ import { MessageRenderer } from "../../features/messages";
 import type { RenderableMessage } from "../../features/messages";
 import { TtsAudioPlayer, useTtsAudioPlayer } from "../../features/audio";
 import type { DecisionRespondChoice, MessageRuntimeMeta, SessionMode, UiDecision } from "../types";
+import { SESSION_MODE_LABELS } from "../types";
 import type { ToolActivity } from "../../features/messages/types";
 import { getDecisionDisplayState } from "../decision-display";
 import { DecisionPanel } from "./decision-panel";
@@ -106,6 +107,7 @@ interface CanvasProps {
   className?: string;
   modelName?: string;
   modelProvider?: string | null;
+  sessionTitle?: string | null;
   onOpenSessionDrawer?: () => void;
   statusMessage?: string | null;
   forceCanvasNext?: boolean;
@@ -134,7 +136,7 @@ function MessageBubble({ message }: { message: CanvasMessage }) {
 
   return (
     <div className={`flex gap-3 ${message.role === "user" ? "flex-row-reverse" : ""}`}>
-      <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center bg-[#2a2a30] border border-[#3a3a42]">
+      <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center bg-zinc-800 border border-zinc-700">
         {message.role === "assistant" ? (
           <img
             src={BrainLogo}
@@ -142,7 +144,7 @@ function MessageBubble({ message }: { message: CanvasMessage }) {
             className="w-4 h-4 object-contain"
           />
         ) : (
-          <span className="text-[11px] font-semibold text-[#aeb1ff]">YOU</span>
+          <span className="text-[11px] font-semibold text-zinc-400">YOU</span>
         )}
       </div>
       <div className="flex-1 min-w-0">
@@ -272,6 +274,7 @@ export function Canvas({
   className = "",
   modelName = "Model not selected",
   modelProvider = null,
+  sessionTitle = null,
   onOpenSessionDrawer,
   statusMessage = null,
   forceCanvasNext = false,
@@ -785,19 +788,41 @@ export function Canvas({
         <div className="flex items-center gap-3">
           <button
             onClick={onOpenSessionDrawer}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#1f1f24] bg-[#141418] hover:border-[#2a2a30] transition-colors cursor-pointer"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-zinc-800 bg-zinc-900 hover:border-zinc-800 transition-colors cursor-pointer"
           >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-[#888]" />
-            <span className="text-[13px] text-[#d0d0d6]">Session</span>
+            <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-400" />
+            <span className="text-[13px] text-zinc-300">Session</span>
           </button>
-          <span className="text-[13px] text-[#8f8f95]">{modelName}</span>
+          <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+            {SESSION_MODE_LABELS[runtimeMode]}
+          </span>
+          {sessionTitle ? (
+            <span className="max-w-[420px] truncate text-[13px] text-zinc-300">
+              {sessionTitle}
+            </span>
+          ) : null}
+          <span className="text-[13px] text-zinc-400">{modelName}</span>
         </div>
       </div>
 
       {/* Messages area */}
       <div className="min-h-0 flex-1 overflow-y-auto" data-scrollbar="auto">
-        <div className="max-w-5xl mx-auto px-6 py-6 space-y-8">
-          {displayMessages.map((msg) => {
+        {displayMessages.length === 0 ? (
+          <div className="flex min-h-full flex-col items-center justify-center gap-3 px-6 py-12 text-center">
+            <img
+              src={BrainLogo}
+              alt="SlavikAI"
+              className="h-12 w-12 object-contain opacity-50"
+            />
+            <div className="text-[15px] text-zinc-300">Start a conversation</div>
+            <p className="max-w-sm text-[12px] leading-5 text-zinc-500">
+              Ask a question or describe a task. SlavikAI answers here, and the
+              Computer panel shows what a running task is doing.
+            </p>
+          </div>
+        ) : (
+          <div className="max-w-5xl mx-auto px-6 py-6 space-y-8">
+            {displayMessages.map((msg) => {
             const isSavedMessage = !msg.transient;
             const canFeedback =
               !!onSendFeedback
@@ -852,10 +877,11 @@ export function Canvas({
                   />
                 ) : null}
               </div>
-            );
-          })}
-          <div ref={messagesEndRef} />
-        </div>
+              );
+            })}
+            <div ref={messagesEndRef} />
+          </div>
+        )}
       </div>
 
       {decisionState.shouldRender && decisionState.decision ? (
@@ -876,7 +902,7 @@ export function Canvas({
       <div className="px-4 py-3">
         <div className="max-w-5xl mx-auto">
           {visibleStatusMessage ? (
-            <div className="mb-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
+            <div className="mb-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[12px] text-zinc-300">
               {visibleStatusMessage}
             </div>
           ) : null}
@@ -886,12 +912,12 @@ export function Canvas({
             </div>
           ) : null}
           {pasteUndo ? (
-            <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-[#1f1f24] bg-[#141418] px-3 py-2 text-[12px] text-[#c0c0c0]">
+            <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[12px] text-zinc-300">
               <span>Вставка длинного текста сохранена как файл.</span>
               <button
                 type="button"
                 onClick={handleUndoPaste}
-                className="rounded border border-[#2a2a30] px-2 py-0.5 text-[11px] text-[#ddd] hover:bg-[#1f1f24]"
+                className="rounded border border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-200 hover:bg-zinc-800"
               >
                 Undo
               </button>
@@ -902,14 +928,14 @@ export function Canvas({
               {composerAttachments.map((attachment) => (
                 <div
                   key={attachment.id}
-                  className="inline-flex items-center gap-2 rounded-md border border-[#2a2a30] bg-[#141418] px-2.5 py-1 text-[12px] text-[#c8c8cc]"
+                  className="inline-flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[12px] text-zinc-300"
                 >
-                  <FileText className="h-3.5 w-3.5 text-[#8f8f95]" />
+                  <FileText className="h-3.5 w-3.5 text-zinc-400" />
                   <span className="max-w-[260px] truncate">{attachment.name}</span>
                   <button
                     type="button"
                     onClick={() => handleRemoveComposerAttachment(attachment.id)}
-                    className="rounded p-0.5 text-[#8f8f95] hover:bg-[#1f1f24] hover:text-[#d6d6db]"
+                    className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
                     title="Remove attachment"
                     aria-label="Remove attachment"
                   >
@@ -929,28 +955,28 @@ export function Canvas({
               void handleAttachFiles(event);
             }}
           />
-          <div className="flex items-end gap-2 bg-[#141418] rounded-xl border border-[#1f1f24] focus-within:border-[#2a2a30] transition-colors px-4 py-3">
+          <div className="flex items-end gap-2 bg-zinc-900 rounded-xl border border-zinc-800 focus-within:border-zinc-800 transition-colors px-4 py-3">
             {/* Composer actions */}
             <div className="relative flex-shrink-0 pb-0.5">
               {actionsMenuOpen ? (
-                <div className="absolute bottom-8 left-0 z-20 min-w-[160px] rounded-lg border border-[#24242a] bg-[#101014] py-1 shadow-xl shadow-black/40">
+                <div className="absolute bottom-8 left-0 z-20 min-w-[160px] rounded-lg border border-zinc-800 bg-zinc-900 py-1 shadow-xl shadow-black/40">
                   <button
                     type="button"
                     onClick={handleOpenFilePicker}
-                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-[#d6d6db] transition-colors hover:bg-[#1a1a20]"
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-zinc-300 transition-colors hover:bg-zinc-800"
                     title="Add file"
                   >
-                    <Paperclip className="h-4 w-4 text-[#8f8f95]" />
+                    <Paperclip className="h-4 w-4 text-zinc-400" />
                     <span>Add file</span>
                   </button>
                   <button
                     type="button"
                     onClick={handleToggleWebSearch}
                     disabled={!webSearchAvailable}
-                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors disabled:cursor-not-allowed disabled:text-[#555] ${
+                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors disabled:cursor-not-allowed disabled:text-zinc-500 ${
                       webSearchNext && webSearchAvailable
                         ? "bg-[#173124] text-[#9fe3b8]"
-                        : "text-[#d6d6db] hover:bg-[#1a1a20]"
+                        : "text-zinc-300 hover:bg-zinc-800"
                     }`}
                     title="Web search"
                     aria-pressed={webSearchNext && webSearchAvailable}
@@ -964,7 +990,7 @@ export function Canvas({
                     className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors ${
                       forceCanvasNext
                         ? "bg-[#173124] text-[#9fe3b8]"
-                        : "text-[#d6d6db] hover:bg-[#1a1a20]"
+                        : "text-zinc-300 hover:bg-zinc-800"
                     }`}
                     title="Canvas"
                     aria-pressed={forceCanvasNext}
@@ -978,7 +1004,7 @@ export function Canvas({
                 type="button"
                 onClick={() => setActionsMenuOpen((prev) => !prev)}
                 disabled={actionsDisabled}
-                className="flex h-6 w-6 items-center justify-center rounded-md text-[#666] transition-colors hover:bg-[#1b1b20] hover:text-[#aaa] cursor-pointer disabled:cursor-not-allowed disabled:text-[#444]"
+                className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-400 cursor-pointer disabled:cursor-not-allowed disabled:text-zinc-600"
                 title="Actions"
                 aria-label="Actions"
                 aria-expanded={actionsMenuOpen}
@@ -1030,7 +1056,7 @@ export function Canvas({
                   : "Type your message... (Shift+Enter for new line)"
               }
               rows={1}
-              className="composer-textarea flex-1 bg-transparent text-[14px] text-[#d4d4d8] placeholder-[#555] resize-none outline-none min-h-[24px] max-h-[120px]"
+              className="composer-textarea flex-1 bg-transparent text-[14px] text-zinc-300 placeholder-zinc-500 resize-none outline-none min-h-[24px] max-h-[120px]"
               style={{ lineHeight: "24px" }}
               disabled={sending || isTranscribing || composerBlocked}
               data-scrollbar="always"
@@ -1045,12 +1071,12 @@ export function Canvas({
               disabled={!canUseMediaRecorder || sending || isTranscribing || composerBlocked}
               className={`relative transition-colors pb-0.5 cursor-pointer ${
                 !canUseMediaRecorder
-                  ? "text-[#444]"
+                  ? "text-zinc-600"
                   : isRecording
                     ? "text-rose-300"
                     : isTranscribing
                       ? "text-amber-300"
-                      : "text-[#555] hover:text-[#999]"
+                      : "text-zinc-500 hover:text-zinc-400"
               }`}
               title={
                 !canUseMediaRecorder
@@ -1091,13 +1117,13 @@ export function Canvas({
               className={`p-1.5 rounded-lg transition-all cursor-pointer ${
                 sending
                   ? cancelling
-                    ? "bg-[#1b1b20] text-[#555]"
+                    ? "bg-zinc-800 text-zinc-500"
                     : "bg-rose-600 hover:bg-rose-500 text-white"
                   : (inputValue.trim() || composerAttachments.length > 0)
                     && !isTranscribing
                     && !composerBlocked
-                    ? "bg-[#6366f1] hover:bg-[#5558e6] text-white"
-                    : "bg-[#1b1b20] text-[#555]"
+                    ? "bg-zinc-100 hover:bg-white text-zinc-900"
+                    : "bg-zinc-800 text-zinc-500"
               }`}
               title={sending ? (cancelling ? "Stopping..." : "Stop generation") : "Send"}
               aria-label={sending ? (cancelling ? "Stopping generation" : "Stop generation") : "Send"}
@@ -1114,7 +1140,7 @@ export function Canvas({
             </button>
           </div>
 
-          <p className="text-[11px] text-[#444] text-center mt-2">
+          <p className="text-[11px] text-zinc-600 text-center mt-2">
             SlavikAI v1.0 - Python Agent
           </p>
         </div>

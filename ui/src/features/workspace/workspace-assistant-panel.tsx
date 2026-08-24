@@ -18,10 +18,13 @@ import type {
   TaskExecutionState,
   UiDecision,
 } from '../../app/types';
+import { SESSION_MODE_LABELS } from '../../app/types';
 import type { CanvasMessage } from '../../app/components/canvas';
+import { StatusBadge } from '../../app/components/ui/status-badge';
 import { MessageRenderer } from '../messages';
 import type { RenderableMessage } from '../messages';
 import { TtsAudioPlayer, useTtsAudioPlayer } from '../audio';
+import { deriveComputerStatus } from './computer-status';
 
 type WorkspaceAssistantPanelProps = {
   mode: SessionMode;
@@ -137,106 +140,72 @@ export function WorkspaceAssistantPanel({
   const controlButtonClass =
     'rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40';
 
+  const status = deriveComputerStatus({ mode, activePlan, activeTask, autoState, decision });
+  const modeLabel = SESSION_MODE_LABELS[mode];
+
   return (
     <section
-      className="min-h-0 bg-[#0d0d11] flex flex-col overflow-hidden h-full"
+      className="min-h-0 bg-zinc-900 flex flex-col overflow-hidden h-full"
       data-computer-surface="true"
     >
-      <div className="h-9 border-b border-[#1f1f24] px-3 flex items-center gap-2 text-[12px]">
-        <Monitor className="h-3.5 w-3.5 text-[#7c7cff]" />
-        <span className="font-medium text-[#d2d2d9]">Computer</span>
-        <span className="text-[#444]">·</span>
-        <span className="text-[#9a9aa3]">Agent Execution Surface</span>
-      </div>
-
-      <div className="border-b border-[#1f1f24] bg-[#0f0f14] px-3 py-2 text-[11px] text-[#8a8a94]">
-        <div className="flex items-center justify-between gap-2">
-          <span>
-            mode:{' '}
-            <span className="text-[#b0b0bd]">{mode}</span>
+      <header className="shrink-0 border-b border-zinc-800 bg-zinc-900">
+        <div className="flex items-center gap-2 px-3 py-2">
+          <Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+          <span className="text-[12px] font-medium text-zinc-300">Computer</span>
+          <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+            {modeLabel}
           </span>
-          <span>
-            plan:{' '}
-            <span
-              className={
-                activePlan?.status === 'running'
-                  ? 'text-[#7c7cff]'
-                  : activePlan?.status === 'completed'
-                    ? 'text-emerald-400'
-                    : activePlan?.status === 'failed'
-                      ? 'text-red-400'
-                      : 'text-[#8a8a94]'
-              }
-            >
-              {activePlan?.status ?? 'none'}
-            </span>
-          </span>
+          <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
         </div>
-        <div className="mt-1 flex items-center justify-between gap-2">
-          <span>
-            task:{' '}
-            <span
-              className={
-                activeTask?.status === 'running'
-                  ? 'text-[#7c7cff]'
-                  : activeTask?.status === 'completed'
-                    ? 'text-emerald-400'
-                    : activeTask?.status === 'failed'
-                      ? 'text-red-400'
-                      : 'text-[#8a8a94]'
-              }
-            >
-              {activeTask?.status ?? 'none'}
-            </span>
-          </span>
-          <span>
-            auto:{' '}
-            <span
-              className={
-                autoState?.status === 'planning' || autoState?.status === 'coding'
-                  ? 'text-[#7c7cff]'
-                  : autoState?.status === 'completed'
-                    ? 'text-emerald-400'
-                    : autoState?.status?.startsWith('failed')
-                      ? 'text-red-400'
-                      : autoState?.status === 'waiting_approval'
-                        ? 'text-amber-300'
-                        : 'text-[#8a8a94]'
-              }
-            >
-              {autoState?.status ?? 'idle'}
-            </span>
-          </span>
-        </div>
-        {autoState?.goal ? (
-          <div className="mt-1 truncate text-[#666]" title={autoState.goal}>
-            goal: {autoState.goal}
+        {status.goal || status.stepLabel || status.detail ? (
+          <div className="space-y-0.5 px-3 pb-2">
+            {status.goal ? (
+              <div className="truncate text-[12px] text-zinc-300" title={status.goal}>
+                {status.goal}
+              </div>
+            ) : null}
+            {status.stepLabel || status.detail ? (
+              <div className="flex items-center gap-2 text-[11px]">
+                {status.stepLabel ? (
+                  <span className="text-zinc-400">{status.stepLabel}</span>
+                ) : null}
+                {status.stepLabel && status.detail ? (
+                  <span className="text-zinc-500">·</span>
+                ) : null}
+                {status.detail ? (
+                  <span
+                    className={
+                      status.tone === 'error'
+                        ? 'text-rose-300'
+                        : status.tone === 'waiting'
+                          ? 'text-amber-300'
+                          : 'text-zinc-400'
+                    }
+                  >
+                    {status.detail}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
-        {autoState?.skill ? (
-          <div className="mt-1 truncate text-[#666]">
-            skill: {autoState.skill.skill_id && autoState.skill.version
-              ? `${autoState.skill.skill_id}@${autoState.skill.version}`
-              : 'none'} · {autoState.skill.status}
-          </div>
-        ) : null}
-      </div>
+      </header>
 
       {computerEvents.length > 0 ? (
-        <div className="border-b border-[#1f1f24] bg-[#0a0a0f] px-3 py-2 max-h-40 overflow-auto space-y-0.5">
+        <div className="border-b border-zinc-800 bg-zinc-950 px-3 py-2 max-h-40 overflow-auto space-y-0.5">
           {computerEvents.slice(-20).map((ev, idx) => (
             <div
               key={`${ev.ts}-${idx}`}
-              className={`flex items-center gap-2 text-[10px] font-mono ${ev.ok === false ? 'text-red-400' : 'text-[#6a6a75]'}`}
+              className={`flex items-center gap-2 text-[10px] font-mono ${ev.ok === false ? 'text-red-400' : 'text-zinc-500'}`}
             >
               <span className={`shrink-0 w-16 ${ev.ok === false ? 'text-red-400' : 'text-[#5a8a5a]'}`}>
                 {ev.kind}
               </span>
-              <span className="truncate text-[#8a8a94]">
+              <span className="truncate text-zinc-400">
                 {ev.path ?? ev.command ?? ev.tool}
               </span>
               {ev.duration_ms !== undefined ? (
-                <span className="shrink-0 text-[#555]">{ev.duration_ms}ms</span>
+                <span className="shrink-0 text-zinc-500">{ev.duration_ms}ms</span>
               ) : null}
             </div>
           ))}
@@ -245,7 +214,17 @@ export function WorkspaceAssistantPanel({
 
       <div className="flex-1 min-h-0 overflow-auto px-3 py-3 space-y-2" data-scrollbar="always">
         {renderItems.length === 0 ? (
-          <div className="text-[12px] text-[#777]">No messages yet.</div>
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+            <Monitor className="h-8 w-8 text-zinc-600" />
+            <p className="text-[13px] text-zinc-300">
+              {status.isActive
+                ? `${status.label}. The agent is working; progress will appear here.`
+                : 'Nothing running yet.'}
+            </p>
+            <p className="max-w-sm text-[12px] leading-5 text-zinc-500">
+              Start a task in Chat, or open Files / Changes / Terminal to inspect this session.
+            </p>
+          </div>
         ) : (
           renderItems.map((item) => {
             if (item.kind === 'decision') {
@@ -372,7 +351,7 @@ export function WorkspaceAssistantPanel({
       </div>
 
       {terminalPendingText ? (
-        <div className="border-t border-[#1f1f24] px-3 py-2 text-[11px] text-amber-300">
+        <div className="border-t border-zinc-800 px-3 py-2 text-[11px] text-amber-300">
           {terminalPendingText}
         </div>
       ) : null}

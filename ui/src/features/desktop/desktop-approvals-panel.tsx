@@ -89,10 +89,10 @@ export function DesktopApprovalsPanel() {
   };
 
   return (
-    <div className="mt-2 rounded-md border border-[#26262e] bg-[#0d0d11] p-2 text-[11px]">
+    <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-900 p-2 text-[11px]">
       <div className="flex items-center justify-between">
-        <span className="font-medium text-[#c7c7d0]">Persistent Desktop approvals</span>
-        <button type="button" onClick={() => void reload()} className="text-[#8f8f99] hover:text-white">
+        <span className="font-medium text-zinc-300">Persistent Desktop approvals</span>
+        <button type="button" onClick={() => void reload()} className="text-zinc-400 hover:text-white">
           Refresh
         </button>
       </div>
@@ -102,8 +102,8 @@ export function DesktopApprovalsPanel() {
           ? rule.scope.target_pattern
           : 'no path scope';
         return (
-          <div key={rule.rule_id} className="mt-2 rounded border border-[#23232a] p-2">
-            <div className="truncate text-[#bcbcc6]">
+          <div key={rule.rule_id} className="mt-2 rounded border border-zinc-800 p-2">
+            <div className="truncate text-zinc-400">
               {String(rule.scope.tool ?? '?')}:{String(rule.scope.action ?? '?')} → {target}
             </div>
             <div className="mt-1 flex items-center gap-2">
@@ -112,7 +112,7 @@ export function DesktopApprovalsPanel() {
                 onClick={() => void updateEffect(rule).catch((reason: unknown) => {
                   setError(reason instanceof Error ? reason.message : 'Update failed.');
                 })}
-                className="rounded border border-[#34343d] px-2 py-0.5 text-[#a8a8b2]"
+                className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-400"
               >
                 {rule.effect}
               </button>
