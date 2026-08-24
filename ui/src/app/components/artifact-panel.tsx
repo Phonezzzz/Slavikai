@@ -70,7 +70,7 @@ export function ArtifactPanel({
   if (view === "viewer" && selectedArtifact) {
     return (
       <div
-        className={`h-full min-h-0 w-[40vw] min-w-[360px] max-w-[720px] flex-shrink-0 border-l border-[#1f1f24] bg-[#0b0b0d] max-md:w-[88vw] max-md:min-w-0 ${className}`}
+        className={`h-full min-h-0 w-[40vw] min-w-[360px] max-w-[720px] flex-shrink-0 border-l border-zinc-800 bg-zinc-950 max-md:w-[88vw] max-md:min-w-0 ${className}`}
       >
         <DocumentViewer
           title={selectedArtifact.name}
@@ -89,7 +89,7 @@ export function ArtifactPanel({
 
   return (
     <div
-      className={`h-full min-h-0 w-[20vw] min-w-[280px] max-w-[420px] flex-shrink-0 border-l border-[#1f1f24] bg-[#0b0b0d] max-md:w-[88vw] max-md:min-w-0 ${className}`}
+      className={`h-full min-h-0 w-[20vw] min-w-[280px] max-w-[420px] flex-shrink-0 border-l border-zinc-800 bg-zinc-950 max-md:w-[88vw] max-md:min-w-0 ${className}`}
     >
       <ArtifactsSidebar
         artifacts={artifacts}

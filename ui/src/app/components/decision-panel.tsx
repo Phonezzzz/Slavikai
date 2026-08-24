@@ -88,18 +88,18 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
   };
 
   return (
-    <div className="border-t border-[#1f1f24] bg-[#101014] px-4 py-3">
-      <div className="mx-auto max-w-3xl rounded-xl border border-[#2a2a30] bg-[#141418] px-4 py-3">
+    <div className="border-t border-zinc-800 bg-zinc-900 px-4 py-3">
+      <div className="mx-auto max-w-3xl rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-[#e4e4e7]">Требуется подтверждение</h3>
-            <p className="mt-1 text-xs text-[#b4b4bd]">{decision.summary}</p>
-            <p className="mt-1 text-xs text-[#8f8f98]">Причина: {decision.reason}</p>
+            <h3 className="text-sm font-semibold text-zinc-200">Требуется подтверждение</h3>
+            <p className="mt-1 text-xs text-zinc-400">{decision.summary}</p>
+            <p className="mt-1 text-xs text-zinc-400">Причина: {decision.reason}</p>
           </div>
           <button
             type="button"
             onClick={() => setDetailsOpen((prev) => !prev)}
-            className="inline-flex items-center gap-1 rounded-md border border-[#2a2a30] px-2 py-1 text-xs text-[#b4b4bd] hover:bg-[#1b1b22]"
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-800 px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
             title="Show details"
             aria-label="Show details"
           >
@@ -109,21 +109,21 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
         </div>
 
         {detailsOpen ? (
-          <div className="mt-3 rounded-lg border border-[#23232a] bg-[#0f0f14] p-3">
-            <pre className="overflow-auto text-[11px] leading-relaxed text-[#c9c9d2]">
+          <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+            <pre className="overflow-auto text-[11px] leading-relaxed text-zinc-300">
               {JSON.stringify(decision.proposed_action ?? {}, null, 2)}
             </pre>
           </div>
         ) : null}
 
         {isMemorySave ? (
-          <div className="mt-3 rounded-lg border border-[#2a2a30] bg-[#0f0f14] p-3">
-            <div className="text-xs font-medium text-[#d7d7de]">Будет сохранено</div>
-            <p className="mt-1 whitespace-pre-wrap text-sm text-[#e4e4e7]">
+          <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3">
+            <div className="text-xs font-medium text-zinc-300">Будет сохранено</div>
+            <p className="mt-1 whitespace-pre-wrap text-sm text-zinc-200">
               {proposedMemoryText}
             </p>
             {memoryClaimLabels.length > 0 ? (
-              <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-[#a8a8b2]">
+              <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-zinc-400">
                 {memoryClaimLabels.map((label, index) => (
                   <li key={`${index}-${label}`}>{label}</li>
                 ))}
@@ -138,7 +138,7 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
               value={editValue}
               onChange={(event) => setEditValue(event.target.value)}
               rows={isMemorySave ? 4 : 6}
-              className={`w-full rounded-lg border border-[#2a2a30] bg-[#0f0f14] px-3 py-2 text-[#d7d7de] outline-none focus:border-[#3a3a44] ${isMemorySave ? 'text-sm' : 'font-mono text-[12px]'}`}
+              className={`w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-zinc-300 outline-none focus:border-zinc-700 ${isMemorySave ? 'text-sm' : 'font-mono text-[12px]'}`}
               disabled={busy}
             />
             {editError ? <p className="text-xs text-rose-300">{editError}</p> : null}
@@ -159,7 +159,7 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
               || action === 'always_allow'
               || action === 'confirm'
                 ? 'bg-emerald-600 text-white hover:bg-emerald-500'
-                : 'border border-[#3a3a44] text-[#d4d4db] hover:bg-[#1b1b22]';
+                : 'border border-zinc-700 text-zinc-300 hover:bg-zinc-800';
             const icon = action === 'reject'
               ? <X className="h-3.5 w-3.5" />
               : isEditAction

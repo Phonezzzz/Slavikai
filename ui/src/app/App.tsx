@@ -213,6 +213,9 @@ export default function App() {
   const modelLabel = runtime.selectedModel
     ? `${runtime.selectedModel.provider}/${runtime.selectedModel.model}`
     : 'Model not selected';
+  const sessionTitle =
+    sessions.find((session) => session.session_id === runtime.selectedConversation)?.title ??
+    null;
   const selectedModelValue = runtime.selectedModel
     ? `${runtime.selectedModel.provider}::${runtime.selectedModel.model}`
     : null;
@@ -628,6 +631,7 @@ export default function App() {
             cancelling={transport.cancelling}
             modelLabel={modelLabel}
             modelProvider={runtime.selectedModel?.provider ?? null}
+            sessionTitle={sessionTitle}
             statusMessage={statusMessage}
             longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
             longPasteThresholdChars={composerSettings.longPasteThresholdChars}
@@ -665,7 +669,7 @@ export default function App() {
           />
         </div>
         {activeView === 'workspace' ? (
-          <div className="h-full min-h-0 w-[48vw] min-w-[420px] max-w-[920px] border-l border-[#1b1b20] bg-[#0a0a0d] shadow-[-12px_0_30px_rgba(0,0,0,0.28)] max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:w-[min(92vw,760px)] max-lg:min-w-0">
+          <div className="h-full min-h-0 w-[48vw] min-w-[420px] max-w-[920px] border-l border-zinc-800 bg-zinc-950 shadow-[-12px_0_30px_rgba(0,0,0,0.28)] max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:w-[min(92vw,760px)] max-lg:min-w-0">
             <WorkspaceSessionScreen
               sessionId={runtime.selectedConversation}
               sessionHeader={SESSION_HEADER}

@@ -79,15 +79,15 @@ export function ArtifactsSidebar({
 
   return (
     <div
-      className={`flex h-full w-full flex-col bg-[#0b0b0d] ${className}`}
+      className={`flex h-full w-full flex-col bg-zinc-950 ${className}`}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4">
-        <h3 className="text-[#e0e0e0] text-[15px]">Artifacts</h3>
+        <h3 className="text-zinc-200 text-[15px]">Artifacts</h3>
         <div className="flex items-center gap-3">
           <button
             onClick={onDownloadAll}
-            className="flex items-center gap-1.5 text-[13px] text-[#888] hover:text-[#ccc] transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 text-[13px] text-zinc-400 hover:text-[#ccc] transition-colors cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
             Download all
@@ -95,7 +95,7 @@ export function ArtifactsSidebar({
           {onClose && (
             <button
               onClick={onClose}
-              className="text-[#666] hover:text-[#ccc] transition-colors cursor-pointer"
+              className="text-zinc-500 hover:text-[#ccc] transition-colors cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
@@ -107,30 +107,30 @@ export function ArtifactsSidebar({
         <div className="p-4 space-y-2">
           {/* Artifacts List */}
           {artifacts.length === 0 ? (
-            <div className="rounded-xl bg-[#141418] p-4 text-[13px] text-[#777]">
+            <div className="rounded-xl bg-zinc-900 p-4 text-[13px] text-zinc-500">
               Нет артефактов.
             </div>
           ) : (
             artifacts.map((artifact) => (
               <div
                 key={artifact.id}
-                className="group flex items-center gap-3 p-3 rounded-xl bg-[#141418] hover:bg-[#1b1b20] transition-all cursor-pointer"
+                className="group flex items-center gap-3 p-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 transition-all cursor-pointer"
                 onMouseEnter={() => setHoveredArtifact(artifact.id)}
                 onMouseLeave={() => setHoveredArtifact(null)}
                 onClick={() => onArtifactClick?.(artifact)}
               >
-                <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-[#1b1b20]">
+                <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-zinc-800">
                   {categoryIconMap[artifact.category]}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[14px] text-[#e0e0e0] truncate">
+                  <div className="text-[14px] text-zinc-200 truncate">
                     {artifact.name}
                   </div>
                   <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className="text-[12px] text-[#777]">
+                    <span className="text-[12px] text-zinc-500">
                       {artifact.category}
                     </span>
-                    <span className="text-[12px] text-[#555]">-</span>
+                    <span className="text-[12px] text-zinc-500">-</span>
                     <span
                       className={`text-[12px] ${typeColorMap[artifact.type] || "text-gray-400"}`}
                     >
@@ -143,7 +143,7 @@ export function ArtifactsSidebar({
                     e.stopPropagation();
                     onDownloadArtifact?.(artifact.id);
                   }}
-                  className={`text-[#555] hover:text-[#ccc] transition-all ${
+                  className={`text-zinc-500 hover:text-[#ccc] transition-all ${
                     hoveredArtifact === artifact.id
                       ? "opacity-100"
                       : "opacity-0 group-hover:opacity-100"
@@ -160,15 +160,15 @@ export function ArtifactsSidebar({
         {previewItems.length > 0 && (
           <div className="px-4 pb-4">
             <div className="flex items-center justify-between mb-3 mt-2">
-              <h4 className="text-[14px] text-[#e0e0e0]">Content</h4>
-              <ChevronRight className="w-4 h-4 text-[#555]" />
+              <h4 className="text-[14px] text-zinc-200">Content</h4>
+              <ChevronRight className="w-4 h-4 text-zinc-500" />
             </div>
             <div className="grid grid-cols-2 gap-2">
               {previewItems.map((item) => (
                 <div
                   key={item.id}
                   onClick={() => onContentClick?.(item.id)}
-                  className="relative group rounded-lg overflow-hidden bg-[#111114] transition-all cursor-pointer aspect-[16/10]"
+                  className="relative group rounded-lg overflow-hidden bg-zinc-900 transition-all cursor-pointer aspect-[16/10]"
                 >
                   {item.thumbnail ? (
                     <img
@@ -180,7 +180,7 @@ export function ArtifactsSidebar({
 
                   {/* Video play button */}
                   {item.isVideo && (
-                    <div className="absolute bottom-1.5 right-1.5 w-6 h-6 rounded-full bg-[#6366f1]/80 flex items-center justify-center">
+                    <div className="absolute bottom-1.5 right-1.5 w-6 h-6 rounded-full bg-black/50 flex items-center justify-center">
                       <Play className="w-3 h-3 text-white fill-white" />
                     </div>
                   )}

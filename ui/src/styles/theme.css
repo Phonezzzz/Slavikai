@@ -99,16 +99,16 @@
 }
 
 [data-ui-theme="oled"] .bg-zinc-950,
-[data-ui-theme="oled"] .bg-\[\#0b0b0d\],
-[data-ui-theme="oled"] .bg-\[\#0f0f12\] {
+[data-ui-theme="oled"] .bg-black {
   background-color: #000000;
 }
 
-[data-ui-theme="oled"] .bg-\[\#0f0f14\],
-[data-ui-theme="oled"] .bg-\[\#101014\],
-[data-ui-theme="oled"] .bg-\[\#121217\],
-[data-ui-theme="oled"] .bg-\[\#141418\] {
-  background-color: #090909;
+[data-ui-theme="oled"] .bg-zinc-900 {
+  background-color: #0a0a0a;
+}
+
+[data-ui-theme="oled"] .bg-zinc-800 {
+  background-color: #141414;
 }
 
 @theme inline {

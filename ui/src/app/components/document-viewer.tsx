@@ -129,8 +129,8 @@ function renderHighlightedCodeBlock(
   const keywords = keywordSet(lang);
   const lines = code.replace(/\r\n/g, "\n").split("\n");
   return (
-    <div key={`${keyPrefix}-code`} className="my-3 overflow-hidden rounded-lg border border-[#1f1f24] bg-[#0d0d12]">
-      <div className="border-b border-[#1f1f24] bg-[#111118] px-3 py-1.5 text-[11px] uppercase tracking-wide text-[#7f8a9a]">
+    <div key={`${keyPrefix}-code`} className="my-3 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
+      <div className="border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[11px] uppercase tracking-wide text-[#7f8a9a]">
         {lang || "text"}
       </div>
       <pre className="overflow-x-auto px-3 py-3 text-[13px] leading-relaxed font-mono">
@@ -241,7 +241,7 @@ export function DocumentViewer({
                   {tableHeaders.map((h, i) => (
                     <th
                       key={i}
-                      className="text-left px-3 py-2 bg-[#141418] text-[#aaa] border border-[#1f1f24]"
+                      className="text-left px-3 py-2 bg-zinc-900 text-zinc-400 border border-zinc-800"
                     >
                       {h.trim()}
                     </th>
@@ -254,7 +254,7 @@ export function DocumentViewer({
                     {row.map((cell, ci) => (
                       <td
                         key={ci}
-                        className="px-3 py-2 text-[#c0c0c0] border border-[#1f1f24]"
+                        className="px-3 py-2 text-zinc-300 border border-zinc-800"
                       >
                         {cell.trim()}
                       </td>
@@ -310,7 +310,7 @@ export function DocumentViewer({
           return (
             <code
               key={i}
-              className="px-1.5 py-0.5 rounded bg-[#2a2a2e] text-[#e8a0bf] text-[12px] font-mono"
+              className="px-1.5 py-0.5 rounded bg-zinc-800 text-[#e8a0bf] text-[12px] font-mono"
             >
               {part.slice(1, -1)}
             </code>
@@ -321,7 +321,7 @@ export function DocumentViewer({
         return boldParts.map((bp, j) => {
           if (bp.startsWith("**") && bp.endsWith("**")) {
             return (
-              <span key={`${i}-${j}`} className="text-[#e0e0e0]">
+              <span key={`${i}-${j}`} className="text-zinc-200">
                 {bp.slice(2, -2)}
               </span>
             );
@@ -383,9 +383,9 @@ export function DocumentViewer({
         listItems.push(
           <li
             key={`li-${i}`}
-            className="flex items-start gap-2 text-[13px] text-[#b0b0b0]"
+            className="flex items-start gap-2 text-[13px] text-zinc-400"
           >
-            <span className="text-[#6366f1] mt-1">-</span>
+            <span className="text-zinc-500 mt-1">-</span>
             <span>{renderInline(trimmed.slice(2))}</span>
           </li>
         );
@@ -399,7 +399,7 @@ export function DocumentViewer({
         elements.push(
             <hr
               key={`hr-${i}`}
-              className="border-[#1f1f24] my-4"
+              className="border-zinc-800 my-4"
             />
         );
         continue;
@@ -410,7 +410,7 @@ export function DocumentViewer({
         elements.push(
           <h2
             key={`h2-${i}`}
-            className="text-[16px] text-[#e0e0e0] mt-5 mb-2"
+            className="text-[16px] text-zinc-200 mt-5 mb-2"
           >
             {line.slice(3)}
           </h2>
@@ -438,7 +438,7 @@ export function DocumentViewer({
 
       // Regular text
       elements.push(
-        <p key={`p-${i}`} className="text-[13px] text-[#b0b0b0] leading-relaxed">
+        <p key={`p-${i}`} className="text-[13px] text-zinc-400 leading-relaxed">
           {renderInline(line)}
         </p>
       );
@@ -454,24 +454,24 @@ export function DocumentViewer({
 
   return (
     <div
-      className={`flex flex-col h-full bg-[#0b0b0d] ${className}`}
+      className={`flex flex-col h-full bg-zinc-950 ${className}`}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 bg-[#111115]">
+      <div className="flex items-center justify-between px-4 py-3 bg-zinc-900">
         <div className="flex items-center gap-3">
           {onBack && (
             <button
               onClick={onBack}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[13px] text-[#888] hover:text-[#ddd] hover:bg-[#1b1b20] transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[13px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-all cursor-pointer"
             >
               <ArrowLeft className="w-4 h-4" />
               Back
             </button>
           )}
           <div className="flex items-center gap-2">
-            <FileText className="w-4 h-4 text-[#888]" />
+            <FileText className="w-4 h-4 text-zinc-400" />
             <span className="text-[13px] text-[#ccc]">{title}</span>
-            <span className="text-[11px] text-[#666] bg-[#1b1b20] px-1.5 py-0.5 rounded">
+            <span className="text-[11px] text-zinc-500 bg-zinc-800 px-1.5 py-0.5 rounded">
               {type}
             </span>
           </div>
@@ -479,7 +479,7 @@ export function DocumentViewer({
         <div className="flex items-center gap-2">
           <button
             onClick={handleCopy}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-[#888] hover:text-[#ddd] hover:bg-[#1b1b20] transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-all cursor-pointer"
           >
             {copied ? (
               <>
@@ -499,7 +499,7 @@ export function DocumentViewer({
           >
             <button
               onClick={() => setShowDownloadMenu(!showDownloadMenu)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-[#888] hover:text-[#ddd] hover:bg-[#1b1b20] transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-all cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
               Download
@@ -507,15 +507,15 @@ export function DocumentViewer({
             </button>
             {showDownloadMenu && (
               <div
-                className="absolute right-0 top-full mt-1 rounded-lg bg-[#141418] border border-[#1f1f24] shadow-xl shadow-black/40 py-1 min-w-[120px] z-10"
+                className="absolute right-0 top-full mt-1 rounded-lg bg-zinc-900 border border-zinc-800 shadow-xl shadow-black/40 py-1 min-w-[120px] z-10"
               >
                 {downloadFormats.map((format) => (
                   <button
                     key={format}
                     onClick={() => handleDownload(format)}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-[12px] text-[#ccc] hover:bg-[#1b1b20] transition-colors cursor-pointer"
+                    className="flex items-center gap-2 w-full px-3 py-2 text-[12px] text-[#ccc] hover:bg-zinc-800 transition-colors cursor-pointer"
                   >
-                    <Download className="w-3 h-3 text-[#666]" />
+                    <Download className="w-3 h-3 text-zinc-500" />
                     {artifactKind === "file" && fileName ? fileName : `.${format.toLowerCase()}`}
                   </button>
                 ))}
@@ -525,7 +525,7 @@ export function DocumentViewer({
           {onClose && (
             <button
               onClick={onClose}
-              className="text-[#555] hover:text-[#ccc] transition-colors p-1 cursor-pointer"
+              className="text-zinc-500 hover:text-[#ccc] transition-colors p-1 cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
@@ -541,7 +541,7 @@ export function DocumentViewer({
               ? renderHighlightedCodeBlock(content, language || type, "raw-code")
               : renderMarkdown(content)
           ) : (
-            <p className="text-[13px] text-[#555]">Нет содержимого.</p>
+            <p className="text-[13px] text-zinc-500">Нет содержимого.</p>
           )}
         </div>
       </div>

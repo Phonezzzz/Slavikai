@@ -58,7 +58,7 @@ export function PlanPanel({
   };
 
   return (
-    <div className="border-b border-[#1f1f24] bg-[#0f0f14] px-3 py-2">
+    <div className="border-b border-zinc-800 bg-zinc-900 px-3 py-2">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           {showModeControls
@@ -83,8 +83,8 @@ export function PlanPanel({
                       disabled={busy || !transition || !transition.allowed}
                       className={`rounded-md border px-2 py-1 text-[11px] uppercase tracking-wide ${
                         mode === item
-                          ? 'border-[#3a3a46] bg-[#1b1b22] text-[#e0e0e8]'
-                          : 'border-[#2a2a31] bg-[#121217] text-[#a4a4ad] hover:bg-[#181820]'
+                          ? 'border-zinc-700 bg-zinc-800 text-zinc-200'
+                          : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:bg-zinc-900'
                       } disabled:opacity-50`}
                     >
                       {SESSION_MODE_LABELS[item]}
@@ -93,7 +93,7 @@ export function PlanPanel({
                 })
             : null}
         </div>
-        <span className="text-[11px] text-[#8a8a94]">{statusText}</span>
+        <span className="text-[11px] text-zinc-400">{statusText}</span>
       </div>
 
       {mode === 'plan' ? (
@@ -103,14 +103,14 @@ export function PlanPanel({
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
               placeholder="Цель плана (например: исправить streaming в Computer)"
-              className="h-8 flex-1 rounded-md border border-[#2a2a31] bg-[#111117] px-2 text-[12px] text-[#d0d0d8] outline-none"
+              className="h-8 flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 text-[12px] text-zinc-300 outline-none"
               disabled={busy}
             />
             <button
               type="button"
               onClick={handleDraft}
               disabled={busy || !goal.trim()}
-              className="h-8 rounded-md border border-[#2a2a31] bg-[#141418] px-3 text-[12px] text-[#c4c4cd] disabled:opacity-50"
+              className="h-8 rounded-md border border-zinc-800 bg-zinc-900 px-3 text-[12px] text-zinc-300 disabled:opacity-50"
             >
               Draft
             </button>
@@ -122,7 +122,7 @@ export function PlanPanel({
                 void onApprove();
               }}
               disabled={busy || !plan || plan.status !== 'draft'}
-              className="h-8 rounded-md border border-[#2a2a31] bg-[#141418] px-3 text-[12px] text-[#c4c4cd] disabled:opacity-50"
+              className="h-8 rounded-md border border-zinc-800 bg-zinc-900 px-3 text-[12px] text-zinc-300 disabled:opacity-50"
             >
               Approve
             </button>
@@ -132,7 +132,7 @@ export function PlanPanel({
                 void onExecute();
               }}
               disabled={busy || !plan || plan.status !== 'approved'}
-              className="h-8 rounded-md border border-[#2a2a31] bg-[#141418] px-3 text-[12px] text-[#c4c4cd] disabled:opacity-50"
+              className="h-8 rounded-md border border-zinc-800 bg-zinc-900 px-3 text-[12px] text-zinc-300 disabled:opacity-50"
             >
               Execute
             </button>
@@ -142,7 +142,7 @@ export function PlanPanel({
 
       {mode === 'act' ? (
         <div className="mt-2 flex items-center justify-between">
-          <span className="text-[11px] text-[#9a9aa4]">
+          <span className="text-[11px] text-zinc-400">
             task: {task ? task.status : 'none'}
           </span>
           <button
@@ -151,7 +151,7 @@ export function PlanPanel({
               void onCancel();
             }}
             disabled={busy || !task || task.status !== 'running'}
-            className="h-8 rounded-md border border-[#2a2a31] bg-[#141418] px-3 text-[12px] text-[#c4c4cd] disabled:opacity-50"
+            className="h-8 rounded-md border border-zinc-800 bg-zinc-900 px-3 text-[12px] text-zinc-300 disabled:opacity-50"
           >
             Cancel
           </button>
@@ -159,7 +159,7 @@ export function PlanPanel({
       ) : null}
 
       {mode === 'auto' ? (
-        <div className="mt-2 rounded-md border border-[#1f1f24] bg-[#0d0d11] p-2 text-[11px] text-[#9a9aa4]">
+        <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-900 p-2 text-[11px] text-zinc-400">
           <div>run: {autoState?.run_id ?? 'none'}</div>
           <div>status: {autoState?.status ?? 'idle'}</div>
           <div>pool: {autoState?.pool_size ?? '-'}</div>
@@ -181,11 +181,11 @@ export function PlanPanel({
       ) : null}
 
       {plan?.steps?.length ? (
-        <div className="mt-2 max-h-28 overflow-auto rounded-md border border-[#1f1f24] bg-[#0d0d11] p-2 text-[11px] text-[#a5a5ae]" data-scrollbar="always">
+        <div className="mt-2 max-h-28 overflow-auto rounded-md border border-zinc-800 bg-zinc-900 p-2 text-[11px] text-zinc-400" data-scrollbar="always">
           {plan.steps.map((step) => (
             <div key={step.step_id} className="flex items-center justify-between gap-2 py-0.5">
               <span className="truncate">{step.title}</span>
-              <span className="shrink-0 text-[#7e7e88]">{step.status}</span>
+              <span className="shrink-0 text-zinc-500">{step.status}</span>
             </div>
           ))}
         </div>

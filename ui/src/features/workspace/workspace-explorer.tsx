@@ -101,8 +101,8 @@ export function WorkspaceExplorer({
             onSelectPath(node.path);
             onToggleNode(node, key, expanded);
           }}
-          className={`flex h-[28px] w-full items-center gap-1.5 px-2 text-left text-[12px] hover:bg-[#15151a] ${
-            selected ? 'bg-[#1b1b22] text-[#d6d6de]' : 'text-[#a4a4ad]'
+          className={`flex h-[28px] w-full items-center gap-1.5 px-2 text-left text-[12px] hover:bg-zinc-900 ${
+            selected ? 'bg-zinc-800 text-zinc-300' : 'text-zinc-400'
           }`}
           style={{ paddingLeft: `${8 + depth * 14}px` }}
           data-parent={parentKey}
@@ -128,7 +128,7 @@ export function WorkspaceExplorer({
             </span>
           ) : null}
           {loading ? (
-            <span className="text-[#7d7d86]" title="Загрузка директории">
+            <span className="text-zinc-500" title="Загрузка директории">
               ...
             </span>
           ) : null}
@@ -148,8 +148,8 @@ export function WorkspaceExplorer({
         }}
         className={`flex h-[28px] w-full items-center gap-1.5 px-2 text-left text-[12px] transition-colors ${
           isActive || selected
-            ? 'bg-[#1b1b22] text-[#d6d6de]'
-            : 'text-[#9a9aa3] hover:bg-[#15151a]'
+            ? 'bg-zinc-800 text-zinc-300'
+            : 'text-zinc-400 hover:bg-zinc-900'
         }`}
         style={{ paddingLeft: `${28 + depth * 14}px` }}
       >
@@ -163,21 +163,21 @@ export function WorkspaceExplorer({
   const treeTruncatedTitle = treeMeta?.truncatedReasons.join(', ') ?? '';
 
   return (
-    <aside className="min-h-0 border-r border-[#1f1f24] bg-[#0d0d11] flex flex-col overflow-hidden">
-      <div className="h-9 flex items-center justify-between gap-2 px-3 border-b border-[#1f1f24]">
-        <span className="text-[11px] uppercase tracking-wider text-[#686873]">Explorer</span>
+    <aside className="min-h-0 border-r border-zinc-800 bg-zinc-900 flex flex-col overflow-hidden">
+      <div className="h-9 flex items-center justify-between gap-2 px-3 border-b border-zinc-800">
+        <span className="text-[11px] uppercase tracking-wider text-zinc-500">Explorer</span>
         {!readOnly ? (
           <div className="flex items-center gap-1 text-[11px]">
             <button
               onClick={onCreateFile}
-              className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21]"
+              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800"
               title="Create file"
             >
               New
             </button>
             <button
               onClick={() => onRenamePath(activeExplorerPath)}
-              className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21] disabled:opacity-50"
+              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
               disabled={!activeExplorerPath}
               title="Rename selected path"
             >
@@ -185,7 +185,7 @@ export function WorkspaceExplorer({
             </button>
             <button
               onClick={() => onMovePath(activeExplorerPath)}
-              className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#bdbdc6] hover:bg-[#1a1a21] disabled:opacity-50"
+              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
               disabled={!activeExplorerPath}
               title="Move selected path"
             >
@@ -193,7 +193,7 @@ export function WorkspaceExplorer({
             </button>
             <button
               onClick={() => onDeletePath(activeExplorerPath)}
-              className="rounded border border-[#2a2a31] bg-[#121217] px-1.5 py-0.5 text-[#ef8f8f] hover:bg-[#2a1717] disabled:opacity-50"
+              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[#ef8f8f] hover:bg-[#2a1717] disabled:opacity-50"
               disabled={!activeExplorerPath}
               title="Delete selected path"
             >
@@ -217,11 +217,11 @@ export function WorkspaceExplorer({
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
       >
         {treeLoading ? (
-          <div className="px-3 py-2 text-[12px] text-[#777]">Loading tree...</div>
+          <div className="px-3 py-2 text-[12px] text-zinc-500">Loading tree...</div>
         ) : treeError ? (
           <div className="px-3 py-2 text-[12px] text-red-400">{treeError}</div>
         ) : flatRows.length === 0 ? (
-          <div className="px-3 py-2 text-[12px] text-[#777]">Computer has no files.</div>
+          <div className="px-3 py-2 text-[12px] text-zinc-500">Computer has no files.</div>
         ) : (
           <div>
             <div style={{ height: `${topSpacerHeight}px` }} />

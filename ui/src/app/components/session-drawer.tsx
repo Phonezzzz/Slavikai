@@ -1,7 +1,9 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { ChevronRight, LoaderCircle, Play, Server, Shield, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
+import { ToggleSwitch } from './ui/toggle-switch';
+import { useFocusTrap } from '../use-focus-trap';
 import {
   SESSION_MODE_VALUES,
   SESSION_MODE_LABELS,
@@ -179,35 +181,6 @@ const parseSecurityPayload = (payload: unknown): SessionSecurityState => {
   };
 };
 
-type ToggleSwitchProps = {
-  checked: boolean;
-  disabled?: boolean;
-  label: string;
-  onToggle: () => void;
-};
-
-function ToggleSwitch({ checked, disabled = false, label, onToggle }: ToggleSwitchProps) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onToggle}
-      className={`relative inline-flex h-6 w-10 shrink-0 items-center rounded-full p-[2px] transition-colors ${
-        checked ? 'bg-emerald-500/75' : 'bg-zinc-700'
-      } disabled:cursor-not-allowed disabled:opacity-40`}
-    >
-      <span
-        className={`block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${
-          checked ? 'translate-x-4' : 'translate-x-0'
-        }`}
-      />
-    </button>
-  );
-}
-
 export function SessionDrawer({
   isOpen,
   onClose,
@@ -237,6 +210,9 @@ export function SessionDrawer({
   const [activeProvider, setActiveProvider] = useState<string | null>(null);
   const [loadedProviders, setLoadedProviders] = useState<Set<string>>(() => new Set());
   const [startingOllama, setStartingOllama] = useState(false);
+
+  const panelRef = useRef<HTMLElement | null>(null);
+  useFocusTrap(isOpen, panelRef);
 
   const requestHeaders = sessionId ? { [sessionHeader]: sessionId } : {};
   const safeModeEnabled = policyProfile !== 'yolo';
@@ -416,7 +392,11 @@ export function SessionDrawer({
             onClick={onClose}
           />
           <motion.aside
+            ref={panelRef}
             className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[520px] flex-col border-l border-zinc-800 bg-zinc-950 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Session controls"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
@@ -476,8 +456,8 @@ export function SessionDrawer({
                             }
                             className={`rounded-md border px-2 py-2 text-[11px] uppercase tracking-wide ${
                               mode === item
-                                ? 'border-[#3a3a46] bg-[#1b1b22] text-[#e0e0e8]'
-                                : 'border-[#2a2a31] bg-[#121217] text-[#a4a4ad] hover:bg-[#181820]'
+                                ? 'border-zinc-700 bg-zinc-800 text-zinc-100'
+                                : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:bg-zinc-800'
                             } disabled:opacity-50`}
                           >
                             {SESSION_MODE_LABELS[item]}
@@ -489,7 +469,7 @@ export function SessionDrawer({
 
                 <div className="space-y-2">
                   <div className="text-xs font-medium text-zinc-300">Model</div>
-                  <div className="rounded-lg border border-[#252530] bg-[#101014] p-2">
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-2">
                     <div className="mb-2 text-[11px] text-zinc-500">{modelLabel}</div>
                     <div className="grid grid-cols-[132px,1fr] gap-2">
                       <div className="space-y-1">
@@ -506,8 +486,8 @@ export function SessionDrawer({
                               disabled={modelsLoading || savingModel || !sessionId}
                               className={`flex w-full items-center justify-between rounded-md border px-2 py-2 text-left text-xs transition-colors ${
                                 isActive
-                                  ? 'border-[#3a3a46] bg-[#1b1b22] text-[#e8e8ef]'
-                                  : 'border-[#252530] bg-[#111116] text-[#a4a4ad] hover:bg-[#17171d]'
+                                  ? 'border-zinc-700 bg-zinc-800 text-zinc-100'
+                                  : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:bg-zinc-800'
                               } disabled:opacity-50`}
                             >
                               <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -520,7 +500,7 @@ export function SessionDrawer({
                         })}
                       </div>
 
-                      <div className="min-h-[150px] rounded-md border border-[#252530] bg-[#0d0d11] p-2">
+                      <div className="min-h-[150px] rounded-md border border-zinc-800 bg-zinc-950 p-2">
                         {currentProviderName === 'local' && currentProviderModels.length === 0 ? (
                           <div className="flex h-full min-h-[132px] flex-col justify-center gap-2">
                             <button
@@ -529,7 +509,7 @@ export function SessionDrawer({
                                 void handleStartLocalOllama();
                               }}
                               disabled={startingOllama || modelsLoading || savingModel || !sessionId}
-                              className="inline-flex items-center justify-center gap-2 rounded-md border border-[#343440] bg-[#181820] px-3 py-2 text-xs font-medium text-[#e0e0e8] hover:bg-[#202029] disabled:opacity-50"
+                              className="inline-flex items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-zinc-700 disabled:opacity-50"
                             >
                               {startingOllama ? (
                                 <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
@@ -577,7 +557,7 @@ export function SessionDrawer({
                                   className={`w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors ${
                                     selected
                                       ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100'
-                                      : 'border-transparent bg-transparent text-zinc-300 hover:border-[#2a2a31] hover:bg-[#15151b]'
+                                      : 'border-transparent bg-transparent text-zinc-300 hover:border-zinc-800 hover:bg-zinc-800'
                                   } disabled:opacity-50`}
                                 >
                                   <span className="block truncate">{model}</span>
@@ -601,20 +581,35 @@ export function SessionDrawer({
                   </div>
                 </div>
 
-                <div className="grid gap-2">
+                <div>
                   {POLICY_OPTIONS.map((option) => (
                     <button
                       key={option.value}
                       type="button"
                       onClick={() => setPolicyProfile(option.value)}
-                      className={`rounded-lg border px-3 py-3 text-left ${
+                      className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors ${
                         policyProfile === option.value
-                          ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
-                          : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700'
+                          ? 'bg-zinc-800/70'
+                          : 'hover:bg-zinc-900'
                       }`}
                     >
-                      <div className="text-sm font-medium">{option.title}</div>
-                      <div className="mt-1 text-xs text-zinc-400">{option.description}</div>
+                      <span
+                        className={`h-3.5 w-3.5 shrink-0 rounded-full border ${
+                          policyProfile === option.value
+                            ? 'border-zinc-200 bg-zinc-200'
+                            : 'border-zinc-600'
+                        }`}
+                      />
+                      <span className="min-w-0">
+                        <span
+                          className={`block text-[13px] ${
+                            policyProfile === option.value ? 'text-zinc-100' : 'text-zinc-300'
+                          }`}
+                        >
+                          {option.title}
+                        </span>
+                        <span className="block text-xs text-zinc-500">{option.description}</span>
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -662,13 +657,15 @@ export function SessionDrawer({
                   </button>
                 </div>
 
-                <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-3">
-                  <div className="text-sm font-medium text-zinc-100">Safe mode</div>
-                  <div className="mt-1 text-xs text-zinc-400">
-                    {safeModeEnabled
-                      ? 'ON for sandbox/index profiles. Risky tools remain blocked.'
-                      : 'OFF for the YOLO profile.'}
-                  </div>
+                <div className="text-xs text-zinc-400">
+                  Safe mode:{' '}
+                  <span className={safeModeEnabled ? 'text-amber-300' : 'text-emerald-300'}>
+                    {safeModeEnabled ? 'ON' : 'OFF'}
+                  </span>
+                  <span className="text-zinc-500">
+                    {' '}
+                    — {safeModeEnabled ? 'risky tools remain blocked' : 'YOLO profile'}
+                  </span>
                 </div>
 
                 <div className="space-y-2">

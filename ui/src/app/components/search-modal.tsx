@@ -109,25 +109,25 @@ export function SearchModal({
 
       {/* Modal */}
       <div
-        className="relative w-[780px] max-h-[70vh] bg-[#0f0f12] rounded-2xl border border-[#1f1f24] shadow-2xl shadow-black/50 overflow-hidden flex"
+        className="relative w-[780px] max-h-[70vh] bg-zinc-900 rounded-2xl border border-zinc-800 shadow-2xl shadow-black/50 overflow-hidden flex"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Left side - search & list */}
         <div className="flex-1 flex flex-col min-w-0">
           {/* Search input */}
-          <div className="flex items-center gap-3 px-5 py-4 border-b border-[#1f1f24]">
-            <Search className="w-4.5 h-4.5 text-[#666] flex-shrink-0" />
+          <div className="flex items-center gap-3 px-5 py-4 border-b border-zinc-800">
+            <Search className="w-4.5 h-4.5 text-zinc-500 flex-shrink-0" />
             <input
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search"
-              className="flex-1 bg-transparent text-[14px] text-[#e0e0e0] placeholder-[#555] outline-none"
+              className="flex-1 bg-transparent text-[14px] text-zinc-200 placeholder-zinc-500 outline-none"
             />
             {query && (
               <button
                 onClick={() => setQuery("")}
-                className="text-[#555] hover:text-[#999] cursor-pointer"
+                className="text-zinc-500 hover:text-zinc-400 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -136,8 +136,8 @@ export function SearchModal({
 
           {/* Actions */}
           {!query && (
-            <div className="px-4 py-2 border-b border-[#1f1f24]">
-              <p className="text-[11px] text-[#666] uppercase tracking-wider px-2 mb-1">
+            <div className="px-4 py-2 border-b border-zinc-800">
+              <p className="text-[11px] text-zinc-500 uppercase tracking-wider px-2 mb-1">
                 Actions
               </p>
               <button
@@ -145,9 +145,9 @@ export function SearchModal({
                   onNewChat?.();
                   onClose();
                 }}
-                className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#ccc] hover:bg-[#1b1b20] transition-colors cursor-pointer"
+                className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#ccc] hover:bg-zinc-800 transition-colors cursor-pointer"
               >
-                <Edit3 className="w-4 h-4 text-[#888]" />
+                <Edit3 className="w-4 h-4 text-zinc-400" />
                 Start a new conversation
               </button>
               <button
@@ -155,9 +155,9 @@ export function SearchModal({
                   onNewNote?.();
                   onClose();
                 }}
-                className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#ccc] hover:bg-[#1b1b20] transition-colors cursor-pointer"
+                className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] text-[#ccc] hover:bg-zinc-800 transition-colors cursor-pointer"
               >
-                <FileText className="w-4 h-4 text-[#888]" />
+                <FileText className="w-4 h-4 text-zinc-400" />
                 Create a new note
               </button>
             </div>
@@ -168,7 +168,7 @@ export function SearchModal({
             <div className="px-4 py-2">
               {groups.map((group) => (
                 <div key={group.label} className="mb-3">
-                  <p className="text-[11px] text-[#666] uppercase tracking-wider px-2 mb-1">
+                  <p className="text-[11px] text-zinc-500 uppercase tracking-wider px-2 mb-1">
                     {group.label}
                   </p>
                   {group.chats.map((chat) => (
@@ -180,14 +180,14 @@ export function SearchModal({
                       }}
                       className={`flex items-center justify-between w-full px-3 py-2.5 rounded-lg text-left transition-colors cursor-pointer ${
                         selectedId === chat.id
-                          ? "bg-[#1b1b20]"
-                          : "hover:bg-[#141418]"
+                          ? "bg-zinc-800"
+                          : "hover:bg-zinc-900"
                       }`}
                     >
                       <span className="text-[13px] text-[#ccc] truncate flex-1 mr-3">
                         {chat.title}
                       </span>
-                      <span className="text-[11px] text-[#555] flex-shrink-0 whitespace-nowrap">
+                      <span className="text-[11px] text-zinc-500 flex-shrink-0 whitespace-nowrap">
                         {chat.date.includes(",")
                           ? chat.date.split(",")[0]
                           : chat.date}
@@ -198,7 +198,7 @@ export function SearchModal({
               ))}
               {filteredChats.length === 0 && (
                 <div className="px-3 py-8 text-center">
-                  <p className="text-[13px] text-[#555]">No results found</p>
+                  <p className="text-[13px] text-zinc-500">No results found</p>
                 </div>
               )}
             </div>
@@ -207,16 +207,16 @@ export function SearchModal({
 
         {/* Right side - preview */}
         {selectedChat && (
-          <div className="w-[340px] border-l border-[#1f1f24] flex flex-col">
+          <div className="w-[340px] border-l border-zinc-800 flex flex-col">
             <div className="flex-1 flex items-center justify-center px-6">
               {selectedChat.preview ? (
                 <div className="w-full">
-                  <p className="text-[13px] text-[#b0b0b0] leading-relaxed whitespace-pre-wrap">
+                  <p className="text-[13px] text-zinc-400 leading-relaxed whitespace-pre-wrap">
                     {selectedChat.preview}
                   </p>
                 </div>
               ) : (
-                <p className="text-[13px] text-[#555]">
+                <p className="text-[13px] text-zinc-500">
                   Select a conversation to preview
                 </p>
               )}
