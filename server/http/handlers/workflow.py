@@ -286,9 +286,10 @@ async def handle_ui_runtime_init(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
 
-    agent = await _resolve_agent(request, session_id)
-
-    workspace_root = await _workspace_root_for_session(hub, session_id)
+    # Проверяем занятость ДО взятия agent lock: _resolve_agent держит scope-lock
+    # на всё время выполнения активной задачи, поэтому если проверять после,
+    # при настроенной модели guard всегда ждёт завершения задачи и видит
+    # completed вместо running — защита runtime_busy перестаёт работать.
     workflow_before = await hub.get_session_workflow(session_id)
     active_task_before = _normalize_task_payload(workflow_before.get("active_task"))
     if (
@@ -309,6 +310,10 @@ async def handle_ui_runtime_init(request: web.Request) -> web.Response:
                 "reset_reason": reset_reason,
             },
         )
+
+    agent = await _resolve_agent(request, session_id)
+
+    workspace_root = await _workspace_root_for_session(hub, session_id)
     await hub.set_session_workflow(
         session_id,
         mode="ask",

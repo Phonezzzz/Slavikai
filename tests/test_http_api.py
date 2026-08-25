@@ -60,6 +60,15 @@ class DummyAgent:
     def apply_runtime_workspace_root(self, workspace_root: str | None) -> None:
         self.runtime_workspace_root = workspace_root
 
+    def reconfigure_models(
+        self,
+        main_config,
+        main_api_key=None,
+        *,
+        persist: bool = True,
+    ) -> None:
+        del main_config, main_api_key, persist
+
     def set_runtime_state(
         self,
         *,
