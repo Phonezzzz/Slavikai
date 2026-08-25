@@ -1087,10 +1087,10 @@ export function WorkspaceIde({
   ];
 
   const tabBtnClass = (id: typeof computerTab) =>
-    `px-3 py-1 text-[11px] rounded-md transition-colors ${
+    `px-3 py-1 text-xs rounded-md transition-colors border ${
       computerTab === id
-        ? 'bg-zinc-800 text-zinc-300'
-        : 'text-zinc-500 hover:text-zinc-400 hover:bg-zinc-900'
+        ? 'border-zinc-700 bg-zinc-800 text-zinc-100'
+        : 'border-transparent text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
     }`;
 
   return (
@@ -1113,7 +1113,7 @@ export function WorkspaceIde({
         onOpenRepositoryPanel={onOpenRepositoryPanel}
       />
 
-      <div className="h-8 border-b border-zinc-800 flex items-center px-2 gap-0.5 shrink-0 overflow-x-auto">
+      <div className="h-9 border-b border-zinc-800/80 flex items-center px-2 gap-1 shrink-0 overflow-x-auto">
         {COMPUTER_TABS.map((tab) => (
           <button
             key={tab.id}
@@ -1148,19 +1148,19 @@ export function WorkspaceIde({
 
         {computerTab === 'terminal' && (
           <div className="h-full flex flex-col" data-computer-tab-content="terminal">
-            <div className="flex-1 overflow-auto px-3 py-2 font-mono text-[11px] text-zinc-400">
+            <div className="flex-1 overflow-auto px-3 py-2 font-mono text-xs text-zinc-400">
               {terminalLines.map((line, idx) => (
                 <div key={idx} className="whitespace-pre-wrap break-all leading-5">{line}</div>
               ))}
               <div ref={terminalEndRef} />
             </div>
             {terminalPendingText ? (
-              <div className="border-t border-zinc-800 px-3 py-2 text-[11px] text-amber-300">
+              <div className="border-t border-zinc-800/80 px-3 py-2 text-xs text-amber-300">
                 {terminalPendingText}
               </div>
             ) : null}
-            <div className="border-t border-zinc-800 flex items-center gap-2 px-3 py-2">
-              <span className="text-zinc-500 font-mono text-[11px] select-none">$</span>
+            <div className="border-t border-zinc-800/80 flex items-center gap-2 px-3 py-2">
+              <span className="text-zinc-500 font-mono text-xs select-none">$</span>
               <input
                 value={terminalInput}
                 onChange={(event) => setTerminalInput(event.target.value)}
@@ -1171,10 +1171,10 @@ export function WorkspaceIde({
                 }}
                 disabled={!sessionId || terminalBusy || isDecisionBlocking}
                 placeholder="command..."
-                className="flex-1 bg-transparent outline-none text-[11px] font-mono text-zinc-300 placeholder-zinc-600 disabled:opacity-50"
+                className="flex-1 bg-transparent outline-none text-xs font-mono text-zinc-300 placeholder-zinc-600 disabled:opacity-50"
               />
               {terminalBusy ? (
-                <span className="text-zinc-500 text-[10px] shrink-0">running…</span>
+                <span className="text-zinc-500 text-xs shrink-0">running…</span>
               ) : null}
             </div>
           </div>

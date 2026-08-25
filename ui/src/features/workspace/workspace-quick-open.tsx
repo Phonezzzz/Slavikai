@@ -62,20 +62,20 @@ export function WorkspaceQuickOpen({
     >
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
       <div
-        className="relative w-[760px] max-w-[92vw] max-h-[70vh] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl shadow-black/70"
+        className="relative w-[760px] max-w-[92vw] max-h-[70vh] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/70"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="border-b border-zinc-800 px-4 py-3">
-          <div className="mb-2 flex items-center justify-between gap-3 text-[11px] text-[#8f8fa1]">
+        <div className="border-b border-zinc-800/80 px-4 py-3">
+          <div className="mb-2 flex items-center justify-between gap-3 text-xs text-zinc-400">
             <span>Quick Open</span>
             <span>
               primary: <kbd className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-zinc-300">Ctrl+Space</kbd>
               {' '}
-              secondary: <kbd className="rounded border border-zinc-800 bg-zinc-900 px-1 py-0.5 text-[#a7a7b7]">Ctrl+D</kbd>
+              secondary: <kbd className="rounded border border-zinc-700/80 bg-zinc-900 px-1 py-0.5 text-zinc-400">Ctrl+D</kbd>
             </span>
           </div>
-          <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2">
-            <Search className="h-4 w-4 text-[#6f6f7d]" />
+          <div className="flex items-center gap-2 rounded-md border border-zinc-700/80 bg-zinc-900 px-3 py-2">
+            <Search className="h-4 w-4 text-zinc-500" />
             <input
               ref={inputRef}
               value={query}
@@ -108,12 +108,12 @@ export function WorkspaceQuickOpen({
                 }
               }}
               placeholder="Search files by name or path..."
-              className="flex-1 bg-transparent text-[13px] text-zinc-300 outline-none placeholder:text-zinc-500"
+              className="flex-1 bg-transparent text-sm text-zinc-300 outline-none placeholder:text-zinc-500"
             />
             {query ? (
               <button
                 onClick={() => onQueryChange('')}
-                className="rounded p-1 text-[#747482] hover:bg-zinc-800 hover:text-zinc-400"
+                className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
                 aria-label="Clear query"
                 title="Clear query"
               >
@@ -124,32 +124,32 @@ export function WorkspaceQuickOpen({
         </div>
 
         {partial ? (
-          <div className="border-b border-[#392a1a] bg-[#1e150d] px-4 py-2 text-[11px] text-[#f3c486]">
+          <div className="border-b border-amber-900/40 bg-amber-950/30 px-4 py-2 text-xs text-amber-300">
             File list is partial due to workspace tree limits.
           </div>
         ) : null}
 
         <div className="max-h-[48vh] overflow-y-auto" data-scrollbar="always">
           {loading ? (
-            <div className="px-4 py-4 text-[12px] text-[#8b8b98]">Loading file index...</div>
+            <div className="px-4 py-4 text-xs text-zinc-500">Loading file index...</div>
           ) : items.length === 0 ? (
-            <div className="px-4 py-6 text-[12px] text-[#7f7f8d]">No files found.</div>
+            <div className="px-4 py-6 text-xs text-zinc-500">No files found.</div>
           ) : (
             items.map((item, index) => (
               <button
                 key={item.path}
                 onClick={() => onSelect(item.path)}
                 onMouseEnter={() => setCursor(index)}
-                className={`flex w-full items-center justify-between gap-3 border-b border-zinc-900 px-4 py-2.5 text-left ${
+                className={`flex w-full items-center justify-between gap-3 border-b border-zinc-800/60 px-4 py-2.5 text-left ${
                   index === safeCursor ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-900'
                 }`}
                 title={item.path}
               >
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px]">{item.name}</span>
-                  <span className="block truncate text-[11px] text-[#818192]">{item.dir || '.'}</span>
+                  <span className="block truncate text-sm">{item.name}</span>
+                  <span className="block truncate text-xs text-zinc-500">{item.dir || '.'}</span>
                 </span>
-                <span className="text-[10px] text-[#6f6f7b]">Enter</span>
+                <span className="text-[11px] text-zinc-500">Enter</span>
               </button>
             ))
           )}

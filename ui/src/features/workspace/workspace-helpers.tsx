@@ -239,9 +239,9 @@ export const fileIcon = (path: string) => {
     || normalized.endsWith('.js')
     || normalized.endsWith('.jsx')
   ) {
-    return <FileCode2 className="h-3.5 w-3.5 text-[#6f9cff]" />;
+    return <FileCode2 className="h-3.5 w-3.5 text-zinc-300" />;
   }
-  return <FileText className="h-3.5 w-3.5 text-[#8f8f97]" />;
+  return <FileText className="h-3.5 w-3.5 text-zinc-500" />;
 };
 
 export const terminalTimestamp = (): string => new Date().toLocaleTimeString();

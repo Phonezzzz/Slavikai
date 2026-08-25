@@ -138,9 +138,16 @@ const buildSkillBlock = (meta: MessageRuntimeMeta | null): SkillMessageBlock | n
   if (!skill) {
     return null;
   }
-  const identity = skill.skill_id && skill.version
-    ? `${skill.skill_id}@${skill.version}`
-    : 'No matched skill';
+  // Показываем skill только когда он реально был использован
+  // (completed/failed). "skipped" или отсутствие skill_id означают,
+  // что навык не применялся — такой блок не нужен пользователю.
+  if (skill.status === 'skipped') {
+    return null;
+  }
+  if (!skill.skill_id || !skill.version) {
+    return null;
+  }
+  const identity = `${skill.skill_id}@${skill.version}`;
   return {
     kind: 'skill',
     id: 'skill-0',

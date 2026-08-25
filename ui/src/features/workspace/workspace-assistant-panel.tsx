@@ -147,14 +147,14 @@ export function WorkspaceAssistantPanel({
 
   return (
     <section
-      className="min-h-0 bg-zinc-900 flex flex-col overflow-hidden h-full"
+      className="min-h-0 flex flex-col overflow-hidden h-full"
       data-computer-surface="true"
     >
-      <header className="shrink-0 border-b border-zinc-800 bg-zinc-900">
+      <header className="shrink-0 border-b border-zinc-800/80">
         <div className="flex items-center gap-2 px-3 py-2">
           <Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-          <span className="text-[12px] font-medium text-zinc-300">Computer</span>
-          <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+          <span className="text-sm font-medium text-zinc-200">Computer</span>
+          <span className="rounded border border-zinc-700/80 bg-zinc-900 px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-zinc-400">
             {modeLabel}
           </span>
           <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
@@ -162,12 +162,12 @@ export function WorkspaceAssistantPanel({
         {status.goal || status.stepLabel || status.detail ? (
           <div className="space-y-0.5 px-3 pb-2">
             {status.goal ? (
-              <div className="truncate text-[12px] text-zinc-300" title={status.goal}>
+              <div className="truncate text-xs text-zinc-300" title={status.goal}>
                 {status.goal}
               </div>
             ) : null}
             {status.stepLabel || status.detail ? (
-              <div className="flex items-center gap-2 text-[11px]">
+              <div className="flex items-center gap-2 text-xs">
                 {status.stepLabel ? (
                   <span className="text-zinc-400">{status.stepLabel}</span>
                 ) : null}
@@ -194,13 +194,13 @@ export function WorkspaceAssistantPanel({
       </header>
 
       {computerEvents.length > 0 ? (
-        <div className="border-b border-zinc-800 bg-zinc-950 px-3 py-2 max-h-40 overflow-auto space-y-0.5">
+        <div className="border-b border-zinc-800/80 bg-zinc-900/50 px-3 py-2 max-h-40 overflow-auto space-y-0.5">
           {computerEvents.slice(-20).map((ev, idx) => (
             <div
               key={`${ev.ts}-${idx}`}
-              className={`flex items-center gap-2 text-[10px] font-mono ${ev.ok === false ? 'text-red-400' : 'text-zinc-500'}`}
+              className={`flex items-center gap-2 text-[11px] font-mono ${ev.ok === false ? 'text-red-400' : 'text-zinc-500'}`}
             >
-              <span className={`shrink-0 w-16 ${ev.ok === false ? 'text-red-400' : 'text-[#5a8a5a]'}`}>
+              <span className={`shrink-0 w-16 ${ev.ok === false ? 'text-red-400' : 'text-emerald-500'}`}>
                 {ev.kind}
               </span>
               <span className="truncate text-zinc-400">
@@ -218,12 +218,12 @@ export function WorkspaceAssistantPanel({
         {renderItems.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
             <Monitor className="h-8 w-8 text-zinc-600" />
-            <p className="text-[13px] text-zinc-300">
+            <p className="text-sm text-zinc-300">
               {status.isActive
                 ? `${status.label}. The agent is working; progress will appear here.`
                 : 'Nothing running yet.'}
             </p>
-            <p className="max-w-sm text-[12px] leading-5 text-zinc-500">
+            <p className="max-w-sm text-xs leading-5 text-zinc-500">
               Start a task in Chat, or open Files / Changes / Terminal to inspect this session.
             </p>
           </div>
@@ -353,7 +353,7 @@ export function WorkspaceAssistantPanel({
       </div>
 
       {terminalPendingText ? (
-        <div className="border-t border-zinc-800 px-3 py-2 text-[11px] text-amber-300">
+        <div className="border-t border-zinc-800/80 px-3 py-2 text-xs text-amber-300">
           {terminalPendingText}
         </div>
       ) : null}

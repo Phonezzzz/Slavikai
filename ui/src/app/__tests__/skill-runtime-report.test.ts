@@ -71,4 +71,70 @@ describe('engineering skill runtime observability', () => {
     });
     expect(parseMwvReport({ skill: { status: 'running' } })?.skill).toBeUndefined();
   });
+
+  it('does not render a skill block when no skill was matched or used', () => {
+    const report = parseMwvReport({
+      route: 'auto',
+      skill: {
+        status: 'skipped',
+        skill_id: null,
+        version: null,
+        supporting_skills: [],
+        reason: 'no_match',
+      },
+    });
+
+    const blocks = buildMessageBlocks('chat', {
+      kind: 'message',
+      message: {
+        id: 'message-2',
+        messageId: 'message-2',
+        role: 'assistant',
+        content: 'done',
+      },
+      meta: {
+        messageId: 'message-2',
+        lane: 'chat',
+        traceId: null,
+        isFinal: true,
+        mwvReport: report,
+      },
+    });
+
+    expect(blocks.some((block) => block.kind === 'skill')).toBe(false);
+  });
+
+  it('renders a skill block when a matched skill failed', () => {
+    const report = parseMwvReport({
+      route: 'auto',
+      skill: {
+        status: 'failed',
+        skill_id: 'implement',
+        version: '1.0.0',
+        supporting_skills: [],
+      },
+    });
+
+    const blocks = buildMessageBlocks('chat', {
+      kind: 'message',
+      message: {
+        id: 'message-3',
+        messageId: 'message-3',
+        role: 'assistant',
+        content: 'done',
+      },
+      meta: {
+        messageId: 'message-3',
+        lane: 'chat',
+        traceId: null,
+        isFinal: true,
+        mwvReport: report,
+      },
+    });
+
+    expect(blocks[0]).toMatchObject({
+      kind: 'skill',
+      summary: 'implement@1.0.0 · failed',
+    });
+  });
 });

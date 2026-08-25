@@ -285,29 +285,26 @@ Computer Mode не является:
 
 Computer Mode — это поверхность, которая отображает, что agent делает прямо сейчас:
 sandbox/container status, current task, live command/output stream, activity timeline,
-changes/diff, checks/tests, approvals, artifacts.
+approvals, artifacts.
 
 Explorer/editor/terminal — вторичные inspection tools, доступные по запросу,
 а не главный экран.
 
 ### Computer Mode — primary surface
 
-Основной экран Computer отображает:
+Основной экран Computer использует строго 4 канонические вкладки (surface tabs):
 
-- sandbox/container status (local/container, idle/running/completed/failed)
-- current task / auto state / plan
-- live activity timeline (agent tool calls, durations, results)
-- changes/diff summary
-- checks/tests summary
-- approvals / pending decisions
-- artifacts
+- Overview — sandbox/container status (local/container, idle/running/completed/failed),
+  current task / auto state / plan, live activity timeline (agent tool calls, durations,
+  results), approvals / pending decisions, artifacts.
+- Changes — changes/diff summary.
+- Files — file explorer / editor / preview.
+- Terminal — terminal / PTY.
 
 ### Computer Mode — secondary details (по запросу)
 
-- terminal / PTY
-- file explorer
-- editor / preview
-- raw logs
+- Расширенные детали (в т.ч. raw logs) показываются внутри соответствующих вкладок
+  по запросу; отдельные канонические вкладки для них не выделяются.
 
 ### Роли (фиксированные)
 
