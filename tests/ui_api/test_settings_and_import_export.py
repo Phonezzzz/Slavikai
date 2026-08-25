@@ -689,7 +689,8 @@ def test_ui_tts_speak_success(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("server.http.handlers.settings._SANDBOX_AUDIO_ROOT", audio_dir.resolve())
 
     async def run() -> None:
-        client = await _create_client(TtsAgent(audio_path=audio_path))
+        client = await _create_client(DummyAgent())
+        client.server.app["tts_tool"] = FakeTtsTool(audio_path=audio_path)
         try:
             response = await client.post(
                 "/ui/api/tts/speak",
@@ -706,8 +707,9 @@ def test_ui_tts_speak_success(monkeypatch, tmp_path) -> None:
 
 def test_ui_tts_speak_returns_controlled_error_on_tool_failure() -> None:
     async def run() -> None:
-        client = await _create_client(
-            TtsAgent(fail_message="OpenAI API key не задан для TTS (env OPENAI_API_KEY).")
+        client = await _create_client(DummyAgent())
+        client.server.app["tts_tool"] = FakeTtsTool(
+            fail_message="OpenAI API key не задан для TTS (env OPENAI_API_KEY)."
         )
         try:
             response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
@@ -724,7 +726,8 @@ def test_ui_tts_speak_returns_controlled_error_on_tool_failure() -> None:
 
 def test_ui_tts_speak_returns_409_when_safe_mode_blocks_tool() -> None:
     async def run() -> None:
-        client = await _create_client(TtsAgent(fail_message="Safe mode: инструмент отключён"))
+        client = await _create_client(DummyAgent())
+        client.server.app["tts_tool"] = FakeTtsTool(fail_message="Safe mode: инструмент отключён")
         try:
             response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
             assert response.status == 409
@@ -740,7 +743,8 @@ def test_ui_tts_speak_returns_409_when_safe_mode_blocks_tool() -> None:
 
 def test_ui_tts_speak_returns_502_on_upstream_failure() -> None:
     async def run() -> None:
-        client = await _create_client(TtsAgent(fail_message="Ошибка OpenAI TTS сервиса."))
+        client = await _create_client(DummyAgent())
+        client.server.app["tts_tool"] = FakeTtsTool(fail_message="Ошибка OpenAI TTS сервиса.")
         try:
             response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
             assert response.status == 502
@@ -748,6 +752,27 @@ def test_ui_tts_speak_returns_502_on_upstream_failure() -> None:
             error = payload.get("error")
             assert isinstance(error, dict)
             assert error.get("code") == "tts_failed"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_tts_speak_works_without_approval_in_safe_mode(monkeypatch, tmp_path) -> None:
+    audio_dir = tmp_path / "sandbox" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "tts_test.mp3"
+    audio_path.write_bytes(b"fake-mp3")
+    monkeypatch.setattr("server.http.handlers.settings._SANDBOX_AUDIO_ROOT", audio_dir.resolve())
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        client.server.app["tts_tool"] = FakeTtsTool(audio_path=audio_path)
+        try:
+            # Пользовательский Listen не должен требовать approval даже в safe mode.
+            response = await client.post("/ui/api/tts/speak", json={"text": "Привет, мир"})
+            assert response.status == 200
+            assert await response.read() == b"fake-mp3"
         finally:
             await client.close()
 

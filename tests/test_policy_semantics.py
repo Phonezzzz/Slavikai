@@ -491,12 +491,11 @@ class TestDangerousCommandIntentDetection:
         categories = {i.category for i in intents}
         assert "EXEC_ARBITRARY" in categories
 
-    def test_sudo_command_adds_sudo_intent(self) -> None:
+    def test_sudo_command_is_hard_denied_intent(self) -> None:
         req = ToolRequest("workspace_terminal_run", {"command": "sudo reboot"})
         intents = detect_action_intents(req, risk_classes=["execute"])
         categories = {i.category for i in intents}
-        assert "SUDO" in categories
-        assert "EXEC_ARBITRARY" in categories
+        assert "HARD_DENY" in categories
 
     def test_git_commit_adds_git_publish_intent(self) -> None:
         req = ToolRequest("workspace_terminal_run", {"command": "git commit -m 'x'"})
@@ -529,15 +528,42 @@ class TestDangerousCommandIntentDetection:
         assert "SYSTEM_IMPACT" in categories
 
     def test_dangerous_command_blocked_in_strict_gateway(self) -> None:
-        """sudo command → SUDO + EXEC_ARBITRARY → approval required."""
+        """sudo command → HARD_DENY → hard block (not an approval prompt)."""
         registry = _make_registry_with_workspace_tools()
         registry.set_execution_policy(mode="act")
         gw = ToolGateway(registry=registry, approval_context=_strict_ctx())
-        with pytest.raises(ApprovalRequired) as exc_info:
-            gw.call(ToolRequest("workspace_terminal_run", {"command": "sudo rm -rf /tmp/x"}))
-        req = exc_info.value.request
-        assert req.tool == "workspace_terminal_run"
-        assert "SUDO" in req.required_categories or "EXEC_ARBITRARY" in req.required_categories
+        result = gw.call(ToolRequest("workspace_terminal_run", {"command": "sudo rm -rf /tmp/x"}))
+        assert not result.ok
+        assert "запрещена политикой безопасности" in (result.error or "")
+
+
+class TestHardSafetyBlockAppliesEvenInYolo:
+    """Hard-safety commands are blocked regardless of safe_mode/YOLO."""
+
+    def _gateway(self, ctx: ApprovalContext) -> ToolGateway:
+        registry = _make_registry_with_workspace_tools()
+        registry.set_execution_policy(mode="act")
+        return ToolGateway(registry=registry, approval_context=ctx)
+
+    def test_yolo_blocks_sudo(self) -> None:
+        result = self._gateway(_permissive_ctx()).call(
+            ToolRequest("workspace_terminal_run", {"command": "sudo reboot"})
+        )
+        assert not result.ok
+        assert "запрещена политикой безопасности" in (result.error or "")
+
+    def test_yolo_blocks_rm_rf(self) -> None:
+        result = self._gateway(_permissive_ctx()).call(
+            ToolRequest("workspace_terminal_run", {"command": "rm -rf /tmp/x"})
+        )
+        assert not result.ok
+        assert "запрещена политикой безопасности" in (result.error or "")
+
+    def test_yolo_allows_safe_command(self) -> None:
+        result = self._gateway(_permissive_ctx()).call(
+            ToolRequest("workspace_terminal_run", {"command": "pwd"})
+        )
+        assert result.ok
 
     def test_git_push_blocked_in_strict_gateway(self) -> None:
         registry = _make_registry_with_workspace_tools()

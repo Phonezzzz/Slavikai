@@ -94,6 +94,7 @@ def test_detect_action_intents_shell_risks() -> None:
         ToolRequest(name="shell", args={"command": "sudo pip install requests"})
     )
     categories = {intent.category for intent in intents}
-    assert "SUDO" in categories
-    assert "DEPS_INSTALL_UPDATE" in categories
-    assert "EXEC_ARBITRARY" in categories
+    assert "HARD_DENY" in categories
+    assert "SUDO" not in categories
+    assert "DEPS_INSTALL_UPDATE" not in categories
+    assert "EXEC_ARBITRARY" not in categories

@@ -80,7 +80,7 @@ from tools.desktop_tools import (
     DesktopVerifyTool,
 )
 from tools.filesystem_tool import SANDBOX_ROOT, FilesystemTool
-from tools.http_client import HttpClient
+from tools.http_client import HttpClient, HttpConfig
 from tools.image_analyze_tool import ImageAnalyzeTool
 from tools.image_generate_tool import ImageGenerateTool
 from tools.project_tool import ProjectTool
@@ -429,9 +429,10 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             risk_classes=["execute", "network", "external_side_effect"],
         )
         http_client = HttpClient()
+        tts_http_client = HttpClient(HttpConfig(max_bytes=20_000_000))
         register_tool(
             "tts",
-            TtsTool(http_client),
+            TtsTool(tts_http_client),
             enabled=self.tools_enabled.get("tts", False),
             capability="exec",
             risk_classes=["execute", "network", "external_side_effect"],

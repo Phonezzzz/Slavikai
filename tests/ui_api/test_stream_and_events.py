@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 # ruff: noqa: F403,F405
+import asyncio
+import time
+
 import pytest
 
 from core.agent import Agent
@@ -15,6 +18,7 @@ from llm.stream_model import (
 )
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
 from server.http.common.auth import UI_AUTH_COOKIE, _ui_auth_cookie_value
+from server.http.common.streaming import _stream_preview_ready_for_chat
 from shared.models import LLMMessage, ToolResult
 
 from .fakes import *
@@ -40,6 +44,170 @@ class _RealStreamingAgent(Agent):
         persist: bool = True,
     ) -> None:
         del main_config, main_api_key, persist
+
+
+class _SlowStreamingAgent(DummyAgent):
+    """Agent whose respond_stream yields text in parts with delays."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_stream_response_raw: str | None = None
+
+    def respond_stream(self, messages, cancellation_token=None):
+        del messages, cancellation_token
+        parts = [
+            "Первая порция длинная, чтобы пройти warmup и показаться раньше конца генерации. ",
+            "Вторая порция публикуется после паузы, имитирующей медленный стриминг.",
+            "Третья и последняя порция ответа завершает сообщение.",
+        ]
+        for part in parts:
+            yield TextDelta(text=part)
+            time.sleep(0.3)
+        self.last_stream_response_raw = "".join(parts)
+        yield Done()
+
+    def respond(self, messages) -> str:
+        del messages
+        return (
+            "Первая порция ответа достаточно длинная, чтобы пройти warmup и показаться на экране "
+            "раньше окончания генерации. Вторая порция публикуется после паузы. "
+            "Третья и последняя порция завершает сообщение."
+        )
+
+
+class _AutoProgressAgent(DummyAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_stream_response_raw: str | None = None
+        self._drains = 0
+
+    def drain_auto_progress_events(self) -> list[dict[str, object]]:
+        self._drains += 1
+        if self._drains == 1:
+            return [{"run_id": "auto-test", "status": "planning", "goal": "news"}]
+        return []
+
+    def respond_stream(self, messages, cancellation_token=None):
+        del messages, cancellation_token
+        yield TextDelta(text="Первая порция ответа достаточно длинная для warmup. ")
+        time.sleep(0.6)
+        yield TextDelta(text="Вторая порция ответа.")
+        self.last_stream_response_raw = (
+            "Первая порция ответа достаточно длинная для warmup. Вторая порция ответа."
+        )
+        yield Done()
+
+
+def test_ui_chat_stream_deltas_arrive_incrementally_before_send_completes() -> None:
+    async def run() -> None:
+        client = await _create_client(_SlowStreamingAgent())
+        try:
+            status_response = await client.get("/ui/api/status")
+            status_payload = await status_response.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/chat/events/{session_id}",
+                timeout=10,
+            )
+            assert stream_resp.status == 200
+            await _read_first_sse_event(stream_resp)
+
+            send_task = asyncio.create_task(
+                client.post(
+                    "/ui/api/chat/send",
+                    json={"content": "hi"},
+                    headers={"X-Slavik-Session": session_id},
+                )
+            )
+
+            received_deltas: list[str] = []
+            first_delta_seen = False
+            while not first_delta_seen:
+                event = await asyncio.wait_for(
+                    _read_first_sse_event(stream_resp),
+                    timeout=10,
+                )
+                if event.get("type") != "chat.stream.delta":
+                    continue
+                payload = event.get("payload")
+                assert isinstance(payload, dict)
+                delta = payload.get("delta")
+                assert isinstance(delta, str)
+                received_deltas.append(delta)
+                first_delta_seen = True
+
+            # The first delta must reach the client while the send is still running,
+            # proving streaming is incremental rather than buffered.
+            assert not send_task.done(), (
+                "chat.stream.delta arrived only after the send finished — streaming is buffered"
+            )
+
+            remaining = await _read_sse_events(stream_resp, max_events=64)
+            for event in remaining:
+                if event.get("type") != "chat.stream.delta":
+                    continue
+                payload = event.get("payload")
+                if isinstance(payload, dict):
+                    delta = payload.get("delta")
+                    if isinstance(delta, str):
+                        received_deltas.append(delta)
+
+            send_response = await asyncio.wait_for(send_task, timeout=15)
+            assert send_response.status == 200
+            assert len(received_deltas) >= 3
+            assert received_deltas[0].startswith("Первая порция")
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_chat_auto_progress_published_during_stream() -> None:
+    async def run() -> None:
+        client = await _create_client(_AutoProgressAgent())
+        try:
+            status_response = await client.get("/ui/api/status")
+            status_payload = await status_response.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+            await _select_local_model(client, session_id)
+
+            stream_resp = await client.get(
+                f"/ui/api/chat/events/{session_id}",
+                timeout=10,
+            )
+            assert stream_resp.status == 200
+            await _read_first_sse_event(stream_resp)
+
+            send_task = asyncio.create_task(
+                client.post(
+                    "/ui/api/chat/send",
+                    json={"content": "найди новости"},
+                    headers={"X-Slavik-Session": session_id},
+                )
+            )
+
+            progress_seen = False
+            while not progress_seen:
+                event = await asyncio.wait_for(
+                    _read_first_sse_event(stream_resp),
+                    timeout=12,
+                )
+                if event.get("type") == "auto.progress":
+                    progress_seen = True
+            assert not send_task.done(), "auto.progress arrived only after the send finished"
+
+            send_response = await asyncio.wait_for(send_task, timeout=15)
+            assert send_response.status == 200
+            stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 def test_ui_chat_stream_real_agent_uses_sqlite_from_worker_thread(
@@ -172,6 +340,43 @@ def test_ui_only_chat_event_stream_path_is_open_for_session() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_chat_event_stream_has_no_buffering_headers() -> None:
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            stream = await client.get(f"/ui/api/chat/events/{session_id}", timeout=5)
+            assert stream.status == 200
+            assert stream.headers.get("Content-Type") == "text/event-stream"
+            assert stream.headers.get("Cache-Control") == "no-cache, no-transform"
+            assert stream.headers.get("X-Accel-Buffering") == "no"
+            await _read_first_sse_event(stream)
+            stream.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_stream_preview_warmup_thresholds() -> None:
+    assert not _stream_preview_ready_for_chat("", chat_stream_warmup_chars=96)
+    assert not _stream_preview_ready_for_chat("короткий текст", chat_stream_warmup_chars=96)
+    # Plain text starts showing from 48 chars.
+    assert _stream_preview_ready_for_chat("x" * 49, chat_stream_warmup_chars=96)
+    # Code fences or multiline content below the primary threshold still wait.
+    assert not _stream_preview_ready_for_chat("```" + "x" * 50, chat_stream_warmup_chars=96)
+    assert not _stream_preview_ready_for_chat(
+        "x" * 30 + "\n\n" + "y" * 30,
+        chat_stream_warmup_chars=96,
+    )
+    # Any content >= primary threshold is ready.
+    assert _stream_preview_ready_for_chat("x" * 97, chat_stream_warmup_chars=96)
 
 
 def test_ui_legacy_event_stream_route_is_absent() -> None:

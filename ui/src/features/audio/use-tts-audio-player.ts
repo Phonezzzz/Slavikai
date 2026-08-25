@@ -31,7 +31,7 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
 
 const finiteOrZero = (value: number): number => (Number.isFinite(value) && value > 0 ? value : 0);
 
-export function useTtsAudioPlayer() {
+export function useTtsAudioPlayer(sessionId?: string | null) {
   const [state, setState] = useState<TtsPlaybackState>(initialState);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
@@ -141,6 +141,7 @@ export function useTtsAudioPlayer() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            ...(sessionId ? { 'X-Slavik-Session': sessionId } : {}),
           },
           body: JSON.stringify({ text: trimmedText }),
         });
@@ -151,7 +152,8 @@ export function useTtsAudioPlayer() {
           } catch {
             payload = null;
           }
-          throw new Error(extractErrorMessage(payload, 'TTS request failed.'));
+          const fallback = `TTS request failed (HTTP ${response.status}).`;
+          throw new Error(extractErrorMessage(payload, fallback));
         }
         const audioBlob = await response.blob();
         if (audioBlob.size === 0) {
@@ -227,7 +229,7 @@ export function useTtsAudioPlayer() {
         });
       }
     },
-    [pause, releaseAudio, resume, state.activeMessageId, state.status, stop],
+    [pause, releaseAudio, resume, sessionId, state.activeMessageId, state.status, stop],
   );
 
   return {

@@ -14,6 +14,7 @@ from core.desktop_policy import (
     exact_scope_for_action,
 )
 from core.desktop_security import DesktopPathSecurity
+from shared.command_safety import is_hard_unsafe_command as _is_unsafe
 from shared.models import JSONValue, ToolRequest
 
 ApprovalCategory = Literal[
@@ -26,6 +27,7 @@ ApprovalCategory = Literal[
     "SUDO",
     "NETWORK_RISK",
     "EXEC_ARBITRARY",
+    "HARD_DENY",
 ]
 ApprovalDecisionStatus = Literal["allow", "require_approval", "block"]
 
@@ -95,6 +97,7 @@ ALL_CATEGORIES: Final[set[ApprovalCategory]] = {
     "SUDO",
     "NETWORK_RISK",
     "EXEC_ARBITRARY",
+    "HARD_DENY",
 }
 
 _RISK_TEXT: Final[dict[ApprovalCategory, str]] = {
@@ -107,6 +110,7 @@ _RISK_TEXT: Final[dict[ApprovalCategory, str]] = {
     "SUDO": "Повышенные права, риск для системы.",
     "NETWORK_RISK": "Сетевой доступ во внешние сервисы.",
     "EXEC_ARBITRARY": "Выполнение произвольной команды.",
+    "HARD_DENY": "Команда запрещена политикой безопасности.",
 }
 
 _CONFIG_HINTS: Final[tuple[str, ...]] = (
@@ -173,6 +177,14 @@ def decide_action(
 ) -> ApprovalDecision:
     if not intents:
         return ApprovalDecision("allow", "no_intent", [], [])
+    hard_denied = [intent for intent in intents if intent.category == "HARD_DENY"]
+    if hard_denied:
+        return ApprovalDecision(
+            "block",
+            "command_denied:hard_safety",
+            hard_denied,
+            ["HARD_DENY"],
+        )
     if not context.safe_mode:
         return ApprovalDecision("allow", "safe_mode_disabled", intents, [])
     required = [intent for intent in intents if intent.category not in context.approved_categories]
@@ -416,7 +428,10 @@ def detect_action_intents(
     if tool in {"shell", "workspace_run", "workspace_terminal_run"}:
         command = str(args.get("command") or args.get("path") or "")
         if command.strip():
-            intents.extend(_shell_intents(tool, command))
+            if _is_unsafe(command):
+                intents.append(_intent(tool, "HARD_DENY", {"command": command}))
+            else:
+                intents.extend(_shell_intents(tool, command))
         config_path = str(args.get("config_path") or "")
         if config_path:
             intents.append(

@@ -127,6 +127,46 @@ class _AutoV1Agent(_FakeAgent):
         return ToolGateway(self.tool_registry)
 
 
+class _RecoveryToolLoopBrain:
+    """First call triggers a failing tool; second call recovers with a final answer."""
+
+    supports_native_tools = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages_seen: list[list[LLMMessage]] = []
+
+    def generate(self, messages, config=None, tools=None):  # noqa: ANN001
+        del config, tools
+        self.calls += 1
+        self.messages_seen.append(list(messages))
+        if self.calls == 1:
+            return LLMResult(
+                text="call tool",
+                tool_calls=[
+                    ToolCall(id="auto-call-fail", name="fail_tool", arguments={}),
+                ],
+            )
+        assert messages[-1].role == "tool"
+        return LLMResult(text="auto v1 final after recovery")
+
+
+class _RecoveryAgent(_FakeAgent):
+    def __init__(self) -> None:
+        super().__init__(brain_text="")
+        self._brain = _RecoveryToolLoopBrain()
+        self.tool_registry = ToolRegistry()
+        self.tool_registry.register(
+            "fail_tool",
+            lambda request: ToolResult.failure("boom"),
+            description="Always fails",
+            parameters_schema={"type": "object", "properties": {}, "required": []},
+        )
+
+    def _build_tool_gateway(self):
+        return ToolGateway(self.tool_registry)
+
+
 class _ResponseOnlyAgent(_FakeAgent):
     def __init__(self) -> None:
         super().__init__(brain_text="")
@@ -251,6 +291,49 @@ def test_auto_agent_run_outcome_uses_auto_v1_tool_loop(monkeypatch) -> None:  # 
     verifier = agent.last_auto_state.get("verifier")
     assert isinstance(verifier, dict)
     assert verifier.get("verifier_profile") == "tool_outcomes"
+
+
+def test_auto_success_text_excludes_service_report(monkeypatch) -> None:  # noqa: ANN001
+    agent = _AutoV1Agent()
+    auto = AutoAgent(agent)  # type: ignore[arg-type]
+    monkeypatch.setattr(auto_runtime, "VerifierRuntime", _PassingVerifierRuntime)
+
+    outcome = auto.run_outcome("inspect workspace", skill_resolution=_skill_resolution())
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert "Auto-run v1 завершён успешно" not in outcome.text
+    assert "Tool calls:" not in outcome.text
+    assert "auto v1 final" in outcome.text
+
+
+def test_auto_v1_recovery_from_failed_tool_call_is_not_worker_failed(
+    monkeypatch,
+    tmp_path,
+) -> None:  # noqa: ANN001
+    agent = _RecoveryAgent()
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)  # type: ignore[arg-type]
+    run_root = tmp_path / "runtime"
+    run_root.mkdir(parents=True, exist_ok=True)
+    (run_root / "Makefile").write_text("check:\n\t@true\n", encoding="utf-8")
+    monkeypatch.setattr(auto_runtime, "VerifierRuntime", _PassingVerifierRuntime)
+
+    with workspace_root_context(run_root):
+        outcome = orchestrator.run_v1(
+            "inspect workspace",
+            skill_resolution=_skill_resolution(),
+            run_root_override=run_root,
+        )
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert isinstance(agent._brain, _RecoveryToolLoopBrain)
+    assert agent._brain.calls == 2
+    coders = agent.last_auto_state.get("coders")
+    assert isinstance(coders, list)
+    assert coders[0]["tool"] == "fail_tool"
+    assert coders[0]["status"] == "failed"
+    verifier = agent.last_auto_state.get("verifier")
+    assert isinstance(verifier, dict)
+    assert verifier.get("status") == VerificationStatus.PASSED.value
 
 
 def test_auto_runtime_returns_conversation_without_forcing_tool_action(tmp_path) -> None:

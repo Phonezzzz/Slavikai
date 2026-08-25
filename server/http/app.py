@@ -212,7 +212,12 @@ def run_server(config: HttpServerConfig) -> None:
         max_request_bytes=config.max_request_bytes,
         auth_config=auth_config,
     )
-    web.run_app(app, host=config.host, port=config.port)
+    web.run_app(
+        app,
+        host=config.host,
+        port=config.port,
+        shutdown_timeout=8.0,
+    )
 
 
 def main() -> None:

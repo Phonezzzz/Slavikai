@@ -268,11 +268,6 @@ class AutoOrchestrator:
             )
             tool_call_states = [_auto_v1_tool_call_state(item) for item in loop_result.tool_calls]
             state["coders"] = tool_call_states
-            failed_calls = [
-                item
-                for item in tool_call_states
-                if isinstance(item.get("status"), str) and item.get("status") != "completed"
-            ]
             state["merge"] = {
                 "status": "completed",
                 "changed_paths": [],
@@ -297,18 +292,14 @@ class AutoOrchestrator:
                     reason,
                     skill=_skill_state(state),
                 )
-            if failed_calls:
-                diagnostics_raw = failed_calls[0].get("diagnostics")
-                if isinstance(diagnostics_raw, list) and diagnostics_raw:
-                    first_error = str(diagnostics_raw[0])
-                else:
-                    first_error = "tool call failed"
-                state["error"] = first_error
+            loop_error = getattr(loop_result, "error", None)
+            if loop_error is not None:
+                state["error"] = loop_error
                 self._set_status(state, AutoRunStatus.FAILED_WORKER)
                 return AutoRunOutcome(
                     text=self.parent._format_stop_response(
                         what="Auto-run остановлен: tool loop failed",
-                        why=first_error,
+                        why=loop_error,
                         next_steps=[
                             "Проверь auto_state.coders.",
                             "Исправь причину ошибки tool call и перезапусти auto.",
@@ -316,7 +307,7 @@ class AutoOrchestrator:
                         stop_reason_code=StopReasonCode.WORKER_FAILED,
                         route="auto",
                         plan_summary="Auto v1 выполнил задачу через native tool loop.",
-                        execution_summary=first_error,
+                        execution_summary=loop_error,
                         skill=_skill_state(state),
                     ),
                     status=AutoRunStatus.FAILED_WORKER,
@@ -367,16 +358,8 @@ class AutoOrchestrator:
 
             self._set_status(state, AutoRunStatus.COMPLETED)
             response_only = not loop_result.tool_calls
-            visible_result = loop_result.text
-            if not response_only:
-                visible_result = (
-                    "Auto-run v1 завершён успешно.\n"
-                    f"Tool calls: {len(loop_result.tool_calls)}\n"
-                    f"Verifier: {verification.status.value}\n"
-                    f"Result: {loop_result.text}"
-                )
             text = self.parent._append_report_block(
-                visible_result,
+                loop_result.text,
                 route="auto",
                 trace_id=None,
                 attempts=(1, 1),

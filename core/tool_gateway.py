@@ -73,8 +73,18 @@ class ToolGateway:
                             "policy_rule_id": decision.policy_rule_id,
                         },
                     )
+                block_message = f"POLICY_DENY: {decision.reason}"
+                if decision.reason == "command_denied:hard_safety" and decision.intents:
+                    command = str(decision.intents[0].details.get("command") or "")
+                    block_message = (
+                        "Команда запрещена политикой безопасности: sudo, rm -rf, shutdown, "
+                        "reboot, mkfs, fork bomb и запись в системные файлы недоступны "
+                        "даже в YOLO."
+                    )
+                    if command:
+                        block_message = f"{block_message} Команда: {command}"
                 return ToolResult.failure(
-                    f"POLICY_DENY: {decision.reason}",
+                    block_message,
                     meta={"policy_reason": decision.reason},
                 )
             if decision.status == "allow" and decision.intents:

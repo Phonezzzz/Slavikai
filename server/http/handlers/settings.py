@@ -8,13 +8,16 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
 from config.memory_config import MemoryConfig
+from config.tts_config import TtsConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server import http_api as api
 from server.agent_provider import AgentApplyFailure, ScopedAgentProvider
 from server.http.common.auth import _require_owner
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import RuntimeModelStateProtocol
-from shared.models import JSONValue
+from shared.models import JSONValue, ToolRequest
+from tools.http_client import HttpClient, HttpConfig
+from tools.tts_tool import TtsTool
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 _SANDBOX_AUDIO_ROOT = Path("sandbox/audio").resolve()
@@ -77,7 +80,13 @@ def _tts_error_response(message: str) -> web.Response:
         status = 400
         error_type = "invalid_request_error"
         code = "invalid_request_error"
-    elif "api key" in lowered or "отключ" in lowered or "safe mode" in lowered:
+    elif (
+        "api key" in lowered
+        or "отключ" in lowered
+        or "safe mode" in lowered
+        or "подтвержден" in lowered
+        or "approval" in lowered
+    ):
         status = 409
         error_type = "configuration_error"
         code = "tts_unavailable"
@@ -843,21 +852,19 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
 
-    try:
-        agent = await api._resolve_agent(request)
-    except Exception as exc:  # noqa: BLE001
-        return error_response(
-            status=500,
-            message=f"Не удалось получить agent для TTS: {exc}",
-            error_type="internal_error",
-            code="internal_error",
-        )
-    if agent is None:
-        return error_response(
-            status=409,
-            message="Не выбрана модель. Выберите модель в UI и повторите.",
-            error_type="configuration_error",
-            code="model_not_selected",
+    tts_tool = request.app.get("tts_tool")
+    if tts_tool is None:
+        api_key = api._resolve_provider_api_key("openai")
+        if not api_key:
+            return error_response(
+                status=409,
+                message="Не задан OpenAI API key для TTS (env или Settings → API Keys).",
+                error_type="configuration_error",
+                code="tts_unavailable",
+            )
+        tts_tool = TtsTool(
+            http_client=HttpClient(HttpConfig(max_bytes=20_000_000)),
+            config=TtsConfig(api_key=api_key),
         )
 
     args: dict[str, JSONValue] = {"text": text_raw.strip()}
@@ -874,9 +881,7 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
     if isinstance(format_raw, str) and format_raw.strip():
         args["format"] = format_raw.strip().lower()
 
-    agent_lock = api._agent_lock_for_request(request)
-    async with agent_lock:
-        result = agent.call_tool("tts", args=args, raw_input="ui:tts")
+    result = tts_tool.handle(ToolRequest(name="tts", args=args))
     if not result.ok:
         return _tts_error_response(result.error or "TTS tool failed.")
 
