@@ -1136,17 +1136,13 @@ def test_computer_tabs_overview_is_first() -> None:
 
 
 def test_computer_tabs_all_canonical_tabs_present() -> None:
-    """workspace-ide.tsx must define all 8 canonical Computer Mode tabs."""
+    """workspace-ide.tsx must define all 4 canonical Computer Mode tabs."""
     content = _read_text("ui/src/app/components/workspace-ide.tsx")
     required_tabs = [
         "overview",
-        "activity",
-        "terminal",
-        "changes",
-        "checks",
-        "environment",
         "files",
-        "logs",
+        "changes",
+        "terminal",
     ]
     for tab_id in required_tabs:
         assert f"'{tab_id}'" in content or f'"{tab_id}"' in content, (

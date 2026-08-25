@@ -101,7 +101,7 @@ export function WorkspaceExplorer({
             onSelectPath(node.path);
             onToggleNode(node, key, expanded);
           }}
-          className={`flex h-[28px] w-full items-center gap-1.5 px-2 text-left text-[12px] hover:bg-zinc-900 ${
+          className={`flex h-[28px] w-full items-center gap-1.5 px-2 text-left text-xs hover:bg-zinc-900 ${
             selected ? 'bg-zinc-800 text-zinc-300' : 'text-zinc-400'
           }`}
           style={{ paddingLeft: `${8 + depth * 14}px` }}
@@ -117,13 +117,13 @@ export function WorkspaceExplorer({
             <span className="inline-block h-3.5 w-3.5" />
           )}
           {expanded ? (
-            <FolderOpen className="h-3.5 w-3.5 text-[#f59e0b]" />
+            <FolderOpen className="h-3.5 w-3.5 text-amber-500" />
           ) : (
-            <Folder className="h-3.5 w-3.5 text-[#f59e0b]" />
+            <Folder className="h-3.5 w-3.5 text-amber-500" />
           )}
           <span className="truncate">{node.name}</span>
           {node.childrenTruncated ? (
-            <span className="text-[#f59e0b]" title="Список детей директории обрезан лимитами">
+            <span className="text-amber-500" title="Список детей директории обрезан лимитами">
               …
             </span>
           ) : null}
@@ -146,7 +146,7 @@ export function WorkspaceExplorer({
           onSelectPath(path);
           onOpenFile(path);
         }}
-        className={`flex h-[28px] w-full items-center gap-1.5 px-2 text-left text-[12px] transition-colors ${
+        className={`flex h-[28px] w-full items-center gap-1.5 px-2 text-left text-xs transition-colors ${
           isActive || selected
             ? 'bg-zinc-800 text-zinc-300'
             : 'text-zinc-400 hover:bg-zinc-900'
@@ -163,21 +163,21 @@ export function WorkspaceExplorer({
   const treeTruncatedTitle = treeMeta?.truncatedReasons.join(', ') ?? '';
 
   return (
-    <aside className="min-h-0 border-r border-zinc-800 bg-zinc-900 flex flex-col overflow-hidden">
-      <div className="h-9 flex items-center justify-between gap-2 px-3 border-b border-zinc-800">
-        <span className="text-[11px] uppercase tracking-wider text-zinc-500">Explorer</span>
+    <aside className="min-h-0 border-r border-zinc-800/80 bg-zinc-900 flex flex-col overflow-hidden">
+      <div className="h-9 flex items-center justify-between gap-2 px-3 border-b border-zinc-800/80">
+        <span className="text-xs uppercase tracking-wider text-zinc-500">Explorer</span>
         {!readOnly ? (
-          <div className="flex items-center gap-1 text-[11px]">
+          <div className="flex items-center gap-1">
             <button
               onClick={onCreateFile}
-              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800"
+              className="rounded border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800"
               title="Create file"
             >
               New
             </button>
             <button
               onClick={() => onRenamePath(activeExplorerPath)}
-              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              className="rounded border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50"
               disabled={!activeExplorerPath}
               title="Rename selected path"
             >
@@ -185,7 +185,7 @@ export function WorkspaceExplorer({
             </button>
             <button
               onClick={() => onMovePath(activeExplorerPath)}
-              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              className="rounded border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50"
               disabled={!activeExplorerPath}
               title="Move selected path"
             >
@@ -193,7 +193,7 @@ export function WorkspaceExplorer({
             </button>
             <button
               onClick={() => onDeletePath(activeExplorerPath)}
-              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[#ef8f8f] hover:bg-[#2a1717] disabled:opacity-50"
+              className="rounded border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-rose-300 transition-colors hover:bg-rose-950/40 disabled:opacity-50"
               disabled={!activeExplorerPath}
               title="Delete selected path"
             >
@@ -204,7 +204,7 @@ export function WorkspaceExplorer({
       </div>
       {treeTruncated ? (
         <div
-          className="border-b border-[#2a2212] bg-[#1b1308] px-3 py-1 text-[11px] text-[#f2c27f]"
+          className="border-b border-amber-900/40 bg-amber-950/30 px-3 py-1 text-xs text-amber-300"
           title={treeTruncatedTitle}
         >
           Показана часть дерева из-за лимитов производительности.
@@ -217,11 +217,11 @@ export function WorkspaceExplorer({
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
       >
         {treeLoading ? (
-          <div className="px-3 py-2 text-[12px] text-zinc-500">Loading tree...</div>
+          <div className="px-3 py-2 text-xs text-zinc-500">Loading tree...</div>
         ) : treeError ? (
-          <div className="px-3 py-2 text-[12px] text-red-400">{treeError}</div>
+          <div className="px-3 py-2 text-xs text-red-400">{treeError}</div>
         ) : flatRows.length === 0 ? (
-          <div className="px-3 py-2 text-[12px] text-zinc-500">Computer has no files.</div>
+          <div className="px-3 py-2 text-xs text-zinc-500">Computer has no files.</div>
         ) : (
           <div>
             <div style={{ height: `${topSpacerHeight}px` }} />

@@ -147,24 +147,24 @@ export function ProjectPicker({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
+        className="w-full max-w-lg overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/60"
         onClick={(event) => event.stopPropagation()}
         onKeyDown={handleKeyDown}
         role="dialog"
         aria-label="Project Picker"
       >
-        <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
-          <h2 className="text-sm font-semibold text-zinc-300">Open Project</h2>
+        <div className="flex items-center justify-between border-b border-zinc-800/80 px-4 py-3">
+          <h2 className="text-sm font-semibold text-zinc-100">Open Project</h2>
           <button
             onClick={onClose}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-zinc-800 text-zinc-400 hover:bg-zinc-800"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-zinc-700/80 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
             aria-label="Close"
           >
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
 
-        <div className="border-b border-zinc-800 px-4 py-2">
+        <div className="border-b border-zinc-800/80 px-4 py-2">
           <input
             value={searchQuery}
             onChange={(event) => {
@@ -172,12 +172,12 @@ export function ProjectPicker({
               setSelectedIndex(0);
             }}
             placeholder="Search directories..."
-            className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[12px] text-zinc-300 outline-none placeholder:text-zinc-500"
+            className="w-full rounded-md border border-zinc-700/80 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 outline-none placeholder:text-zinc-500 focus:border-zinc-500"
           />
         </div>
 
         {browseResult && browseResult.breadcrumbs.length > 1 ? (
-          <div className="border-b border-zinc-800 px-4 py-1.5 flex items-center gap-1 overflow-x-auto">
+          <div className="border-b border-zinc-800/80 px-4 py-1.5 flex items-center gap-1 overflow-x-auto">
             {browseResult.breadcrumbs.map((crumb, idx) => (
               <span key={crumb.path} className="flex items-center gap-1 shrink-0">
                 {idx > 0 ? (
@@ -185,7 +185,7 @@ export function ProjectPicker({
                 ) : null}
                 <button
                   onClick={() => navigateBreadcrumb(crumb.path)}
-                  className="text-[11px] text-zinc-400 hover:text-zinc-300 truncate max-w-[120px]"
+                  className="text-xs text-zinc-400 hover:text-zinc-300 truncate max-w-[120px]"
                 >
                   {crumb.name}
                 </button>
@@ -194,8 +194,8 @@ export function ProjectPicker({
           </div>
         ) : null}
 
-        <div className="border-b border-zinc-800 px-4 py-1.5 flex items-center justify-between">
-          <span className="text-[11px] text-zinc-500">
+        <div className="border-b border-zinc-800/80 px-4 py-1.5 flex items-center justify-between">
+          <span className="text-xs text-zinc-500">
             {browseLoading
               ? 'Loading...'
               : browsePath
@@ -205,7 +205,7 @@ export function ProjectPicker({
           {browseResult?.parent ? (
             <button
               onClick={navigateToParent}
-              className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800"
             >
               <ArrowUp className="h-3 w-3" />
               Parent
@@ -214,14 +214,14 @@ export function ProjectPicker({
         </div>
 
         {recentRoots.length > 0 && !searchQuery ? (
-          <div className="border-b border-zinc-800 px-4 py-2">
-            <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Recent</div>
+          <div className="border-b border-zinc-800/80 px-4 py-2">
+            <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-1">Recent</div>
             <div className="flex flex-wrap gap-1">
               {recentRoots.map((recent) => (
                 <button
                   key={recent}
                   onClick={() => handleRecentClick(recent)}
-                  className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-400 hover:bg-zinc-800 truncate max-w-[180px]"
+                  className="rounded-md border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-400 transition-colors hover:bg-zinc-800 truncate max-w-[180px]"
                   title={recent}
                 >
                   {compactPath(recent, 30)}
@@ -233,11 +233,11 @@ export function ProjectPicker({
 
         <div ref={listRef} className="max-h-[280px] overflow-auto" data-scrollbar="always">
           {browseError ? (
-            <div className="px-4 py-3 text-[12px] text-red-400">{browseError}</div>
+            <div className="px-4 py-3 text-xs text-red-400">{browseError}</div>
           ) : browseLoading ? (
-            <div className="px-4 py-3 text-[12px] text-zinc-500">Loading...</div>
+            <div className="px-4 py-3 text-xs text-zinc-500">Loading...</div>
           ) : filteredEntries.length === 0 ? (
-            <div className="px-4 py-3 text-[12px] text-zinc-500">
+            <div className="px-4 py-3 text-xs text-zinc-500">
               {searchQuery ? 'No matching directories.' : 'Empty directory.'}
             </div>
           ) : (
@@ -251,16 +251,16 @@ export function ProjectPicker({
                   }}
                   onDoubleClick={handleApplyCurrent}
                   data-selected={isSelected ? 'true' : 'false'}
-                  className={`flex w-full items-center gap-2 px-4 py-1.5 text-left text-[12px] transition-colors ${
+                  className={`flex w-full items-center gap-2 px-4 py-1.5 text-left text-xs transition-colors ${
                     isSelected
                       ? 'bg-zinc-800 text-zinc-300'
                       : 'text-zinc-400 hover:bg-zinc-900'
                   }`}
                 >
                   {browsePath === entry.path ? (
-                    <FolderOpen className="h-3.5 w-3.5 shrink-0 text-[#f59e0b]" />
+                    <FolderOpen className="h-3.5 w-3.5 shrink-0 text-amber-500" />
                   ) : (
-                    <Folder className="h-3.5 w-3.5 shrink-0 text-[#f59e0b]" />
+                    <Folder className="h-3.5 w-3.5 shrink-0 text-amber-500" />
                   )}
                   <span className="truncate">{entry.name}</span>
                 </button>
@@ -269,17 +269,17 @@ export function ProjectPicker({
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
+        <div className="flex items-center justify-end gap-2 border-t border-zinc-800/80 px-4 py-3">
           <button
             onClick={onClose}
-            className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[12px] text-zinc-400 hover:bg-zinc-800"
+            className="rounded-md border border-zinc-700/80 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:bg-zinc-800"
           >
             Cancel
           </button>
           <button
             onClick={handleApplyCurrent}
             disabled={loading || !browsePath}
-            className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-[12px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+            className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 transition-colors hover:bg-zinc-700 disabled:opacity-50"
           >
             {loading ? 'Applying...' : 'Open Project'}
           </button>

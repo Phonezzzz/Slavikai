@@ -184,13 +184,13 @@ export function GitPanel({
   ) =>
     entries.length > 0 ? (
       <div className="mb-2">
-        <div className={`text-[11px] font-medium ${color} mb-1`}>
+        <div className={`text-xs font-medium ${color} mb-1`}>
           {label} ({entries.length})
         </div>
         {entries.map((entry) => (
           <div
             key={entry.path}
-            className="flex items-center justify-between gap-2 text-[11px] text-zinc-400 py-0.5"
+            className="flex items-center justify-between gap-2 text-xs text-zinc-400 py-0.5"
           >
             <span className="truncate font-mono" title={entry.path}>
               {entry.path}
@@ -224,7 +224,7 @@ export function GitPanel({
     <button
       onClick={onClick}
       disabled={disabled}
-      className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
+      className="rounded border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-400 transition-colors hover:bg-zinc-800 disabled:opacity-50"
     >
       {label}
     </button>
@@ -233,21 +233,21 @@ export function GitPanel({
   return (
     <div className="h-full overflow-auto px-3 py-3" data-computer-tab-content="git-panel">
       {!sessionId ? (
-        <div className="text-[12px] text-zinc-500">No active session.</div>
+        <div className="text-xs text-zinc-500">No active session.</div>
       ) : loading ? (
-        <div className="text-[12px] text-zinc-500">Loading git status...</div>
+        <div className="text-xs text-zinc-500">Loading git status...</div>
       ) : error ? (
-        <div className="text-[12px] text-red-400">{error}</div>
+        <div className="text-xs text-red-400">{error}</div>
       ) : !status ? null : (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <FolderGit2 className="h-4 w-4 text-zinc-400" />
-              <span className="text-[12px] font-medium text-zinc-300">
+              <span className="text-sm font-medium text-zinc-200">
                 {status.branch || 'detached'}
               </span>
               {status.upstream ? (
-                <span className="text-[11px] text-zinc-500">
+                <span className="text-xs text-zinc-500">
                   {status.upstream}
                   {status.ahead > 0 ? ` ↑${status.ahead}` : ''}
                   {status.behind > 0 ? ` ↓${status.behind}` : ''}
@@ -257,7 +257,7 @@ export function GitPanel({
             <button
               onClick={() => void loadStatus()}
               disabled={loading}
-              className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-900 disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50"
             >
               <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
               Refresh
@@ -265,11 +265,11 @@ export function GitPanel({
           </div>
 
           {!status.ok ? (
-            <div className="text-[12px] text-red-400">
+            <div className="text-xs text-red-400">
               {status.error || 'Git error'}
             </div>
           ) : !hasChanges ? (
-            <div className="text-[12px] text-zinc-500">Clean — no changes.</div>
+            <div className="text-xs text-zinc-500">Clean — no changes.</div>
           ) : (
             <>
               {fileEntry(
@@ -313,14 +313,14 @@ export function GitPanel({
               )}
               {fileEntry(status.conflicted, 'Conflicted', 'text-red-400')}
 
-              <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800 pt-2">
+              <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800/80 pt-2">
                 {status.unstaged.length > 0 || status.untracked.length > 0 ? (
                   <button
                     onClick={() => {
                       void handleStage(allUnstagedPaths.map((e) => e.path), false);
                     }}
                     disabled={actionBusy}
-                    className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-900 disabled:opacity-50"
+                    className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50"
                   >
                     Stage all
                   </button>
@@ -331,19 +331,19 @@ export function GitPanel({
                       void handleUnstage(null, true);
                     }}
                     disabled={actionBusy}
-                    className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-900 disabled:opacity-50"
+                    className="inline-flex items-center gap-1 rounded-md border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50"
                   >
                     Unstage all
                   </button>
                 ) : null}
               </div>
 
-              <div className="border-t border-zinc-800 pt-2 space-y-1.5">
+              <div className="border-t border-zinc-800/80 pt-2 space-y-1.5">
                 <input
                   value={commitMessage}
                   onChange={(event) => setCommitMessage(event.target.value)}
                   placeholder="Commit message..."
-                  className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[12px] text-zinc-300 outline-none placeholder:text-zinc-500"
+                  className="w-full rounded-md border border-zinc-700/80 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 outline-none placeholder:text-zinc-500 focus:border-zinc-500"
                   disabled={actionBusy}
                 />
                 <button
@@ -351,7 +351,7 @@ export function GitPanel({
                     void handleCommit();
                   }}
                   disabled={actionBusy || !commitMessage.trim() || status.staged.length === 0}
-                  className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1 text-[11px] text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+                  className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 transition-colors hover:bg-zinc-700 disabled:opacity-50"
                 >
                   {actionBusy ? 'Committing...' : 'Commit'}
                 </button>
@@ -360,19 +360,19 @@ export function GitPanel({
           )}
 
           {pendingApproval ? (
-            <div className="rounded-md border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
+            <div className="rounded-md border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
               {actionMessage}
             </div>
           ) : outcomeKind === 'failed' ? (
-            <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] text-red-300">
+            <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
               {actionMessage}
             </div>
           ) : outcomeKind === 'rejected' ? (
-            <div className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] text-zinc-400">
+            <div className="rounded-md border border-zinc-800/80 bg-zinc-900 px-3 py-2 text-xs text-zinc-400">
               {actionMessage}
             </div>
           ) : actionMessage ? (
-            <div className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] text-zinc-400">
+            <div className="rounded-md border border-zinc-800/80 bg-zinc-900 px-3 py-2 text-xs text-zinc-400">
               {actionMessage}
             </div>
           ) : null}
