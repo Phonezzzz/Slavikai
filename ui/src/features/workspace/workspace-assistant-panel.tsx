@@ -27,6 +27,7 @@ import { TtsAudioPlayer, useTtsAudioPlayer } from '../audio';
 import { deriveComputerStatus } from './computer-status';
 
 type WorkspaceAssistantPanelProps = {
+  sessionId?: string | null;
   mode: SessionMode;
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
@@ -45,6 +46,7 @@ type WorkspaceAssistantPanelProps = {
 };
 
 export function WorkspaceAssistantPanel({
+  sessionId,
   mode,
   activePlan,
   activeTask,
@@ -61,7 +63,7 @@ export function WorkspaceAssistantPanel({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, 'good' | 'bad'>>({});
   const [feedbackBusyMessageId, setFeedbackBusyMessageId] = useState<string | null>(null);
-  const ttsPlayer = useTtsAudioPlayer();
+  const ttsPlayer = useTtsAudioPlayer(sessionId);
 
   const visibleMessages = useMemo(() => messages.slice(-24), [messages]);
   const renderItems = useMemo<RenderableMessage[]>(() => {

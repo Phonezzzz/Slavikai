@@ -6,6 +6,7 @@ import type { Artifact } from './artifacts-sidebar';
 import type { DecisionRespondChoice, SessionMode, UiDecision } from '../types';
 
 type ChatSessionScreenProps = {
+  sessionId: string | null;
   messages: CanvasMessage[];
   pendingMessage: CanvasMessage | null;
   streamingAssistantMessage: CanvasMessage | null;
@@ -41,6 +42,7 @@ type ChatSessionScreenProps = {
 };
 
 export function ChatSessionScreen({
+  sessionId,
   messages,
   pendingMessage,
   streamingAssistantMessage,
@@ -76,6 +78,7 @@ export function ChatSessionScreen({
       <div className="h-full min-h-0 min-w-0 flex-1">
         <Canvas
           className="h-full min-h-0"
+          sessionId={sessionId}
           messages={messages}
           pendingMessage={pendingMessage}
           streamingAssistantMessage={streamingAssistantMessage}

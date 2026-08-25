@@ -1130,6 +1130,7 @@ export function WorkspaceIde({
       <div className="flex-1 min-h-0">
         {computerTab === 'overview' && (
           <WorkspaceAssistantPanel
+            sessionId={sessionId}
             mode={mode}
             activePlan={activePlan}
             activeTask={activeTask}

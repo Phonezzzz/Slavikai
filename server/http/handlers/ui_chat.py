@@ -116,6 +116,39 @@ async def _iterate_stream_in_thread(
             await asyncio.to_thread(close)
 
 
+async def _publish_auto_progress_while(
+    *,
+    hub: UIHub,
+    session_id: str,
+    agent: object,
+    stop_event: asyncio.Event,
+) -> None:
+    """Публикует auto.progress в hub параллельно с выполнением auto-run."""
+    drain = getattr(agent, "drain_auto_progress_events", None)
+    if not callable(drain):
+        return
+    while not stop_event.is_set():
+        drained = drain()
+        if isinstance(drained, list):
+            for item in drained:
+                normalized = _normalize_auto_state(item)
+                if normalized is not None:
+                    await hub.publish(
+                        session_id,
+                        {
+                            "type": "auto.progress",
+                            "payload": {
+                                "session_id": session_id,
+                                "auto_state": normalized,
+                            },
+                        },
+                    )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.2)
+        except TimeoutError:
+            continue
+
+
 def _normalize_message_lane(value: object, *, default: MessageLane = "chat") -> MessageLane:
     if isinstance(value, str):
         normalized = value.strip().lower()
@@ -864,6 +897,15 @@ async def _handle_ui_send_impl(
                 pending_chat_chunks: list[str] = []
                 chat_stream_mode: Literal["pending", "chat"] = "pending"
                 chat_content_stream_open = False
+                stream_finished = asyncio.Event()
+                auto_progress_task = asyncio.create_task(
+                    _publish_auto_progress_while(
+                        hub=hub,
+                        session_id=session_id,
+                        agent=agent,
+                        stop_event=stream_finished,
+                    )
+                )
                 try:
                     stream_error_message: str | None = None
                     stream_error_code: str | None = None
@@ -1110,6 +1152,11 @@ async def _handle_ui_send_impl(
                         response_raw = response_raw_candidate
                     else:
                         response_raw = f"[Ошибка ответа: {exc}]"
+                finally:
+                    stream_finished.set()
+                    if not auto_progress_task.done():
+                        auto_progress_task.cancel()
+                        await asyncio.gather(auto_progress_task, return_exceptions=True)
             else:
                 response_raw = agent.respond(llm_messages)
             drain_consumed_rules = getattr(agent, "drain_consumed_desktop_rule_ids", None)

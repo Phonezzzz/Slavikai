@@ -624,6 +624,7 @@ export default function App() {
       <div className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
         <div className="min-w-0 flex-1">
           <ChatSessionScreen
+            sessionId={runtime.selectedConversation}
             messages={transport.canvasMessages}
             pendingMessage={transport.pendingCanvasMessage}
             streamingAssistantMessage={transport.streamingAssistantCanvasMessage}

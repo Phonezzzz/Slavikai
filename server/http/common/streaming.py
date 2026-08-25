@@ -15,7 +15,7 @@ from llm.stream_model import (
 from shared.models import JSONValue
 
 CHAT_STREAM_CHUNK_SIZE = 80
-CHAT_STREAM_WARMUP_CHARS = 220
+CHAT_STREAM_WARMUP_CHARS = 96
 
 
 class SessionPublisher(Protocol):
@@ -38,7 +38,7 @@ def _stream_preview_ready_for_chat(preview_text: str, *, chat_stream_warmup_char
         return False
     if len(normalized) >= chat_stream_warmup_chars:
         return True
-    if len(normalized) >= 96 and "```" not in normalized and normalized.count("\n") <= 1:
+    if len(normalized) >= 48 and "```" not in normalized and normalized.count("\n") <= 1:
         return True
     return False
 

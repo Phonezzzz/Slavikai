@@ -61,8 +61,9 @@ async def _handle_ui_events_stream(
         status=200,
         headers={
             "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
             UI_SESSION_HEADER: session_id,
         },
     )

@@ -7,9 +7,37 @@ from config.stt_config import SttConfig
 from config.tts_config import TtsConfig
 from config.ui_embeddings_settings import resolve_openai_api_key
 from shared.models import ToolRequest
-from tools.http_client import HttpResult
+from tools.http_client import HttpClient, HttpConfig, HttpResult
 from tools.stt_tool import SttTool
 from tools.tts_tool import TtsTool
+
+
+class _TruncatedAudioHttp:
+    def post_bytes(self, url: str, **kwargs):
+        del url, kwargs
+        return HttpResult(
+            ok=True,
+            data=b"preview-audio",
+            status_code=200,
+            error=None,
+            headers={},
+            meta={"truncated": True},
+        )
+
+
+def test_tts_rejects_truncated_audio_response() -> None:
+    tool = TtsTool(
+        http_client=_TruncatedAudioHttp(),
+        config=TtsConfig(api_key="test-key"),
+    )
+    result = tool.handle(ToolRequest(name="tts", args={"text": "Привет, мир"}))
+    assert not result.ok
+    assert "обрезано" in (result.error or "")
+
+
+def test_tts_http_client_accepts_large_audio() -> None:
+    client = HttpClient(HttpConfig(max_bytes=20_000_000))
+    assert client.config.max_bytes >= 20_000_000
 
 
 class DummyHttp:

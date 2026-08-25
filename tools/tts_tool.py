@@ -71,6 +71,8 @@ class TtsTool:
                 headers=headers,
                 timeout=self.config.timeout,
             )
+            if result.meta and result.meta.get("truncated") is True:
+                return ToolResult.failure("Аудио TTS обрезано лимитом размера ответа HTTP-клиента.")
             if (
                 not result.ok
                 or not isinstance(result.data, (bytes, bytearray))

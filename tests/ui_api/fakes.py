@@ -46,7 +46,7 @@ from server.ui_session_storage import (
     SQLiteUISessionStorage,
 )
 from shared.memory_category_models import MemoryCategory
-from shared.models import JSONValue, ToolResult
+from shared.models import JSONValue, ToolRequest, ToolResult
 from tools.tool_logger import ToolCallLogger
 
 TEST_API_TOKEN = "test-ui-api-token"
@@ -185,6 +185,37 @@ class TtsAgent(DummyAgent):
         if self.audio_path is None:
             return ToolResult.failure("missing test audio")
         format_value = str((args or {}).get("format") or "mp3")
+        return ToolResult.success(
+            {
+                "file_path": str(self.audio_path),
+                "format": format_value,
+                "voice": "test-voice",
+                "voice_id": "test-voice",
+            }
+        )
+
+
+class FakeTtsTool:
+    """Заменяет TtsTool в app['tts_tool'] для UI-тестов."""
+
+    def __init__(
+        self,
+        *,
+        audio_path: Path | None = None,
+        fail_message: str | None = None,
+    ) -> None:
+        self.audio_path = audio_path
+        self.fail_message = fail_message
+        self.last_args: dict[str, JSONValue] | None = None
+
+    def handle(self, request: ToolRequest) -> ToolResult:
+        args = dict(request.args or {})
+        self.last_args = args
+        if self.fail_message is not None:
+            return ToolResult.failure(self.fail_message)
+        if self.audio_path is None:
+            return ToolResult.failure("missing test audio")
+        format_value = str(args.get("format") or "mp3")
         return ToolResult.success(
             {
                 "file_path": str(self.audio_path),

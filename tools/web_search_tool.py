@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Literal, cast
+from urllib.parse import urlencode, urlparse
 
 from config.web_search_config import WebSearchConfig
 from shared.models import JSONValue, ToolRequest, ToolResult
@@ -13,6 +17,7 @@ from tools.http_client import HttpClient, HttpConfig, HttpResult
 logger = logging.getLogger("SlavikAI.WebSearchTool")
 
 SERPER_ENDPOINT = "https://google.serper.dev/search"
+SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
 
 
 @dataclass
@@ -29,7 +34,16 @@ class WebSearchTool:
         config: WebSearchConfig | None = None,
         http_client: HttpClient | None = None,
     ) -> None:
-        self.config = config or WebSearchConfig(api_key=os.getenv("SERPER_API_KEY"))
+        if config is not None:
+            self.config = config
+        else:
+            provider_raw = os.getenv("WEB_SEARCH_PROVIDER", "serper").strip().lower()
+            provider: Literal["serper", "serpapi"] = cast(
+                "Literal['serper', 'serpapi']",
+                provider_raw if provider_raw in {"serper", "serpapi"} else "serper",
+            )
+            key_env = "SERPAPI_API_KEY" if provider == "serpapi" else "SERPER_API_KEY"
+            self.config = WebSearchConfig(provider=provider, api_key=os.getenv(key_env))
         self.http = http_client or HttpClient(
             HttpConfig(timeout=self.config.timeout, max_bytes=self.config.max_bytes)
         )
@@ -49,6 +63,8 @@ class WebSearchTool:
 
         if self.config.provider == "serper":
             return self._search_serper(query_raw)
+        if self.config.provider == "serpapi":
+            return self._search_serpapi(query_raw)
         return ToolResult.failure(f"Неизвестный провайдер поиска: {self.config.provider}")
 
     def _fetch_url(self, url: str) -> ToolResult:
@@ -75,17 +91,91 @@ class WebSearchTool:
 
         payload = {"q": query, "num": self.config.top_k}
         headers = {"X-API-KEY": api_key}
-        result: HttpResult = self.http.post_json(
-            SERPER_ENDPOINT, json=payload, headers=headers, timeout=self.config.timeout
+        result: HttpResult = self._request_with_retry(
+            lambda: self.http.post_json(
+                SERPER_ENDPOINT, json=payload, headers=headers, timeout=self.config.timeout
+            )
         )
         if not result.ok:
+            if result.status_code in (401, 403):
+                return ToolResult.failure(
+                    f"HTTP ошибка поиска: {result.error} — ключ SERPER_API_KEY недействителен "
+                    "или нет доступа. Проверьте ключ в Settings/окружении."
+                )
             return ToolResult.failure(f"HTTP ошибка поиска: {result.error}")
         if not isinstance(result.data, dict):
             return ToolResult.failure("Неверный формат ответа поиска.")
 
-        results_raw = result.data.get("organic") or []
+        return self._build_results_payload(result.data, provider="serper")
+
+    def _search_serpapi(self, query: str) -> ToolResult:
+        api_key = self._resolve_api_key()
+        if not api_key:
+            return ToolResult.failure("SERPAPI_API_KEY не задан. Установите ключ для web поиска.")
+
+        params = {
+            "engine": "google",
+            "q": query,
+            "num": self.config.top_k,
+            "api_key": api_key,
+        }
+        url = f"{SERPAPI_ENDPOINT}?{urlencode(params)}"
+        result = self._request_with_retry(
+            lambda: self.http.get_text(url, timeout=self.config.timeout)
+        )
+        if not result.ok or not isinstance(result.data, str):
+            error = result.error or "Ошибка поиска."
+            return ToolResult.failure(
+                f"HTTP ошибка поиска: {error}",
+                {"status": result.status_code},
+            )
+        try:
+            data = json.loads(result.data)
+        except (ValueError, TypeError):
+            return ToolResult.failure("Неверный формат ответа поиска.")
+        if not isinstance(data, dict):
+            return ToolResult.failure("Неверный формат ответа поиска.")
+        return self._build_results_payload(data, provider="serpapi")
+
+    def _request_with_retry(self, request_fn: Callable[[], HttpResult]) -> HttpResult:
+        """Один повтор на timeout/5xx: внешние поиски иногда отвечают медленно."""
+        last: HttpResult | None = None
+        for attempt in range(2):
+            result = request_fn()
+            if result.ok:
+                return result
+            status_code = result.status_code
+            retryable = status_code is None or (status_code or 0) >= 500
+            if attempt == 0 and retryable:
+                time.sleep(1.0)
+                last = result
+                continue
+            return result
+        return (
+            last
+            if last is not None
+            else HttpResult(
+                ok=False,
+                data=None,
+                status_code=None,
+                error="timeout",
+                headers={},
+                meta={},
+            )
+        )
+
+    def _build_results_payload(
+        self,
+        data: dict[str, object],
+        *,
+        provider: str,
+    ) -> ToolResult:
+        raw_results = data.get("organic_results") or data.get("organic")
+        results_raw: list[object] = raw_results if isinstance(raw_results, list) else []
         ranked: list[SearchResult] = []
         for idx, item in enumerate(results_raw[: self.config.top_k]):
+            if not isinstance(item, dict):
+                continue
             title = str(item.get("title") or "").strip()
             link = str(item.get("link") or "").strip()
             snippet = str(item.get("snippet") or "").strip()
@@ -112,12 +202,17 @@ class WebSearchTool:
                 ),
                 "results": serialized,
             },
-            meta={"provider": "serper"},
+            meta={"provider": provider},
         )
 
     def _resolve_api_key(self) -> str | None:
         if self.config.api_key:
             return self.config.api_key
+        key_env = "SERPAPI_API_KEY" if self.config.provider == "serpapi" else "SERPER_API_KEY"
+        env_key = os.getenv(key_env)
+        if env_key:
+            return env_key
+        # Совместимость: ключ мог быть положен в старую переменную.
         env_key = os.getenv("SERPER_API_KEY")
         if env_key:
             return env_key

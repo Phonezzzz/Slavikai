@@ -96,6 +96,7 @@ export async function deliverTranscription(
 }
 
 interface CanvasProps {
+  sessionId?: string | null;
   messages?: CanvasMessage[];
   pendingMessage?: CanvasMessage | null;
   streamingAssistantMessage?: CanvasMessage | null;
@@ -263,6 +264,7 @@ function MessageActions({
 // ====== Main Canvas Component ======
 
 export function Canvas({
+  sessionId = null,
   messages = [],
   pendingMessage = null,
   streamingAssistantMessage = null,
@@ -312,7 +314,7 @@ export function Canvas({
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const caretSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
-  const ttsPlayer = useTtsAudioPlayer();
+  const ttsPlayer = useTtsAudioPlayer(sessionId);
   const displayMessages = useMemo(() => {
     const items = [...messages];
     if (pendingMessage) {

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import shlex
 import subprocess
 import time
@@ -13,26 +12,11 @@ from config.shell_config import (
     load_shell_config,
     save_shell_config,
 )
+from shared.command_safety import is_hard_unsafe_command as _is_unsafe
 from shared.models import ToolRequest, ToolResult
 from shared.sandbox import SandboxViolationError, normalize_shell_sandbox_root
 
-DISALLOWED_PATTERNS: Final[list[re.Pattern[str]]] = [
-    re.compile(r"\brm\b\s+-rf\b", re.IGNORECASE),
-    re.compile(r"\bshutdown\b", re.IGNORECASE),
-    re.compile(r"\breboot\b", re.IGNORECASE),
-    re.compile(r"\bmkfs\b", re.IGNORECASE),
-    re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*;\s*\}\s*;", re.IGNORECASE),  # fork bomb
-    re.compile(r"\bsudo\b", re.IGNORECASE),
-]
-
 CHAIN_TOKENS: Final[set[str]] = {"&&", "||", ";"}
-
-
-def _is_unsafe(command: str) -> bool:
-    lowered = command.lower()
-    if ">" in command and ("/etc" in command or "/dev" in command):
-        return True
-    return any(pattern.search(lowered) for pattern in DISALLOWED_PATTERNS)
 
 
 def _validate_args(args: list[str], allowed_commands: set[str]) -> str | None:

@@ -501,8 +501,22 @@ export function useSessionTransport({
     };
     const encodedSessionId = encodeURIComponent(selectedConversation);
     const chatEventSource = new EventSource(`/ui/api/chat/events/${encodedSessionId}`);
+    let streamErrorReported = false;
+    chatEventSource.onopen = () => {
+      if (streamErrorReported) {
+        streamErrorReported = false;
+        onStatusMessage(null);
+      }
+    };
     chatEventSource.onmessage = handleEventMessage;
-    chatEventSource.onerror = () => {};
+    chatEventSource.onerror = () => {
+      if (!streamErrorReported) {
+        streamErrorReported = true;
+        onStatusMessage(
+          'Live update connection lost; the answer may appear at once instead of streaming.',
+        );
+      }
+    };
     return () => {
       chatEventSource.close();
       setChatStreamingState(null);
