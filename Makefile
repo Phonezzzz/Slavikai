@@ -28,6 +28,10 @@ UI_PID_FILE := $(RUN_DIR)/ui-server.pid
 UI_LOG_FILE := $(RUN_DIR)/ui-server.log
 PROD_HOST ?= 0.0.0.0
 PROD_PORT ?= 8000
+DEV_HOST ?= 127.0.0.1
+DEV_PORT ?= 8001
+DEPLOY_HOST ?= 127.0.0.1
+DEPLOY_PORT ?= 8000
 
 .PHONY: help
 help:
@@ -62,14 +66,15 @@ help:
 	@echo "  make git-check       Clean, fully pushed PR branch plus canonical check"
 	@echo
 	@echo "Run:"
-	@echo "  make run             Run UI in foreground"
+	@echo "  make run             Run dev server in foreground (port 8001)"
+	@echo "  make deploy          Install deps if needed + start production server (port 8000)"
 	@echo "  make run-prod        Run server in foreground for production host/port"
 	@echo "  make smoke-prod      Check health and Bearer automation models on a running server"
 	@echo "  make up-prod         Run production server in background via venv-prod"
 	@echo "  make down-prod       Stop background production server"
 	@echo "  make status-prod     Show background production server status"
 	@echo "  make logs-prod       Tail background production server log"
-	@echo "  make up              Run development server in background via venv"
+	@echo "  make up              Run dev server in background (port 8001)"
 	@echo "  make down            Stop background development server"
 	@echo "  make status          Show background development server status"
 	@echo "  make logs            Tail background development server log"
@@ -310,7 +315,32 @@ ci: venv
 
 .PHONY: run
 run: venv
-	"$(VENV_PY)" -m server
+	SLAVIK_HTTP_HOST="$(DEV_HOST)" SLAVIK_HTTP_PORT="$(DEV_PORT)" "$(VENV_PY)" -m server
+
+.PHONY: deploy
+deploy:
+	@mkdir -p "$(RUN_DIR)"; \
+	if [[ -f "$(PROD_APP_PID_FILE)" ]]; then \
+		pid="$$(cat "$(PROD_APP_PID_FILE)")"; \
+		if kill -0 "$$pid" 2>/dev/null; then \
+			echo "Already deployed: pid=$$pid on $(DEPLOY_HOST):$(DEPLOY_PORT)"; \
+			echo "Logs: $(PROD_APP_LOG_FILE)  (make logs-prod)"; \
+			exit 0; \
+		fi; \
+		echo "Removing stale pid file $(PROD_APP_PID_FILE)"; \
+		rm -f "$(PROD_APP_PID_FILE)"; \
+	fi; \
+	if ! $(PYTHON) -c 'import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("$(DEPLOY_HOST)", $(DEPLOY_PORT))); s.close()'; then \
+		echo "ERROR: port $(DEPLOY_PORT) is already in use by another process."; \
+		echo "Stop it first (make down-prod / make down / sudo systemctl stop slavikai)."; \
+		exit 1; \
+	fi; \
+	$(MAKE) install-beta; \
+	nohup env SLAVIK_HTTP_HOST="$(DEPLOY_HOST)" SLAVIK_HTTP_PORT="$(DEPLOY_PORT)" \
+		"$(PROD_VENV_PY)" -m server >"$(PROD_APP_LOG_FILE)" 2>&1 & \
+	echo $$! >"$(PROD_APP_PID_FILE)"; \
+	echo "Deployed production server: pid=$$(cat "$(PROD_APP_PID_FILE)") on $(DEPLOY_HOST):$(DEPLOY_PORT)"; \
+	echo "Logs: $(PROD_APP_LOG_FILE)  (make logs-prod)"
 
 .PHONY: run-prod
 run-prod: venv-prod
@@ -430,8 +460,9 @@ up: venv
 			exit 1; \
 		fi; \
 	fi
-	@nohup "$(VENV_PY)" -m server >"$(APP_LOG_FILE)" 2>&1 & echo $$! >"$(APP_PID_FILE)"
-	@echo "Started: pid=$$(cat "$(APP_PID_FILE)")"
+	@nohup env SLAVIK_HTTP_HOST="$(DEV_HOST)" SLAVIK_HTTP_PORT="$(DEV_PORT)" \
+		"$(VENV_PY)" -m server >"$(APP_LOG_FILE)" 2>&1 & echo $$! >"$(APP_PID_FILE)"
+	@echo "Started dev server: pid=$$(cat "$(APP_PID_FILE)") on $(DEV_HOST):$(DEV_PORT)"
 	@echo "Logs: $(APP_LOG_FILE)"
 
 .PHONY: down
