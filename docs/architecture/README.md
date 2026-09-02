@@ -1,4 +1,36 @@
-# Architecture docs
+# Architecture workspace
 
-- `ARCH_CANON.md` — runtime canon и границы legacy.
-- `Architecture.md` — текущая runtime inventory.
+- **Назначение:** точка входа в долгосрочное проектирование архитектуры SlavikAI.
+- **Содержит:** структуру документов, правила их использования и ссылки на действующие
+  архитектурные источники.
+- **Не содержит:** неподтверждённую архитектуру, выдуманные факты о реализации или
+  implementation roadmap до завершения необходимых исследований.
+- **Обновлять:** при изменении структуры workspace, статусов документов или правил
+  архитектурной работы.
+
+## Обязательное правило этапа
+
+До завершения Capability Discovery запрещено считать список capabilities полным и начинать
+детальную архитектурную разработку отдельных capability domains.
+
+`memory`, `execution`, `reasoning`, `context` и `tasks` — стартовые placeholders, а не
+окончательный список capabilities. Добавление, объединение или удаление capability domains
+должно опираться на результаты Capability Discovery.
+
+## Структура workspace
+
+- `vision/` — направление, принципы и non-goals.
+- `capabilities/` — материалы по capability domains; пока полностью подготовлен только
+  шаблон документов для `memory`.
+- `decisions/` — принятые архитектурные решения.
+- `system/` — системные представления, создаваемые после достаточного discovery.
+- `roadmap/` — будущая последовательность работ и найденные задачи.
+- `research/` — источники и открытые вопросы.
+
+## Существующие архитектурные документы
+
+- [`ARCH_CANON.md`](ARCH_CANON.md) — действующий runtime canon и target-инварианты.
+- [`Architecture.md`](Architecture.md) — текущая runtime inventory и legacy paths.
+
+Новый workspace не изменяет статус этих документов и не заменяет иерархию из
+[`../SOURCE_OF_TRUTH.md`](../SOURCE_OF_TRUTH.md).
