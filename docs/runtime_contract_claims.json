@@ -105,6 +105,18 @@
       "summary": "Deterministic Ask to Plan to Act orchestration is a target, not current Auto behavior."
     },
     {
+      "id": "runtime.multi_agent.shared_coordination",
+      "scope": "runtime",
+      "status": "target",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "docs/architecture/ARCH_CANON.md"
+      ],
+      "summary": "SlavikAI must support explicitly published typed work events when multiple isolated agents interact within one task; this target capability does not replace single-agent, MWV or hierarchical delegation modes."
+    },
+    {
       "id": "memory.explicit_confirmation",
       "scope": "memory",
       "status": "implemented",

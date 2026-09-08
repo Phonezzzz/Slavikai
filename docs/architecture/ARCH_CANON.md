@@ -112,6 +112,34 @@
 - Budgets обязательны: time/tool_calls/tokens/files/retries.
 - При fail/ambiguity/risk Auto останавливается в STOP и ждёт явного решения.
 
+### Multi-agent coordination (discovered requirement; target)
+
+SlavikAI должен поддерживать shared coordination между isolated agents, когда несколько
+активных агентов реально взаимодействуют в рамках одной задачи. Эта target capability
+дополняет, но не заменяет существующие способы выполнения: single-agent execution, MWV,
+обычный цикл `orchestrator -> isolated worker -> final result -> orchestrator` и простая
+иерархическая delegation остаются допустимыми. При shared coordination каждый агент сохраняет
+собственный private working context.
+
+- Reasoning и private context одного агента не становятся автоматически общим context window
+  остальных агентов; полный transcript или chain-of-thought не публикуется в общий слой.
+- В общий слой попадают только явно публикуемые рабочие события и результаты, необходимые для
+  координации: findings, hypotheses, failures и тупиковые направления, успешные решения,
+  artifacts, claims о взятой задаче, completion, blockers, dependencies и существенные
+  изменения плана.
+- Активные агенты могут получать такие события во время своей работы и использовать их, чтобы
+  не дублировать выполненное исследование, учитывать найденные результаты и blockers,
+  прекращать опровергнутые ветки и согласовывать параллельные действия без обязательного
+  посредничества orchestrator для каждого сообщения.
+- Orchestrator сохраняет ответственность за decomposition, spawning/delegation, распределение
+  задач, lifecycle, aggregation/final response и policy/approval/isolation boundaries, но
+  коммуникационная топология не ограничивается связями `parent <-> child`.
+- Будущий coordination contract должен различать семантику событий. Минимальные кандидаты:
+  `finding`, `hypothesis`, `failure`, `artifact`, `task_claimed`, `task_completed`, `blocker`,
+  `plan_change`. Этот requirement не фиксирует event schema, storage или transport.
+
+Это новый target requirement, а не описание существующей возможности SlavikAI.
+
 ### Desktop (host execution profile)
 
 - Desktop tools имеют `execution_target=desktop` и не публикуются Chat/Agent tool snapshots.
