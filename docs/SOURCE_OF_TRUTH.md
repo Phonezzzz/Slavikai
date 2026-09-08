@@ -62,8 +62,10 @@ Desktop approvals также имеют explicit principal subject, при эт�
 - Public OpenAI-compatible API: current `implemented` contract — `slavik` является
   единственным публичным proxy model id; `/v1/chat/completions` отклоняет любой другой ID до
   Agent/session resolution.
-- Memory: current `implemented` contract — запись возможна только после отдельного явного
-  `confirm` или `edit_and_confirm`; `reject` не пишет данные. Устаревший
+- Memory: current `implemented` contract для явного запроса «запомни» — preview не пишет
+  данные, запись выполняется только после отдельного `confirm` или `edit_and_confirm`, а
+  `reject` не пишет данные. Current `/end-session` direct summary promotion не входит в этот
+  contract и является зафиксированным architecture debt. Устаревший
   `auto_save_dialogue` удалён из config/runtime/UI и отклоняется settings API. Confirm endpoint
   сейчас существует только в browser UI lane; `/v1` может вернуть preview, но не применяет его.
 - Engineering skills: current `implemented` contract — instructions и supporting dependencies

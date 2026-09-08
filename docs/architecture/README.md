@@ -10,3 +10,7 @@
   layers, isolated projections, budgeting, compaction, tools и recovery.
 - `CONTEXT_ARCHITECTURE_RESEARCH.md` — current context-flow audit, alternatives, primary
   external sources и current-runtime migration implications.
+- `MEMORY_ARCHITECTURE_CONTRACT.md` — target semantic contract long-term Memory: taxonomy,
+  promotion, provenance, revisions/conflicts, retrieval/projection, Vault и isolation.
+- `MEMORY_ARCHITECTURE_RESEARCH.md` — current Memory audit/data flow, external research,
+  alternatives, threat analysis и evidence-based current-runtime verdicts.

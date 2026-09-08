@@ -30,8 +30,10 @@
   `submit_plan` tool call; Auto отклоняет provider без native tools до запуска и применяет
   `tool_outcomes` verifier для generic workspace. Ask не выполняет Memory/tool writes и
   передаёт `allow_runtime_init=False` во все vector retrieval paths; explicit Memory request
-  создаёт `memory_save` preview/decision, а canonical/vector write происходит только после
-  отдельного `confirm` или `edit_and_confirm`. Добавлен пользовательский режим Desktop:
+  создаёт `memory_save` preview/decision, а write этого request происходит только после
+  отдельного `confirm` или `edit_and_confirm`. `/end-session` всё ещё напрямую повышает derived
+  summary до canonical fact и является current architecture debt, а не исключением target
+  Memory contract. Добавлен пользовательский режим Desktop:
   тот же provider-neutral `AgentToolLoop -> ToolGateway -> VerifierRuntime`, но с явным
   execution target `desktop`, host-only tool profile, детерминированной scoped policy
   `ALLOW|ASK|DENY` и lifecycle once/session/persistent approvals.
@@ -190,6 +192,44 @@ alternatives, primary external sources и migration implications — в
 
 Это target capability и не заявление о существующем unified context assembler или durable
 recovery mechanism.
+
+### Long-term Memory architecture (target)
+
+SlavikAI должен поддерживать отдельную governed long-term Memory subsystem для устойчивого
+personal/project knowledge. Наличие данных в conversation, private agent context, task,
+coordination, summary, audit, telemetry или artifact storage не делает их Memory и не даёт
+authority для automatic promotion.
+
+Нормативная target-модель определена в
+[`MEMORY_ARCHITECTURE_CONTRACT.md`](MEMORY_ARCHITECTURE_CONTRACT.md); current-runtime audit,
+alternatives, threat analysis, external sources и migration implications — в
+[`MEMORY_ARCHITECTURE_RESEARCH.md`](MEMORY_ARCHITECTURE_RESEARCH.md).
+
+- Accepted Memory состоит из versioned structured records с provenance, epistemic status,
+  temporal applicability, scope, sensitivity и revision lineage; blind last-write-wins запрещён.
+- Write проходит explicit candidate/promotion boundary. Model inference, agent result, summary,
+  external content, artifact или coordination event не становятся trusted Memory автоматически.
+- Retrieval сначала применяет deterministic principal/project/agent-purpose/access/sensitivity/
+  status filters, затем hybrid candidate retrieval, freshness/conflict reconciliation и bounded
+  ranking. Vector similarity является signal, а не authority или truth.
+- Model context получает только attributable policy-filtered Memory projection. Prompt,
+  embeddings, indexes, summaries, caches и entity/graph views являются derived и rebuildable.
+- Sensitive Memory имеет отдельный Vault access/index/egress boundary и не попадает в ordinary
+  retrieval по semantic similarity. Sensitive Memory Vault не является Credential/Secret Store:
+  passwords, tokens, API keys, recovery secrets и private keys запрещены как Memory payload;
+  допустима только policy-authorized opaque reference на отдельный credential service. Approvals,
+  permissions и temporary capabilities не replayed как действующая authority.
+- Baseline запрещает cross-principal sharing/deduplication. Multi-agent workers могут предлагать
+  candidates, но promotion принадлежит отдельной Memory control boundary; siblings получают
+  только explicit task-purpose projection.
+- User correction, suppression и forgetting должны изменить subsequent retrieval до success
+  acknowledgement; source-aware deletion не обещает удалить transcript/artifact/audit из их
+  independent retention domains. Forget/delete оставляет минимальный non-payload anti-resurrection
+  tombstone, чтобы restore, rebuild, replication, delayed event или re-import старой revision не
+  вернули её в active state без новой explicit authorized acceptance operation.
+
+Это target capability. Current mutable canonical atoms, legacy Memory stores, direct
+`/end-session` promotion и текущий vector/context-slot pipeline не объявляются её реализацией.
 
 ### Desktop (host execution profile)
 

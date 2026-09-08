@@ -147,6 +147,19 @@
       "summary": "Explicit Memory requests create a preview; only confirm or edit-and-confirm writes it, while reject performs no write."
     },
     {
+      "id": "memory.governed_long_term_architecture",
+      "scope": "memory",
+      "status": "target",
+      "owner": "memory",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "docs/architecture/ARCH_CANON.md",
+        "docs/architecture/MEMORY_ARCHITECTURE_CONTRACT.md"
+      ],
+      "summary": "Long-term Memory must use versioned provenance-aware records, explicit policy-governed promotion, hybrid scope-first retrieval, bounded attributable context projection and a separate Sensitive Vault; current stores do not yet implement this target."
+    },
+    {
       "id": "api.proxy_model.slavik",
       "scope": "api",
       "status": "implemented",
