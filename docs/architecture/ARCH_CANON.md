@@ -132,6 +132,51 @@
 - При выходе из Desktop pending execution отменяется, once/session approvals очищаются.
 - Наблюдения tools, файлов, terminal и browser считаются untrusted data, не approvals.
 
+### Task/run lifecycle-facing communication (target boundary; current implementation partial)
+
+**Current, confirmed only:** the runtime exposes workflow status values
+`running/completed/failed/cancelled`, approval-related `waiting_approval` state,
+UIHub activity phases, token/auxiliary stream events and an auto-progress publisher.
+These are existing transport/workflow signals, not a semantic communication contract.
+There is currently no confirmed authoritative `progress_update` artifact, final-response
+publication gate, terminal acceptance gate, delivery acknowledgement or replay/idempotency
+mechanism. Everything below defines the target boundary; only the explicitly listed
+status/event plumbing is current and partial.
+
+- Authoritative task/run lifecycle state является source of truth для user-facing
+  communication. Communication layer не переводит task в terminal state: направление
+  зависимости — `authoritative lifecycle state -> communication decision`.
+- `progress_update` и `final_response` — разные semantic output classes. Token
+  streaming, tool-call events, Computer activity events и background notifications
+  не считаются progress update или вторым conversational channel без отдельного
+  semantic decision.
+- Progress update допускается только после semantic filtering существенного
+  user-visible изменения: intermediate result, long-running/background transition,
+  waiting/blocked/approval, recovery/replan, partial verification, material plan
+  change или degraded execution. Internal event не обязан становиться сообщением.
+- Two-phase communication означает два класса outputs, а не ровно два сообщения;
+  progress может отсутствовать у короткой задачи, но final для terminal outcome
+  остаётся отдельным semantic completion artifact.
+- Final response запрещён как success-completion claim до authoritative terminal
+  transition и требуемой verification/acceptance. Model `done`, artifact creation,
+  завершение generation/tool loop или отсутствие tool calls недостаточны.
+- Terminal user communication различает successful, failed, cancelled и
+  partial/incomplete outcomes. `blocked`, `waiting_user_input` и `waiting_approval`
+  не являются completion.
+- Final readiness, completion transition, response generation, delivery и delivery
+  acknowledgement — отдельные concepts; crash/reconnect/retry требуют idempotent
+  delivery/replay semantics, которые пока остаются за пределами этого invariant.
+- Workers/siblings не публикуют user-facing progress напрямую. Orchestrator либо
+  отдельный future communication decision layer агрегирует typed coordination state,
+  deduplicates updates и публикует только accepted/reconciled information.
+- User interruption не означает автоматическую cancellation: clarification,
+  requirement change, cancel, status request и unrelated question должны иметь
+  различимую семантику; revision/pause/replan остаются будущим interaction design.
+
+Эти invariants являются lifecycle-facing target boundary, а не полным
+`USER_INTERACTION_CONTRACT`. Полный communication protocol, UI shape, schemas и
+delivery mechanism остаются отдельным audit scope.
+
 ## 3) TaskPacket v2 (execution contract)
 
 `TaskPacket` обязан содержать:
