@@ -24,7 +24,8 @@
   требование не должно создавать новый lane или превращать Computer activity events во
   второй чат.
 - **Граница:** detailed capability design отложен до завершения Capability Discovery.
-- **Lifecycle audit result:** requirement остаётся `discovered requirement`; lifecycle-facing
-  semantic invariants зафиксированы в `ARCH_CANON.md` как target boundary, но полный
-  communication design не повышен до отдельного capability contract. Следующий scope —
-  отдельный `User Interaction / Communication Architecture Audit`.
+- **Lifecycle/contract result:** requirement остаётся `discovered requirement`, но теперь
+  покрыт нормативным target contract:
+  `docs/architecture/USER_INTERACTION_COMMUNICATION_CONTRACT.md`. В repository нет
+  установленного перехода `incorporated/resolved`, поэтому статус не выдумывается и не
+  означает runtime implementation.

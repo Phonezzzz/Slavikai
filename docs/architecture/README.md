@@ -2,6 +2,9 @@
 
 - `ARCH_CANON.md` — runtime canon и границы legacy.
 - `Architecture.md` — текущая runtime inventory.
+- `USER_INTERACTION_COMMUNICATION_CONTRACT.md` — target semantic contract пользовательской
+  коммуникации; не является текущей runtime implementation.
+- `research/task-run-communication-audit.md` — evidence, alternatives и rationale.
 
 ---
 

@@ -174,8 +174,18 @@ status/event plumbing is current and partial.
   различимую семантику; revision/pause/replan остаются будущим interaction design.
 
 Эти invariants являются lifecycle-facing target boundary, а не полным
-`USER_INTERACTION_CONTRACT`. Полный communication protocol, UI shape, schemas и
-delivery mechanism остаются отдельным audit scope.
+`USER_INTERACTION_COMMUNICATION_CONTRACT.md`. Полный wire schema, UI shape, transport
+и delivery mechanism остаются implementation-defined.
+
+Выбранная target architecture: `authoritative lifecycle state -> communication
+decision -> typed semantic communication artifact -> rendering/delivery/replay`.
+Rendered assistant text не обязан быть canonical record; token streaming и UIHub
+являются presentation/delivery surfaces, а Computer activity остаётся отдельным
+operational lane. Final publication требует accepted terminal state, применимой
+verification/acceptance, reconciled или явно раскрытых side effects, disclosure
+policy и текущей task/run revision. UIHub verdict: `reuse with modification`, не
+source of truth. Подробные artifact types, coalescing, retention и delivery protocol
+зафиксированы в research audit и требуют отдельного User Interaction design.
 
 ## 3) TaskPacket v2 (execution contract)
 

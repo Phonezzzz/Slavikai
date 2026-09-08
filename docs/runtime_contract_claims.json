@@ -105,6 +105,19 @@
       "summary": "Deterministic Ask to Plan to Act orchestration is a target, not current Auto behavior."
     },
     {
+      "id": "runtime.communication.semantic_artifacts",
+      "scope": "runtime",
+      "status": "target",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/USER_INTERACTION_COMMUNICATION_CONTRACT.md",
+      "verified_by": [
+        "docs/architecture/research/task-run-communication-audit.md",
+        "docs/architecture/USER_INTERACTION_COMMUNICATION_CONTRACT.md"
+      ],
+      "summary": "Target architecture derives typed user-facing communication artifacts from authoritative lifecycle state through a communication decision layer; current streaming/UIHub paths are not this contract."
+    },
+    {
       "id": "memory.explicit_confirmation",
       "scope": "memory",
       "status": "implemented",
