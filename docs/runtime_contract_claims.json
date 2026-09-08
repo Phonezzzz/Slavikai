@@ -118,6 +118,19 @@
       "summary": "SlavikAI must support task-scoped typed coordination history plus authoritative task-state transitions when multiple isolated agents interact within one task run; this target capability does not replace single-agent, MWV or hierarchical delegation modes."
     },
     {
+      "id": "runtime.context.projection_architecture",
+      "scope": "runtime",
+      "status": "target",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "docs/architecture/ARCH_CANON.md",
+        "docs/architecture/CONTEXT_ARCHITECTURE_CONTRACT.md"
+      ],
+      "summary": "Each model turn must receive a bounded policy-filtered projection of applicable authoritative state, evidence and isolated private working context, with separately governed Memory only when eligible; prompts and summaries are derived views, not runtime truth."
+    },
+    {
       "id": "memory.explicit_confirmation",
       "scope": "memory",
       "status": "implemented",

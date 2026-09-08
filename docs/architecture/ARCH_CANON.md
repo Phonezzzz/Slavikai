@@ -58,6 +58,10 @@
 5. Auto FSM = **Ask -> Plan -> Act orchestrator** (target).
 6. Desktop = **host execution profile**, а не отдельный AI, planner или execution loop.
 
+В этом canon `stateless` означает **no execution-side state mutation, not context-free**:
+Ask может читать bounded read-only session/Memory context, но не изменяет execution state,
+Memory или external systems.
+
 В пользовательском UI Chat соответствует безопасному диалогу (`ask`), Agent — существующему
 изолированному agent/auto execution, Desktop — выполнению через host capabilities. Desktop
 ортогонален внутренним Plan/Act ролям: reasoning остаётся у текущего LLM provider, enforcement
@@ -149,6 +153,43 @@ external research и current-runtime impact — в
   blockers, plan changes и verification. Он не фиксирует wire schema, storage или transport.
 
 Это новый target requirement, а не описание существующей возможности SlavikAI.
+
+### Context architecture (target)
+
+SlavikAI должен собирать bounded model context как explicit, policy-filtered projection из
+применимых authoritative runtime state, retained evidence/artifacts и private working state
+конкретного agent. Отдельная long-term Memory подключается только когда она релевантна и
+разрешена policy. Model prompt, session transcript, summary, retrieval result и UI snapshot не
+являются source of truth сами по себе.
+
+Нормативная target-модель определена в
+[`CONTEXT_ARCHITECTURE_CONTRACT.md`](CONTEXT_ARCHITECTURE_CONTRACT.md); current-runtime audit,
+alternatives, primary external sources и migration implications — в
+[`CONTEXT_ARCHITECTURE_RESEARCH.md`](CONTEXT_ARCHITECTURE_RESEARCH.md).
+
+- `principal_id` остаётся hard security boundary, но `session_id` не подменяет identity
+  conversation, task, task run, coordination scope, agent, model turn или tool attempt.
+- Каждый agent имеет отдельный private working context. Parent/child/peer получают только
+  явные typed projections; полный private transcript, scratchpad или chain-of-thought не
+  передаётся автоматически.
+- Authoritative task/plan/policy/approval/lifecycle state изменяется только trusted runtime
+  transitions. Модель может предложить change, но prompt prose не authorizes его.
+- Для каждого model turn формируется immutable bounded context package с source revisions,
+  provenance, trust, audience/sensitivity/freshness, transformation и omission markers.
+- Critical constraints, pending decisions, unknown side effects, blockers, accepted plan/task
+  state и verification не могут существовать только в lossy summary или silently truncated
+  history.
+- Tool results и artifacts являются typed evidence с call/attempt/version identity; большой
+  или sensitive payload попадает модели через bounded projection/reference.
+- Coordination consumption следует shared coordination contract и durable checkpoint, но не
+  превращает coordination history в общий agent transcript.
+- Long-term Memory имеет отдельные acceptance, consent, retention и freshness semantics;
+  context получает только scoped Memory projection.
+- Recovery строится из durable canonical state, evidence и разрешённых checkpoints без
+  необходимости сохранять chain-of-thought; policy/approvals revalidate before side effects.
+
+Это target capability и не заявление о существующем unified context assembler или durable
+recovery mechanism.
 
 ### Desktop (host execution profile)
 
