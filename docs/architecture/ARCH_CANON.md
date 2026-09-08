@@ -91,6 +91,9 @@
   - `budgets`
   - `approvals`
   - `verifier`
+- Для target coordinated execution read-only означает отсутствие external execution side
+  effects, а не вечную неизменность плана после старта Act. Adaptive replanning допустим только
+  как новая versioned Plan transaction через control plane; worker не мутирует active revision.
 
 ### Act (target: isolated; current: partial)
 
@@ -121,6 +124,11 @@ SlavikAI должен поддерживать shared coordination между is
 иерархическая delegation остаются допустимыми. При shared coordination каждый агент сохраняет
 собственный private working context.
 
+Нормативная semantic-модель capability определена в
+[`MULTI_AGENT_COORDINATION_CONTRACT.md`](MULTI_AGENT_COORDINATION_CONTRACT.md); alternatives,
+external research и current-runtime impact — в
+[`MULTI_AGENT_COORDINATION_RESEARCH.md`](MULTI_AGENT_COORDINATION_RESEARCH.md).
+
 - Reasoning и private context одного агента не становятся автоматически общим context window
   остальных агентов; полный transcript или chain-of-thought не публикуется в общий слой.
 - В общий слой попадают только явно публикуемые рабочие события и результаты, необходимые для
@@ -133,10 +141,12 @@ SlavikAI должен поддерживать shared coordination между is
   посредничества orchestrator для каждого сообщения.
 - Orchestrator сохраняет ответственность за decomposition, spawning/delegation, распределение
   задач, lifecycle, aggregation/final response и policy/approval/isolation boundaries, но
-  коммуникационная топология не ограничивается связями `parent <-> child`.
-- Будущий coordination contract должен различать семантику событий. Минимальные кандидаты:
-  `finding`, `hypothesis`, `failure`, `artifact`, `task_claimed`, `task_completed`, `blocker`,
-  `plan_change`. Этот requirement не фиксирует event schema, storage или transport.
+  коммуникационная топология не ограничивается связями `parent <-> child`. Выбор coordinated
+  mode подчинён effective policy: trusted policy/runtime может require, forbid или constrain
+  его, а orchestrator выбирает только среди разрешённых режимов.
+- Coordination contract различает semantic work events и authoritative task-state
+  transitions, включая findings, hypotheses, failures, artifacts, claims, completion,
+  blockers, plan changes и verification. Он не фиксирует wire schema, storage или transport.
 
 Это новый target requirement, а не описание существующей возможности SlavikAI.
 

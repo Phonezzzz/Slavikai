@@ -109,12 +109,13 @@
       "scope": "runtime",
       "status": "target",
       "owner": "runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/ARCH_CANON.md",
       "verified_by": [
-        "docs/architecture/ARCH_CANON.md"
+        "docs/architecture/ARCH_CANON.md",
+        "docs/architecture/MULTI_AGENT_COORDINATION_CONTRACT.md"
       ],
-      "summary": "SlavikAI must support explicitly published typed work events when multiple isolated agents interact within one task; this target capability does not replace single-agent, MWV or hierarchical delegation modes."
+      "summary": "SlavikAI must support task-scoped typed coordination history plus authoritative task-state transitions when multiple isolated agents interact within one task run; this target capability does not replace single-agent, MWV or hierarchical delegation modes."
     },
     {
       "id": "memory.explicit_confirmation",
