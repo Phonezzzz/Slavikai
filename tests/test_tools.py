@@ -74,12 +74,9 @@ def test_shell_blocks_dangerous_command() -> None:
 
 
 def test_shell_allows_simple_command() -> None:
-    from tools.shell_tool import ShellConfig, handle_shell_request
+    from tools.shell_tool import handle_shell_request
 
-    cfg = ShellConfig(allowed_commands=["echo"])
-    result = handle_shell_request(
-        ToolRequest(name="shell", args={"command": "echo hi", "shell_config": cfg.__dict__})
-    )
+    result = handle_shell_request(ToolRequest(name="shell", args={"command": "echo hi"}))
     assert result.ok
     assert "hi" in str(result.data.get("output"))
 
