@@ -464,3 +464,31 @@ provider-specific security/ToS/reliability research.
 - **Связанный вопрос:** [OQ-MA-16](../research/open-questions.md#oq-ma-16--как-должен-быть-устроен-subscription-backed-chatgptopenai-access).
 - **Следующий шаг:** собрать authoritative OpenAI product/account/API sources и только
   затем сформулировать candidate access route и решение.
+
+## DW-2026-09-10-PATCH-REVISION — Version-bound patch preview and apply
+
+- **Статус:** preserved cross-domain architecture invariant; ownership и concrete schema
+  остаются открыты до определения Execution/Artifact boundaries.
+- **Provenance:** surviving invariant из commit
+  `c12df4ca7702826b154351cd318ab7d97ca735c3` (`pr-999-editor-mercury-patch`).
+  Provider-specific Mercury editor flow и его implementation не переносятся.
+- **Current overlap:** текущий Verification contract уже требует связывать evidence с
+  exact task/criteria/result/artifact/policy revision и признавать evidence stale после
+  изменения artifact. Недостающая часть относится к optimistic concurrency самого
+  patch workflow.
+- **Invariant:** patch preview должен идентифицировать exact base artifact/file revision,
+  на которой он был построен и проверен. Apply обязан повторно сравнить current revision
+  с preview base revision до любого write.
+- **Conflict semantics:** concurrent/stale modification не может приводить к silent
+  overwrite или неявному пересчёту старого patch. Apply должен вернуть explicit conflict;
+  дальнейшие действия требуют нового preview/reverification либо явно авторизованного
+  conflict-resolution workflow.
+- **Verification binding:** dry-run, structural checks и иное verification evidence
+  относятся только к exact base/patch/result revision. Изменение base, patch или result
+  делает evidence stale и запрещает использовать его как основание accepted apply.
+- **Security/safety boundary:** invariant provider-neutral и должен применяться независимо
+  от того, создан patch моделью, пользователем или deterministic tool. Он не предоставляет
+  approval и не ослабляет sandbox/ToolGateway policy.
+- **Следующий architecture шаг:** после Capability Discovery назначить ownership между
+  Execution, Artifact/Workspace и Verification contracts и определить stable identities,
+  conflict result и re-verification transition без восстановления Mercury-specific UI/API.
