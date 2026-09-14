@@ -226,14 +226,16 @@ conversational lane или превращать Computer activity events во в
   для доступа к моделям через официальный ChatGPT/OpenAI account и consumer subscription.
   Этот путь нельзя неявно приравнивать к обычному OpenAI API, оплачиваемому и
   авторизуемому как API service.
-- **Статус:** open research scope; не Target, не ADR и не утверждение, что такой access path
-  поддерживается или разрешён.
+- **Статус:** обязательность capability принята как Target в
+  [`ADR-0001`](../decisions/ADR-0001-subscription-backed-openai-access.md); open остаётся
+  конкретный поддерживаемый и разрешённый implementation contract.
 - **Недостаёт:** authoritative research по official account/subscription authentication,
   entitlement/quota, поддерживаемым и разрешённым access paths, отделению от API-billed
   services, quota exhaustion, explicit/non-silent fallback, trust/privacy/data-egress
   transitions, защите credentials/session tokens и product/Terms-of-Service boundaries.
 - **Владелец:** Capability Discovery совместно с authentication/credentials,
   security/trust и provider/model access research.
-- **Закрытие:** authoritative sources и product decision позволяют принять, отклонить или
-  оставить experimental точные route classes; contract явно определяет identity,
-  entitlement, lifecycle, quota/failure behavior, security boundary и fallback policy.
+- **Закрытие:** authoritative sources и follow-up design выбирают compliant route class и
+  явно определяют identity, entitlement, lifecycle, quota/failure behavior, security boundary
+  и fallback policy. Отсутствие подтверждённого route блокирует implementation, но не отменяет
+  Target без explicit superseding decision.

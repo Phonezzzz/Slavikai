@@ -439,11 +439,15 @@ Qwen auth/discovery/session route: **confirmed local partial PASS**; Qwen actual
 upstream plan restriction. Finding остаётся research evidence до Capability Discovery и
 provider-specific security/ToS/reliability research.
 
-## DW-2026-09-10 — ChatGPT/OpenAI subscription-backed model access research
+## DW-2026-09-10 — ChatGPT/OpenAI subscription-backed Target access
 
-- **Статус:** discovered research scope; не Target, не ADR, не implementation plan.
+- **Статус:** Target capability принята
+  [`ADR-0001`](../decisions/ADR-0001-subscription-backed-openai-access.md); research/design и
+  implementation plan остаются incomplete.
 - **Источник:** semantic branch obsolescence audit 2026-09-10 выявил отсутствие explicit
   target contract в старом research, `origin/main` и текущей Architecture.
+- **Target:** конечный SlavikAI предоставляет first-class, user-selectable route для
+  поддерживаемого subscription-backed OpenAI/ChatGPT access.
 - **Проблема:** consumer ChatGPT/OpenAI account/subscription access нельзя считать
   эквивалентом обычного OpenAI API access. У них могут различаться authentication,
   entitlement, quota, supported interfaces, billing, trust/privacy boundary и допустимость
@@ -459,11 +463,13 @@ provider-specific security/ToS/reliability research.
   - защита credentials, browser/session tokens, redaction, rotation и revocation;
   - product/Terms-of-Service boundary и условия, при которых route должен быть rejected
     или оставлен experimental.
-- **Evidence boundary:** research ещё не выполнен; наличие consumer subscription само по
-  себе не доказывает entitlement, API compatibility или разрешённость automation.
+- **Evidence boundary:** Target принят, но research ещё не выполнен; наличие consumer
+  subscription само по себе не доказывает entitlement, API compatibility или разрешённость
+  automation. До подтверждения compliant path runtime status остаётся `unavailable`/`blocked`,
+  не implemented.
 - **Связанный вопрос:** [OQ-MA-16](../research/open-questions.md#oq-ma-16--как-должен-быть-устроен-subscription-backed-chatgptopenai-access).
-- **Следующий шаг:** собрать authoritative OpenAI product/account/API sources и только
-  затем сформулировать candidate access route и решение.
+- **Следующий шаг:** собрать authoritative OpenAI product/account/API sources, затем
+  сформулировать candidate access route и отдельное implementation decision.
 
 ## DW-2026-09-10-PATCH-REVISION — Version-bound patch preview and apply
 

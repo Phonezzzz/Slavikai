@@ -49,6 +49,20 @@
   соблюдают этот канон: Plan использует только read-only inspection через `ToolGateway`,
   Act исполняет только packet.
 
+### Model access target boundary
+
+- Target обязательно включает отдельный first-class subscription-backed OpenAI/ChatGPT access
+  route согласно
+  [`decisions/ADR-0001-subscription-backed-openai-access.md`](decisions/ADR-0001-subscription-backed-openai-access.md).
+- Subscription/account entitlement не эквивалентен OpenAI API key, API credit или API billing.
+- Model family, Access Mode, auth identity, upstream transport, protocol adapter, capability
+  provenance/qualification и trust policy должны оставаться различимыми.
+- Route selection/fallback обязан быть observable и policy-controlled; silent переход через
+  billing, account, provider, trust/privacy, capability или data-egress boundary запрещён.
+- Current runtime не реализует этот contract. Конкретный compliant auth/transport и lifecycle
+  остаются research/design work; неподтверждённый Web-session proxy не становится Target по
+  умолчанию.
+
 ## 1) Канонические роли режимов
 
 1. Ask = **stateless** (current `implemented`).

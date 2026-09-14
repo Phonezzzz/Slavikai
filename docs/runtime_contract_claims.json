@@ -131,6 +131,20 @@
       "summary": "Target architecture accepts lifecycle completion only after policy-selected verification and acceptance for the exact task/result/artifact revision; current verifier paths are partial evidence mechanisms."
     },
     {
+      "id": "model_access.openai_subscription",
+      "scope": "model_access",
+      "status": "target",
+      "owner": "model_provider_access",
+      "version": 1,
+      "source": "docs/architecture/decisions/ADR-0001-subscription-backed-openai-access.md",
+      "verified_by": [
+        "docs/architecture/ARCH_CANON.md",
+        "docs/architecture/vision/north-star.md",
+        "docs/architecture/decisions/ADR-0001-subscription-backed-openai-access.md"
+      ],
+      "summary": "Target SlavikAI provides a first-class user-selected subscription-backed OpenAI/ChatGPT access route distinct from API-key billing, with explicit entitlement, trust and non-silent fallback boundaries; no current runtime implementation is claimed."
+    },
+    {
       "id": "memory.explicit_confirmation",
       "scope": "memory",
       "status": "implemented",
