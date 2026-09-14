@@ -4,6 +4,10 @@
 implementation не изменяется. Normative contract:
 [`../USER_INTERACTION_COMMUNICATION_CONTRACT.md`](../USER_INTERACTION_COMMUNICATION_CONTRACT.md).
 
+Verification/acceptance is defined separately in
+[`../VERIFICATION_ARCHITECTURE_CONTRACT.md`](../VERIFICATION_ARCHITECTURE_CONTRACT.md);
+communication consumes accepted verification outcomes and does not define them.
+
 **Scope:** lifecycle-facing communication для progress, status, waiting/approval,
 terminal results, delivery/replay и user interruption. Полный UI/chat protocol и wire
 schema остаются будущим implementation design.

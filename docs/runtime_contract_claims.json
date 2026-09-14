@@ -118,6 +118,19 @@
       "summary": "Target architecture derives typed user-facing communication artifacts from authoritative lifecycle state through a communication decision layer; current streaming/UIHub paths are not this contract."
     },
     {
+      "id": "runtime.verification.authoritative_acceptance",
+      "scope": "runtime",
+      "status": "target",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/VERIFICATION_ARCHITECTURE_CONTRACT.md",
+      "verified_by": [
+        "docs/architecture/VERIFICATION_ARCHITECTURE_RESEARCH.md",
+        "docs/architecture/VERIFICATION_ARCHITECTURE_CONTRACT.md"
+      ],
+      "summary": "Target architecture accepts lifecycle completion only after policy-selected verification and acceptance for the exact task/result/artifact revision; current verifier paths are partial evidence mechanisms."
+    },
+    {
       "id": "memory.explicit_confirmation",
       "scope": "memory",
       "status": "implemented",

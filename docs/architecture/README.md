@@ -5,6 +5,8 @@
 - `USER_INTERACTION_COMMUNICATION_CONTRACT.md` — target semantic contract пользовательской
   коммуникации; не является текущей runtime implementation.
 - `research/task-run-communication-audit.md` — evidence, alternatives и rationale.
+- `VERIFICATION_ARCHITECTURE_CONTRACT.md` — target verification/acceptance contract.
+- `VERIFICATION_ARCHITECTURE_RESEARCH.md` — current map, external research и alternatives.
 
 ---
 

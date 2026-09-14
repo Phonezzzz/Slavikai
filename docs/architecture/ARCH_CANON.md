@@ -185,7 +185,12 @@ operational lane. Final publication требует accepted terminal state, пр
 verification/acceptance, reconciled или явно раскрытых side effects, disclosure
 policy и текущей task/run revision. UIHub verdict: `reuse with modification`, не
 source of truth. Подробные artifact types, coalescing, retention и delivery protocol
-зафиксированы в research audit и требуют отдельного User Interaction design.
+зафиксированы в research audit и contract.
+
+Verification target contract: `VERIFICATION_ARCHITECTURE_CONTRACT.md`.
+`result_submitted` не является `completed`; required verification/acceptance принимает
+authoritative coordinator, а не worker, model, tool result или UI. Current verifier/check
+paths остаются partial evidence mechanisms, не единым target acceptance gate.
 
 ## 3) TaskPacket v2 (execution contract)
 
