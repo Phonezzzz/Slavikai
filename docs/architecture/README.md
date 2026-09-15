@@ -14,3 +14,7 @@
   promotion, provenance, revisions/conflicts, retrieval/projection, Vault и isolation.
 - `MEMORY_ARCHITECTURE_RESEARCH.md` — current Memory audit/data flow, external research,
   alternatives, threat analysis и evidence-based current-runtime verdicts.
+- `TASK_RUN_LIFECYCLE_CONTRACT.md` — target semantic contract identities, hierarchical lifecycle,
+  attempts/retries, cancellation, completion, recovery и background execution.
+- `TASK_RUN_LIFECYCLE_RESEARCH.md` — current lifecycle maps, external research, alternatives,
+  failure/recovery audit и evidence-based current-runtime verdicts.

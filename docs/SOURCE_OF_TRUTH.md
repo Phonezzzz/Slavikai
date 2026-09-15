@@ -59,6 +59,10 @@ Desktop approvals также имеют explicit principal subject, при эт�
 - Plan: current contract — read-only tools только через `ToolGateway`; write/exec запрещены.
 - Auto: Auto v1 через `AgentToolLoop -> ToolGateway -> verifier` является current;
   `Ask -> Plan -> Act` FSM является target.
+- Task/Run lifecycle: hierarchical authoritative state для logical task/run/subtask, immutable
+  transition history, explicit attempts/epochs, recoverable checkpoints и side-effect
+  reconciliation являются target. Current UI/session snapshots и process-local runners не
+  считаются реализацией этого contract.
 - Public OpenAI-compatible API: current `implemented` contract — `slavik` является
   единственным публичным proxy model id; `/v1/chat/completions` отклоняет любой другой ID до
   Agent/session resolution.

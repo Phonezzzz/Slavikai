@@ -106,7 +106,9 @@ Memory или external systems.
 - Act исполняет только `TaskPacket.steps`.
 - Act не меняет `scope/policy/budgets/verifier`.
 - Любое отклонение от packet-контракта => `STOP_TO_CHAT` с `stop_reason_code=REPLAN_REQUIRED`.
-- Retry через новый `packet_revision` в Plan, а не через импровизацию в Act.
+- Изменение execution contract проходит через новую Plan/packet revision, а не через импровизацию
+  worker в Act. Retry неизменённой operation/subtask создаёт новый explicit attempt identity и не
+  маскируется под Plan revision.
 
 ### Auto v1 (current)
 
@@ -231,6 +233,37 @@ alternatives, threat analysis, external sources и migration implications — в
 Это target capability. Current mutable canonical atoms, legacy Memory stores, direct
 `/end-session` promotion и текущий vector/context-slot pipeline не объявляются её реализацией.
 
+### Task / Run lifecycle architecture (target)
+
+SlavikAI должен поддерживать общий semantic lifecycle contract для logical task, task revision,
+task run, subtask, attempt, verification и background execution. Нормативная target-модель
+определена в [`TASK_RUN_LIFECYCLE_CONTRACT.md`](TASK_RUN_LIFECYCLE_CONTRACT.md); current audit,
+alternatives, failure/recovery analysis, external sources и migration implications — в
+[`TASK_RUN_LIFECYCLE_RESEARCH.md`](TASK_RUN_LIFECYCLE_RESEARCH.md).
+
+- Logical task, task revision, run, subtask и attempt имеют distinct stable identities. Retry не
+  создаёт новую logical task, а whole-run retry не переиспользует старый run ID.
+- Authoritative current state, immutable transition history, recoverable checkpoint и derived
+  UI/context/log projections являются разными layers. Session/UI/process state не lifecycle truth.
+- Result submission, verification, acceptance и completion различаются. Final model message,
+  artifact existence или worker `done` сами по себе не завершают task/run.
+- Cancellation — versioned authoritative transition. Cancellation/ownership epochs fencing'ят
+  late stale results и не позволяют resurrect cancelled/superseded work.
+- Tool/action timeout или crash может означать unknown external outcome. До reconcile/verify
+  unsafe retry и completion запрещены; exactly-once external execution не обещается.
+- Pause/wait/block имеют typed reasons и отличаются от cancellation/failure. Resume revalidates
+  task/plan revisions, policy, approvals, budgets, artifacts, ownership и pending side effects и
+  формирует новый bounded context вместо продолжения stale prompt.
+- Durable background execution принадлежит principal/task/run и переживает client disconnect;
+  process-local async handle, Agent instance, websocket или UI session не являются её contract.
+- Failure propagates между attempt/subtask/run/task только explicit trusted transition. Failed
+  attempt/run и budget exhaustion не считаются failed task или success автоматически.
+- Multi-agent ownership использует Coordination contract epochs; lifecycle events не раскрывают
+  private agent context. Completion не пишет Memory автоматически и не присваивает artifacts.
+
+Это target capability. Current UI `active_task`, Auto status snapshot, process-local cancellation,
+bare background tasks и implicit MWV attempts не объявляются её реализацией.
+
 ### Desktop (host execution profile)
 
 - Desktop tools имеют `execution_target=desktop` и не публикуются Chat/Agent tool snapshots.
@@ -256,6 +289,9 @@ alternatives, threat analysis, external sources и migration implications — в
 `TaskPacket` обязан содержать:
 
 - `task_id`
+- `task_revision`
+- `task_run_id`
+- `plan_revision`
 - `packet_revision`
 - `packet_hash`
 - `session_id`
@@ -270,6 +306,11 @@ alternatives, threat analysis, external sources и migration implications — в
 - `approvals`
 - `verifier`
 - `context`
+
+Current `TaskPacket` ещё не содержит lifecycle identities `task_revision`, `task_run_id` и
+`plan_revision` как first-class fields; это часть target, а не shipped guarantee. Attempt,
+ownership/cancellation epochs и action journal принадлежат lifecycle state, а не мутируются внутри
+packet worker'ом.
 
 `TaskStepContract`:
 
@@ -325,7 +366,9 @@ API:
 ## 6) Policy boundary (sandbox/index/yolo)
 
 - Policy/scope/budgets/verifier фиксируются в packet и становятся immutable для Act.
-- Enforcement строится по packet-policy snapshot, а не по “текущему состоянию”.
+- Packet policy snapshot является execution baseline; model/session prose не меняет его. Live
+  revocation или более строгая current policy имеет precedence перед новым side effect/resume и
+  приводит к typed pause/downgrade/cancel/replan transition.
 - Работа вне workspace root запрещается policy-check на исполнении шага.
 - Index-режим: явный, наблюдаемый, с отдельным контуром read/write.
 - Sandbox semantics относятся к Agent/Act. Desktop является отдельным explicit execution

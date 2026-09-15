@@ -131,6 +131,19 @@
       "summary": "Each model turn must receive a bounded policy-filtered projection of applicable authoritative state, evidence and isolated private working context, with separately governed Memory only when eligible; prompts and summaries are derived views, not runtime truth."
     },
     {
+      "id": "runtime.task_run.lifecycle_architecture",
+      "scope": "runtime",
+      "status": "target",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/ARCH_CANON.md",
+      "verified_by": [
+        "docs/architecture/ARCH_CANON.md",
+        "docs/architecture/TASK_RUN_LIFECYCLE_CONTRACT.md"
+      ],
+      "summary": "Logical task, task revision, task run, subtask and attempt must use hierarchical authoritative state with immutable transition history, explicit attempts and fencing epochs, recoverable checkpoints, typed completion/cancellation and external-side-effect reconciliation; current UI and process-local state do not implement this target."
+    },
+    {
       "id": "memory.explicit_confirmation",
       "scope": "memory",
       "status": "implemented",
