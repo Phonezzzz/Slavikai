@@ -49,6 +49,20 @@
   соблюдают этот канон: Plan использует только read-only inspection через `ToolGateway`,
   Act исполняет только packet.
 
+### Model access target boundary
+
+- Target обязательно включает отдельный first-class subscription-backed OpenAI/ChatGPT access
+  route согласно
+  [`decisions/ADR-0001-subscription-backed-openai-access.md`](decisions/ADR-0001-subscription-backed-openai-access.md).
+- Subscription/account entitlement не эквивалентен OpenAI API key, API credit или API billing.
+- Model family, Access Mode, auth identity, upstream transport, protocol adapter, capability
+  provenance/qualification и trust policy должны оставаться различимыми.
+- Route selection/fallback обязан быть observable и policy-controlled; silent переход через
+  billing, account, provider, trust/privacy, capability или data-egress boundary запрещён.
+- Current runtime не реализует этот contract. Конкретный compliant auth/transport и lifecycle
+  остаются research/design work; неподтверждённый Web-session proxy не становится Target по
+  умолчанию.
+
 ## 1) Канонические роли режимов
 
 1. Ask = **stateless** (current `implemented`).
@@ -131,6 +145,73 @@
   PID не подтверждает состояние исходного процесса.
 - При выходе из Desktop pending execution отменяется, once/session approvals очищаются.
 - Наблюдения tools, файлов, terminal и browser считаются untrusted data, не approvals.
+
+### Task/run lifecycle-facing communication (target boundary; current implementation partial)
+
+**Current, confirmed only:** the runtime exposes workflow status values
+`running/completed/failed/cancelled`, approval-related `waiting_approval` state,
+UIHub activity phases, token/auxiliary stream events and an auto-progress publisher.
+These are existing transport/workflow signals, not a semantic communication contract.
+There is currently no confirmed authoritative `progress_update` artifact, final-response
+publication gate, terminal acceptance gate, delivery acknowledgement or replay/idempotency
+mechanism. Everything below defines the target boundary; only the explicitly listed
+status/event plumbing is current and partial.
+
+- Authoritative task/run lifecycle state является source of truth для user-facing
+  communication. Communication layer не переводит task в terminal state: направление
+  зависимости — `authoritative lifecycle state -> communication decision`.
+- `progress_update` и `final_response` — разные semantic output classes. Token
+  streaming, tool-call events, Computer activity events и background notifications
+  не считаются progress update или вторым conversational channel без отдельного
+  semantic decision.
+- Progress update допускается только после semantic filtering существенного
+  user-visible изменения: intermediate result, long-running/background transition,
+  waiting/blocked/approval, recovery/replan, partial verification, material plan
+  change или degraded execution. Internal event не обязан становиться сообщением.
+- Two-phase communication означает два класса outputs, а не ровно два сообщения;
+  progress может отсутствовать у короткой задачи, но final для terminal outcome
+  остаётся отдельным semantic completion artifact.
+- Final response запрещён как success-completion claim до authoritative terminal
+  transition и требуемой verification/acceptance. Model `done`, artifact creation,
+  завершение generation/tool loop или отсутствие tool calls недостаточны.
+- Terminal user communication следует
+  [ADR-0002](decisions/ADR-0002-terminal-outcome-and-partial-result.md):
+  `completed/failed/cancelled/aborted` — причины, `full/accepted_partial/none`
+  — отдельное disposition. Частичная работа после failure/cancellation/abort
+  раскрывается после причины; `final_partial` допустим только для
+  `completed + accepted_partial`. `blocked`, `waiting_user_input` и
+  `waiting_approval` не являются completion.
+- Замена принятой ревизии следует
+  [ADR-0010](decisions/ADR-0010-supersession-lineage-without-separate-final.md):
+  статус и lineage без отдельного final старой ревизии только из-за замены.
+- Final readiness, completion transition, response generation, delivery и delivery
+  acknowledgement — отдельные concepts; crash/reconnect/retry требуют idempotent
+  delivery/replay semantics, которые пока остаются за пределами этого invariant.
+- Workers/siblings не публикуют user-facing progress напрямую. Orchestrator либо
+  отдельный future communication decision layer агрегирует typed coordination state,
+  deduplicates updates и публикует только accepted/reconciled information.
+- User interruption не означает автоматическую cancellation: clarification,
+  requirement change, cancel, status request и unrelated question должны иметь
+  различимую семантику; revision/pause/replan остаются будущим interaction design.
+
+Эти invariants являются lifecycle-facing target boundary, а не полным
+`USER_INTERACTION_COMMUNICATION_CONTRACT.md`. Полный wire schema, UI shape, transport
+и delivery mechanism остаются implementation-defined.
+
+Выбранная target architecture: `authoritative lifecycle state -> communication
+decision -> typed semantic communication artifact -> rendering/delivery/replay`.
+Rendered assistant text не обязан быть canonical record; token streaming и UIHub
+являются presentation/delivery surfaces, а Computer activity остаётся отдельным
+operational lane. Final publication требует accepted terminal state, применимой
+verification/acceptance, reconciled или явно раскрытых side effects, disclosure
+policy и текущей task/run revision. UIHub verdict: `reuse with modification`, не
+source of truth. Подробные artifact types, coalescing, retention и delivery protocol
+зафиксированы в research audit и contract.
+
+Verification target contract: `VERIFICATION_ARCHITECTURE_CONTRACT.md`.
+`result_submitted` не является `completed`; required verification/acceptance принимает
+authoritative coordinator, а не worker, model, tool result или UI. Current verifier/check
+paths остаются partial evidence mechanisms, не единым target acceptance gate.
 
 ## 3) TaskPacket v2 (execution contract)
 
