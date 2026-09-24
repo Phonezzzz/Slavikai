@@ -13,7 +13,7 @@ Current-runtime audit и его пределы находятся в
 Исходный research snapshot `6040640:docs/architecture/TASK_RUN_LIFECYCLE_RESEARCH.md`
 остаётся отдельным источником до точечной интеграции.
 
-Этот draft сверяется с [`ARCH_CANON.md`](ARCH_CANON.md),
+Этот accepted target contract сверяется с [`ARCH_CANON.md`](ARCH_CANON.md),
 [`USER_INTERACTION_COMMUNICATION_CONTRACT.md`](USER_INTERACTION_COMMUNICATION_CONTRACT.md),
 [`VERIFICATION_ARCHITECTURE_CONTRACT.md`](VERIFICATION_ARCHITECTURE_CONTRACT.md),
 [`ADR-0002`](decisions/ADR-0002-terminal-outcome-and-partial-result.md),
@@ -702,7 +702,8 @@ explanation — разные projections/retention domains. Sensitive tool paylo
 ADR-0002; supersession/lineage — ADR-0010; durable identity/final для обычного Ask — ADR-0012.
 Остаются open product questions:
 
-- какая authority принимает completion там, где verifier optional;
+- какие criteria/authority inputs разрешают acceptance, когда verifier optional
+  (authoritative terminal transition всегда принадлежит Task/Run Lifecycle);
 - какие classes tasks разрешены detached/background;
 - когда user follow-up является task revision, новым run или новой task;
 - retention policy transition history/checkpoints и user-visible run history;

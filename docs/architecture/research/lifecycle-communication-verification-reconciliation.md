@@ -4,10 +4,11 @@
 [`../decisions/ADR-0002-terminal-outcome-and-partial-result.md`](../decisions/ADR-0002-terminal-outcome-and-partial-result.md).
 Supersession is resolved separately by
 [`ADR-0010`](../decisions/ADR-0010-supersession-lineage-without-separate-final.md):
-status/lineage without a separate old-revision final. Согласованный draft
-находится в [`../TASK_RUN_LIFECYCLE_CONTRACT.md`](../TASK_RUN_LIFECYCLE_CONTRACT.md)
-со статусом «черновик согласования Target»; он ожидает cross-document acceptance и не является
-runtime claim. The audit itself is not a runtime claim.
+status/lineage without a separate old-revision final. The reconciled lifecycle
+contract is in
+[`../TASK_RUN_LIFECYCLE_CONTRACT.md`](../TASK_RUN_LIFECYCLE_CONTRACT.md) as an
+accepted Target contract (owner acceptance 2026-09-24), not a runtime
+implementation. The audit itself is not a runtime claim.
 **Scope:** compare the unintegrated lifecycle research/contract in Git snapshot
 `6040640` with the communication and verification target contracts on
 `architecture/target` at `e7cc2b0`. Production checkout observed at `920d5f3`.
@@ -61,14 +62,16 @@ These are semantic mismatches. Textual merge resolution cannot decide them.
    by preserving terminal cause in the class and disclosing accepted partial
    work as a separate result field.
 4. Verification emits its seven typed outcomes against exact revisions.
-   Coordinator/control plane alone accepts a full or partial result and commits
-   lifecycle transitions. `inconclusive`, `stale`, `blocked` and
-   `verifier_error` cannot be silently treated as `passed`.
+   Coordinator/control plane proposes a full or partial result; the
+   authoritative Task/Run Lifecycle alone accepts and commits lifecycle
+   transitions. `inconclusive`, `stale`, `blocked` and `verifier_error` cannot
+   be silently treated as `passed`.
 
 The product owner selected cause-first finals and user/preapproved-criteria
 partial acceptance. ADR-0002 records the complete mapping. The snapshot
-`6040640` still must not be integrated mechanically. Gate 0 accepted only
-the coarse system boundaries; the detailed lifecycle contract remains open.
+`6040640` still must not be integrated mechanically. Gate 0 accepted only the
+coarse system boundaries at audit time; the detailed lifecycle contract is now
+reconciled and accepted as Target.
 
 ## Section 4 follow-up: internal snapshot ambiguity
 
@@ -87,10 +90,9 @@ This is a contract correction, not evidence of current runtime behavior.
 
 ## Next evidence and acceptance gate
 
-- Reconcile the lifecycle contract from snapshot `6040640` with ADR-0002,
-  ADR-0010 and the updated communication/verification contracts after the
-  system-level boundary review and before section 4 runtime specification;
-  preserve the source snapshot.
+- Lifecycle contract reconciliation from snapshot `6040640` against ADR-0002,
+  ADR-0010 and the updated communication/verification contracts is complete;
+  the accepted Target contract is in `../TASK_RUN_LIFECYCLE_CONTRACT.md`.
 - Recheck the accepted Gate 0 boundaries and current runtime paths before
   writing a lifecycle implementation spec. Preserve the cross-task versus
   same-task replacement distinction and the run/task final boundary.
@@ -112,10 +114,10 @@ accepted. Current-path evidence and limits are in
 | §§20, 22–25 replan/communication | Version replacement and fence old attempts; retain historical artifacts/evidence. For `failed/cancelled/aborted` final, cause leads and accepted partial work follows. `final_partial` means only `completed + accepted_partial`; notification/progress is distinct from final. | One logical final per user-facing terminal revision, none merely for supersession or a terminal run whose task remains open. |
 | §26 open choices | Move resolved cause, partial-acceptance and supersession decisions to ADR references. Durable ordinary Ask is resolved by ADR-0012. Keep detached-task eligibility, retention and non-compensatable-effect reconciliation explicitly open until decided. | No implementation spec silently assumes an answer to a remaining product/authority question. |
 
-The first runtime slice can use one actual Plan/Act or Auto path after this
-contract passes the cross-document check. It must prove identity/revision and
-transition authority before adding durable waits, effect retry or final
-publication. The order is a dependency, not evidence that any slice exists.
+The first runtime slice can use one actual Plan/Act or Auto path now that this
+contract is an accepted Target. It must prove identity/revision and transition
+authority before adding durable waits, effect retry or final publication. The
+order is a dependency, not evidence that any slice exists.
 
 ### Current-path check for this redline
 
