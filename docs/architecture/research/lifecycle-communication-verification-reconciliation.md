@@ -4,9 +4,10 @@
 [`../decisions/ADR-0002-terminal-outcome-and-partial-result.md`](../decisions/ADR-0002-terminal-outcome-and-partial-result.md).
 Supersession is resolved separately by
 [`ADR-0010`](../decisions/ADR-0010-supersession-lineage-without-separate-final.md):
-status/lineage without a separate old-revision final. The lifecycle snapshot
-still needs a reconciled version before integration.
-The audit itself is not a runtime claim.
+status/lineage without a separate old-revision final. Согласованный draft
+находится в [`../TASK_RUN_LIFECYCLE_CONTRACT.md`](../TASK_RUN_LIFECYCLE_CONTRACT.md)
+со статусом «черновик согласования Target»; он ожидает cross-document acceptance и не является
+runtime claim. The audit itself is not a runtime claim.
 **Scope:** compare the unintegrated lifecycle research/contract in Git snapshot
 `6040640` with the communication and verification target contracts on
 `architecture/target` at `e7cc2b0`. Production checkout observed at `920d5f3`.
@@ -109,7 +110,7 @@ accepted. Current-path evidence and limits are in
 | §13 completion | Replace compressed `accepted/rejected/inconclusive` verifier step with the seven Verification outcomes. Separate verification, authorized full/partial result acceptance, run transition, **task-revision terminal decision**, final readiness and delivery. Bind `full/accepted_partial/none` to exact criteria/result/artifact revisions; only the user or preapproved criteria may accept incomplete scope. | `result_submitted` and verifier `passed` alone never produce `completed` or final; invalid cause/disposition combinations are rejected. |
 | §§14–17 failure/effects | Preserve failure level and effect uncertainty. A failed/cancelled/aborted run can retain accepted partial work without changing its cause; unknown side effects require reconciliation or an explicit unresolved disclosure before terminal projection. | Retry does not infer no effect from timeout; budget or policy stop does not become success. |
 | §§20, 22–25 replan/communication | Version replacement and fence old attempts; retain historical artifacts/evidence. For `failed/cancelled/aborted` final, cause leads and accepted partial work follows. `final_partial` means only `completed + accepted_partial`; notification/progress is distinct from final. | One logical final per user-facing terminal revision, none merely for supersession or a terminal run whose task remains open. |
-| §26 open choices | Move resolved cause, partial-acceptance and supersession decisions to ADR references. Keep durable ordinary Ask, detached-task eligibility, retention and non-compensatable-effect reconciliation explicitly open until decided. | No implementation spec silently assumes an answer to a remaining product/authority question. |
+| §26 open choices | Move resolved cause, partial-acceptance and supersession decisions to ADR references. Durable ordinary Ask is resolved by ADR-0012. Keep detached-task eligibility, retention and non-compensatable-effect reconciliation explicitly open until decided. | No implementation spec silently assumes an answer to a remaining product/authority question. |
 
 The first runtime slice can use one actual Plan/Act or Auto path after this
 contract passes the cross-document check. It must prove identity/revision and

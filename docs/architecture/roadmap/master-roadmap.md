@@ -57,6 +57,9 @@ domain handoffs remain open; the Lifecycle conflict blocks section 4 contract
 integration, not the accepted system map. No numbered section or Target runtime
 is marked Done by this milestone.
 
-**Next step:** reconcile Lifecycle snapshot `6040640` against ADR-0002/0010,
-then take each dependent section through Current State audit → Target/ТЗ →
-verified runtime PRs. Memory promotion OQ-MEM-01 remains assigned to section 3.
+**Next step:** the Lifecycle snapshot `6040640` is reconciled in
+`../TASK_RUN_LIFECYCLE_CONTRACT.md` against ADR-0002/0010/0012 with owner
+acceptance confirmed, and the lifecycle target claim is recorded in the claims
+registry. Next: take section 4 through Current State audit → Target/ТЗ →
+verified runtime slices, then each dependent section. Memory promotion
+OQ-MEM-01 remains assigned to section 3.

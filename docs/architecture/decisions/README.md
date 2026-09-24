@@ -30,3 +30,5 @@
   — замена принятой task revision создаёт status/lineage link без отдельного final старой ревизии.
 - [`ADR-0011-system-fact-ownership-and-cross-cutting-protocols.md`](ADR-0011-system-fact-ownership-and-cross-cutting-protocols.md)
   — каждый durable факт имеет одного logical owner; persistence/recovery/events и observability остаются сквозными протоколами.
+- [`ADR-0012-ordinary-ask-task-identity.md`](ADR-0012-ordinary-ask-task-identity.md)
+  — каждый обычный Ask получает сохраняемые task identity и semantic final; полный execution checkpoint требуется выборочно.

@@ -20,6 +20,7 @@ details remain in [gate-0-closure-matrix.md](gate-0-closure-matrix.md),
 | ADR-0008 | Separate request-scoped media operations are sufficient; no continuous voice/visual session owner is required. | Per-request consent, provenance, egress and artifact handoffs. |
 | ADR-0009 | External tool providers/extensions are Target scope, with permission and version governance separate from skills. | Provider identity, version/revocation, credentials and call-time policy contract. |
 | ADR-0010 | Superseded accepted revision receives status and lineage to its replacement, without a separate final solely for supersession. | Reconcile Lifecycle state model and publication rules with ADR-0002. |
+| ADR-0012 | Every accepted ordinary Ask gets a durable logical `task_id`, initial accepted task revision, run/attempt identity and one semantic final for history/replay; full durable execution checkpoint is enabled only where the mode/policy requires it. | Exact schema, retention duration and recovery executor. |
 
 These product choices are accepted in their ADRs. Detailed protocol, storage
 and PR breakdown belong to the dependent sections.

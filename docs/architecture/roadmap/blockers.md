@@ -7,8 +7,12 @@
 
 ## B-2026-09-24-01 — Lifecycle contract cannot be integrated as-is
 
-- **Status:** open; blocks Lifecycle contract integration and section 4 runtime
-  specification, not the remaining read-only Capability Discovery research.
+- **Status:** resolved. The reconciled draft
+  `../TASK_RUN_LIFECYCLE_CONTRACT.md` fixes the `aborted` terminal cause,
+  supersession-as-status/lineage (ADR-0010) and the run-completion versus
+  task-revision-final boundary. ADR-0012 resolves the ordinary-Ask durable
+  identity question. Owner acceptance of the reconciled contract and ADR-0012
+  was confirmed 2026-09-24; the lifecycle claim is recorded as `target`.
 - **Evidence:** snapshot `6040640:docs/architecture/TASK_RUN_LIFECYCLE_CONTRACT.md`
   omits `aborted` from logical-task terminal states, while accepted ADR-0002
   requires a user-facing administratively terminated task revision to retain
@@ -20,15 +24,21 @@
   sections 3 and 4 also differ on replacement within one logical task versus
   replacement by another task; section 13 jumps from run acceptance to final
   projection without an explicit logical-task terminal decision.
+- **Progress (2026-09-24):** reconciled draft now lives in
+  `../TASK_RUN_LIFECYCLE_CONTRACT.md` (draft, not runtime). Terminal causes are
+  `completed/failed/cancelled/aborted`; `superseded` is a status/lineage
+  transition; section 13 separates verification, acceptance, run transition,
+  task-revision terminal decision and final delivery; the ADR-0002 cause×
+  disposition mapping is reflected in section 22. Cross-check against
+  Communication and Verification contracts is consistent.
 - **Resolution:** complete the Gate 0 boundary review, then produce a
-  reconciled lifecycle contract before section 4 runtime work. Update
-  its task state machine and transition/communication mapping, including
-  same-task/cross-task supersession and run-versus-task final boundaries, then check the
-  Communication and Verification contracts and claims registry together.
-  Preserve the source snapshot; do not merge it mechanically.
+  reconciled lifecycle contract before section 4 runtime work (done as draft).
+  Remaining after Gate 0: write the section 4 runtime spec and implement the
+  verified identity/revision and transition slices.
+  The source snapshot is preserved; it must not be merged mechanically.
 - **Owner:** architecture/lifecycle workstream. The product rules are settled
-  in ADR-0002 and ADR-0010; the remaining work is a reconciled lifecycle
-  contract and cross-contract check, not another product preference.
+  in ADR-0002, ADR-0010 and ADR-0012; the remaining work is the section 4
+  runtime, not another product preference.
 
 ## B-2026-09-24-02 — Memory snapshot promotion authority needs reconciliation
 

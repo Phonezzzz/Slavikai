@@ -132,3 +132,37 @@ thresholds, runners and retry counts remain implementation-defined.
 - Human verification is valid only for subjective or unobservable criteria.
 - Verification budgets and minimum required profile need policy design.
 - Browser/UI screenshots are evidence, not truth by themselves.
+
+## 8. Current-code confirmation (2026-09-24)
+
+Production checkout `920d5f3` still defines `VerificationStatus` in
+`core/mwv/models.py` as exactly `PASSED = "passed"`, `FAILED = "failed"`,
+`ERROR = "error"`. `VerifierRunner`/`VerifierRuntime` return only those three
+values. `inconclusive`, `stale`, `not_applicable`, `blocked` and the
+`verifier_error`-versus-result-failure distinction are not modeled. This is the
+same gap recorded above; the seven-outcome target contract is therefore still a
+Target, not current runtime behavior.
+
+## 9. Implementation ТЗ — outcome and evidence model (section 6, PR 1)
+
+Before any authoritative acceptance transition, the runtime outcome model must
+match `VERIFICATION_ARCHITECTURE_CONTRACT.md` §4:
+
+- extend `VerificationStatus` to `passed / failed / inconclusive / stale /
+  not_applicable / blocked / verifier_error`; keep `error` only as an explicit
+  migration/compatibility alias if a concrete consumer still requires it;
+- add revision-bound evidence identity to `VerificationResult` (task/result/
+  artifact/criteria revision references) without letting verifier prose become
+  authoritative;
+- map `VerifierRunner`/`VerifierRuntime` terminations to the correct outcome:
+  nonzero subprocess → `failed`, timeout/unavailable → `verifier_error`, absent
+  or non-applicable check → `not_applicable` with reason, contradictory evidence
+  → `inconclusive`;
+- add mechanism tests proving `inconclusive`, `stale`, `blocked` and
+  `verifier_error` are never treated as `passed`, and that `blocked` requires
+  wait/escalation rather than silent success.
+
+Acceptance: `ok` remains true only for `passed`; no call site silently upgrades a
+new outcome to success; Auto/MWV/Desktop verification tests still pass after the
+enum change. Exact wire schema, storage and timeout/retry values remain
+implementation-defined.
