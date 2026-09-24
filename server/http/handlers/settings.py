@@ -802,6 +802,9 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
 
 
 async def handle_ui_tts_speak(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001

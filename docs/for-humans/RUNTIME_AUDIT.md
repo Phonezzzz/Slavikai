@@ -121,6 +121,14 @@ send и падает, если она пришла только после. Те
 - Регрессия: `test_ui_tts_speak_works_without_approval_in_safe_mode` + существующие
   success/failure тесты TTS.
 
+### Provider credential authority (ADR-0007)
+
+Прямой «Listen» обходит generic tool approval, но не отменяет credential authority:
+application-level OpenAI key по умолчанию разрешён только owner. `/ui/api/tts/speak`
+требует `_require_owner` до резолва/использования OpenAI key; member получает 403
+`owner_required`, TTS tool не вызывается. Owner path работает без tool approval.
+Отдельная credential delegation — отдельный credential/egress runtime slice.
+
 ### Подтверждённый дефект №3: TTS читал только первый абзац
 
 Симптом: аудио 31с вместо 84с. Причина: `TtsTool` использовал общий `HttpClient` с

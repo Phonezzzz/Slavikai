@@ -30,7 +30,7 @@ from server.ui_session_storage import (
     PersistedFolder,
     PersistedSession,
 )
-from tests.ui_api.fakes import DummyAgent
+from tests.ui_api.fakes import DummyAgent, FakeTtsTool
 
 
 class StubAccessVerifier:
@@ -597,3 +597,66 @@ def test_workspace_index_uses_principal_vector_store(
         memory_root=memory_root,
     )
     assert captured_paths == [owner.vectors_db, member.vectors_db]
+
+
+def test_ui_tts_speak_requires_owner_for_application_key(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    audio_dir = tmp_path / "sandbox" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = audio_dir / "tts_test.mp3"
+    audio_path.write_bytes(b"fake-mp3")
+    monkeypatch.setattr(
+        "server.http.handlers.settings._SANDBOX_AUDIO_ROOT",
+        audio_dir.resolve(),
+    )
+
+    async def run() -> None:
+        auth_config = HttpAuthConfig(
+            api_token="automation-token",
+            browser_auth_mode="cloudflare",
+            cloudflare_access_issuer="https://example.cloudflareaccess.com",
+            cloudflare_access_aud="application-aud",
+            owner_email="owner@example.com",
+        )
+        verifier = StubAccessVerifier(
+            {
+                "owner-token": VerifiedAccessClaims(email="owner@example.com"),
+                "member-token": VerifiedAccessClaims(email="member@example.com"),
+            }
+        )
+        app = create_app(
+            agent=DummyAgent(),
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=auth_config,
+            cloudflare_access_verifier=verifier,
+            desktop_policy_store=DesktopPolicyStore(tmp_path / "desktop-approvals.json"),
+        )
+        fake_tts = FakeTtsTool(audio_path=audio_path)
+        app["tts_tool"] = fake_tts
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            member_resp = await client.post(
+                "/ui/api/tts/speak",
+                headers={"Cf-Access-Jwt-Assertion": "member-token"},
+                json={"text": "Привет, мир"},
+            )
+            assert member_resp.status == 403
+            member_body = await member_resp.json()
+            assert member_body["error"]["code"] == "owner_required"
+            assert fake_tts.last_args is None
+
+            owner_resp = await client.post(
+                "/ui/api/tts/speak",
+                headers={"Cf-Access-Jwt-Assertion": "owner-token"},
+                json={"text": "Привет, мир"},
+            )
+            assert owner_resp.status == 200
+            assert fake_tts.last_args is not None
+            assert await owner_resp.read() == b"fake-mp3"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
