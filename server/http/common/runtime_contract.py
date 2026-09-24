@@ -136,6 +136,8 @@ class AgentProtocol(Protocol):
         name: str,
         args: dict[str, JSONValue] | None = None,
         raw_input: str | None = None,
+        *,
+        confirmed_decision: bool = False,
     ) -> ToolResult: ...
 
     def build_memory_save_preview(

@@ -182,6 +182,7 @@ export function useSessionTransport({
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
   const [toolStreamActivity, setToolStreamActivity] = useState<ToolActivity[]>([]);
   const toolStreamActivityRef = useRef<ToolActivity[]>([]);
+  const streamWarningActiveRef = useRef(false);
 
   const clearConversationState = () => {
     setChatMessages([]);
@@ -501,17 +502,16 @@ export function useSessionTransport({
     };
     const encodedSessionId = encodeURIComponent(selectedConversation);
     const chatEventSource = new EventSource(`/ui/api/chat/events/${encodedSessionId}`);
-    let streamErrorReported = false;
     chatEventSource.onopen = () => {
-      if (streamErrorReported) {
-        streamErrorReported = false;
+      if (streamWarningActiveRef.current) {
+        streamWarningActiveRef.current = false;
         onStatusMessage(null);
       }
     };
     chatEventSource.onmessage = handleEventMessage;
     chatEventSource.onerror = () => {
-      if (!streamErrorReported) {
-        streamErrorReported = true;
+      if (!streamWarningActiveRef.current) {
+        streamWarningActiveRef.current = true;
         onStatusMessage(
           'Live update connection lost; the answer may appear at once instead of streaming.',
         );
@@ -591,6 +591,7 @@ export function useSessionTransport({
       setToolStreamActivity([]);
       toolStreamActivityRef.current = [];
       await loadSessions();
+      streamWarningActiveRef.current = false;
       onStatusMessage(extractGenerationErrorMessage(responsePayload));
       if (forceCanvasForRequest) {
         consumeForceCanvasNext();
@@ -598,6 +599,7 @@ export function useSessionTransport({
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send message.';
+      streamWarningActiveRef.current = false;
       onStatusMessage(message);
       setPendingUserMessage(null);
       setPendingSessionId(null);
@@ -626,10 +628,12 @@ export function useSessionTransport({
       }
       setChatStreamingState(null);
       setSending(false);
+      streamWarningActiveRef.current = false;
       onStatusMessage(null);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to stop generation.';
+      streamWarningActiveRef.current = false;
       onStatusMessage(message);
       return false;
     } finally {

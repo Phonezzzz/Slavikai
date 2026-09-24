@@ -154,8 +154,10 @@ class DummyAgent:
         name: str,
         args: dict[str, JSONValue] | None = None,
         raw_input: str | None = None,
+        *,
+        confirmed_decision: bool = False,
     ) -> ToolResult:
-        del args, raw_input
+        del args, raw_input, confirmed_decision
         return ToolResult.failure(f"Инструмент {name} не поддерживается в тестовом агенте")
 
 
@@ -176,7 +178,10 @@ class TtsAgent(DummyAgent):
         name: str,
         args: dict[str, JSONValue] | None = None,
         raw_input: str | None = None,
+        *,
+        confirmed_decision: bool = False,
     ) -> ToolResult:
+        del confirmed_decision
         if name != "tts":
             return super().call_tool(name, args=args, raw_input=raw_input)
         self.last_tts_args = dict(args or {})

@@ -30,7 +30,7 @@ from server.ui_session_storage import (
     PersistedFolder,
     PersistedSession,
 )
-from tests.ui_api.fakes import DummyAgent, FakeTtsTool
+from tests.ui_api.fakes import DummyAgent, TtsAgent
 
 
 class StubAccessVerifier:
@@ -626,15 +626,14 @@ def test_ui_tts_speak_requires_owner_for_application_key(
                 "member-token": VerifiedAccessClaims(email="member@example.com"),
             }
         )
+        tts_agent = TtsAgent(audio_path=audio_path)
         app = create_app(
-            agent=DummyAgent(),
+            agent=tts_agent,
             ui_storage=InMemoryUISessionStorage(),
             auth_config=auth_config,
             cloudflare_access_verifier=verifier,
             desktop_policy_store=DesktopPolicyStore(tmp_path / "desktop-approvals.json"),
         )
-        fake_tts = FakeTtsTool(audio_path=audio_path)
-        app["tts_tool"] = fake_tts
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
@@ -646,7 +645,7 @@ def test_ui_tts_speak_requires_owner_for_application_key(
             assert member_resp.status == 403
             member_body = await member_resp.json()
             assert member_body["error"]["code"] == "owner_required"
-            assert fake_tts.last_args is None
+            assert tts_agent.last_tts_args is None
 
             owner_resp = await client.post(
                 "/ui/api/tts/speak",
@@ -654,7 +653,7 @@ def test_ui_tts_speak_requires_owner_for_application_key(
                 json={"text": "Привет, мир"},
             )
             assert owner_resp.status == 200
-            assert fake_tts.last_args is not None
+            assert tts_agent.last_tts_args is not None
             assert await owner_resp.read() == b"fake-mp3"
         finally:
             await client.close()

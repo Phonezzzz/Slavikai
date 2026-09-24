@@ -323,9 +323,12 @@ deploy:
 	if [[ -f "$(PROD_APP_PID_FILE)" ]]; then \
 		pid="$$(cat "$(PROD_APP_PID_FILE)")"; \
 		if kill -0 "$$pid" 2>/dev/null; then \
-			echo "Already deployed: pid=$$pid on $(DEPLOY_HOST):$(DEPLOY_PORT)"; \
+			echo "ERROR: production process is still running (pid=$$pid on $(DEPLOY_HOST):$(DEPLOY_PORT))."; \
+			echo "A new checkout cannot be rolled out while the old process is alive."; \
+			echo "Stop it first (make down-prod / make down / sudo systemctl stop slavikai),"; \
+			echo "then re-run 'make deploy' to perform the rollout."; \
 			echo "Logs: $(PROD_APP_LOG_FILE)  (make logs-prod)"; \
-			exit 0; \
+			exit 1; \
 		fi; \
 		echo "Removing stale pid file $(PROD_APP_PID_FILE)"; \
 		rm -f "$(PROD_APP_PID_FILE)"; \

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from config.shell_config import DEFAULT_SHELL_CONFIG_PATH, load_shell_config
 from shared.command_safety import is_hard_unsafe_command as _is_unsafe_shell_command
 from shared.models import JSONValue, ToolRequest, ToolResult
+from tools.shell_tool import _validate_args as _validate_shell_args
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -126,6 +127,9 @@ class TerminalTool:
             args = shlex.split(command)
         except ValueError as exc:
             return ToolResult.failure(f"Ошибка парсинга команды: {exc}")
+        validation_error = _validate_shell_args(args, set(cfg.allowed_commands))
+        if validation_error:
+            return ToolResult.failure(validation_error)
 
         if cwd_mode == "session_root":
             cwd = workspace_root

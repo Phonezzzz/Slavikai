@@ -690,9 +690,15 @@ class AgentToolsMixin:
         name: str,
         args: dict[str, JSONValue] | None = None,
         raw_input: str | None = None,
+        *,
+        confirmed_decision: bool = False,
     ) -> ToolResult:
         request = ToolRequest(name=name, args=args or {})
-        return self._call_tool_logged(raw_input or f"tool:{name}", request)
+        return self._call_tool_logged(
+            raw_input or f"tool:{name}",
+            request,
+            confirmed_decision=confirmed_decision,
+        )
 
     def _call_tool_logged(
         self,

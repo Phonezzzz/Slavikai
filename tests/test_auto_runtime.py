@@ -5,7 +5,7 @@ import pytest
 import core.auto_runtime as auto_runtime
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
 from core.auto_agent import AutoAgent
-from core.mwv.models import VerificationResult, VerificationStatus
+from core.mwv.models import StopReasonCode, VerificationResult, VerificationStatus
 from core.skills.index import SkillResolution
 from core.skills.models import SkillEntry
 from core.tool_gateway import ToolGateway
@@ -306,7 +306,7 @@ def test_auto_success_text_excludes_service_report(monkeypatch) -> None:  # noqa
     assert "auto v1 final" in outcome.text
 
 
-def test_auto_v1_recovery_from_failed_tool_call_is_not_worker_failed(
+def test_auto_v1_failed_tool_call_without_recovery_is_worker_failed(
     monkeypatch,
     tmp_path,
 ) -> None:  # noqa: ANN001
@@ -324,16 +324,85 @@ def test_auto_v1_recovery_from_failed_tool_call_is_not_worker_failed(
             run_root_override=run_root,
         )
 
-    assert outcome.status == AutoRunStatus.COMPLETED
+    assert outcome.status == AutoRunStatus.FAILED_WORKER
+    assert outcome.stop_reason_code == StopReasonCode.WORKER_FAILED
     assert isinstance(agent._brain, _RecoveryToolLoopBrain)
     assert agent._brain.calls == 2
     coders = agent.last_auto_state.get("coders")
     assert isinstance(coders, list)
     assert coders[0]["tool"] == "fail_tool"
     assert coders[0]["status"] == "failed"
-    verifier = agent.last_auto_state.get("verifier")
-    assert isinstance(verifier, dict)
-    assert verifier.get("status") == VerificationStatus.PASSED.value
+
+
+class _CorrectiveRecoveryBrain:
+    supports_native_tools = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, messages, config=None, tools=None):  # noqa: ANN001
+        del config, tools
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResult(
+                text="call fail_tool",
+                tool_calls=[ToolCall(id="c1", name="fail_tool", arguments={})],
+            )
+        if self.calls == 2:
+            assert messages[-1].role == "tool"
+            return LLMResult(
+                text="call ok_tool",
+                tool_calls=[ToolCall(id="c2", name="ok_tool", arguments={})],
+            )
+        return LLMResult(text="done after corrective action")
+
+
+class _CorrectiveRecoveryAgent(_FakeAgent):
+    def __init__(self) -> None:
+        super().__init__(brain_text="")
+        self._brain = _CorrectiveRecoveryBrain()
+        self.tool_registry = ToolRegistry()
+        self.tool_registry.register(
+            "fail_tool",
+            lambda request: ToolResult.failure("boom"),
+            description="Always fails",
+            parameters_schema={"type": "object", "properties": {}, "required": []},
+        )
+        self.tool_registry.register(
+            "ok_tool",
+            lambda request: ToolResult.success({"ok": True}),
+            description="Corrective success",
+            parameters_schema={"type": "object", "properties": {}, "required": []},
+        )
+
+    def _build_tool_gateway(self):
+        return ToolGateway(self.tool_registry)
+
+
+def test_auto_v1_recovery_with_corrective_tool_call_is_completed(
+    monkeypatch,
+    tmp_path,
+) -> None:  # noqa: ANN001
+    agent = _CorrectiveRecoveryAgent()
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)  # type: ignore[arg-type]
+    run_root = tmp_path / "runtime"
+    run_root.mkdir(parents=True, exist_ok=True)
+    (run_root / "Makefile").write_text("check:\n\t@true\n", encoding="utf-8")
+    monkeypatch.setattr(auto_runtime, "VerifierRuntime", _PassingVerifierRuntime)
+
+    with workspace_root_context(run_root):
+        outcome = orchestrator.run_v1(
+            "inspect workspace",
+            skill_resolution=_skill_resolution(),
+            run_root_override=run_root,
+        )
+
+    assert outcome.status == AutoRunStatus.COMPLETED
+    assert agent._brain.calls == 3
+    coders = agent.last_auto_state.get("coders")
+    assert isinstance(coders, list)
+    assert coders[0]["status"] == "failed"
+    assert coders[1]["status"] == "completed"
 
 
 def test_auto_runtime_returns_conversation_without_forcing_tool_action(tmp_path) -> None:

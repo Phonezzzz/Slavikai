@@ -8,16 +8,19 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
 from config.memory_config import MemoryConfig
-from config.tts_config import TtsConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
+from core.approval_policy import ApprovalRequired
 from server import http_api as api
 from server.agent_provider import AgentApplyFailure, ScopedAgentProvider
-from server.http.common.auth import _require_owner
+from server.http.common.auth import _require_owner, _resolve_ui_session_id_for_principal
 from server.http.common.responses import error_response, json_response
-from server.http.common.runtime_contract import RuntimeModelStateProtocol
-from shared.models import JSONValue, ToolRequest
-from tools.http_client import HttpClient, HttpConfig
-from tools.tts_tool import TtsTool
+from server.http.common.runtime_contract import (
+    RuntimeModelStateProtocol,
+    _agent_scope,
+    _resolve_agent,
+)
+from server.ui_hub import UIHub
+from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 _SANDBOX_AUDIO_ROOT = Path("sandbox/audio").resolve()
@@ -855,20 +858,27 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
 
-    tts_tool = request.app.get("tts_tool")
-    if tts_tool is None:
-        api_key = api._resolve_provider_api_key("openai")
-        if not api_key:
-            return error_response(
-                status=409,
-                message="Не задан OpenAI API key для TTS (env или Settings → API Keys).",
-                error_type="configuration_error",
-                code="tts_unavailable",
-            )
-        tts_tool = TtsTool(
-            http_client=HttpClient(HttpConfig(max_bytes=20_000_000)),
-            config=TtsConfig(api_key=api_key),
+    hub = cast(UIHub, request.app["ui_hub"])
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_id is None:
+        return session_error or error_response(
+            status=401,
+            message="Unauthorized.",
+            error_type="invalid_request_error",
+            code="unauthorized",
         )
+    agent = await _resolve_agent(request, session_id)
+    if agent is None:
+        return error_response(
+            status=400,
+            message="Модель сессии не выбрана.",
+            error_type="configuration_error",
+            code="model_not_found",
+        )
+    approval_scope = _agent_scope(request, session_id)
+    session_store = request.app["session_store"]
+    approved_categories = await session_store.get_categories(approval_scope)
+    agent.set_session_context(session_id, approved_categories)
 
     args: dict[str, JSONValue] = {"text": text_raw.strip()}
     voice_value = (
@@ -884,7 +894,19 @@ async def handle_ui_tts_speak(request: web.Request) -> web.Response:
     if isinstance(format_raw, str) and format_raw.strip():
         args["format"] = format_raw.strip().lower()
 
-    result = tts_tool.handle(ToolRequest(name="tts", args=args))
+    try:
+        result = agent.call_tool(
+            "tts",
+            args,
+            raw_input="ui:tts",
+        )
+    except ApprovalRequired:
+        return error_response(
+            status=409,
+            message="Для TTS требуется подтверждение.",
+            error_type="invalid_request_error",
+            code="approval_required",
+        )
     if not result.ok:
         return _tts_error_response(result.error or "TTS tool failed.")
 

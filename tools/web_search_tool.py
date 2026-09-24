@@ -212,10 +212,6 @@ class WebSearchTool:
         env_key = os.getenv(key_env)
         if env_key:
             return env_key
-        # Совместимость: ключ мог быть положен в старую переменную.
-        env_key = os.getenv("SERPER_API_KEY")
-        if env_key:
-            return env_key
         key_path = Path("config/web_search_api_key.txt")
         if key_path.exists():
             return key_path.read_text(encoding="utf-8").strip()

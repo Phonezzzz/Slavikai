@@ -1,14 +1,40 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
 from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HTTPClient")
+
+_SENSITIVE_PARAM_RE = re.compile(
+    r"(?i)^(api_?key|key|token|secret|password|authorization|access_token)$"
+)
+_URL_RE = re.compile(r"https?://[^\s\"']+")
+
+
+def _redact_url(url: str) -> str:
+    try:
+        parts = urlsplit(url)
+        if not parts.query:
+            return url
+        redacted = [
+            (key, "[REDACTED]" if _SENSITIVE_PARAM_RE.match(key) else value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        ]
+        query = urlencode(redacted)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    except Exception:  # noqa: BLE001
+        return url
+
+
+def _redact_text(text: str) -> str:
+    return _URL_RE.sub(lambda match: _redact_url(match.group(0)), text)
 
 
 @dataclass
@@ -56,14 +82,23 @@ class HttpClient:
             status = response.status_code
             response.raise_for_status()
         except requests.Timeout:
-            logger.error("HTTP %s timeout for %s", method, url)
+            logger.error("HTTP %s timeout for %s", method, _redact_url(url))
             return HttpResult(ok=False, data=None, status_code=None, error="timeout")
         except requests.RequestException as exc:
-            logger.error("HTTP %s error for %s: %s", method, url, exc)
-            return HttpResult(ok=False, data=None, status_code=None, error=str(exc))
+            redacted_url = _redact_url(url)
+            redacted_error = _redact_text(str(exc))
+            logger.error("HTTP %s error for %s: %s", method, redacted_url, redacted_error)
+            return HttpResult(ok=False, data=None, status_code=None, error=redacted_error)
         except Exception as exc:  # noqa: BLE001
-            logger.error("HTTP %s unexpected error for %s: %s", method, url, exc)
-            return HttpResult(ok=False, data=None, status_code=None, error=str(exc))
+            redacted_url = _redact_url(url)
+            redacted_error = _redact_text(str(exc))
+            logger.error(
+                "HTTP %s unexpected error for %s: %s",
+                method,
+                redacted_url,
+                redacted_error,
+            )
+            return HttpResult(ok=False, data=None, status_code=None, error=redacted_error)
 
         body_raw, truncated = self._read_limited(response, as_bytes=as_bytes)
         meta: dict[str, JSONValue] = {"truncated": truncated, "status_code": status}
@@ -74,7 +109,11 @@ class HttpClient:
             else:
                 body_str = cast(str, body_raw)
             if truncated:
-                logger.error("HTTP %s JSON body truncated for %s (payload too large)", method, url)
+                logger.error(
+                    "HTTP %s JSON body truncated for %s (payload too large)",
+                    method,
+                    _redact_url(url),
+                )
                 return HttpResult(
                     ok=False,
                     data=None,
@@ -84,7 +123,11 @@ class HttpClient:
                     meta=meta,
                 )
             if len(body_str.encode("utf-8")) > self.config.max_json_bytes:
-                logger.error("HTTP %s JSON exceeds max_json_bytes for %s", method, url)
+                logger.error(
+                    "HTTP %s JSON exceeds max_json_bytes for %s",
+                    method,
+                    _redact_url(url),
+                )
                 return HttpResult(
                     ok=False,
                     data=None,
@@ -98,7 +141,12 @@ class HttpClient:
 
                 parsed = json.loads(body_str)
             except Exception as exc:  # noqa: BLE001
-                logger.error("HTTP %s JSON decode error for %s: %s", method, url, exc)
+                logger.error(
+                    "HTTP %s JSON decode error for %s: %s",
+                    method,
+                    _redact_url(url),
+                    _redact_text(str(exc)),
+                )
                 return HttpResult(
                     ok=False,
                     data=None,

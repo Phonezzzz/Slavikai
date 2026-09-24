@@ -140,7 +140,7 @@ export function deriveComputerStatus(input: {
   autoState: AutoState | null;
   decision: UiDecision | null | undefined;
 }): ComputerStatus {
-  const { activePlan, activeTask, autoState, decision } = input;
+  const { mode, activePlan, activeTask, autoState, decision } = input;
 
   if (decision && decision.status === 'pending' && decision.blocking) {
     return buildStatus(
@@ -154,7 +154,7 @@ export function deriveComputerStatus(input: {
     );
   }
 
-  if (autoState && autoState.status !== 'idle') {
+  if (mode === 'auto' && autoState && autoState.status !== 'idle') {
     return buildStatus(
       AUTO_STATUS_MAP[autoState.status] ?? 'running',
       autoState.goal?.trim() || null,

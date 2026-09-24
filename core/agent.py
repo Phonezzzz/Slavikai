@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -323,6 +324,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.last_execution_summary: str | None = None
         self.last_auto_state: dict[str, JSONValue] | None = None
         self._auto_progress_events: list[dict[str, JSONValue]] = []
+        self._auto_progress_lock = threading.Lock()
         self.workspace_file_path: str | None = None
         self.workspace_file_content: str | None = None
         self.workspace_selection: str | None = None
@@ -334,12 +336,14 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         return answer
 
     def _record_auto_progress(self, state: dict[str, JSONValue]) -> None:
-        self._auto_progress_events.append(dict(state))
+        with self._auto_progress_lock:
+            self._auto_progress_events.append(dict(state))
 
     def drain_auto_progress_events(self) -> list[dict[str, JSONValue]]:
-        events = [dict(item) for item in self._auto_progress_events]
-        self._auto_progress_events.clear()
-        return events
+        with self._auto_progress_lock:
+            events = [dict(item) for item in self._auto_progress_events]
+            self._auto_progress_events.clear()
+            return events
 
     def make_computer_runtime(self) -> AgentComputerRuntime:
         cfg = resolve_computer_backend_config()

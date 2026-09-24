@@ -140,3 +140,15 @@ def test_web_search_serpapi_retries_once_on_timeout() -> None:
     assert result.ok
     assert fake_http.calls == 2
     assert len(result.data.get("results") or []) == 1
+
+
+def test_serpapi_does_not_fall_back_to_serper_key(monkeypatch) -> None:
+    monkeypatch.setenv("SERPAPI_API_KEY", "")
+    monkeypatch.setenv("SERPER_API_KEY", "serper-secret")
+    fake_http = _SerpApiFakeHttp()
+    config = WebSearchConfig(provider="serpapi", api_key=None)
+    tool = WebSearchTool(config=config, http_client=fake_http)
+    result = tool.handle(ToolRequest(name="web", args={"query": "hello"}))
+    assert not result.ok
+    assert "SERPAPI_API_KEY" in (result.error or "")
+    assert fake_http.calls == []
