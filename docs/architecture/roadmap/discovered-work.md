@@ -5,6 +5,69 @@
 - **Не сюда:** committed roadmap items, дубли.
 - **Обновлять:** при обнаружении новой работы или переводе/удалении элемента.
 
+## DW-2026-09-24-01 — Audit authorization of local Ollama host launch
+
+- **Status:** discovered audit work; no vulnerability classification or runtime
+  change yet. Assign to sections 8/9/18/19 after Gate 0, unless a targeted
+  security review establishes an earlier blocking need.
+- **Evidence:** `server/http/routes.py` exposes
+  `POST /ui/api/local/ollama/start`; `auth_gate_middleware` authenticates
+  `/ui/api/` requests, and `server/http/handlers/sessions.py::handle_ui_local_ollama_start`
+  does not inspect owner/member role before `_start_local_ollama_runtime`
+  potentially invokes `OLLAMA_BIN serve` on the host. This is a source-path
+  observation, not a live authorization test or a demonstrated exploit.
+- **Audit question:** which authenticated roles may start a host inference
+  process, under which resource/policy scope, and does the current route enforce
+  that contract? Check related tests and deployment auth modes before any fix.
+
+## DW-2026-09-24-02 — Preapproved autonomous work initiation
+
+- **Status:** accepted Target scope in ADR-0003 and owner boundary in ADR-0004;
+  detailed rule/firing contract remains open (OQ-CD-04). This is a new
+  capability beyond the 20 numbered headings;
+  schedule its audit/spec/runtime PRs after Gate 0 establishes the remaining
+  system dependencies.
+- **Required audit:** current initiation paths, principal/rule authority,
+  schedule and external-event sources, missed/duplicate firing, overlap,
+  revocation, resource reservation and user visibility.
+- **Implementation boundary:** registration/firing proposes task creation;
+  lifecycle accepts the task, background execution runs it, policy authorizes
+  effects and communication publishes progress/final. No runtime-completion
+  claim follows from the ADR or current message-triggered `RuleEngine`.
+
+## DW-2026-09-24-03 — Audit and enforce owner provider-key delegation
+
+- **Status:** Target policy accepted in ADR-0007; Current State gap identified
+  from selected source paths, not a live exploit verdict. Sections 8/9/18/19
+  own full audit and implementation planning after Gate 0.
+- **Evidence:** `server/http/common/ui_settings.py::_resolve_provider_api_key`
+  takes provider/key source but no principal or delegation. Inspected UI chat
+  and STT paths call this application-level resolver. Owner-only Settings
+  mutation does not establish owner-only key use. No key values were read.
+- **Required audit:** every model, embeddings, STT/TTS and extension egress
+  path; env/file key ownership, member/automation identity propagation,
+  explicit delegation scope/expiry/revocation, route qualification, tests and
+  safe rollout. Do not implement a global allow/deny toggle or change live
+  credentials without the accepted detailed contract.
+
+## DW-2026-09-24-04 — Audit direct media actions and artifact retention
+
+- **Status:** discovered Current State/Target gap from selected source paths;
+  no vulnerability classification or production change. Sections 5/7/8/9/16/19
+  own the complete audit after Gate 0.
+- **Evidence:** [media/extension/operations audit](../research/media-extension-operations-boundary-audit.md)
+  traces `/ui/api/stt/transcribe` calling a provider directly and
+  `/ui/api/tts/speak` calling `TtsTool.handle` directly, without a
+  `ToolGateway` call in either handler. TTS writes an audio file under
+  `sandbox/audio`; the selected path has no separate artifact identity or
+  retention decision. Authentication exists at ingress, but the handlers do
+  not inspect principal, role or per-request consent. No live side effect was
+  triggered by the audit.
+- **Required audit:** caller/credential/consent/egress rules, direct UI media
+  action authority, safe-mode behavior, file ownership/cleanup, replay and
+  result provenance. Decide how request-scoped media enters typed Tool
+  Execution and Artifact contracts without inventing a continuous session.
+
 ## Two-phase communication for long-running tasks
 
 - **Статус:** discovered requirement.

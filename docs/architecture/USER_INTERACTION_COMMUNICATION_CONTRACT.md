@@ -2,6 +2,11 @@
 
 **Status:** target architecture; not current runtime.
 
+Terminal-cause and accepted-result mapping is fixed by
+[`decisions/ADR-0002-terminal-outcome-and-partial-result.md`](decisions/ADR-0002-terminal-outcome-and-partial-result.md).
+Revision replacement without a separate old-revision final follows
+[`decisions/ADR-0010-supersession-lineage-without-separate-final.md`](decisions/ADR-0010-supersession-lineage-without-separate-final.md).
+
 **Source of truth:** this document defines the target semantic boundary for user-facing
 communication. Runtime/lifecycle state remains authoritative for task truth. Current
 evidence and alternatives are in
@@ -51,7 +56,8 @@ serialization and retry timing are implementation-defined.
 | `final_success` | Self-contained successful result | Accepted completion and required checks | Durable and replayable | One logical final per task revision |
 | `final_failure` | Self-contained terminal failure | Authoritative terminal failure | Durable and replayable | One logical final per revision |
 | `final_cancelled` | Self-contained terminal cancellation | Authoritative cancelled state | Durable and replayable | One logical final per revision |
-| `final_partial` | Self-contained incomplete result | Terminal outcome with incomplete scope | Durable and replayable | One logical final per revision |
+| `final_partial` | Self-contained accepted incomplete result | `completed` task revision with `accepted_partial` disposition | Durable and replayable | One logical final per revision |
+| `final_aborted` | Self-contained administrative/policy/recovery stop without domain-failure assertion | Authoritative terminal `aborted` task revision | Durable and replayable | One logical final per revision |
 | `notification` | Minimal detached/background alert or pointer | Notification policy | Durable pointer/status as policy requires | Optional; never replaces full final |
 
 These are semantic classes, not wire names or UI components. Each artifact has stable
@@ -99,8 +105,15 @@ corresponding terminal outcome and all applicable conditions hold:
 6. communication is generated against the current revision with stable identity.
 
 Worker `done`, model generation end, artifact existence, tool-loop end, no pending tool
-calls, UI state or progress prose never authorize final by themselves. `completed`,
-`failed`, `cancelled` and `partial` outcomes require corresponding final classes.
+calls, UI state or progress prose never authorize final by themselves. Terminal
+`completed`, `failed`, `cancelled` and `aborted` task revisions require the
+corresponding final class; `accepted_partial` is a separate result disposition,
+not a lifecycle state. `superseded` closes the old revision for execution with
+an explicit lineage/status transition. It is not a fifth terminal cause and
+does not publish a separate logical final merely because a new revision was
+accepted. The replacement may be shown as current-revision progress/status or
+explicit correction with both revision references. Previously delivered
+finals remain historical and are not rewritten.
 
 ## 6. Final, epistemic and outcome semantics
 
@@ -110,9 +123,13 @@ Progress is supplementary visibility, not required context for understanding fin
 
 Claims preserve qualifications such as verified, accepted, inferred, unresolved,
 disputed or partial. `final_failure` describes actual incomplete work, possible success,
-material cause and side-effect/artifact state. `final_partial` is first-class for budget
-exhaustion, policy-limited scope, mixed subtask outcomes, unavailable dependencies or
-user termination after an accepted usable result; it must not masquerade as success.
+material cause and side-effect/artifact state. An incomplete result may be accepted
+only by the authorized user or criteria explicitly approved by that user in advance.
+`final_partial` represents `completed + accepted_partial`; budget exhaustion,
+policy-limited scope, mixed subtask outcomes or unavailable dependencies do not imply
+acceptance. If a failed, cancelled or aborted task revision has accepted usable work,
+its final leads with that terminal cause and separately discloses the accepted
+partial result. It must not masquerade as success.
 
 ## 7. Waiting, clarification, approval and status
 
@@ -137,6 +154,8 @@ Interruption is classified as status, clarification answer, requirement change,
 correction, pause, cancel or unrelated message. A new user message does not implicitly
 cancel an active run. Requirement changes bind to task/plan revision, obsolete work and
 adaptive replan; final is generated only for the latest accepted revision.
+Supersession itself produces status/lineage, not an old-revision final; old
+effects and artifact refs retain their identity for reconciliation.
 
 Multiple concurrent runs are supported semantically: progress, final, cancel and status
 are task/run/revision scoped, with no cross-task mixing. A single `active_task`
@@ -151,6 +170,8 @@ pending and delivered/replayed without prescribing an enum or transport:
 - delivery retry reuses the same communication identity and cannot duplicate it;
 - delayed progress after accepted final is suppressed;
 - old-revision communication is suppressed or explicitly historical;
+- a superseded revision has an explicit old/new lineage projection without a
+  new final for the old revision; any prior final remains visible as history;
 - reconnect restores sufficient current representation: current wait/blocker, latest
   meaningful progress and terminal final/notification state, not necessarily raw events;
 - material correction is explicit/traceable through supersession/correction relation,

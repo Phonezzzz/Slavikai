@@ -5,6 +5,44 @@
 - **Не сюда:** уже отвеченные или решённые вопросы.
 - **Обновлять:** при появлении или закрытии вопроса.
 
+## OQ-CD-04 — Каков точный contract правил и firing автономных triggers?
+
+- **Контекст:** ADR-0003 принял в Target запуск новой работы по расписанию
+  или внешнему событию **только по заранее утверждённым пользователем правилам**.
+  ADR-0004 закрепил Work Initiation как владельца правил и firing history;
+  Lifecycle принимает или отклоняет task-creation intent.
+  План покрывал background continuation, но не эту отдельную границу.
+  Проверенные HTTP entry points начинают работу по UI/API запросу;
+  `core/rule_engine.py` сопоставляет правило с уже полученным user message и
+  меняет pre-generation instructions. Это не evidence наличия или отсутствия
+  иных trigger механизмов во всём deployment.
+- **Недостаёт:** точный contract регистрации/ревизии/отзыва правил, source и
+  principal binding, trigger scope/expiry, дедупликация, overlap/catch-up,
+  wakeup после restart, budget, task-creation acceptance и notification.
+- **Владелец:** Capability Discovery, Lifecycle, Identity/Policy, Event и
+  Background Architecture.
+- **Закрытие:** принятый подробный contract rule/firing identity, revalidation,
+  deduplicated task-creation intent, overlap/catch-up и crash reconciliation
+  с Lifecycle; owner boundary уже принят в ADR-0004.
+
+## OQ-MEM-01 — Совместима ли policy-based Memory promotion с запретом auto-updates?
+
+- **Контекст:** неинтегрированный Memory snapshot `f883893`, §5.3–5.4,
+  допускает automatic acceptance для узкого класса по explicit policy.
+  Действующий `docs/agent/DevRules.md` §11 запрещает auto-updates Memory в
+  runtime без явного approve, а `docs/SOURCE_OF_TRUTH.md` описывает текущий
+  `confirm`/`edit_and_confirm` для каждого сохранения. Это разные по статусу
+  источники; наличие snapshot не меняет current contract.
+- **Недостаёт:** установить, считается ли предварительно утверждённая
+  class/scope/source policy достаточным «явным approve», либо Target сохраняет
+  per-record confirmation. До решения нельзя интегрировать snapshot как
+  разрешение на автоматическую запись или реализовывать такой path.
+- **Владелец:** Memory Architecture, Policy/Approval и владелец продукта при
+  необходимости изменить обязательное правило.
+- **Закрытие:** одно непротиворечивое нормативное правило для promotion,
+  записанное в canonical docs/ADR; Current State и runtime claims остаются
+  отдельными от Target.
+
 ## Task / Run Lifecycle Audit — communication boundary
 
 **Статус research:** lifecycle-facing semantic findings зафиксированы; полный
@@ -164,16 +202,6 @@ conversational lane или превращать Computer activity events во в
 - **Владелец:** context/session, credentials и configuration persistence research.
 - **Закрытие:** lifecycle не допускает cross-principal/session leakage и определяет recovery
   после expiration, restart и account switch.
-
-## OQ-MA-11 — Является ли Local Inference Manager отдельным capability domain?
-
-- **Контекст:** reference skill демонстрирует control layer над hardware discovery, engine
-  selection, tuning, launch и verification, но не является model или inference engine.
-- **Недостаёт:** полная capability map, ownership относительно routing/resource/runtime
-  lifecycle и граница между recommendation, provisioning и continuous management.
-- **Владелец:** Capability Discovery.
-- **Закрытие:** domain boundary принята либо responsibilities распределены без потери единого
-  lifecycle owner.
 
 ## OQ-MA-12 — Может ли manager выбирать саму local model, а не только engine?
 

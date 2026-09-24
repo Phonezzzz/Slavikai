@@ -5,6 +5,47 @@
 - **Не сюда:** скопированное сырое содержимое источников.
 - **Обновлять:** при использовании нового источника.
 
+## Capability Discovery — 2026-09-24
+
+- [Anthropic, Building effective agents](https://www.anthropic.com/engineering/building-effective-agents):
+  workflow/agent distinction, orchestration patterns and stopping conditions;
+  primary engineering guidance, not a SlavikAI design mandate.
+- [OpenAI Agents SDK documentation](https://openai.github.io/openai-agents-python/):
+  example of separate tools, handoffs, guardrails, sessions, human review and
+  tracing concerns; primary documentation of that SDK, not runtime evidence
+  for SlavikAI.
+- [LangGraph persistence documentation](https://docs.langchain.com/oss/python/langgraph/persistence)
+  and [Temporal workflow execution documentation](https://docs.temporal.io/workflow-execution):
+  examples of checkpoint/durable execution semantics; primary documentation
+  of their respective runtimes, not a recommendation to adopt either one.
+- [LangGraph, Thinking in LangGraph](https://docs.langchain.com/oss/javascript/langgraph/thinking-in-langgraph):
+  primary documentation/example of node-boundary replay and application-level
+  idempotency/caching responsibilities; supports distinguishing checkpoints
+  from effect guarantees.
+- [Anthropic, Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents):
+  agent-quality evaluation concern; primary engineering guidance, distinct
+  from proof that one SlavikAI task met its acceptance criteria.
+- [OWASP, Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/):
+  threat categories around agent functionality, permissions and autonomy;
+  authoritative project guidance, not a finding against this repository.
+- [NIST AI RMF Core](https://airc.nist.gov/airmf-resources/airmf/5-sec-core/):
+  cross-cutting governance and risk mapping/measurement/management;
+  authoritative framework, not a product architecture template.
+- [Temporal Schedules developer guide](https://github.com/temporalio/documentation/blob/main/docs/develop/go/workflows/schedules.mdx)
+  and [Schedule policy API](https://typescript.temporal.io/api/interfaces/proto.temporal.api.schedule.v1.SchedulePolicies._Properties):
+  primary documentation of schedule identity, action, pause/trigger,
+  overlap, catch-up and failure policy; reference pattern for work initiation,
+  not a framework decision for SlavikAI.
+- [MCP tools specification, 2026-07-28](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/server/tools.mdx)
+  and [MCP Tasks extension](https://tasks.extensions.modelcontextprotocol.io/seps/2663-tasks-extension):
+  primary protocol sources for tool metadata trust and task-request
+  authorization; do not establish MCP adoption or SlavikAI runtime support.
+- [LiveKit AgentSession](https://docs.livekit.io/agents/logic/sessions/)
+  and [tool interruption behavior](https://docs.livekit.io/agents/logic/tools/definition/):
+  primary implementation docs for continuous media/turn state and the
+  distinction between interrupted speech and still-running tool work;
+  reference architecture, not SlavikAI product scope.
+
 ## Model access, protocol adapters and local inference — 2026-09-02
 
 Все источники ниже проверены по `README.md` текущей на момент доступа ветки `main` и

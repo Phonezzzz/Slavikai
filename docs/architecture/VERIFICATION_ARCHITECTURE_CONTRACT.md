@@ -2,6 +2,9 @@
 
 **Status:** target architecture; not current runtime.
 
+Result disposition and terminal communication follow
+[`decisions/ADR-0002-terminal-outcome-and-partial-result.md`](decisions/ADR-0002-terminal-outcome-and-partial-result.md).
+
 This contract defines how SlavikAI determines whether a result may be accepted by the
 authoritative lifecycle. It complements
 [`USER_INTERACTION_COMMUNICATION_CONTRACT.md`](USER_INTERACTION_COMMUNICATION_CONTRACT.md)
@@ -17,8 +20,10 @@ and [`VERIFICATION_ARCHITECTURE_RESEARCH.md`](VERIFICATION_ARCHITECTURE_RESEARCH
   The coordinator/control plane accepts completion, rework, failure, escalation or STOP.
 - Approval answers whether an action is permitted; verification answers what happened and
   whether criteria are met. Approval success is not execution success.
-- Required verification and acceptance are prerequisites for `final_success`; gaps may
-  yield `final_partial`, failure, waiting or escalation according to policy.
+- Required verification and acceptance are prerequisites for `final_success`.
+  Gaps may yield waiting, rework, failure, cancellation or abort; an
+  `accepted_partial` disposition requires user acceptance or preapproved
+  criteria, not merely an incomplete verification result.
 
 ## 2. Taxonomy and profiles
 
@@ -77,6 +82,10 @@ Semantic outcomes:
 
 Verifier error is not result failure. Inconclusive is not passed. Stale is not a valid
 acceptance basis. Blocked requires wait/escalation/STOP, not silent success.
+When an accepted task revision is superseded, its verification records remain
+historical evidence bound to that revision. They cannot accept the replacement
+revision's result without fresh revision-bound evaluation. Supersession status
+and lineage follow ADR-0010 and do not themselves publish a separate final.
 
 Retries distinguish rerunning a deterministic check, a new verifier attempt, reworking
 the result and creating a new result revision. Repetition does not itself increase
@@ -118,8 +127,10 @@ must be idempotent or guarded by existing-state verification.
 - Verification projects to communication as relevant evidence; it is not user chat and
   does not become Memory automatically.
 - `final_success` requires required verification/acceptance. `final_failure` may follow
-  terminal verification failure. `final_partial` or waiting/escalation represents
-  incomplete, inconclusive or blocked verification when terminally settled.
+  terminal verification failure. Incomplete, inconclusive or blocked verification
+  does not itself authorize `final_partial`; that class requires
+  `completed + accepted_partial`. Failed/cancelled/aborted finals may disclose
+  separately accepted usable work without changing their terminal cause.
 - Verification history is bounded/projected into context and does not replace canonical
   task/artifact state.
 
@@ -127,7 +138,9 @@ must be idempotent or guarded by existing-state verification.
 
 Verification consumes tokens, tool calls, time and external cost. Policy fixes the minimum
 profile and bounds budget; exhaustion cannot silently downgrade required verification.
-The task may remain waiting, become partial, fail or STOP according to authoritative policy.
+The task may remain waiting, fail, be cancelled/aborted, or reach an
+explicitly accepted partial disposition according to authoritative policy
+and the user's acceptance criteria.
 
 Verifier access is least-privilege and scoped to task/artifact/principal. It does not
 grant approvals/capabilities, access private CoT/secrets by default or trust unvalidated

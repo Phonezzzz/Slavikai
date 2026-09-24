@@ -131,6 +131,22 @@
       "summary": "Target architecture accepts lifecycle completion only after policy-selected verification and acceptance for the exact task/result/artifact revision; current verifier paths are partial evidence mechanisms."
     },
     {
+      "id": "runtime.lifecycle.task_run_contract",
+      "scope": "runtime",
+      "status": "target",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/TASK_RUN_LIFECYCLE_CONTRACT.md",
+      "verified_by": [
+        "docs/architecture/TASK_RUN_LIFECYCLE_CONTRACT.md",
+        "docs/architecture/research/lifecycle-communication-verification-reconciliation.md",
+        "docs/architecture/decisions/ADR-0002-terminal-outcome-and-partial-result.md",
+        "docs/architecture/decisions/ADR-0010-supersession-lineage-without-separate-final.md",
+        "docs/architecture/decisions/ADR-0012-ordinary-ask-task-identity.md"
+      ],
+      "summary": "Target lifecycle contract separates terminal cause (completed/failed/cancelled/aborted) from result disposition (full/accepted_partial/none), treats supersession as status/lineage, and gives every accepted Ask a durable task identity with one semantic final; current runtime is not this contract."
+    },
+    {
       "id": "model_access.openai_subscription",
       "scope": "model_access",
       "status": "target",

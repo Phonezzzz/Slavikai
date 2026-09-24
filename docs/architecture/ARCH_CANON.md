@@ -174,9 +174,16 @@ status/event plumbing is current and partial.
 - Final response запрещён как success-completion claim до authoritative terminal
   transition и требуемой verification/acceptance. Model `done`, artifact creation,
   завершение generation/tool loop или отсутствие tool calls недостаточны.
-- Terminal user communication различает successful, failed, cancelled и
-  partial/incomplete outcomes. `blocked`, `waiting_user_input` и `waiting_approval`
-  не являются completion.
+- Terminal user communication следует
+  [ADR-0002](decisions/ADR-0002-terminal-outcome-and-partial-result.md):
+  `completed/failed/cancelled/aborted` — причины, `full/accepted_partial/none`
+  — отдельное disposition. Частичная работа после failure/cancellation/abort
+  раскрывается после причины; `final_partial` допустим только для
+  `completed + accepted_partial`. `blocked`, `waiting_user_input` и
+  `waiting_approval` не являются completion.
+- Замена принятой ревизии следует
+  [ADR-0010](decisions/ADR-0010-supersession-lineage-without-separate-final.md):
+  статус и lineage без отдельного final старой ревизии только из-за замены.
 - Final readiness, completion transition, response generation, delivery и delivery
   acknowledgement — отдельные concepts; crash/reconnect/retry требуют idempotent
   delivery/replay semantics, которые пока остаются за пределами этого invariant.
