@@ -74,9 +74,10 @@ Two-phase communication means two semantic classes, not exactly two messages:
 progress -> progress -> final
 ```
 
-is valid, as is `final` for a short task. Progress may be absent. A final for a
-user-facing terminal task is always separate semantic completion communication. Progress
-never means completion.
+is valid, as is `final` for a short task. Progress may be absent only for a short
+task; a long-running task must publish at least one meaningful `progress_update`
+before its final. A final for a user-facing terminal task is always separate
+semantic completion communication. Progress never means completion.
 
 ## 4. Progress contract
 

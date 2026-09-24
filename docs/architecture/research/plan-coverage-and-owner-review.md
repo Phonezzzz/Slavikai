@@ -1,7 +1,7 @@
 # Gate 0 — покрытие плана и проверка владельцев
 
 **Статус:** исследовательская сверка, 24.09.2026; системная карта принята на
-крупном уровне в [Gate 0 matrix](gate-0-closure-matrix.md). Основа: [рабочий план](/home/ki/Desktop/plan.md),
+крупном уровне в [Gate 0 matrix](gate-0-closure-matrix.md). Основа: [рабочий план](../roadmap/master-roadmap.md),
 [ARCH_CANON](../ARCH_CANON.md), действующие ADR-0001–0010, Communication и
 Verification contracts, [Current State matrix](current-state-flow-ownership-matrix.md)
 и четыре **неинтегрированных** snapshot contract. Production checkout при

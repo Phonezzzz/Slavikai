@@ -17,7 +17,8 @@ and [`VERIFICATION_ARCHITECTURE_RESEARCH.md`](VERIFICATION_ARCHITECTURE_RESEARCH
   prose do not independently authorize completion.
 - The producer is not automatically the authoritative verifier.
 - Verification reports evidence/outcomes; it does not mutate lifecycle state by itself.
-  The coordinator/control plane accepts completion, rework, failure, escalation or STOP.
+  The coordinator/control plane proposes completion, rework, failure, escalation or
+  STOP; the authoritative Task/Run Lifecycle alone accepts the terminal transition.
 - Approval answers whether an action is permitted; verification answers what happened and
   whether criteria are met. Approval success is not execution success.
 - Required verification and acceptance are prerequisites for `final_success`.
@@ -162,7 +163,8 @@ acceptance decision. Concrete storage/schema is implementation-defined.
 8. Unknown side effects require reconcile/verify before material retry.
 9. Verifier does not receive private CoT automatically.
 10. Verification event does not change task state by itself.
-11. Coordinator/control plane accepts completion.
+11. Coordinator/control plane proposes completion; the authoritative Task/Run
+    Lifecycle accepts the terminal transition.
 12. Verifier execution failure is not result failure; inconclusive is not passed.
 13. Contradictory outcomes are not resolved by last-write-wins.
 14. Material evidence has provenance and verification is auditable.

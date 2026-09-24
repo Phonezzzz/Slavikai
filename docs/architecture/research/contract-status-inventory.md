@@ -1,9 +1,9 @@
 # Gate 0 — contract and claim status inventory
 
-**Status:** current checkout audit, 2026-09-24. Architecture HEAD
-`e7cc2b0` with the uncommitted ADR-0002–0010/research edits listed in Git status;
-production reference HEAD `920d5f3`. This inventory distinguishes document
-authority from executable runtime evidence. It does not promote any claim.
+**Status:** current checkout audit, 2026-09-24. Architecture HEAD `e7cc2b0`
+(reachable on `origin/architecture/target`); ADR-0002–0011 are committed/present
+in this PR. Production reference HEAD `920d5f3`. This inventory distinguishes
+document authority from executable runtime evidence. It does not promote any claim.
 
 ## Accepted or present in this architecture checkout
 
@@ -13,15 +13,15 @@ authority from executable runtime evidence. It does not promote any claim.
 | `USER_INTERACTION_COMMUNICATION_CONTRACT.md` | Target semantic communication; updated for ADR-0002 | Registry claim `runtime.communication.semantic_artifacts` is `target`; current UIHub/streaming does not close it. |
 | `VERIFICATION_ARCHITECTURE_CONTRACT.md` | Target evidence/acceptance; updated for ADR-0002 | Registry claim `runtime.verification.authoritative_acceptance` is `target`; existing Auto/MWV verifier passes are narrower. |
 | ADR-0001 | Accepted product requirement for subscription-backed OpenAI/ChatGPT access | Registry claim `model_access.openai_subscription` is `target`; compliant auth/transport remains undecided. |
-| ADR-0002 (working tree) | Accepted owner decision on terminal cause, partial acceptance and final mapping | No corresponding runtime claim or implementation in the current registry; lifecycle snapshot needs reconciliation. |
-| ADR-0003 (working tree) | Accepted product scope for preapproved schedule/event-initiated work | No current scheduler, subscription or trigger registry claim is established by this ADR; ADR-0004 assigns ownership and OQ-CD-04 tracks detailed firing design. |
-| ADR-0004 (working tree) | Accepted Target owner split: Work Initiation owns rules/firings; Lifecycle accepts task creation | No runtime implementation claim; exact rule/firing and cross-owner recovery protocol remain for later work. |
-| ADR-0005/0006 (working tree) | Accepted Target boundaries for Local Inference Operations, Resource Governance, material history and System Evaluation | No runtime implementation claim; detailed contracts remain later work. |
-| ADR-0007 (working tree) | Accepted owner-only provider-key use by default, with explicit delegation rule for another principal | The inspected resolver lacks principal/delegation context; full route audit and enforcement remain open. |
-| ADR-0008 (working tree) | Accepted request-scoped media Target, without continuous voice/visual sessions | Current STT/TTS and attachment paths do not prove unified consent, egress or artifact handling. |
-| ADR-0009 (working tree) | Accepted governed external provider Target, with permissions and versions owned separately from skills | No current extension-governance runtime claim; protocol and call contract remain open. |
-| ADR-0010 (working tree) | Accepted supersession status/lineage without a separate final solely for replacement | Lifecycle snapshot needs reconciliation and no current runtime implementation is claimed. |
-| ADR-0011 (working tree) | Accepted system-level one-owner-per-fact and cross-cutting protocol classification | Detailed contracts and all runtime claims remain separate; pending snapshots are not promoted. |
+| ADR-0002 (committed) | Accepted owner decision on terminal cause, partial acceptance and final mapping | No corresponding runtime claim or implementation in the current registry; lifecycle snapshot needs reconciliation. |
+| ADR-0003 (committed) | Accepted product scope for preapproved schedule/event-initiated work | No current scheduler, subscription or trigger registry claim is established by this ADR; ADR-0004 assigns ownership and OQ-CD-04 tracks detailed firing design. |
+| ADR-0004 (committed) | Accepted Target owner split: Work Initiation owns rules/firings; Lifecycle accepts task creation | No runtime implementation claim; exact rule/firing and cross-owner recovery protocol remain for later work. |
+| ADR-0005/0006 (committed) | Accepted Target boundaries for Local Inference Operations, Resource Governance, material history and System Evaluation | No runtime implementation claim; detailed contracts remain later work. |
+| ADR-0007 (committed) | Accepted owner-only provider-key use by default, with explicit delegation rule for another principal | The inspected resolver lacks principal/delegation context; full route audit and enforcement remain open. |
+| ADR-0008 (committed) | Accepted request-scoped media Target, without continuous voice/visual sessions | Current STT/TTS and attachment paths do not prove unified consent, egress or artifact handling. |
+| ADR-0009 (committed) | Accepted governed external provider Target, with permissions and versions owned separately from skills | No current extension-governance runtime claim; protocol and call contract remain open. |
+| ADR-0010 (committed) | Accepted supersession status/lineage without a separate final solely for replacement | Lifecycle snapshot needs reconciliation and no current runtime implementation is claimed. |
+| ADR-0011 (committed) | Accepted system-level one-owner-per-fact and cross-cutting protocol classification | Detailed contracts and all runtime claims remain separate; pending snapshots are not promoted. |
 
 `docs/SOURCE_OF_TRUTH.md` orders runtime security enforcement, schemas and
 `docs/runtime_contract_claims.json`, `ARCH_CANON.md`, Current State description

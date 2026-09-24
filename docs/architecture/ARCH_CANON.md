@@ -210,8 +210,9 @@ source of truth. Подробные artifact types, coalescing, retention и del
 
 Verification target contract: `VERIFICATION_ARCHITECTURE_CONTRACT.md`.
 `result_submitted` не является `completed`; required verification/acceptance принимает
-authoritative coordinator, а не worker, model, tool result или UI. Current verifier/check
-paths остаются partial evidence mechanisms, не единым target acceptance gate.
+authoritative Task/Run Lifecycle, а coordinator лишь предлагает outcome; worker, model,
+tool result или UI не принимают completion. Current verifier/check paths остаются
+partial evidence mechanisms, не единым target acceptance gate.
 
 ## 3) TaskPacket v2 (execution contract)
 

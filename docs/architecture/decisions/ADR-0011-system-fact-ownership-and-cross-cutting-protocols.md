@@ -8,7 +8,7 @@
 
 ## Контекст и проблема
 
-Исходные 20 пунктов [рабочего плана](/home/ki/Desktop/plan.md) смешивают
+Исходные 20 пунктов [рабочего плана](../roadmap/master-roadmap.md) смешивают
 capabilities, сквозные контракты, user surfaces и audits. Текущий UIHub,
 agent/tool paths и четыре неинтегрированных snapshot contract имеют разные
 state lifetimes. Если принять названия разделов за сервисы либо дать event

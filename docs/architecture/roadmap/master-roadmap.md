@@ -7,9 +7,9 @@
 
 ## Completed milestone — Gate 0 Capability Discovery (2026-09-24)
 
-**Status: accepted at system level.** The 20-section work list is in
-`/home/ki/Desktop/plan.md`; its section names are not yet the accepted
-capability decomposition. Current evidence and a candidate owner/dependency
+**Status: accepted at system level.** The 20-section work list is captured in
+`discovered-work.md`; its section names are not yet the accepted capability
+decomposition. Current evidence and a candidate owner/dependency
 map are in `../research/capability-discovery-inventory.md`,
 `../research/current-state-flow-ownership-matrix.md` and
 `../research/capability-boundary-proposal.md`. The [20-section owner review](../research/plan-coverage-and-owner-review.md)

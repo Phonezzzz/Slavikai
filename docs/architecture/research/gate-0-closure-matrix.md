@@ -1,10 +1,13 @@
 # Gate 0 closure matrix — Capability Discovery
 
 **Status:** Gate 0 accepted at system level, checked 2026-09-24 against architecture
-checkout `e7cc2b0` plus the listed uncommitted research/ADR edits, and production
-checkout `920d5f3`. This is an architecture acceptance record, not evidence
-that Target runtime exists. The source work list is
-`/home/ki/Desktop/plan.md`.
+checkout `e7cc2b0` and production checkout `920d5f3`, both reachable on
+`origin/architecture/target` and `origin/codex/vision-evidence-grounding`. The
+unintegrated snapshot objects `6040640`, `4ee7516`, `4b9a453` and `f883893` are
+preserved on `origin/archive/slavikai-transfer-snapshot-2026-09-16`. The source
+20-section work list is summarized in
+[`../roadmap/master-roadmap.md`](../roadmap/master-roadmap.md). This is an
+architecture acceptance record, not evidence that Target runtime exists.
 
 | Gate requirement | Evidence now | Verdict | Remaining work after Gate 0 |
 | --- | --- | --- | --- |
