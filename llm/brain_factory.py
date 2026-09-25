@@ -29,5 +29,6 @@ def create_brain(config: ModelConfig, api_key: str | None = None) -> Brain:
             default_config=config,
             base_url=config.base_url,
             api_key=api_key or config.api_key,
+            native_tools=False,
         )
     raise ValueError(f"Неизвестный провайдер модели: {config.provider}")

@@ -15,6 +15,8 @@ from aiohttp import web
 
 from server import http_api as api
 from server.agent_provider import AgentScope, ScopedAgentProvider
+from server.http.common import ui_settings
+from server.http.common.auth import _require_owner
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import RuntimeModelStateProtocol, SessionApprovalStore
@@ -164,6 +166,14 @@ async def handle_ui_models(request: web.Request) -> web.Response:
         providers = [normalized]
     else:
         providers = sorted(SUPPORTED_MODEL_PROVIDERS | _load_provider_instances().keys())
+    if any(_load_provider_instance(provider) is not None for provider in providers):
+        owner_error = _require_owner(request)
+        if owner_error is not None:
+            if provider_query:
+                return owner_error
+            providers = [
+                provider for provider in providers if _load_provider_instance(provider) is None
+            ]
     payload_items: list[dict[str, JSONValue]] = []
     if summary_only and not provider_query:
         for provider in providers:
@@ -172,23 +182,40 @@ async def handle_ui_models(request: web.Request) -> web.Response:
                 {
                     "provider": provider,
                     "display_name": instance["display_name"] if instance else provider,
-                    "models": [instance["model"]] if instance else [],
+                    "models": [],
                     "error": None,
                 }
             )
         return json_response({"providers": payload_items})
     for provider in providers:
-        if strict:
-            models, error_text = api._fetch_provider_models(provider, allow_local_fallback=False)
-        else:
-            models, error_text = api._fetch_provider_models(provider)
         instance = _load_provider_instance(provider)
+        catalog_status: str | None = None
+        if instance is not None:
+            key = api._resolve_provider_api_key(provider)
+            if key:
+                models, catalog_status, error_text = await asyncio.to_thread(
+                    ui_settings._probe_openai_models, instance["base_url"], key
+                )
+            else:
+                models, catalog_status, error_text = (
+                    [],
+                    "invalid_api_key",
+                    "Для провайдера не сохранён API-ключ.",
+                )
+        else:
+            if strict:
+                models, error_text = await asyncio.to_thread(
+                    api._fetch_provider_models, provider, allow_local_fallback=False
+                )
+            else:
+                models, error_text = await asyncio.to_thread(api._fetch_provider_models, provider)
         payload_items.append(
             {
                 "provider": provider,
                 "display_name": instance["display_name"] if instance else provider,
                 "models": models,
                 "error": error_text,
+                "status": catalog_status,
             }
         )
     return json_response({"providers": payload_items})
@@ -310,7 +337,35 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    models, fetch_error = api._fetch_provider_models(provider)
+    instance = _load_provider_instance(provider)
+    if instance is not None:
+        owner_error = _require_owner(request)
+        if owner_error is not None:
+            return owner_error
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None or session_id is None:
+        return session_error or _session_forbidden_response()
+    if instance is not None:
+        key = api._resolve_provider_api_key(provider)
+        if not key:
+            return error_response(
+                status=400,
+                message="Для провайдера не сохранён API-ключ.",
+                error_type="invalid_request_error",
+                code="invalid_api_key",
+            )
+        models, catalog_status, fetch_error = await asyncio.to_thread(
+            ui_settings._probe_openai_models, instance["base_url"], key
+        )
+        if catalog_status == "invalid_api_key":
+            return error_response(
+                status=400,
+                message=fetch_error or "API-ключ отклонён.",
+                error_type="invalid_request_error",
+                code="invalid_api_key",
+            )
+    else:
+        models, fetch_error = await asyncio.to_thread(api._fetch_provider_models, provider)
     if fetch_error and _load_provider_instance(provider) is None:
         return error_response(
             status=502,
@@ -318,7 +373,7 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             error_type="provider_error",
             code="provider_models_unavailable",
         )
-    if model_raw not in models and _load_provider_instance(provider) is None:
+    if model_raw not in models and (instance is None or catalog_status == "ready"):
         suggestion = _closest_model_suggestion(model_raw, models)
         details: dict[str, JSONValue] = {
             "provider": provider,
@@ -339,9 +394,6 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             code="model_not_found",
             details=details,
         )
-    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
-    if session_error is not None or session_id is None:
-        return session_error or _session_forbidden_response()
     model_config = api._build_model_config(provider, model_raw)
     runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
     await runtime_model_state.set_session_override(session_id, model_config)

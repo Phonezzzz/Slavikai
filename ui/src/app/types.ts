@@ -240,6 +240,7 @@ export type ProviderModels = {
   displayName?: string;
   models: string[];
   error: string | null;
+  status?: string | null;
 };
 
 export type UploadPreviewType = 'text' | 'image' | 'binary';

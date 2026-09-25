@@ -108,7 +108,15 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                 code="session_forbidden",
             )
 
-    agent = await _resolve_agent_for_base_http(request, explicit_session_id)
+    try:
+        agent = await _resolve_agent_for_base_http(request, explicit_session_id)
+    except PermissionError:
+        return error_response(
+            status=403,
+            message="Owner access required for custom provider.",
+            error_type="invalid_request_error",
+            code="owner_required",
+        )
     if agent is None:
         return _model_not_selected_response()
     agent_lock = _agent_lock_for_request(request, explicit_session_id)

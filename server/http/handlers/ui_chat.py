@@ -553,6 +553,14 @@ async def _handle_ui_send_impl(
                 request,
                 session_id,
             )
+        except PermissionError:
+            await _abort_idempotency()
+            return error_response(
+                status=403,
+                message="Owner access required for custom provider.",
+                error_type="invalid_request_error",
+                code="owner_required",
+            )
         except Exception as exc:  # noqa: BLE001
             await _abort_idempotency()
             return error_response(

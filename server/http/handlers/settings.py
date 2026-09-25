@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Literal, cast
@@ -59,7 +60,9 @@ async def handle_ui_provider_probe(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_base_url",
         )
-    models, status, message = ui_settings._probe_openai_models(base_url, key_raw.strip())
+    models, status, message = await asyncio.to_thread(
+        ui_settings._probe_openai_models, base_url, key_raw.strip()
+    )
     return json_response(
         {"base_url": base_url, "models": models, "status": status, "message": message}
     )
@@ -80,20 +83,24 @@ async def handle_ui_provider_create(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    name_raw, base_raw = body.get("display_name"), body.get("base_url")
-    key_raw, model_raw = body.get("api_key"), body.get("model")
-    if not all(
-        isinstance(value, str) and value.strip()
-        for value in (name_raw, base_raw, key_raw, model_raw)
-    ):
+    if "model" in body:
         return error_response(
             status=400,
-            message="Нужны Display name, Base URL, API key и model ID.",
+            message="Model ID выбирается в chat model picker.",
+            error_type="invalid_request_error",
+            code="model_selection_in_chat",
+        )
+    name_raw, base_raw = body.get("display_name"), body.get("base_url")
+    key_raw = body.get("api_key")
+    if not all(isinstance(value, str) and value.strip() for value in (name_raw, base_raw, key_raw)):
+        return error_response(
+            status=400,
+            message="Нужны Display name, Base URL и API key.",
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
     assert isinstance(name_raw, str) and isinstance(base_raw, str)
-    assert isinstance(key_raw, str) and isinstance(model_raw, str)
+    assert isinstance(key_raw, str)
     try:
         base_url = ui_settings._normalize_openai_base_url(base_raw)
     except ValueError as exc:
@@ -103,7 +110,9 @@ async def handle_ui_provider_create(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_base_url",
         )
-    models, status, message = ui_settings._probe_openai_models(base_url, key_raw.strip())
+    models, status, message = await asyncio.to_thread(
+        ui_settings._probe_openai_models, base_url, key_raw.strip()
+    )
     if status == "invalid_api_key":
         return error_response(
             status=400,
@@ -114,7 +123,7 @@ async def handle_ui_provider_create(request: web.Request) -> web.Response:
     try:
         keys = api._load_provider_api_keys()
         provider_id = ui_settings._save_provider_instance(
-            display_name=name_raw.strip(), base_url=base_url, model=model_raw.strip()
+            display_name=name_raw.strip(), base_url=base_url
         )
         keys[provider_id] = key_raw.strip()
         try:
@@ -134,7 +143,6 @@ async def handle_ui_provider_create(request: web.Request) -> web.Response:
             "provider": provider_id,
             "display_name": name_raw.strip(),
             "base_url": base_url,
-            "model": model_raw.strip(),
             "models": models,
             "status": status,
             "message": message,
@@ -218,9 +226,10 @@ def _tts_error_response(message: str) -> web.Response:
 
 
 async def handle_ui_settings(request: web.Request) -> web.Response:
-    del request
     try:
-        payload = api._build_settings_payload()
+        payload = api._build_settings_payload(
+            include_custom_providers=_require_owner(request) is None
+        )
         logger.info(
             "Settings payload prepared",
             extra={
@@ -693,6 +702,13 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 message="Нужны корректные model.provider и model.model.",
                 error_type="invalid_request_error",
                 code="invalid_request_error",
+            )
+        if ui_settings._load_provider_instance(model_provider) is not None:
+            return error_response(
+                status=400,
+                message="Custom provider model выбирается в chat session model picker.",
+                error_type="invalid_request_error",
+                code="custom_model_session_only",
             )
         persisted_model = api._load_default_model()
         model_changed = (
