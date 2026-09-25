@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 # ruff: noqa: F401
 import difflib
 import json
@@ -891,12 +893,14 @@ class AgentToolsMixin:
         *,
         command_lane: bool = False,
         skill_resolution: SkillResolution | None = None,
+        cancellation_token: asyncio.Event | None = None,
     ) -> str:
         goal_clean = goal.strip() or "auto run"
         self.tracer.log("auto_invoke", f"Auto v1 tool loop: {goal_clean}")
         outcome = self.auto_agent.run_outcome(
             goal_clean,
             skill_resolution=skill_resolution,
+            cancellation_token=cancellation_token,
         )
         if command_lane:
             return self._strip_report_block(outcome.text)

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from core.approval_policy import ApprovalContext
 from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop
-from llm.stream_model import Done, ToolCallCompleted
+from llm.stream_model import Done, Error, ToolCallCompleted
 from llm.types import LLMResult, ToolCall, ToolSpec
 from shared.models import LLMMessage, ToolResult
 from tools.tool_registry import ToolRegistry
@@ -137,3 +138,72 @@ def test_streaming_tool_loop_blocks_registered_tool_not_exposed_to_model() -> No
     assert calls == []
     assert completed.result is not None
     assert completed.result.meta["policy_reason"] == "model_tool_not_exposed"
+
+
+def test_policy_denial_stops_remaining_calls_in_same_model_response() -> None:
+    class BatchBrain:
+        def generate(self, messages, config=None, tools=None):  # type: ignore[override]
+            del messages, config, tools
+            return LLMResult(
+                text="try both",
+                tool_calls=[
+                    ToolCall(id="denied", name="shell", arguments={"command": "sudo reboot"}),
+                    ToolCall(id="later", name="write", arguments={}),
+                ],
+            )
+
+    calls: list[str] = []
+    registry = ToolRegistry()
+    registry.register("shell", lambda _request: calls.append("shell") or ToolResult.success({}))
+    registry.register("write", lambda _request: calls.append("write") or ToolResult.success({}))
+
+    result = AgentToolLoop(max_iterations=3).run(
+        brain=BatchBrain(),  # type: ignore[arg-type]
+        gateway=ToolGateway(
+            registry,
+            approval_context=ApprovalContext(
+                safe_mode=False, session_id="test-session", approved_categories=set()
+            ),
+        ),
+        messages=[LLMMessage(role="user", content="go")],
+        tools=registry.list_tool_specs(),
+    )
+
+    assert result.error == "tool_policy_denied"
+    assert [item.call.id for item in result.tool_calls] == ["denied"]
+    assert calls == []
+
+
+def test_streaming_policy_denial_stops_remaining_calls() -> None:
+    class BatchBrain:
+        def generate_stream_events(self, messages, config=None, tools=None):  # type: ignore[override]
+            del messages, config, tools
+            yield ToolCallCompleted(
+                call=ToolCall(id="denied", name="shell", arguments={"command": "sudo reboot"})
+            )
+            yield ToolCallCompleted(call=ToolCall(id="later", name="write", arguments={}))
+            yield Done()
+
+    calls: list[str] = []
+    registry = ToolRegistry()
+    registry.register("shell", lambda _request: calls.append("shell") or ToolResult.success({}))
+    registry.register("write", lambda _request: calls.append("write") or ToolResult.success({}))
+
+    events = list(
+        AgentToolLoop(max_iterations=3).run_stream_events(
+            brain=BatchBrain(),  # type: ignore[arg-type]
+            gateway=ToolGateway(
+                registry,
+                approval_context=ApprovalContext(
+                    safe_mode=False, session_id="test-session", approved_categories=set()
+                ),
+            ),
+            messages=[LLMMessage(role="user", content="go")],
+            tools=registry.list_tool_specs(),
+        )
+    )
+
+    assert calls == []
+    assert [event.call.id for event in events if isinstance(event, ToolCallCompleted)] == ["denied"]
+    assert any(isinstance(event, Error) and event.code == "tool_policy_denied" for event in events)
+    assert isinstance(events[-1], Done) and events[-1].finish_reason == "error"

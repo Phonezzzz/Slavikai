@@ -132,6 +132,14 @@ class AgentToolLoop:
                         tool_call_id=tool_call.id,
                     )
                 )
+                if _policy_rejected(tool_result):
+                    return AgentToolLoopResult(
+                        text=final_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="tool_policy_denied",
+                    )
                 if cancellation_requested(cancellation_token):
                     return AgentToolLoopResult(
                         text=final_text,
@@ -324,6 +332,16 @@ class AgentToolLoop:
                     )
                 )
                 yield ToolCallCompleted(call=tool_call, result=tool_result)
+                if _policy_rejected(tool_result):
+                    yield Error(message="tool_policy_denied", code="tool_policy_denied")
+                    yield Done(finish_reason="error")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="tool_policy_denied",
+                    )
 
         message = f"Цикл инструментов превысил лимит: {self.max_iterations} итераций."
         yield Error(message=message, code="tool_loop_iteration_limit")
@@ -349,6 +367,14 @@ def _dispatch_model_tool_call(
             meta={"policy_reason": "model_tool_not_exposed"},
         )
     return gateway.call(ToolRequest(name=tool_call.name, args=dict(tool_call.arguments)))
+
+
+def _policy_rejected(result: ToolResult) -> bool:
+    return (
+        not result.ok
+        and result.meta is not None
+        and isinstance(result.meta.get("policy_reason"), str)
+    )
 
 
 def _assistant_message(

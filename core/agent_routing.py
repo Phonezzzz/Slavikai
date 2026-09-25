@@ -75,6 +75,7 @@ class AgentRoutingMixin:
             *,
             command_lane: bool = False,
             skill_resolution: SkillResolution | None = None,
+            cancellation_token: asyncio.Event | None = None,
         ) -> str: ...
         def is_explicit_memory_request(self, text: str) -> bool: ...
         def build_memory_save_preview(
@@ -413,6 +414,7 @@ class AgentRoutingMixin:
                 response = self.handle_auto_command(
                     last_content,
                     skill_resolution=skill_resolution,
+                    cancellation_token=cancellation_token,
                 )
                 self.last_stream_response_raw = response
                 yield from _text_response_events(response)

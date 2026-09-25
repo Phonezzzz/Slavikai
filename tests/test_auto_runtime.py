@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import core.auto_runtime as auto_runtime
@@ -423,6 +425,62 @@ def test_auto_runtime_returns_conversation_without_forcing_tool_action(tmp_path)
     assert verifier.get("verifier_profile") == "response_only"
 
 
+def test_auto_runtime_cancellation_reaches_tool_loop_and_skips_verifier(tmp_path) -> None:
+    agent = _ResponseOnlyAgent()
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    cancellation = asyncio.Event()
+    cancellation.set()
+
+    outcome = orchestrator.run_v1(
+        "write a file",
+        run_root_override=tmp_path,
+        cancellation_token=cancellation,
+    )
+
+    assert outcome.status == AutoRunStatus.CANCELLED
+    assert outcome.verifier is None
+    assert agent._brain.messages_seen == []
+    assert agent.last_auto_state["status"] == AutoRunStatus.CANCELLED.value
+    assert agent.last_auto_state["verifier"] is None
+
+
+def test_auto_runtime_cancellation_during_batch_stops_later_tool(tmp_path) -> None:
+    cancellation = asyncio.Event()
+    agent = _AutoV1Agent()
+
+    class BatchBrain:
+        supports_native_tools = True
+
+        def generate(self, messages, config=None, tools=None):  # noqa: ANN001
+            del messages, config, tools
+            return LLMResult(
+                text="execute batch",
+                tool_calls=[
+                    ToolCall(id="first", name="cancel", arguments={}),
+                    ToolCall(id="later", name="echo", arguments={"value": "later"}),
+                ],
+            )
+
+    calls: list[str] = []
+    agent._brain = BatchBrain()
+    agent.tool_registry.register(
+        "cancel",
+        lambda _request: cancellation.set() or calls.append("cancel") or ToolResult.success({}),
+    )
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+
+    outcome = orchestrator.run_v1(
+        "execute batch",
+        run_root_override=tmp_path,
+        cancellation_token=cancellation,
+    )
+
+    assert calls == ["cancel"]
+    assert outcome.status == AutoRunStatus.CANCELLED
+    assert outcome.verifier is None
+    assert [item["coder_id"] for item in agent.last_auto_state["coders"]] == ["first"]
+
+
 def test_auto_runtime_injects_skill_per_run_without_changing_tools_or_brain(tmp_path) -> None:
     agent = _ResponseOnlyAgent()
     orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
@@ -588,6 +646,7 @@ def test_auto_runtime_v1_waiting_approval_and_resume(monkeypatch, tmp_path) -> N
                 ]
                 iterations = 1
                 text = "resumed"
+                cancelled = False
 
             return _LoopResult()
 

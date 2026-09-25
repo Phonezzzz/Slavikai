@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -150,6 +151,7 @@ class AutoOrchestrator:
         run_id: str | None = None,
         started_at: str | None = None,
         run_root_override: Path | None = None,
+        cancellation_token: asyncio.Event | None = None,
     ) -> AutoRunOutcome:
         run_id_value = run_id or f"auto-{uuid.uuid4().hex}"
         started = started_at or utc_now_iso()
@@ -265,6 +267,7 @@ class AutoOrchestrator:
                 ],
                 tools=tool_specs,
                 config=self.parent.main_config,
+                cancellation_token=cancellation_token,
             )
             tool_call_states = [_auto_v1_tool_call_state(item) for item in loop_result.tool_calls]
             state["coders"] = tool_call_states
@@ -279,6 +282,17 @@ class AutoOrchestrator:
                 "files_touched": 0,
             }
             self._set_state(state)
+            if loop_result.cancelled:
+                state["error"] = "cancelled_by_user"
+                state["error_code"] = "cancelled"
+                self._set_status(state, AutoRunStatus.CANCELLED)
+                return AutoRunOutcome(
+                    text="Auto-run отменён.",
+                    status=AutoRunStatus.CANCELLED,
+                    stop_reason_code=None,
+                    verifier=None,
+                    next_steps=[],
+                )
             if len(loop_result.tool_calls) >= budgets.max_tool_calls:
                 reason = (
                     f"Budget exhausted: tool_calls={len(loop_result.tool_calls)} "

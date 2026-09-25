@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -162,6 +163,8 @@ def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypa
 def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkeypatch) -> None:
     agent, main = _prepare_agent(tmp_path)
     agent.runtime_mode = "auto"
+    cancellation = asyncio.Event()
+    seen_tokens: list[asyncio.Event | None] = []
 
     def _classifier_unreachable(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("Auto stream mode must not call classify_request")
@@ -171,19 +174,27 @@ def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkey
         *,
         command_lane: bool = False,
         skill_resolution: SkillResolution | None = None,
+        cancellation_token: asyncio.Event | None = None,
     ) -> str:
         assert command_lane is False
         assert skill_resolution is None
+        seen_tokens.append(cancellation_token)
         return f"auto-stream:{goal}"
 
     monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
 
-    chunks = list(agent.respond_stream([LLMMessage(role="user", content="image_generate plan")]))
+    chunks = list(
+        agent.respond_stream(
+            [LLMMessage(role="user", content="image_generate plan")],
+            cancellation_token=cancellation,
+        )
+    )
 
     assert chunks == [TextDelta(text="auto-stream:image_generate plan"), Done()]
     assert agent.last_stream_response_raw == "auto-stream:image_generate plan"
     assert main.calls == 0
+    assert seen_tokens == [cancellation]
 
 
 def test_agent_auto_mode_passes_resolved_skill_to_auto_runtime(
