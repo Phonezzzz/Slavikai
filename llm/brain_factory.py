@@ -24,4 +24,10 @@ def create_brain(config: ModelConfig, api_key: str | None = None) -> Brain:
         return InceptionBrain(api_key=api_key or config.api_key, default_config=config)
     if config.provider == "deepseek":
         return DeepSeekBrain(api_key=api_key or config.api_key, default_config=config)
+    if config.base_url:
+        return LocalHttpBrain(
+            default_config=config,
+            base_url=config.base_url,
+            api_key=api_key or config.api_key,
+        )
     raise ValueError(f"Неизвестный провайдер модели: {config.provider}")

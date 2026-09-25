@@ -3,8 +3,11 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
+import uuid
 from pathlib import Path
 from typing import Final, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -91,16 +94,154 @@ UI_SETTINGS_CONTROL_TOP_LEVEL_KEYS: Final[set[str]] = {
     "safe_mode",
 }
 INCEPTION_DOCS_MODELS: Final[list[str]] = ["mercury-2"]
+CUSTOM_PROVIDER_PREFIX: Final[str] = "custom-"
+
+
+def _normalize_openai_base_url(raw: str) -> str:
+    value = raw.strip().rstrip("/")
+    if re.search(r"\s", value):
+        raise ValueError("Base URL не должен содержать пробелы или управляющие символы.")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Некорректный Base URL.") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and port == 0)
+    ):
+        raise ValueError("Base URL должен быть HTTP(S) URL без credentials, query и fragment.")
+    path = parsed.path.rstrip("/")
+    if not path:
+        path = "/v1"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _load_provider_instances(*, ui_settings_path: Path | None = None) -> dict[str, dict[str, str]]:
+    path = ui_settings_path or UI_SETTINGS_PATH
+    raw = _load_ui_settings_blob(ui_settings_path=path).get("provider_instances")
+    if not isinstance(raw, dict):
+        return {}
+    instances: dict[str, dict[str, str]] = {}
+    for provider_id, item in raw.items():
+        if (
+            not isinstance(provider_id, str)
+            or re.fullmatch(r"custom-[0-9a-f]{32}", provider_id) is None
+        ):
+            continue
+        if not isinstance(item, dict):
+            continue
+        name, base_url, model = item.get("display_name"), item.get("base_url"), item.get("model")
+        if (
+            isinstance(name, str)
+            and name.strip()
+            and isinstance(base_url, str)
+            and base_url.strip()
+            and isinstance(model, str)
+            and model.strip()
+        ):
+            instances[provider_id] = {
+                "display_name": name,
+                "base_url": base_url,
+                "model": model,
+            }
+    return instances
+
+
+def _load_provider_instance(
+    provider: str, *, ui_settings_path: Path | None = None
+) -> dict[str, str] | None:
+    return _load_provider_instances(ui_settings_path=ui_settings_path).get(provider)
+
+
+def _save_provider_instance(
+    *, display_name: str, base_url: str, model: str, ui_settings_path: Path | None = None
+) -> str:
+    path = ui_settings_path or UI_SETTINGS_PATH
+    provider_id = f"{CUSTOM_PROVIDER_PREFIX}{uuid.uuid4().hex}"
+    payload = _load_ui_settings_blob(ui_settings_path=path)
+    instances = _load_provider_instances(ui_settings_path=path)
+    instances[provider_id] = {
+        "display_name": display_name,
+        "base_url": base_url,
+        "model": model,
+    }
+    payload["provider_instances"] = instances
+    _save_ui_settings_blob(payload, ui_settings_path=path)
+    return provider_id
+
+
+def _delete_provider_instance(provider: str, *, ui_settings_path: Path | None = None) -> None:
+    path = ui_settings_path or UI_SETTINGS_PATH
+    payload = _load_ui_settings_blob(ui_settings_path=path)
+    instances = _load_provider_instances(ui_settings_path=path)
+    instances.pop(provider, None)
+    payload["provider_instances"] = instances
+    _save_ui_settings_blob(payload, ui_settings_path=path)
+
+
+def _probe_openai_models(base_url: str, api_key: str) -> tuple[list[str], str, str | None]:
+    try:
+        response = requests.get(
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=MODEL_FETCH_TIMEOUT,
+        )
+        if response.status_code == 401:
+            return [], "invalid_api_key", "API-ключ отклонён провайдером."
+        if response.status_code == 403:
+            return (
+                [],
+                "models_unavailable",
+                "Доступ к /models запрещён. Можно ввести model ID вручную.",
+            )
+        response.raise_for_status()
+        models = _parse_models_payload(response.json())
+        if models:
+            return models, "ready", None
+        return [], "models_unavailable", "Список моделей пуст. Можно ввести model ID вручную."
+    except (requests.ConnectionError, requests.Timeout):
+        return (
+            [],
+            "provider_unavailable",
+            "Провайдер сейчас недоступен. Проверьте Base URL; model ID можно ввести вручную.",
+        )
+    except requests.RequestException:
+        return (
+            [],
+            "models_unavailable",
+            "Не удалось получить /models. Можно ввести model ID вручную.",
+        )
+    except ValueError:
+        return (
+            [],
+            "models_unavailable",
+            "Некорректный ответ /models. Можно ввести model ID вручную.",
+        )
 
 
 def _normalize_provider(raw_provider: str) -> str | None:
     normalized = raw_provider.strip().lower()
     if normalized in SUPPORTED_MODEL_PROVIDERS:
         return normalized
+    if _load_provider_instance(normalized) is not None:
+        return normalized
     return None
 
 
 def _build_model_config(provider: str, model_id: str) -> ModelConfig:
+    instance = _load_provider_instance(provider)
+    if instance is not None:
+        return ModelConfig(
+            provider=provider,
+            model=model_id,
+            base_url=f"{instance['base_url']}/chat/completions",
+        )
     if provider == "xai":
         return ModelConfig(provider="xai", model=model_id)
     if provider == "openrouter":
@@ -226,6 +367,15 @@ def _fetch_provider_models(
     api_keys_path: Path = API_KEYS_PATH,
     allow_local_fallback: bool = True,
 ) -> tuple[list[str], str | None]:
+    instance = _load_provider_instance(provider)
+    if instance is not None:
+        key = _resolve_provider_api_key(provider, api_keys_path=api_keys_path)
+        if not key:
+            return [instance["model"]], "Для провайдера не сохранён API-ключ."
+        models, status, error = _probe_openai_models(instance["base_url"], key)
+        if instance["model"] not in models:
+            models.append(instance["model"])
+        return models, error if status != "ready" else None
     if provider == "inception":
         docs_models = list(INCEPTION_DOCS_MODELS)
         headers, _ = _provider_auth_headers(provider, api_keys_path=api_keys_path)
@@ -522,7 +672,7 @@ def _save_provider_api_keys(
     supported = {
         provider: api_key
         for provider, api_key in api_keys.items()
-        if provider in API_KEY_SETTINGS_PROVIDERS
+        if provider in API_KEY_SETTINGS_PROVIDERS or _load_provider_instance(provider) is not None
     }
     save_api_keys(supported, path=api_keys_path)
 
@@ -697,7 +847,7 @@ def _provider_settings_payload(
             ),
         }
 
-    return [
+    builtins: list[dict[str, JSONValue]] = [
         {
             "provider": "xai",
             "api_key_env": "XAI_API_KEY",
@@ -741,6 +891,22 @@ def _provider_settings_payload(
             **_runtime_status("openai"),
         },
     ]
+    for provider_id, instance in _load_provider_instances(
+        ui_settings_path=ui_settings_path
+    ).items():
+        builtins.append(
+            {
+                "provider": provider_id,
+                "display_name": instance["display_name"],
+                "base_url": instance["base_url"],
+                "model": instance["model"],
+                "api_key_env": "",
+                **_key_status(provider_id),
+                "endpoint": f"{instance['base_url']}/models",
+                **_runtime_status(provider_id),
+            }
+        )
+    return builtins
 
 
 def _tts_settings_payload(*, api_keys_path: Path = API_KEYS_PATH) -> dict[str, JSONValue]:

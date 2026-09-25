@@ -237,6 +237,7 @@ export type SelectedModel = {
 
 export type ProviderModels = {
   provider: string;
+  displayName?: string;
   models: string[];
   error: string | null;
 };

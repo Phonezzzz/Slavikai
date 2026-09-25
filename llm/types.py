@@ -8,7 +8,7 @@ from shared.models import JSONValue, LLMMessage
 
 @dataclass(frozen=True)
 class ModelConfig:
-    provider: Literal["openrouter", "local", "xai", "inception", "deepseek"]
+    provider: str
     model: str
     temperature: float = 0.7
     top_p: float | None = None

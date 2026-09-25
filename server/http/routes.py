@@ -61,6 +61,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/plan/cancel", plan.handle_ui_plan_cancel)
     app.router.add_get("/ui/api/settings", settings.handle_ui_settings)
     app.router.add_post("/ui/api/settings", settings.handle_ui_settings_update)
+    app.router.add_post("/ui/api/provider-instances/probe", settings.handle_ui_provider_probe)
+    app.router.add_post("/ui/api/provider-instances", settings.handle_ui_provider_create)
     app.router.add_get("/ui/api/embeddings/status", embeddings.handle_embeddings_status)
     app.router.add_post("/ui/api/embeddings/download", embeddings.handle_embeddings_download)
     app.router.add_get("/ui/api/memory/conflicts", memory.handle_ui_memory_conflicts)
