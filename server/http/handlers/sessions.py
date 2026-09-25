@@ -18,6 +18,7 @@ from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import RuntimeModelStateProtocol, SessionApprovalStore
+from server.http.common.ui_settings import _load_provider_instance, _load_provider_instances
 from server.http_api import (
     SUPPORTED_MODEL_PROVIDERS,
     UI_SESSION_HEADER,
@@ -162,18 +163,34 @@ async def handle_ui_models(request: web.Request) -> web.Response:
             )
         providers = [normalized]
     else:
-        providers = sorted(SUPPORTED_MODEL_PROVIDERS)
+        providers = sorted(SUPPORTED_MODEL_PROVIDERS | _load_provider_instances().keys())
     payload_items: list[dict[str, JSONValue]] = []
     if summary_only and not provider_query:
         for provider in providers:
-            payload_items.append({"provider": provider, "models": [], "error": None})
+            instance = _load_provider_instance(provider)
+            payload_items.append(
+                {
+                    "provider": provider,
+                    "display_name": instance["display_name"] if instance else provider,
+                    "models": [instance["model"]] if instance else [],
+                    "error": None,
+                }
+            )
         return json_response({"providers": payload_items})
     for provider in providers:
         if strict:
             models, error_text = api._fetch_provider_models(provider, allow_local_fallback=False)
         else:
             models, error_text = api._fetch_provider_models(provider)
-        payload_items.append({"provider": provider, "models": models, "error": error_text})
+        instance = _load_provider_instance(provider)
+        payload_items.append(
+            {
+                "provider": provider,
+                "display_name": instance["display_name"] if instance else provider,
+                "models": models,
+                "error": error_text,
+            }
+        )
     return json_response({"providers": payload_items})
 
 
@@ -294,14 +311,14 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
     models, fetch_error = api._fetch_provider_models(provider)
-    if fetch_error:
+    if fetch_error and _load_provider_instance(provider) is None:
         return error_response(
             status=502,
             message=fetch_error,
             error_type="provider_error",
             code="provider_models_unavailable",
         )
-    if model_raw not in models:
+    if model_raw not in models and _load_provider_instance(provider) is None:
         suggestion = _closest_model_suggestion(model_raw, models)
         details: dict[str, JSONValue] = {
             "provider": provider,

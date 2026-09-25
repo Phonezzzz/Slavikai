@@ -475,7 +475,7 @@ export function SessionDrawer({
                       <div className="space-y-1">
                         {sortedProviders.map((provider) => {
                           const isActive = provider.provider === currentProviderName;
-                          const label = PROVIDER_LABELS[provider.provider] ?? provider.provider;
+                          const label = provider.displayName ?? PROVIDER_LABELS[provider.provider] ?? provider.provider;
                           return (
                             <button
                               key={provider.provider}

@@ -26,7 +26,7 @@ interface SettingsProps {
 
 type SettingsTab = 'api' | 'assistant' | 'appearance' | 'composer' | 'memory' | 'data' | 'diagnostics';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai' | 'deepseek';
-type ModelProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'deepseek';
+type ModelProvider = string;
 type ApiKeySource = 'env' | 'file' | 'missing';
 type EmbeddingsProvider = 'local' | 'openai';
 type EmbeddingDownloadState = 'missing' | 'package_missing' | 'downloading' | 'ready' | 'error';
@@ -43,6 +43,13 @@ type ProviderSettings = {
   api_key_valid: boolean | null;
   last_check_error: string | null;
   last_checked_at: string | null;
+};
+
+type ProviderInstance = {
+  provider: string;
+  display_name: string;
+  base_url: string;
+  model: string;
 };
 
 type ProviderRuntimeState = {
@@ -63,6 +70,7 @@ type TtsBackendSettings = {
 
 type ParsedSettings = {
   providers: ProviderSettings[];
+  providerInstances: ProviderInstance[];
   ttsBackend: TtsBackendSettings;
   tone: string;
   systemPrompt: string;
@@ -296,7 +304,10 @@ const isApiKeySource = (value: unknown): value is ApiKeySource =>
   value === 'env' || value === 'file' || value === 'missing';
 
 const isModelProvider = (value: unknown): value is ModelProvider =>
-  value === 'xai' || value === 'openrouter' || value === 'local' || value === 'inception' || value === 'deepseek';
+  typeof value === 'string' && (
+    value === 'xai' || value === 'openrouter' || value === 'local'
+    || value === 'inception' || value === 'deepseek' || /^custom-[0-9a-f]{32}$/.test(value)
+  );
 
 const isEmbeddingsProvider = (value: unknown): value is EmbeddingsProvider =>
   value === 'local' || value === 'openai';
@@ -315,6 +326,7 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
 const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   const defaults: ParsedSettings = {
     providers: DEFAULT_PROVIDER_SETTINGS,
+    providerInstances: [],
     ttsBackend: DEFAULT_TTS_BACKEND,
     tone: 'balanced',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -472,6 +484,21 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
       || DEFAULT_PROVIDER_SETTINGS.find((item) => item.provider === provider)
       || DEFAULT_PROVIDER_SETTINGS[0],
   );
+  const providerInstances: ProviderInstance[] = Array.isArray(providersRaw)
+    ? providersRaw.flatMap((item): ProviderInstance[] => {
+      if (!item || typeof item !== 'object') return [];
+      const entry = item as { provider?: unknown; display_name?: unknown; base_url?: unknown; model?: unknown };
+      if (typeof entry.provider !== 'string' || !/^custom-[0-9a-f]{32}$/.test(entry.provider)
+        || typeof entry.display_name !== 'string' || typeof entry.base_url !== 'string'
+        || typeof entry.model !== 'string') return [];
+      return [{
+        provider: entry.provider,
+        display_name: entry.display_name,
+        base_url: entry.base_url,
+        model: entry.model,
+      }];
+    })
+    : [];
 
   let ttsBackend = defaults.ttsBackend;
   const audioRaw = (settings as { audio?: unknown }).audio;
@@ -506,6 +533,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
 
   return {
     providers,
+    providerInstances,
     ttsBackend,
     tone,
     systemPrompt,
@@ -699,6 +727,15 @@ export function Settings({
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('assistant');
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
+  const [providerInstances, setProviderInstances] = useState<ProviderInstance[]>([]);
+  const [newProviderName, setNewProviderName] = useState('');
+  const [newProviderBaseUrl, setNewProviderBaseUrl] = useState('');
+  const [newProviderKey, setNewProviderKey] = useState('');
+  const [newProviderModel, setNewProviderModel] = useState('');
+  const [newProviderModels, setNewProviderModels] = useState<string[]>([]);
+  const [newProviderProbeStatus, setNewProviderProbeStatus] = useState<string | null>(null);
+  const [newProviderProbeResult, setNewProviderProbeResult] = useState<string | null>(null);
+  const [providerOnboardingBusy, setProviderOnboardingBusy] = useState(false);
   const [apiKeys, setApiKeys] = useState<Record<ApiKeyProvider, string>>(EMPTY_API_KEYS);
   const [providerDirty, setProviderDirty] = useState<Record<ApiKeyProvider, boolean>>(
     EMPTY_PROVIDER_DIRTY,
@@ -748,6 +785,7 @@ export function Settings({
 
   const applyParsedSettings = (parsed: ParsedSettings): void => {
     setProviders(parsed.providers);
+    setProviderInstances(parsed.providerInstances);
     setApiKeys({ ...EMPTY_API_KEYS });
     setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
     setTtsBackend(parsed.ttsBackend);
@@ -854,7 +892,7 @@ export function Settings({
     setDefaultModelsLoading(true);
     setStatus(null);
     try {
-      if (providerDirty[defaultModelProvider]) {
+      if (isApiKeyProvider(defaultModelProvider) && providerDirty[defaultModelProvider]) {
         const apiKey = apiKeys[defaultModelProvider].trim();
         const saveKeyResponse = await fetch('/ui/api/settings', {
           method: 'POST',
@@ -884,7 +922,7 @@ export function Settings({
       const item = Array.isArray(providersRaw) ? providersRaw[0] : null;
       const modelsRaw = item && typeof item === 'object' ? (item as { models?: unknown }).models : null;
       const errorRaw = item && typeof item === 'object' ? (item as { error?: unknown }).error : null;
-      if (typeof errorRaw === 'string' && errorRaw.trim()) {
+      if (typeof errorRaw === 'string' && errorRaw.trim() && !defaultModelProvider.startsWith('custom-')) {
         throw new Error(errorRaw);
       }
       const models = Array.isArray(modelsRaw)
@@ -894,12 +932,82 @@ export function Settings({
       if (!models.includes(defaultModelId)) {
         setDefaultModelId(models[0] ?? '');
       }
-      setStatus(models.length > 0 ? `Loaded ${models.length} ${defaultModelProvider} models.` : 'No models returned.');
+      setStatus(typeof errorRaw === 'string' && errorRaw.trim()
+        ? errorRaw
+        : models.length > 0 ? `Loaded ${models.length} ${defaultModelProvider} models.` : 'No models returned.');
     } catch (error) {
       setDefaultModelOptions(defaultModelId ? [defaultModelId] : []);
       setStatus(error instanceof Error ? error.message : 'Failed to load provider models.');
     } finally {
       setDefaultModelsLoading(false);
+    }
+  };
+
+  const handleProbeNewProvider = async (): Promise<void> => {
+    setProviderOnboardingBusy(true);
+    setNewProviderProbeStatus(null);
+    setNewProviderProbeResult(null);
+    try {
+      const response = await fetch('/ui/api/provider-instances/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_url: newProviderBaseUrl, api_key: newProviderKey }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) throw new Error(extractErrorMessage(payload, 'Provider probe failed.'));
+      const result = payload as { base_url?: unknown; models?: unknown; status?: unknown; message?: unknown };
+      const models = Array.isArray(result.models)
+        ? result.models.filter((item): item is string => typeof item === 'string' && item.length > 0)
+        : [];
+      if (typeof result.base_url === 'string') setNewProviderBaseUrl(result.base_url);
+      setNewProviderModels(models);
+      setNewProviderModel(models[0] ?? '');
+      setNewProviderProbeStatus(typeof result.message === 'string' && result.message
+        ? result.message
+        : `Connected. Found ${models.length} models.`);
+      setNewProviderProbeResult(typeof result.status === 'string' ? result.status : null);
+    } catch (error) {
+      setNewProviderModels([]);
+      setNewProviderProbeStatus(error instanceof Error ? error.message : 'Provider probe failed.');
+      setNewProviderProbeResult(null);
+    } finally {
+      setProviderOnboardingBusy(false);
+    }
+  };
+
+  const handleSaveNewProvider = async (): Promise<void> => {
+    setProviderOnboardingBusy(true);
+    setStatus(null);
+    try {
+      const response = await fetch('/ui/api/provider-instances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          display_name: newProviderName,
+          base_url: newProviderBaseUrl,
+          api_key: newProviderKey,
+          model: newProviderModel,
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) throw new Error(extractErrorMessage(payload, 'Could not save provider.'));
+      const settingsResponse = await fetch('/ui/api/settings');
+      const settingsPayload: unknown = await settingsResponse.json();
+      if (!settingsResponse.ok) throw new Error(extractErrorMessage(settingsPayload, 'Could not reload providers.'));
+      applyParsedSettings(parseSettingsPayload(settingsPayload));
+      setNewProviderName('');
+      setNewProviderBaseUrl('');
+      setNewProviderKey('');
+      setNewProviderModel('');
+      setNewProviderModels([]);
+      setNewProviderProbeStatus(null);
+      setNewProviderProbeResult(null);
+      setStatus('Provider saved. Select it in the chat model picker when ready.');
+      onSaved?.();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Could not save provider.');
+    } finally {
+      setProviderOnboardingBusy(false);
     }
   };
 
@@ -1282,6 +1390,92 @@ export function Settings({
                       </SectionCard>
 
                       <SectionCard
+                        title="Add provider"
+                        description="Connect an OpenAI-compatible endpoint. Saving it does not switch the active model."
+                        scope="Global"
+                      >
+                        <div className="grid gap-3">
+                          <input
+                            aria-label="Provider display name"
+                            placeholder="Display name"
+                            value={newProviderName}
+                            onChange={(event) => setNewProviderName(event.target.value)}
+                            className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                          />
+                          <input
+                            aria-label="Provider Base URL"
+                            placeholder="Base URL (https://host or https://host/v1)"
+                            value={newProviderBaseUrl}
+                            onChange={(event) => {
+                              setNewProviderBaseUrl(event.target.value);
+                              setNewProviderProbeResult(null);
+                            }}
+                            className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                          />
+                          <input
+                            type="password"
+                            autoComplete="new-password"
+                            aria-label="New provider API key"
+                            placeholder="API key"
+                            value={newProviderKey}
+                            onChange={(event) => {
+                              setNewProviderKey(event.target.value);
+                              setNewProviderProbeResult(null);
+                            }}
+                            className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => { void handleProbeNewProvider(); }}
+                            disabled={providerOnboardingBusy || !newProviderBaseUrl.trim() || !newProviderKey.trim()}
+                            className="w-fit rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 disabled:opacity-40"
+                          >
+                            {providerOnboardingBusy ? 'Checking...' : 'Check connection and load models'}
+                          </button>
+                          {newProviderProbeStatus ? <p className="text-xs text-zinc-400">{newProviderProbeStatus}</p> : null}
+                          {newProviderModels.length > 0 ? (
+                            <select
+                              aria-label="Discovered model"
+                              value={newProviderModels.includes(newProviderModel) ? newProviderModel : ''}
+                              onChange={(event) => setNewProviderModel(event.target.value)}
+                              className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                            >
+                              <option value="">Select a discovered model</option>
+                              {newProviderModels.map((model) => <option key={model} value={model}>{model}</option>)}
+                            </select>
+                          ) : null}
+                          <input
+                            aria-label="Manual model ID"
+                            placeholder="Or enter model ID manually"
+                            value={newProviderModel}
+                            onChange={(event) => setNewProviderModel(event.target.value)}
+                            className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => { void handleSaveNewProvider(); }}
+                            disabled={providerOnboardingBusy || !newProviderName.trim() || !newProviderModel.trim()
+                              || (newProviderProbeResult !== 'ready'
+                                && newProviderProbeResult !== 'models_unavailable'
+                                && newProviderProbeResult !== 'provider_unavailable')}
+                            className="w-fit rounded-lg border border-zinc-600 bg-zinc-800 px-4 py-2 text-sm text-zinc-100 disabled:opacity-40"
+                          >
+                            Save provider
+                          </button>
+                        </div>
+                        {providerInstances.length > 0 ? (
+                          <div className="mt-4 space-y-2 text-xs text-zinc-400">
+                            {providerInstances.map((item) => (
+                              <div key={item.provider}>
+                                <span className="text-zinc-200">{item.display_name}</span>
+                                {' · '}{item.base_url}{' · '}{item.model}{' · key saved'}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </SectionCard>
+
+                      <SectionCard
                         title="Default chat model"
                         description="Choose the provider and model used by every new chat. DeepSeek is the recommended beta starting point."
                         scope="Global"
@@ -1295,20 +1489,33 @@ export function Settings({
                                 const provider = event.target.value;
                                 if (isModelProvider(provider)) {
                                   setDefaultModelProvider(provider);
-                                  setDefaultModelId('');
-                                  setDefaultModelOptions([]);
+                                  const savedModel = providerInstances.find((item) => item.provider === provider)?.model ?? '';
+                                  setDefaultModelId(savedModel);
+                                  setDefaultModelOptions(savedModel ? [savedModel] : []);
                                 }
                               }}
                               className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
                             >
                               {(['deepseek', 'openrouter', 'xai', 'inception', 'local'] as ModelProvider[]).map((provider) => (
-                                <option key={provider} value={provider}>{PROVIDER_LABELS[provider]}</option>
+                                <option key={provider} value={provider}>{isApiKeyProvider(provider) ? PROVIDER_LABELS[provider] : provider}</option>
+                              ))}
+                              {providerInstances.map((item) => (
+                                <option key={item.provider} value={item.provider}>{item.display_name}</option>
                               ))}
                             </select>
                           </label>
                           <label>
                             <span className="mb-2 block text-sm font-medium text-zinc-300">Model</span>
-                            <select
+                            {defaultModelProvider.startsWith('custom-') ? (
+                              <input
+                                aria-label="Default model ID"
+                                value={defaultModelId}
+                                onChange={(event) => setDefaultModelId(event.target.value)}
+                                list="dynamic-default-models"
+                                placeholder="Model ID"
+                                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                              />
+                            ) : <select
                               value={defaultModelId}
                               onChange={(event) => setDefaultModelId(event.target.value)}
                               disabled={defaultModelsLoading || defaultModelOptions.length === 0}
@@ -1316,7 +1523,10 @@ export function Settings({
                             >
                               {defaultModelOptions.length === 0 ? <option value="">Load models first</option> : null}
                               {defaultModelOptions.map((model) => <option key={model} value={model}>{model}</option>)}
-                            </select>
+                            </select>}
+                            <datalist id="dynamic-default-models">
+                              {defaultModelOptions.map((model) => <option key={model} value={model} />)}
+                            </datalist>
                           </label>
                           <button
                             type="button"

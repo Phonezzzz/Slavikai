@@ -449,7 +449,9 @@ export function ChatArea({
           title="Model selector"
         >
           <Bot className="h-3.5 w-3.5" />
-          {selectedModel ? `${selectedModel.provider}/${selectedModel.model}` : 'Select model'}
+          {selectedModel
+            ? `${providerModels.find((item) => item.provider === selectedModel.provider)?.displayName ?? selectedModel.provider}/${selectedModel.model}`
+            : 'Select model'}
         </button>
 
         <div className="flex items-center gap-1">
@@ -508,7 +510,7 @@ export function ChatArea({
             >
               {providerModels.map((item) => (
                 <option key={item.provider} value={item.provider} className="bg-zinc-950 text-zinc-100">
-                  {item.provider}
+                  {item.displayName ?? item.provider}
                 </option>
               ))}
             </select>

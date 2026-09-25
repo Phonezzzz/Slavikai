@@ -270,12 +270,13 @@ export const parseProviderModels = (value: unknown): ProviderModels[] => {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    const candidate = item as { provider?: unknown; models?: unknown; error?: unknown };
+    const candidate = item as { provider?: unknown; display_name?: unknown; models?: unknown; error?: unknown };
     if (typeof candidate.provider !== 'string' || !Array.isArray(candidate.models)) {
       continue;
     }
     providers.push({
       provider: candidate.provider,
+      displayName: typeof candidate.display_name === 'string' ? candidate.display_name : undefined,
       models: candidate.models.filter((entry): entry is string => typeof entry === 'string'),
       error:
         typeof candidate.error === 'string' || candidate.error === null ? candidate.error : null,
