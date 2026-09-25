@@ -319,10 +319,10 @@ class AutoOrchestrator:
                     ],
                 )
 
-            if _has_unrecovered_tool_failure(loop_result.tool_calls):
+            if _has_failed_tool_call(loop_result.tool_calls):
                 reason = (
-                    "Auto-run остановлен: tool call завершился ошибкой, а корректирующего "
-                    "действия или verifier evidence для его восстановления нет."
+                    "Auto-run остановлен: tool call завершился ошибкой, а verifier "
+                    "evidence выполнения исходного действия отсутствует."
                 )
                 state["error"] = reason
                 state["error_code"] = "tool_failure_unrecovered"
@@ -333,7 +333,7 @@ class AutoOrchestrator:
                         why=reason,
                         next_steps=[
                             "Проверь auto_state.coders на failed outcome.",
-                            "Выполни корректирующее действие или докажи результат verifier-ом.",
+                            "Докажи выполнение действия verifier-ом или перезапусти auto.",
                         ],
                         stop_reason_code=StopReasonCode.WORKER_FAILED,
                         route="auto",
@@ -346,7 +346,7 @@ class AutoOrchestrator:
                     verifier=None,
                     next_steps=[
                         "Проверь auto_state.coders на failed outcome.",
-                        "Выполни корректирующее действие или докажи результат verifier-ом.",
+                        "Докажи выполнение действия verifier-ом или перезапусти auto.",
                     ],
                 )
 
@@ -663,16 +663,14 @@ def _auto_v1_tool_call_state(item: ExecutedToolCall) -> dict[str, JSONValue]:
     }
 
 
-def _has_unrecovered_tool_failure(tool_calls: list[ExecutedToolCall]) -> bool:
-    """A failed tool call is recovered only by a later successful tool call."""
-    last_success_index = -1
-    last_failure_index = -1
-    for index, item in enumerate(tool_calls):
-        if item.result.ok:
-            last_success_index = index
-        else:
-            last_failure_index = index
-    return last_failure_index > last_success_index
+def _has_failed_tool_call(tool_calls: list[ExecutedToolCall]) -> bool:
+    """Fail closed on any failed tool call.
+
+    Tool-call order is not evidence: a later, unrelated success does not prove
+    the failed action was performed. The canonical verifier checks the repository
+    state, not a specific tool outcome, so it cannot provide that evidence.
+    """
+    return any(not item.result.ok for item in tool_calls)
 
 
 def _verification_state(verification: VerificationResult) -> dict[str, JSONValue]:

@@ -40,6 +40,7 @@ type UseSessionTransportOptions = {
   consumeForceCanvasNext: () => void;
   onSessionIdChange: (sessionId: string) => void;
   onStatusMessage: (message: string | null) => void;
+  onStreamWarning: (message: string | null) => void;
   onRuntimePayload: (payload: unknown) => void;
   onOpenStreamedArtifact: (artifactId: string) => void;
   setArtifactViewerArtifactId: (artifactId: string | null) => void;
@@ -163,6 +164,7 @@ export function useSessionTransport({
   consumeForceCanvasNext,
   onSessionIdChange,
   onStatusMessage,
+  onStreamWarning,
   onRuntimePayload,
   onOpenStreamedArtifact,
   setArtifactViewerArtifactId,
@@ -182,7 +184,6 @@ export function useSessionTransport({
   const [chatStreamingState, setChatStreamingState] = useState<ChatStreamState | null>(null);
   const [toolStreamActivity, setToolStreamActivity] = useState<ToolActivity[]>([]);
   const toolStreamActivityRef = useRef<ToolActivity[]>([]);
-  const streamWarningActiveRef = useRef(false);
 
   const clearConversationState = () => {
     setChatMessages([]);
@@ -503,19 +504,13 @@ export function useSessionTransport({
     const encodedSessionId = encodeURIComponent(selectedConversation);
     const chatEventSource = new EventSource(`/ui/api/chat/events/${encodedSessionId}`);
     chatEventSource.onopen = () => {
-      if (streamWarningActiveRef.current) {
-        streamWarningActiveRef.current = false;
-        onStatusMessage(null);
-      }
+      onStreamWarning(null);
     };
     chatEventSource.onmessage = handleEventMessage;
     chatEventSource.onerror = () => {
-      if (!streamWarningActiveRef.current) {
-        streamWarningActiveRef.current = true;
-        onStatusMessage(
-          'Live update connection lost; the answer may appear at once instead of streaming.',
-        );
-      }
+      onStreamWarning(
+        'Live update connection lost; the answer may appear at once instead of streaming.',
+      );
     };
     return () => {
       chatEventSource.close();
@@ -591,7 +586,6 @@ export function useSessionTransport({
       setToolStreamActivity([]);
       toolStreamActivityRef.current = [];
       await loadSessions();
-      streamWarningActiveRef.current = false;
       onStatusMessage(extractGenerationErrorMessage(responsePayload));
       if (forceCanvasForRequest) {
         consumeForceCanvasNext();
@@ -599,7 +593,6 @@ export function useSessionTransport({
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send message.';
-      streamWarningActiveRef.current = false;
       onStatusMessage(message);
       setPendingUserMessage(null);
       setPendingSessionId(null);
@@ -628,12 +621,10 @@ export function useSessionTransport({
       }
       setChatStreamingState(null);
       setSending(false);
-      streamWarningActiveRef.current = false;
       onStatusMessage(null);
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to stop generation.';
-      streamWarningActiveRef.current = false;
       onStatusMessage(message);
       return false;
     } finally {

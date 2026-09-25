@@ -379,7 +379,7 @@ class _CorrectiveRecoveryAgent(_FakeAgent):
         return ToolGateway(self.tool_registry)
 
 
-def test_auto_v1_recovery_with_corrective_tool_call_is_completed(
+def test_auto_v1_unrelated_success_after_failure_is_worker_failed(
     monkeypatch,
     tmp_path,
 ) -> None:  # noqa: ANN001
@@ -397,7 +397,8 @@ def test_auto_v1_recovery_with_corrective_tool_call_is_completed(
             run_root_override=run_root,
         )
 
-    assert outcome.status == AutoRunStatus.COMPLETED
+    assert outcome.status == AutoRunStatus.FAILED_WORKER
+    assert outcome.stop_reason_code == StopReasonCode.WORKER_FAILED
     assert agent._brain.calls == 3
     coders = agent.last_auto_state.get("coders")
     assert isinstance(coders, list)

@@ -69,6 +69,7 @@ export default function App() {
   );
   const [uiTheme, setUiTheme] = useState<UiTheme>('default');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [streamWarning, setStreamWarning] = useState<string | null>(null);
 
   const overlays = useSessionOverlays({ activeView });
 
@@ -189,6 +190,7 @@ export default function App() {
       await runtime.handleSelectConversation(sessionId);
     },
     onStatusMessage: setStatusMessage,
+    onStreamWarning: setStreamWarning,
     onRuntimePayload: runtime.applyRuntimePayload,
     onOpenStreamedArtifact: overlays.openStreamedArtifact,
     setArtifactViewerArtifactId: overlays.setArtifactViewerArtifactId,
@@ -633,7 +635,7 @@ export default function App() {
             modelLabel={modelLabel}
             modelProvider={runtime.selectedModel?.provider ?? null}
             sessionTitle={sessionTitle}
-            statusMessage={statusMessage}
+            statusMessage={statusMessage ?? streamWarning}
             longPasteToFileEnabled={composerSettings.longPasteToFileEnabled}
             longPasteThresholdChars={composerSettings.longPasteThresholdChars}
             forceCanvasNext={overlays.forceCanvasNext}
@@ -681,7 +683,7 @@ export default function App() {
               sessionSafeMode={runtime.sessionSecuritySummary.safeMode}
               messages={[]}
               computerEvents={runtime.computerEvents}
-              statusMessage={statusMessage}
+              statusMessage={statusMessage ?? streamWarning}
               onBackToChat={() => {
                 overlays.setRepositoryPanelOpen(false);
                 setView('chat');
