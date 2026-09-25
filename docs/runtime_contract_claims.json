@@ -157,7 +157,7 @@
         "tests/ui_api/test_generic_provider_onboarding.py",
         "tests/ui_api/test_provider_model_settings.py"
       ],
-      "summary": "Owner can add an OpenAI-compatible API key provider instance, discover or manually enter an opaque model ID, and explicitly select it through the existing UI and runtime."
+      "summary": "Owner can save an OpenAI-compatible endpoint without a model, then discover and select an opaque model ID in the chat session picker; manual IDs require an unavailable catalog. Member use of owner credentials is denied, dynamic native tools are unqualified, and remote HTTP is rejected."
     },
     {
       "id": "model_access.openai_subscription",

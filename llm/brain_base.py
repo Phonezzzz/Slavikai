@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from typing import ClassVar
 
 from llm.cancellation import cancellation_requested
 from llm.stream_model import Done, StreamEvent, stream_events_from_result
@@ -14,8 +13,8 @@ from shared.models import LLMMessage
 class Brain(ABC):
     """Абстракция для всех моделей (OpenRouter, xAI, Local)."""
 
-    supports_native_tools: ClassVar[bool] = False
-    supports_streaming_tools: ClassVar[bool] = False
+    supports_native_tools: bool = False
+    supports_streaming_tools: bool = False
 
     @abstractmethod
     def generate(

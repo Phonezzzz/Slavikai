@@ -103,7 +103,10 @@ class LocalHttpBrain(Brain):
         default_config: ModelConfig,
         base_url: str | None = None,
         api_key: str | None = None,
+        native_tools: bool = True,
     ) -> None:
+        self.supports_native_tools = native_tools
+        self.supports_streaming_tools = native_tools
         self.default_config = default_config
         self.base_url = (
             base_url
@@ -131,6 +134,8 @@ class LocalHttpBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResult:
+        if tools and not self.supports_native_tools:
+            raise RuntimeError("native_tools_required")
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload: dict[str, JSONValue] = {
@@ -148,15 +153,23 @@ class LocalHttpBrain(Brain):
         if cfg.top_p is not None:
             payload["top_p"] = cfg.top_p
 
-        response = request_with_retry(
-            lambda: requests.post(
+        def send_request() -> requests.Response:
+            if self.supports_native_tools:
+                return requests.post(
+                    self.base_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=DEFAULT_TIMEOUT,
+                )
+            return requests.post(
                 self.base_url,
                 json=payload,
                 headers=headers,
                 timeout=DEFAULT_TIMEOUT,
-            ),
-            provider="local",
-        )
+                allow_redirects=False,
+            )
+
+        response = request_with_retry(send_request, provider="local")
         data_json = response.json()
         if not isinstance(data_json, dict):
             raise RuntimeError("Некорректный ответ локального LLM.")
@@ -203,6 +216,8 @@ class LocalHttpBrain(Brain):
         tools: list[ToolSpec] | None = None,
         cancellation_token: asyncio.Event | None = None,
     ) -> Iterator[StreamEvent]:
+        if tools and not self.supports_native_tools:
+            raise RuntimeError("native_tools_required")
         if cancellation_requested(cancellation_token):
             yield from iter_cancellable((), cancellation_token=cancellation_token)
             return
@@ -224,13 +239,23 @@ class LocalHttpBrain(Brain):
         if cfg.top_p is not None:
             payload["top_p"] = cfg.top_p
 
-        response = requests.post(
-            self.base_url,
-            json=payload,
-            headers=headers,
-            timeout=DEFAULT_TIMEOUT,
-            stream=True,
-        )
+        if self.supports_native_tools:
+            response = requests.post(
+                self.base_url,
+                json=payload,
+                headers=headers,
+                timeout=DEFAULT_TIMEOUT,
+                stream=True,
+            )
+        else:
+            response = requests.post(
+                self.base_url,
+                json=payload,
+                headers=headers,
+                timeout=DEFAULT_TIMEOUT,
+                stream=True,
+                allow_redirects=False,
+            )
         with bind_cancellation_resource(cancellation_token, response):
             response.raise_for_status()
             response.encoding = "utf-8"

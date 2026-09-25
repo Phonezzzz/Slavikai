@@ -14,9 +14,14 @@ from core.mwv.models import RunContext, TaskPacket
 from llm.stream_model import StreamEvent
 from llm.types import ModelConfig
 from server.agent_provider import AgentScope, ScopedAgentProvider
-from server.http.common.auth import _request_principal_id
+from server.http.common.auth import _request_identity, _request_principal_id
 from server.http.common.responses import error_response as _error_response
-from server.http.common.ui_settings import _build_model_config, _resolve_provider_api_key
+from server.http.common.ui_settings import (
+    CUSTOM_PROVIDER_PREFIX,
+    _build_model_config,
+    _load_provider_instance,
+    _resolve_provider_api_key,
+)
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
 
@@ -249,6 +254,8 @@ async def _resolve_agent(
     main_config = await resolver.resolve_main(session_id)
     if main_config is None and not provider.is_static:
         return None
+    if main_config is not None:
+        _require_custom_provider_owner(request, main_config.provider, main_config)
     try:
         scope = _agent_scope(request, session_id)
         return await _get_scoped_agent(
@@ -271,6 +278,8 @@ async def _resolve_agent_for_base_http(
     main_config = await resolver.resolve_main(session_id)
     if main_config is None and not provider.is_static:
         return None
+    if main_config is not None:
+        _require_custom_provider_owner(request, main_config.provider, main_config)
     try:
         scope = _agent_scope(request, session_id)
         return await _get_scoped_agent(
@@ -288,6 +297,20 @@ def _selected_model_snapshot(main_config: ModelConfig) -> dict[str, str]:
     return {"provider": main_config.provider, "model": main_config.model}
 
 
+def _require_custom_provider_owner(
+    request: web.Request, provider: str, config: ModelConfig | None = None
+) -> None:
+    if provider.startswith(CUSTOM_PROVIDER_PREFIX):
+        identity = _request_identity(request)
+        if identity is None or identity.role != "owner":
+            raise PermissionError("Owner access required for custom provider.")
+        instance = _load_provider_instance(provider)
+        if instance is None:
+            raise ValueError("Custom provider configuration unavailable.")
+        if config is not None and config.base_url != f"{instance['base_url']}/chat/completions":
+            raise ValueError("Custom provider endpoint differs from saved configuration.")
+
+
 async def _sync_session_runtime_override(
     request: web.Request,
     session_id: str,
@@ -299,6 +322,7 @@ async def _sync_session_runtime_override(
     model_id = selected_model.get("model")
     if not isinstance(provider, str) or not isinstance(model_id, str):
         return None
+    _require_custom_provider_owner(request, provider)
     main_config = _build_model_config(provider, model_id)
     store = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
     await store.set_session_override(session_id, main_config)
@@ -320,6 +344,7 @@ async def _resolve_agent_for_ui_session(
     main_config = await _resolve_runtime_main_for_session(request, session_id)
     if main_config is None:
         return None, None
+    _require_custom_provider_owner(request, main_config.provider, main_config)
     provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
     try:
         scope = _agent_scope(request, session_id)

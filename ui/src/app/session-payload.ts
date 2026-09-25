@@ -270,7 +270,7 @@ export const parseProviderModels = (value: unknown): ProviderModels[] => {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    const candidate = item as { provider?: unknown; display_name?: unknown; models?: unknown; error?: unknown };
+    const candidate = item as { provider?: unknown; display_name?: unknown; models?: unknown; error?: unknown; status?: unknown };
     if (typeof candidate.provider !== 'string' || !Array.isArray(candidate.models)) {
       continue;
     }
@@ -280,6 +280,7 @@ export const parseProviderModels = (value: unknown): ProviderModels[] => {
       models: candidate.models.filter((entry): entry is string => typeof entry === 'string'),
       error:
         typeof candidate.error === 'string' || candidate.error === null ? candidate.error : null,
+      status: typeof candidate.status === 'string' ? candidate.status : null,
     });
   }
   return providers;

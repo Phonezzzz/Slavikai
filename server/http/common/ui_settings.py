@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import ipaddress
 import json
 import os
 import re
@@ -116,6 +117,16 @@ def _normalize_openai_base_url(raw: str) -> str:
         or (port is not None and port == 0)
     ):
         raise ValueError("Base URL должен быть HTTP(S) URL без credentials, query и fragment.")
+    if parsed.scheme == "http":
+        host = parsed.hostname.lower()
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = host == "localhost"
+        if not loopback:
+            raise ValueError(
+                "Удалённый Base URL должен использовать HTTPS; HTTP разрешён только для loopback."
+            )
     path = parsed.path.rstrip("/")
     if not path:
         path = "/v1"
@@ -136,19 +147,20 @@ def _load_provider_instances(*, ui_settings_path: Path | None = None) -> dict[st
             continue
         if not isinstance(item, dict):
             continue
-        name, base_url, model = item.get("display_name"), item.get("base_url"), item.get("model")
+        name, base_url = item.get("display_name"), item.get("base_url")
         if (
             isinstance(name, str)
             and name.strip()
             and isinstance(base_url, str)
             and base_url.strip()
-            and isinstance(model, str)
-            and model.strip()
         ):
+            try:
+                normalized_url = _normalize_openai_base_url(base_url)
+            except ValueError:
+                continue
             instances[provider_id] = {
                 "display_name": name,
-                "base_url": base_url,
-                "model": model,
+                "base_url": normalized_url,
             }
     return instances
 
@@ -160,7 +172,7 @@ def _load_provider_instance(
 
 
 def _save_provider_instance(
-    *, display_name: str, base_url: str, model: str, ui_settings_path: Path | None = None
+    *, display_name: str, base_url: str, ui_settings_path: Path | None = None
 ) -> str:
     path = ui_settings_path or UI_SETTINGS_PATH
     provider_id = f"{CUSTOM_PROVIDER_PREFIX}{uuid.uuid4().hex}"
@@ -169,7 +181,6 @@ def _save_provider_instance(
     instances[provider_id] = {
         "display_name": display_name,
         "base_url": base_url,
-        "model": model,
     }
     payload["provider_instances"] = instances
     _save_ui_settings_blob(payload, ui_settings_path=path)
@@ -191,6 +202,7 @@ def _probe_openai_models(base_url: str, api_key: str) -> tuple[list[str], str, s
             f"{base_url}/models",
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=MODEL_FETCH_TIMEOUT,
+            allow_redirects=False,
         )
         if response.status_code == 401:
             return [], "invalid_api_key", "API-ключ отклонён провайдером."
@@ -371,10 +383,8 @@ def _fetch_provider_models(
     if instance is not None:
         key = _resolve_provider_api_key(provider, api_keys_path=api_keys_path)
         if not key:
-            return [instance["model"]], "Для провайдера не сохранён API-ключ."
+            return [], "Для провайдера не сохранён API-ключ."
         models, status, error = _probe_openai_models(instance["base_url"], key)
-        if instance["model"] not in models:
-            models.append(instance["model"])
         return models, error if status != "ready" else None
     if provider == "inception":
         docs_models = list(INCEPTION_DOCS_MODELS)
@@ -813,6 +823,7 @@ def _provider_settings_payload(
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
     api_keys_path: Path = API_KEYS_PATH,
+    include_custom_providers: bool = True,
 ) -> list[dict[str, JSONValue]]:
     local_endpoint = (
         os.getenv("LOCAL_LLM_URL", DEFAULT_LOCAL_ENDPOINT).strip() or DEFAULT_LOCAL_ENDPOINT
@@ -891,21 +902,21 @@ def _provider_settings_payload(
             **_runtime_status("openai"),
         },
     ]
-    for provider_id, instance in _load_provider_instances(
-        ui_settings_path=ui_settings_path
-    ).items():
-        builtins.append(
-            {
-                "provider": provider_id,
-                "display_name": instance["display_name"],
-                "base_url": instance["base_url"],
-                "model": instance["model"],
-                "api_key_env": "",
-                **_key_status(provider_id),
-                "endpoint": f"{instance['base_url']}/models",
-                **_runtime_status(provider_id),
-            }
-        )
+    if include_custom_providers:
+        for provider_id, instance in _load_provider_instances(
+            ui_settings_path=ui_settings_path
+        ).items():
+            builtins.append(
+                {
+                    "provider": provider_id,
+                    "display_name": instance["display_name"],
+                    "base_url": instance["base_url"],
+                    "api_key_env": "",
+                    **_key_status(provider_id),
+                    "endpoint": f"{instance['base_url']}/models",
+                    **_runtime_status(provider_id),
+                }
+            )
     return builtins
 
 

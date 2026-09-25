@@ -23,7 +23,6 @@ describe('generic provider onboarding', () => {
               provider: 'custom-0123456789abcdef0123456789abcdef',
               display_name: 'Example',
               base_url: 'https://example.test/v1',
-              model: 'opaque/model',
               api_key_stored: true,
             }] : [],
           },
@@ -45,7 +44,10 @@ describe('generic provider onboarding', () => {
       }
       if (url === '/ui/api/provider-instances') {
         saved = true;
-        return new Response(JSON.stringify({ provider: 'custom-0123456789abcdef0123456789abcdef' }), { status: 200 });
+        return new Response(JSON.stringify({
+          provider: 'custom-0123456789abcdef0123456789abcdef',
+          display_name: 'Example', base_url: 'https://example.test/v1',
+        }), { status: 200 });
       }
       throw new Error(`Unexpected URL: ${url}`);
     });
@@ -54,13 +56,16 @@ describe('generic provider onboarding', () => {
     render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
-    await screen.findByRole('button', { name: 'Check connection and load models' });
+    await screen.findByRole('button', { name: 'Test connection' });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test/' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'ui-test-secret' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Check connection and load models' }));
+    expect(screen.queryByLabelText('Manual model ID')).toBeNull();
+    expect(screen.queryByLabelText('Discovered model')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Save provider' }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
-    await screen.findByRole('option', { name: 'opaque/model' });
+    await screen.findByText('Connected. Found 1 models.');
     expect((screen.getByRole('button', { name: 'Save provider' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Save provider' }));
     await vi.waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
@@ -68,9 +73,60 @@ describe('generic provider onboarding', () => {
     const probe = calls.find((call) => call.path === '/ui/api/provider-instances/probe');
     const create = calls.find((call) => call.path === '/ui/api/provider-instances');
     expect(probe?.body?.api_key).toBe('ui-test-secret');
-    expect(create?.body?.model).toBe('opaque/model');
+    expect(create?.body?.model).toBeUndefined();
     expect(calls.some((call) => call.path === '/ui/api/settings' && call.body?.model !== undefined)).toBe(false);
     expect(screen.queryByDisplayValue('ui-test-secret')).toBeNull();
     expect(screen.getAllByText('Example').length).toBeGreaterThan(0);
+  });
+
+  it('keeps unsaved instructions when a provider is saved', async () => {
+    let saved = false;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: {
+        personalization: { tone: 'balanced', system_prompt: 'server value' },
+        providers: saved ? [{ provider: 'custom-0123456789abcdef0123456789abcdef', display_name: 'Example', base_url: 'https://example.test/v1' }] : [],
+      } }), { status: 200 });
+      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
+      if (url === '/ui/api/provider-instances/probe') return new Response(JSON.stringify({ base_url: 'https://example.test/v1', models: ['opaque/model'], status: 'ready' }), { status: 200 });
+      if (url === '/ui/api/provider-instances') { saved = true; return new Response(JSON.stringify({ provider: 'custom-0123456789abcdef0123456789abcdef', display_name: 'Example', base_url: 'https://example.test/v1' }), { status: 200 }); }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show advanced editor' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Custom instructions' }), { target: { value: 'unsaved value' } });
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
+    fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText('Connected. Found 1 models.');
+    fireEvent.click(screen.getByRole('button', { name: 'Save provider' }));
+    await screen.findByText('Provider saved. Select it in the chat model picker when ready.');
+    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    expect((screen.getByRole('textbox', { name: 'Custom instructions' }) as HTMLTextAreaElement).value).toBe('unsaved value');
+  });
+
+  it('clears unsaved onboarding fields and key when Settings closes', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
+      if (url === '/ui/api/provider-instances/probe') return new Response(JSON.stringify({ base_url: 'https://example.test/v1', models: [], status: 'models_unavailable', message: 'Catalog unavailable.' }), { status: 200 });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Unsaved' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
+    fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'unsaved-secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText('Catalog unavailable.');
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    await vi.waitFor(() => expect((screen.getByLabelText('New provider API key') as HTMLInputElement).value).toBe(''));
+    expect((screen.getByRole('textbox', { name: 'Provider display name' }) as HTMLInputElement).value).toBe('');
+    expect((screen.getByRole('textbox', { name: 'Provider Base URL' }) as HTMLInputElement).value).toBe('');
+    expect(screen.queryByText('Catalog unavailable.')).toBeNull();
   });
 });

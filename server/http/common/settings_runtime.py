@@ -173,10 +173,13 @@ class SettingsRuntimeBindings:
             api_keys_path=self._api_keys_path(),
         )
 
-    def provider_settings_payload(self) -> list[dict[str, JSONValue]]:
+    def provider_settings_payload(
+        self, *, include_custom_providers: bool = True
+    ) -> list[dict[str, JSONValue]]:
         return ui_settings._provider_settings_payload(
             ui_settings_path=self._ui_settings_path(),
             api_keys_path=self._api_keys_path(),
+            include_custom_providers=include_custom_providers,
         )
 
     def load_default_model(self) -> ModelConfig | None:
@@ -185,7 +188,9 @@ class SettingsRuntimeBindings:
     def save_default_model(self, config: ModelConfig) -> None:
         ui_settings._save_default_model(config, model_config_path=self._model_config_path())
 
-    def build_settings_payload(self) -> dict[str, JSONValue]:
+    def build_settings_payload(
+        self, *, include_custom_providers: bool = True
+    ) -> dict[str, JSONValue]:
         tone, system_prompt = self.load_personalization_settings()
         appearance_theme = self.load_appearance_settings()
         long_paste_to_file_enabled, long_paste_threshold_chars = self.load_composer_settings()
@@ -201,6 +206,12 @@ class SettingsRuntimeBindings:
                 "provider": default_model.provider,
                 "model": default_model.model,
             }
+        if not include_custom_providers and default_model_payload is not None:
+            provider_raw = default_model_payload.get("provider")
+            if isinstance(provider_raw, str) and provider_raw.startswith(
+                ui_settings.CUSTOM_PROVIDER_PREFIX
+            ):
+                default_model_payload = None
         return {
             "settings": {
                 "model": default_model_payload,
@@ -232,6 +243,8 @@ class SettingsRuntimeBindings:
                 "audio": {
                     "tts": ui_settings._tts_settings_payload(api_keys_path=self._api_keys_path()),
                 },
-                "providers": self.provider_settings_payload(),
+                "providers": self.provider_settings_payload(
+                    include_custom_providers=include_custom_providers
+                ),
             },
         }

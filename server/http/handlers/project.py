@@ -119,6 +119,13 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 request,
                 session_id,
             )
+        except PermissionError:
+            return error_response(
+                status=403,
+                message="Owner access required for custom provider.",
+                error_type="invalid_request_error",
+                code="owner_required",
+            )
         except Exception as exc:  # noqa: BLE001
             return error_response(
                 status=400,
