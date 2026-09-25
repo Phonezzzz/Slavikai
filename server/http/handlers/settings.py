@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Literal, cast
@@ -12,6 +13,7 @@ from config.ui_embeddings_settings import UIEmbeddingsSettings
 from core.approval_policy import ApprovalRequired
 from server import http_api as api
 from server.agent_provider import AgentApplyFailure, ScopedAgentProvider
+from server.http.common import ui_settings
 from server.http.common.auth import _require_owner, _resolve_ui_session_id_for_principal
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
@@ -24,6 +26,128 @@ from shared.models import JSONValue
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 _SANDBOX_AUDIO_ROOT = Path("sandbox/audio").resolve()
+
+
+async def handle_ui_provider_probe(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = None
+    if not isinstance(body, dict):
+        return error_response(
+            status=400,
+            message="Нужен JSON-объект.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    base_raw, key_raw = body.get("base_url"), body.get("api_key")
+    if not isinstance(base_raw, str) or not isinstance(key_raw, str) or not key_raw.strip():
+        return error_response(
+            status=400,
+            message="Нужны Base URL и API key.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    try:
+        base_url = ui_settings._normalize_openai_base_url(base_raw)
+    except ValueError as exc:
+        return error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_base_url",
+        )
+    models, status, message = await asyncio.to_thread(
+        ui_settings._probe_openai_models, base_url, key_raw.strip()
+    )
+    return json_response(
+        {"base_url": base_url, "models": models, "status": status, "message": message}
+    )
+
+
+async def handle_ui_provider_create(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = None
+    if not isinstance(body, dict):
+        return error_response(
+            status=400,
+            message="Нужен JSON-объект.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    if "model" in body:
+        return error_response(
+            status=400,
+            message="Model ID выбирается в chat model picker.",
+            error_type="invalid_request_error",
+            code="model_selection_in_chat",
+        )
+    name_raw, base_raw = body.get("display_name"), body.get("base_url")
+    key_raw = body.get("api_key")
+    if not all(isinstance(value, str) and value.strip() for value in (name_raw, base_raw, key_raw)):
+        return error_response(
+            status=400,
+            message="Нужны Display name, Base URL и API key.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
+    assert isinstance(name_raw, str) and isinstance(base_raw, str)
+    assert isinstance(key_raw, str)
+    try:
+        base_url = ui_settings._normalize_openai_base_url(base_raw)
+    except ValueError as exc:
+        return error_response(
+            status=400,
+            message=str(exc),
+            error_type="invalid_request_error",
+            code="invalid_base_url",
+        )
+    models, status, message = await asyncio.to_thread(
+        ui_settings._probe_openai_models, base_url, key_raw.strip()
+    )
+    if status == "invalid_api_key":
+        return error_response(
+            status=400,
+            message=message or "API-ключ отклонён.",
+            error_type="invalid_request_error",
+            code="invalid_api_key",
+        )
+    try:
+        keys = api._load_provider_api_keys()
+        provider_id = ui_settings._save_provider_instance(
+            display_name=name_raw.strip(), base_url=base_url
+        )
+        keys[provider_id] = key_raw.strip()
+        try:
+            api._save_provider_api_keys(keys)
+        except Exception:
+            ui_settings._delete_provider_instance(provider_id)
+            raise
+    except Exception:  # noqa: BLE001
+        return error_response(
+            status=500,
+            message="Не удалось сохранить provider и API-ключ.",
+            error_type="internal_error",
+            code="provider_save_failed",
+        )
+    return json_response(
+        {
+            "provider": provider_id,
+            "display_name": name_raw.strip(),
+            "base_url": base_url,
+            "models": models,
+            "status": status,
+            "message": message,
+        }
+    )
 
 
 def _log_agent_apply_failures(
@@ -102,9 +226,10 @@ def _tts_error_response(message: str) -> web.Response:
 
 
 async def handle_ui_settings(request: web.Request) -> web.Response:
-    del request
     try:
-        payload = api._build_settings_payload()
+        payload = api._build_settings_payload(
+            include_custom_providers=_require_owner(request) is None
+        )
         logger.info(
             "Settings payload prepared",
             extra={
@@ -578,6 +703,13 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+        if ui_settings._load_provider_instance(model_provider) is not None:
+            return error_response(
+                status=400,
+                message="Custom provider model выбирается в chat session model picker.",
+                error_type="invalid_request_error",
+                code="custom_model_session_only",
+            )
         persisted_model = api._load_default_model()
         model_changed = (
             persisted_model is None
@@ -588,14 +720,20 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             models, fetch_error = api._fetch_provider_models(
                 model_provider, allow_local_fallback=False
             )
-            if fetch_error is not None:
+            if (
+                fetch_error is not None
+                and ui_settings._load_provider_instance(model_provider) is None
+            ):
                 return error_response(
                     status=502,
                     message=fetch_error,
                     error_type="provider_error",
                     code="provider_models_unavailable",
                 )
-            if model_id not in models:
+            if (
+                model_id not in models
+                and ui_settings._load_provider_instance(model_provider) is None
+            ):
                 return error_response(
                     status=404,
                     message=f"Модель '{model_id}' не найдена у провайдера '{model_provider}'.",

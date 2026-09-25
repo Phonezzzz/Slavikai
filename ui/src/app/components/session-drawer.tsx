@@ -208,6 +208,7 @@ export function SessionDrawer({
   const [dangerConfirmText, setDangerConfirmText] = useState('');
   const [dangerConfirmed, setDangerConfirmed] = useState(false);
   const [activeProvider, setActiveProvider] = useState<string | null>(null);
+  const [manualModelId, setManualModelId] = useState('');
   const [loadedProviders, setLoadedProviders] = useState<Set<string>>(() => new Set());
   const [startingOllama, setStartingOllama] = useState(false);
 
@@ -224,6 +225,8 @@ export function SessionDrawer({
     currentProviderName !== null && loadedProviders.has(currentProviderName);
   const currentProviderError = currentProvider?.error ?? null;
   const currentProviderModels = currentProvider?.models ?? [];
+  const manualModelAllowed = !modelsLoading && currentProviderName?.startsWith('custom-')
+    && (currentProvider?.status === 'models_unavailable' || currentProvider?.status === 'provider_unavailable');
 
   const loadControls = async (): Promise<void> => {
     if (!sessionId) {
@@ -340,6 +343,7 @@ export function SessionDrawer({
 
   const handleOpenProvider = async (provider: string) => {
     setActiveProvider(provider);
+    setManualModelId('');
     setStatus(null);
     if (provider === 'local') {
       return;
@@ -475,7 +479,7 @@ export function SessionDrawer({
                       <div className="space-y-1">
                         {sortedProviders.map((provider) => {
                           const isActive = provider.provider === currentProviderName;
-                          const label = PROVIDER_LABELS[provider.provider] ?? provider.provider;
+                          const label = provider.displayName ?? PROVIDER_LABELS[provider.provider] ?? provider.provider;
                           return (
                             <button
                               key={provider.provider}
@@ -564,6 +568,27 @@ export function SessionDrawer({
                                 </button>
                               );
                             })}
+                          </div>
+                        ) : null}
+                        {manualModelAllowed ? (
+                          <div className="mt-2 flex gap-2">
+                            <input
+                              aria-label="Manual model ID"
+                              placeholder="Enter model ID"
+                              value={manualModelId}
+                              onChange={(event) => setManualModelId(event.target.value)}
+                              className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (currentProviderName && manualModelId.trim()) onSelectModel(currentProviderName, manualModelId.trim());
+                              }}
+                              disabled={savingModel || !sessionId || !manualModelId.trim()}
+                              className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
+                            >
+                              Set
+                            </button>
                           </div>
                         ) : null}
                       </div>

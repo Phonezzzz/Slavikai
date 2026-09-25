@@ -147,6 +147,19 @@
       "summary": "Target lifecycle contract separates terminal cause (completed/failed/cancelled/aborted) from result disposition (full/accepted_partial/none), treats supersession as status/lineage, and gives every accepted Ask a durable task identity with one semantic final; current runtime is not this contract."
     },
     {
+      "id": "model_access.generic_openai_provider",
+      "scope": "model_access",
+      "status": "implemented",
+      "owner": "model_provider_access",
+      "version": 1,
+      "source": "docs/architecture/GENERIC_PROVIDER_ONBOARDING.md",
+      "verified_by": [
+        "tests/ui_api/test_generic_provider_onboarding.py",
+        "tests/ui_api/test_provider_model_settings.py"
+      ],
+      "summary": "Owner can save an OpenAI-compatible endpoint without a model, then discover and select an opaque model ID in the chat session picker; manual IDs require an unavailable catalog. Member use of owner credentials is denied, dynamic native tools are unqualified, and remote HTTP is rejected."
+    },
+    {
       "id": "model_access.openai_subscription",
       "scope": "model_access",
       "status": "target",
