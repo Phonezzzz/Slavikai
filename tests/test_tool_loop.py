@@ -171,6 +171,7 @@ def test_policy_denial_stops_remaining_calls_in_same_model_response() -> None:
 
     assert result.error == "tool_policy_denied"
     assert [item.call.id for item in result.tool_calls] == ["denied"]
+    assert result.tool_calls[0].result.meta["policy_reason"] == "command_denied:hard_safety"
     assert calls == []
 
 
@@ -204,6 +205,9 @@ def test_streaming_policy_denial_stops_remaining_calls() -> None:
     )
 
     assert calls == []
-    assert [event.call.id for event in events if isinstance(event, ToolCallCompleted)] == ["denied"]
+    completed = [event for event in events if isinstance(event, ToolCallCompleted)]
+    assert [event.call.id for event in completed] == ["denied"]
+    assert completed[0].result is not None
+    assert completed[0].result.meta["policy_reason"] == "command_denied:hard_safety"
     assert any(isinstance(event, Error) and event.code == "tool_policy_denied" for event in events)
     assert isinstance(events[-1], Done) and events[-1].finish_reason == "error"
