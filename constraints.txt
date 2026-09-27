@@ -97,7 +97,7 @@ pygments==2.19.2
     #   rich
 python-dateutil==2.9.0.post0
     # via -r requirements.in
-python-dotenv==1.2.1
+python-dotenv==1.2.2
     # via -r requirements.in
 pytz==2025.2
     # via -r requirements.in
