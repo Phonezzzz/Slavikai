@@ -32,7 +32,13 @@ from config.ui_embeddings_settings import (
     save_ui_embeddings_settings,
 )
 from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
-from llm.types import ModelConfig
+from llm.types import (
+    CUSTOM_PROVIDER_ID_PATTERN,
+    ModelConfig,
+)
+from llm.types import (
+    CUSTOM_PROVIDER_PREFIX as CUSTOM_PROVIDER_PREFIX,
+)
 from shared.models import JSONValue
 
 SUPPORTED_MODEL_PROVIDERS: Final[set[str]] = {"xai", "openrouter", "local", "inception", "deepseek"}
@@ -95,7 +101,6 @@ UI_SETTINGS_CONTROL_TOP_LEVEL_KEYS: Final[set[str]] = {
     "safe_mode",
 }
 INCEPTION_DOCS_MODELS: Final[list[str]] = ["mercury-2"]
-CUSTOM_PROVIDER_PREFIX: Final[str] = "custom-"
 
 
 def _normalize_openai_base_url(raw: str) -> str:
@@ -142,7 +147,7 @@ def _load_provider_instances(*, ui_settings_path: Path | None = None) -> dict[st
     for provider_id, item in raw.items():
         if (
             not isinstance(provider_id, str)
-            or re.fullmatch(r"custom-[0-9a-f]{32}", provider_id) is None
+            or CUSTOM_PROVIDER_ID_PATTERN.fullmatch(provider_id) is None
         ):
             continue
         if not isinstance(item, dict):
