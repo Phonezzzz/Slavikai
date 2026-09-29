@@ -293,6 +293,56 @@ describe('generic provider onboarding', () => {
     screen.getByRole('button', { name: 'Test connection' });
   });
 
+  it('keeps a confirmed stale save when a reopened settings load finishes later', async () => {
+    let settingsRequests = 0;
+    let resolveReopenedSettings: ((response: Response) => void) | undefined;
+    let resolveSave: ((response: Response) => void) | undefined;
+    const onSaved = vi.fn();
+    const emptySettings = () => new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/ui/api/settings') {
+        settingsRequests += 1;
+        if (settingsRequests === 1) return emptySettings();
+        return new Promise<Response>((resolve) => { resolveReopenedSettings = resolve; });
+      }
+      if (url === '/ui/api/models?skip_custom_probe=1') {
+        return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      }
+      if (url === '/ui/api/embeddings/status') {
+        return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
+      }
+      if (url === '/ui/api/provider-instances') {
+        return new Promise<Response>((resolve) => { resolveSave = resolve; });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Old' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
+    fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save provider' }));
+    await vi.waitFor(() => expect(resolveSave).toBeDefined());
+
+    rerender(<Settings isOpen={false} onClose={() => undefined} onSaved={onSaved} />);
+    rerender(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
+    await vi.waitFor(() => expect(resolveReopenedSettings).toBeDefined());
+
+    // The POST commits after the reopened GET has captured its old snapshot.
+    resolveSave?.(new Response(JSON.stringify({
+      provider: 'custom-0123456789abcdef0123456789abcdef',
+      display_name: 'Old',
+      base_url: 'https://example.test/v1',
+    }), { status: 200 }));
+    await vi.waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+
+    // The older GET arrives last and must not erase the confirmed provider.
+    resolveReopenedSettings?.(emptySettings());
+    await screen.findByRole('textbox', { name: 'Provider display name' });
+    expect(screen.getAllByText('Old')).toHaveLength(1);
+  });
+
   it('loads initial diagnostics from /ui/api/models?skip_custom_probe=1', async () => {
     const requestedUrls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
