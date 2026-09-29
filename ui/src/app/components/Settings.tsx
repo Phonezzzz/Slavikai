@@ -818,7 +818,11 @@ export function Settings({
     try {
       const [settingsResponse, providerRuntimeResponse, embeddingResponse] = await Promise.all([
         fetch('/ui/api/settings'),
-        fetch('/ui/api/models'),
+        // Skip live probes of saved custom endpoints on initial load: one
+        // unreachable custom endpoint would stall Settings open by ~20s.
+        // Built-in provider diagnostics are still probed; explicit custom
+        // discovery goes through /ui/api/models?provider=custom-...
+        fetch('/ui/api/models?skip_custom_probe=1'),
         fetch('/ui/api/embeddings/status'),
       ]);
       const settingsPayload: unknown = await settingsResponse.json();
@@ -995,6 +999,9 @@ export function Settings({
         }),
       });
       const payload: unknown = await response.json();
+      // Stale success must complete silently: no providerInstances update,
+      // no field clearing, no status write, no onSaved() for the new epoch.
+      if (epoch !== onboardingEpoch.current) return;
       if (!response.ok) throw new Error(extractErrorMessage(payload, 'Could not save provider.'));
       const created = payload as { provider?: unknown; display_name?: unknown; base_url?: unknown };
       if (typeof created.provider !== 'string' || typeof created.display_name !== 'string'
@@ -1014,6 +1021,8 @@ export function Settings({
       setStatus('Provider saved. Select it in the chat model picker when ready.');
       onSaved?.();
     } catch (error) {
+      // Stale error must not write its status into the new epoch.
+      if (epoch !== onboardingEpoch.current) return;
       setStatus(error instanceof Error ? error.message : 'Could not save provider.');
     } finally {
       // Same ownership rule as the probe: a stale save must not clear the
