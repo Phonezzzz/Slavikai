@@ -11,12 +11,18 @@ import requests
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
 from llm.cancellation import (
+    GenerationCancelled,
     bind_cancellation_resource,
     cancellation_requested,
     iter_cancellable,
 )
 from llm.retry import request_with_retry
-from llm.stream_model import StreamEvent, iter_openai_sse_events
+from llm.stream_model import (
+    Done,
+    StreamEvent,
+    iter_openai_sse_events,
+    stream_events_from_result,
+)
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage
 
@@ -92,6 +98,46 @@ def _message_content_to_text(value: JSONValue) -> str:
     return str(value)
 
 
+def _parse_chat_result(data_json: object) -> LLMResult:
+    if not isinstance(data_json, dict):
+        raise RuntimeError("Некорректный ответ локального LLM.")
+    data: dict[str, JSONValue] = data_json
+    choices_raw = data.get("choices")
+    if not isinstance(choices_raw, list) or not choices_raw:
+        raise RuntimeError("Пустой ответ локального LLM.")
+    first_choice = choices_raw[0]
+    if not isinstance(first_choice, dict):
+        raise RuntimeError("Некорректный формат choices.")
+    message_raw = first_choice.get("message")
+    if not isinstance(message_raw, dict):
+        raise RuntimeError("Некорректный формат message.")
+    content = _message_content_to_text(message_raw.get("content"))
+    tool_calls = _parse_tool_calls(message_raw)
+    reasoning_raw = message_raw.get("reasoning")
+    reasoning = (
+        str(reasoning_raw).strip()
+        if isinstance(reasoning_raw, str) and reasoning_raw.strip()
+        else None
+    )
+
+    usage: LLMUsage | None = None
+    usage_block = data.get("usage")
+    if isinstance(usage_block, dict):
+        usage = LLMUsage(
+            prompt_tokens=int(usage_block.get("prompt_tokens", 0)),
+            completion_tokens=int(usage_block.get("completion_tokens", 0)),
+            total_tokens=int(usage_block.get("total_tokens", 0)),
+        )
+
+    return LLMResult(
+        text=content,
+        reasoning=reasoning,
+        usage=usage,
+        raw=data,
+        tool_calls=tool_calls,
+    )
+
+
 class LocalHttpBrain(Brain):
     """Клиент для локальных LLM-эндпоинтов совместимых с OpenAI API (Ollama/LM Studio/MSTI)."""
 
@@ -138,20 +184,7 @@ class LocalHttpBrain(Brain):
             raise RuntimeError("native_tools_required")
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
-        payload: dict[str, JSONValue] = {
-            "model": cfg.model,
-            "messages": [
-                message.to_provider_dict() for message in self._inject_system(messages, cfg)
-            ],
-            "temperature": cfg.temperature,
-        }
-        if tools:
-            payload["tools"] = [_tool_spec_to_provider_dict(tool) for tool in tools]
-            payload["tool_choice"] = "auto"
-        if cfg.max_tokens is not None:
-            payload["max_tokens"] = cfg.max_tokens
-        if cfg.top_p is not None:
-            payload["top_p"] = cfg.top_p
+        payload = self._build_chat_payload(cfg, messages, tools)
 
         def send_request() -> requests.Response:
             if self.supports_native_tools:
@@ -170,44 +203,29 @@ class LocalHttpBrain(Brain):
             )
 
         response = request_with_retry(send_request, provider=cfg.provider)
-        data_json = response.json()
-        if not isinstance(data_json, dict):
-            raise RuntimeError("Некорректный ответ локального LLM.")
-        data: dict[str, JSONValue] = data_json
-        choices_raw = data.get("choices")
-        if not isinstance(choices_raw, list) or not choices_raw:
-            raise RuntimeError("Пустой ответ локального LLM.")
-        first_choice = choices_raw[0]
-        if not isinstance(first_choice, dict):
-            raise RuntimeError("Некорректный формат choices.")
-        message_raw = first_choice.get("message")
-        if not isinstance(message_raw, dict):
-            raise RuntimeError("Некорректный формат message.")
-        content = _message_content_to_text(message_raw.get("content"))
-        tool_calls = _parse_tool_calls(message_raw)
-        reasoning_raw = message_raw.get("reasoning")
-        reasoning = (
-            str(reasoning_raw).strip()
-            if isinstance(reasoning_raw, str) and reasoning_raw.strip()
-            else None
-        )
+        return _parse_chat_result(response.json())
 
-        usage: LLMUsage | None = None
-        usage_block = data.get("usage")
-        if isinstance(usage_block, dict):
-            usage = LLMUsage(
-                prompt_tokens=int(usage_block.get("prompt_tokens", 0)),
-                completion_tokens=int(usage_block.get("completion_tokens", 0)),
-                total_tokens=int(usage_block.get("total_tokens", 0)),
-            )
-
-        return LLMResult(
-            text=content,
-            reasoning=reasoning,
-            usage=usage,
-            raw=data,
-            tool_calls=tool_calls,
-        )
+    def _build_chat_payload(
+        self,
+        cfg: ModelConfig,
+        messages: list[LLMMessage],
+        tools: list[ToolSpec] | None,
+    ) -> dict[str, JSONValue]:
+        payload: dict[str, JSONValue] = {
+            "model": cfg.model,
+            "messages": [
+                message.to_provider_dict() for message in self._inject_system(messages, cfg)
+            ],
+            "temperature": cfg.temperature,
+        }
+        if tools:
+            payload["tools"] = [_tool_spec_to_provider_dict(tool) for tool in tools]
+            payload["tool_choice"] = "auto"
+        if cfg.max_tokens is not None:
+            payload["max_tokens"] = cfg.max_tokens
+        if cfg.top_p is not None:
+            payload["top_p"] = cfg.top_p
+        return payload
 
     def generate_stream_events(
         self,
@@ -220,12 +238,12 @@ class LocalHttpBrain(Brain):
             raise RuntimeError("native_tools_required")
         if not self.supports_native_tools:
             # Unqualified dynamic endpoint: SSE support is not verified, so
-            # never claim native streaming. Use a plain chat completion and
-            # convert it into stream events via the Brain fallback instead.
-            yield from super().generate_stream_events(
+            # never claim native streaming. Use a plain (non-SSE) chat
+            # completion, cancellable through the standard token, and convert
+            # it into stream events.
+            yield from self._stream_events_from_plain_completion(
                 messages,
                 config=config,
-                tools=tools,
                 cancellation_token=cancellation_token,
             )
             return
@@ -250,23 +268,13 @@ class LocalHttpBrain(Brain):
         if cfg.top_p is not None:
             payload["top_p"] = cfg.top_p
 
-        if self.supports_native_tools:
-            response = requests.post(
-                self.base_url,
-                json=payload,
-                headers=headers,
-                timeout=DEFAULT_TIMEOUT,
-                stream=True,
-            )
-        else:
-            response = requests.post(
-                self.base_url,
-                json=payload,
-                headers=headers,
-                timeout=DEFAULT_TIMEOUT,
-                stream=True,
-                allow_redirects=False,
-            )
+        response = requests.post(
+            self.base_url,
+            json=payload,
+            headers=headers,
+            timeout=DEFAULT_TIMEOUT,
+            stream=True,
+        )
         with bind_cancellation_resource(cancellation_token, response):
             response.raise_for_status()
             response.encoding = "utf-8"
@@ -274,6 +282,90 @@ class LocalHttpBrain(Brain):
                 iter_openai_sse_events(response.iter_lines(decode_unicode=True)),
                 cancellation_token=cancellation_token,
             )
+
+    def _stream_events_from_plain_completion(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None,
+        cancellation_token: asyncio.Event | None,
+    ) -> Iterator[StreamEvent]:
+        """Stream events for dynamic endpoints without verified SSE support.
+
+        Runs a plain (non-streaming) chat completion through the standard
+        cancellation token and converts the result into stream events.
+        """
+        if cancellation_requested(cancellation_token):
+            yield Done(finish_reason="cancelled")
+            return
+        try:
+            result = self._generate_plain_cancellable(
+                messages, config=config, cancellation_token=cancellation_token
+            )
+        except GenerationCancelled:
+            yield Done(finish_reason="cancelled")
+            return
+        if cancellation_requested(cancellation_token):
+            yield Done(finish_reason="cancelled")
+            return
+        for event in stream_events_from_result(result):
+            if cancellation_requested(cancellation_token):
+                yield Done(finish_reason="cancelled")
+                return
+            yield event
+
+    def _generate_plain_cancellable(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None,
+        cancellation_token: asyncio.Event | None,
+    ) -> LLMResult:
+        """Plain chat completion for dynamic endpoints, honouring cancellation.
+
+        Uses transport-level ``stream=True`` only (the OpenAI ``stream``
+        parameter stays absent) so the response object exists before the body
+        arrives and can be bound to the cancellation token: closing it aborts
+        a hanging read instead of waiting out the provider timeout.
+        """
+        cfg = self._resolve_config(config)
+        headers = self._build_headers(cfg)
+        payload = self._build_chat_payload(cfg, messages, None)
+        if cancellation_requested(cancellation_token):
+            raise GenerationCancelled("dynamic provider request cancelled")
+        try:
+            if cancellation_token is None:
+                response = request_with_retry(
+                    lambda: requests.post(
+                        self.base_url,
+                        json=payload,
+                        headers=headers,
+                        timeout=DEFAULT_TIMEOUT,
+                        allow_redirects=False,
+                    ),
+                    provider=cfg.provider,
+                )
+            else:
+                response = request_with_retry(
+                    lambda: requests.post(
+                        self.base_url,
+                        json=payload,
+                        headers=headers,
+                        timeout=DEFAULT_TIMEOUT,
+                        allow_redirects=False,
+                        stream=True,
+                    ),
+                    provider=cfg.provider,
+                    stop_requested=cancellation_token.is_set,
+                )
+            with bind_cancellation_resource(cancellation_token, response):
+                if cancellation_requested(cancellation_token):
+                    raise GenerationCancelled("dynamic provider request cancelled")
+                response.raise_for_status()
+                data_json = response.json()
+        except Exception as exc:
+            if cancellation_requested(cancellation_token):
+                raise GenerationCancelled("dynamic provider request cancelled") from exc
+            raise
+        return _parse_chat_result(data_json)
 
     def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
         system_messages: list[LLMMessage] = []
