@@ -127,4 +127,90 @@ describe('generic provider onboarding', () => {
     expect((screen.getByRole('textbox', { name: 'Provider Base URL' }) as HTMLInputElement).value).toBe('');
     expect(screen.queryByText('Catalog unavailable.')).toBeNull();
   });
+
+  it('releases onboarding busy state when Settings closes during a slow probe', async () => {
+    const probeResolvers: Array<(value: Response) => void> = [];
+    const resolveProbe = (index: number, payload: unknown): void => {
+      const resolve = probeResolvers[index];
+      if (!resolve) {
+        throw new Error(`probe ${index} was not started`);
+      }
+      resolve(new Response(JSON.stringify(payload), { status: 200 }));
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
+      if (url === '/ui/api/provider-instances/probe') {
+        return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
+    fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await vi.waitFor(() => expect(probeResolvers.length).toBe(1));
+    await screen.findByRole('button', { name: 'Checking...' });
+
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    // Busy state owned by the invalidated probe is released on close.
+    screen.getByRole('button', { name: 'Test connection' });
+
+    // Late completion of the stale probe must not disturb the reopened form.
+    resolveProbe(0, { base_url: 'https://example.test/v1', models: [], status: 'ready' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    screen.getByRole('button', { name: 'Test connection' });
+    expect(screen.queryByText(/Connected\. Found/)).toBeNull();
+  });
+
+  it('does not let a stale probe clear busy state of a newer probe', async () => {
+    const probeResolvers: Array<(value: Response) => void> = [];
+    const resolveProbe = (index: number, payload: unknown): void => {
+      const resolve = probeResolvers[index];
+      if (!resolve) {
+        throw new Error(`probe ${index} was not started`);
+      }
+      resolve(new Response(JSON.stringify(payload), { status: 200 }));
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
+      if (url === '/ui/api/provider-instances/probe') {
+        return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const fillOnboardingFields = async (): Promise<void> => {
+      fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
+      fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
+      fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
+    };
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    await fillOnboardingFields();
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await vi.waitFor(() => expect(probeResolvers.length).toBe(1));
+
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    await fillOnboardingFields();
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await vi.waitFor(() => expect(probeResolvers.length).toBe(2));
+    await screen.findByRole('button', { name: 'Checking...' });
+
+    // Stale probe A completes: newer probe B's busy state must survive.
+    resolveProbe(0, { base_url: 'https://example.test/v1', models: ['a'], status: 'ready' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    screen.getByRole('button', { name: 'Checking...' });
+
+    // Newer probe B completes: releases its own busy state.
+    resolveProbe(1, { base_url: 'https://example.test/v1', models: ['a'], status: 'ready' });
+    await screen.findByText('Connected. Found 1 models.');
+    screen.getByRole('button', { name: 'Test connection' });
+  });
 });
