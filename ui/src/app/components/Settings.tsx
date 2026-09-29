@@ -852,6 +852,9 @@ export function Settings({
   useEffect(() => {
     if (!isOpen) {
       onboardingEpoch.current += 1;
+      // Release the busy state owned by the invalidated operation so a
+      // reopened Settings is never stuck disabled by a stale probe/save.
+      setProviderOnboardingBusy(false);
       setNewProviderName('');
       setNewProviderBaseUrl('');
       setNewProviderKey('');
@@ -969,11 +972,16 @@ export function Settings({
       if (epoch !== onboardingEpoch.current) return;
       setNewProviderProbeStatus(error instanceof Error ? error.message : 'Provider probe failed.');
     } finally {
-      setProviderOnboardingBusy(false);
+      // Only the operation that owns the current epoch may release the busy
+      // state; a stale probe must not clear a newer request's busy flag.
+      if (epoch === onboardingEpoch.current) {
+        setProviderOnboardingBusy(false);
+      }
     }
   };
 
   const handleSaveNewProvider = async (): Promise<void> => {
+    const epoch = onboardingEpoch.current;
     setProviderOnboardingBusy(true);
     setStatus(null);
     try {
@@ -1008,7 +1016,11 @@ export function Settings({
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Could not save provider.');
     } finally {
-      setProviderOnboardingBusy(false);
+      // Same ownership rule as the probe: a stale save must not clear the
+      // busy state of a newer onboarding operation.
+      if (epoch === onboardingEpoch.current) {
+        setProviderOnboardingBusy(false);
+      }
     }
   };
 
