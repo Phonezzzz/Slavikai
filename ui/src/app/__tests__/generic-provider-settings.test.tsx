@@ -28,7 +28,7 @@ describe('generic provider onboarding', () => {
           },
         }), { status: 200 });
       }
-      if (url === '/ui/api/models') {
+      if (url === '/ui/api/models?skip_custom_probe=1') {
         return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       }
       if (url === '/ui/api/embeddings/status') {
@@ -84,7 +84,7 @@ describe('generic provider onboarding', () => {
         personalization: { tone: 'balanced', system_prompt: 'server value' },
         providers: saved ? [{ provider: 'custom-0123456789abcdef0123456789abcdef', display_name: 'Example', base_url: 'https://example.test/v1' }] : [],
       } }), { status: 200 });
-      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') return new Response(JSON.stringify({ base_url: 'https://example.test/v1', models: ['opaque/model'], status: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances') { saved = true; return new Response(JSON.stringify({ provider: 'custom-0123456789abcdef0123456789abcdef', display_name: 'Example', base_url: 'https://example.test/v1' }), { status: 200 }); }
@@ -108,7 +108,7 @@ describe('generic provider onboarding', () => {
   it('clears unsaved onboarding fields and key when Settings closes', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
-      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') return new Response(JSON.stringify({ base_url: 'https://example.test/v1', models: [], status: 'models_unavailable', message: 'Catalog unavailable.' }), { status: 200 });
       throw new Error(`Unexpected URL: ${url}`);
@@ -139,7 +139,7 @@ describe('generic provider onboarding', () => {
     };
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
-      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
         return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
@@ -180,7 +180,7 @@ describe('generic provider onboarding', () => {
     };
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
-      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
         return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
@@ -216,9 +216,10 @@ describe('generic provider onboarding', () => {
     screen.getByRole('button', { name: 'Test connection' });
   });
 
-  it('ignores a stale save response after Settings is closed and reopened', async () => {
+  it('reconciles a stale save success without touching the new onboarding form', async () => {
     const saveResolvers: Array<(value: Response) => void> = [];
     const probeResolvers: Array<(value: Response) => void> = [];
+    const requestedUrls: string[] = [];
     const resolveDeferred = (
       resolvers: Array<(value: Response) => void>,
       index: number,
@@ -232,8 +233,9 @@ describe('generic provider onboarding', () => {
     };
     const onSaved = vi.fn();
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      requestedUrls.push(url);
       if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
-      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
         return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
@@ -254,7 +256,7 @@ describe('generic provider onboarding', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save provider' }));
     await vi.waitFor(() => expect(saveResolvers.length).toBe(1));
 
-    // Close during the slow save, reopen, enter new data.
+    // Close during the slow save, reopen, let the new load finish, enter new data.
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
     rerender(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
     await fillOnboardingFields('New');
@@ -264,25 +266,59 @@ describe('generic provider onboarding', () => {
     await vi.waitFor(() => expect(probeResolvers.length).toBe(1));
     await screen.findByRole('button', { name: 'Checking...' });
 
-    // The stale save completes now: it must change nothing.
+    // The stale save succeeds on the server: provider A must be reconciled
+    // into the list exactly once, but the new form must stay untouched.
     resolveDeferred(saveResolvers, 0, {
       provider: 'custom-0123456789abcdef0123456789abcdef',
       display_name: 'Old',
       base_url: 'https://example.test/v1',
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
 
+    // New form fields are unchanged.
     expect((screen.getByRole('textbox', { name: 'Provider display name' }) as HTMLInputElement).value).toBe('New');
     expect((screen.getByRole('textbox', { name: 'Provider Base URL' }) as HTMLInputElement).value).toBe('https://example.test');
-    expect(screen.queryByText('Old')).toBeNull();
+    expect((screen.getByLabelText('New provider API key') as HTMLInputElement).value).toBe('secret');
+    // Stale status/probe state did not overwrite the new form.
     expect(screen.queryByText('Provider saved. Select it in the chat model picker when ready.')).toBeNull();
-    expect(onSaved).not.toHaveBeenCalled();
-    // The stale save's finally must not clear the new probe's busy state.
+    expect(screen.queryByText(/Unexpected URL/)).toBeNull();
+    // Provider A reconciled exactly once into the saved provider list.
+    expect(screen.getAllByText('Old')).toHaveLength(1);
+    // The stale save's finally did not clear the new probe's busy state.
     screen.getByRole('button', { name: 'Checking...' });
 
     // The new probe completes normally afterwards.
     resolveDeferred(probeResolvers, 0, { base_url: 'https://example.test/v1', models: ['m'], status: 'ready' });
     await screen.findByText('Connected. Found 1 models.');
     screen.getByRole('button', { name: 'Test connection' });
+  });
+
+  it('loads initial diagnostics from /ui/api/models?skip_custom_probe=1', async () => {
+    const requestedUrls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      requestedUrls.push(url);
+      if (url === '/ui/api/settings') {
+        return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      }
+      if (url === '/ui/api/models?skip_custom_probe=1') {
+        return new Response(JSON.stringify({ providers: [
+          { provider: 'deepseek', display_name: 'deepseek', models: ['m1', 'm2'], error: null },
+        ] }), { status: 200 });
+      }
+      if (url === '/ui/api/embeddings/status') {
+        return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    // Wait for the initial load to finish (onboarding form is gated on it).
+    await screen.findByRole('textbox', { name: 'Provider display name' });
+    // Initial Settings load requested exactly the skip_custom_probe diagnostics URL...
+    expect(requestedUrls).toContain('/ui/api/models?skip_custom_probe=1');
+    expect(requestedUrls).not.toContain('/ui/api/models');
+    // ...and consumed its response instead of falling into the loadSettings
+    // catch path (any unexpected fetch would surface as an "Unexpected URL" status).
+    expect(screen.queryByText(/Unexpected URL/)).toBeNull();
   });
 });
