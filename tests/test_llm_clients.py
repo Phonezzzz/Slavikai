@@ -120,6 +120,73 @@ def test_local_http_generate_preserves_custom_provider_identity_in_errors(
     assert exc_info.value.user_message == (f"Провайдер {provider_id} отклонил запрос (HTTP 401).")
 
 
+def test_create_brain_rejects_arbitrary_provider_with_base_url() -> None:
+    with pytest.raises(ValueError, match="Неизвестный провайдер"):
+        create_brain(
+            ModelConfig(
+                provider="totally-legit",
+                model="m",
+                base_url="https://example.test/v1",
+            )
+        )
+
+
+def test_create_brain_rejects_unqualified_custom_id_with_base_url() -> None:
+    with pytest.raises(ValueError, match="Неизвестный провайдер"):
+        create_brain(
+            ModelConfig(
+                provider="custom-evil",
+                model="m",
+                base_url="https://example.test/v1",
+            )
+        )
+
+
+def test_create_brain_rejects_unknown_provider_without_base_url() -> None:
+    with pytest.raises(ValueError, match="Неизвестный провайдер"):
+        create_brain(ModelConfig(provider="nope", model="m"))
+
+
+def test_create_brain_accepts_qualified_custom_provider() -> None:
+    brain = create_brain(
+        ModelConfig(
+            provider="custom-0123456789abcdef0123456789abcdef",
+            model="opaque/model",
+            base_url="https://example.test/v1/chat/completions",
+        )
+    )
+    assert isinstance(brain, LocalHttpBrain)
+    assert brain.supports_native_tools is False
+    assert brain.supports_streaming_tools is False
+
+
+def test_dynamic_provider_streaming_falls_back_to_non_streaming_generate(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    def fake_post(url, json, headers, timeout, allow_redirects):
+        del url, headers, timeout, allow_redirects
+        calls["json"] = json
+        # The endpoint rejects stream=true: the brain must not request SSE.
+        assert json.get("stream") is not True
+        return _mock_response({"choices": [{"message": {"content": "hello world"}}]})
+
+    monkeypatch.setattr("llm.local_http_brain.requests.post", fake_post)
+    config = ModelConfig(
+        provider="custom-0123456789abcdef0123456789abcdef",
+        model="opaque/model",
+        base_url="https://example.test/v1/chat/completions",
+    )
+    brain = LocalHttpBrain(default_config=config, native_tools=False)
+
+    events = list(brain.generate_stream_events([LLMMessage(role="user", content="hi")]))
+
+    assert calls["json"].get("stream") is not True
+    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "hello world"
+    assert isinstance(events[-1], Done)
+
+
 def test_local_http_generate_sends_and_parses_native_tools(monkeypatch) -> None:
     calls: dict[str, Any] = {}
 

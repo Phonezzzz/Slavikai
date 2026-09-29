@@ -5,7 +5,7 @@ from llm.deepseek_brain import DeepSeekBrain
 from llm.inception_brain import InceptionBrain
 from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
-from llm.types import ModelConfig
+from llm.types import ModelConfig, is_custom_provider_id
 from llm.xai_brain import XAiBrain
 
 
@@ -25,6 +25,12 @@ def create_brain(config: ModelConfig, api_key: str | None = None) -> Brain:
     if config.provider == "deepseek":
         return DeepSeekBrain(api_key=api_key or config.api_key, default_config=config)
     if config.base_url:
+        # Trust boundary: a dynamic OpenAI-compatible provider must not become
+        # executable merely because base_url is present. Only explicitly
+        # qualified custom provider identities may enter this path; anything
+        # else fails closed like an unknown provider.
+        if not is_custom_provider_id(config.provider):
+            raise ValueError(f"Неизвестный провайдер модели: {config.provider}")
         return LocalHttpBrain(
             default_config=config,
             base_url=config.base_url,

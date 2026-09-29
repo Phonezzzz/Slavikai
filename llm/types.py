@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Final, Literal
 
 from shared.models import JSONValue, LLMMessage
+
+CUSTOM_PROVIDER_PREFIX: Final[str] = "custom-"
+CUSTOM_PROVIDER_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"custom-[0-9a-f]{32}")
+
+
+def is_custom_provider_id(provider: str) -> bool:
+    """True only for explicitly qualified dynamic provider identities.
+
+    Registered custom providers are minted as ``custom-<32 hex>``; anything
+    else must never enter the dynamic OpenAI-compatible factory path.
+    """
+    return CUSTOM_PROVIDER_ID_PATTERN.fullmatch(provider) is not None
 
 
 @dataclass(frozen=True)
