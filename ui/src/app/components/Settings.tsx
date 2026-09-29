@@ -999,27 +999,39 @@ export function Settings({
         }),
       });
       const payload: unknown = await response.json();
-      // Stale success must complete silently: no providerInstances update,
-      // no field clearing, no status write, no onSaved() for the new epoch.
-      if (epoch !== onboardingEpoch.current) return;
-      if (!response.ok) throw new Error(extractErrorMessage(payload, 'Could not save provider.'));
+      const stale = epoch !== onboardingEpoch.current;
+      if (!response.ok) {
+        // A stale error must remain silent for the new epoch.
+        if (stale) return;
+        throw new Error(extractErrorMessage(payload, 'Could not save provider.'));
+      }
       const created = payload as { provider?: unknown; display_name?: unknown; base_url?: unknown };
       if (typeof created.provider !== 'string' || typeof created.display_name !== 'string'
-        || typeof created.base_url !== 'string') throw new Error('Provider saved, but response was incomplete.');
+        || typeof created.base_url !== 'string') {
+        if (stale) return;
+        throw new Error('Provider saved, but response was incomplete.');
+      }
       const providerId = created.provider;
       const displayName = created.display_name;
       const baseUrl = created.base_url;
-      setProviderInstances((current) => [...current, {
-        provider: providerId,
-        display_name: displayName,
-        base_url: baseUrl,
-      }]);
+      // The server may have persisted the provider even when the response is
+      // stale for the new epoch: reconcile it into the list (deduplicated)
+      // and notify the picker, but never touch the new epoch's form fields,
+      // probe status, status message, or busy state.
+      setProviderInstances((current) => current.some((item) => item.provider === providerId)
+        ? current
+        : [...current, {
+          provider: providerId,
+          display_name: displayName,
+          base_url: baseUrl,
+        }]);
+      onSaved?.();
+      if (stale) return;
       setNewProviderName('');
       setNewProviderBaseUrl('');
       setNewProviderKey('');
       setNewProviderProbeStatus(null);
       setStatus('Provider saved. Select it in the chat model picker when ready.');
-      onSaved?.();
     } catch (error) {
       // Stale error must not write its status into the new epoch.
       if (epoch !== onboardingEpoch.current) return;
