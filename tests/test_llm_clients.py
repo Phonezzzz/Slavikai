@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -7,6 +10,7 @@ import requests
 
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
+from llm.cancellation import cancel_generation
 from llm.inception_brain import InceptionBrain
 from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
@@ -185,6 +189,81 @@ def test_dynamic_provider_streaming_falls_back_to_non_streaming_generate(
     assert calls["json"].get("stream") is not True
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "hello world"
     assert isinstance(events[-1], Done)
+
+
+def test_dynamic_provider_plain_completion_is_cancellable(monkeypatch) -> None:
+    provider_id = "custom-0123456789abcdef0123456789abcdef"
+    token = asyncio.Event()
+    post_calls: list[dict[str, Any]] = []
+    body_read_started = threading.Event()
+    release_body = threading.Event()
+
+    class HangingResponse:
+        status_code = 200
+
+        def __init__(self) -> None:
+            self._closed = False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self._closed = True
+            release_body.set()
+
+        def json(self) -> dict[str, Any]:
+            body_read_started.set()
+            # Simulate a hanging upstream: the body read blocks until the
+            # response is closed (cancellation) or the wait below expires.
+            release_body.wait(timeout=30)
+            if self._closed:
+                raise requests.exceptions.ChunkedEncodingError("connection closed")
+            return {"choices": [{"message": {"content": "hi"}}]}
+
+    def fake_post(url, json, headers, timeout, **kwargs):
+        del url, headers, timeout, kwargs
+        post_calls.append(json)
+        # Plain completion: the OpenAI "stream" parameter must stay absent.
+        assert json.get("stream") is not True
+        return HangingResponse()
+
+    monkeypatch.setattr("llm.local_http_brain.requests.post", fake_post)
+    config = ModelConfig(
+        provider=provider_id,
+        model="opaque/model",
+        base_url="https://example.test/v1/chat/completions",
+    )
+    brain = LocalHttpBrain(default_config=config, native_tools=False)
+
+    events: list[Any] = []
+    errors: list[BaseException] = []
+
+    def run_generation() -> None:
+        try:
+            events.extend(
+                brain.generate_stream_events(
+                    [LLMMessage(role="user", content="hi")],
+                    cancellation_token=token,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    started = time.monotonic()
+    thread = threading.Thread(target=run_generation, daemon=True)
+    thread.start()
+    assert body_read_started.wait(timeout=10), "request did not reach the hanging body read"
+
+    cancel_generation(token)
+    thread.join(timeout=20)
+    elapsed = time.monotonic() - started
+
+    assert not thread.is_alive(), "cancellation did not stop the blocked generation"
+    assert not errors, f"generation leaked an exception: {errors!r}"
+    assert len(post_calls) == 1, "retry must not run after cancellation"
+    assert elapsed < 15, "cancellation waited out the provider timeout"
+    assert isinstance(events[-1], Done)
+    assert events[-1].finish_reason == "cancelled"
 
 
 def test_local_http_generate_sends_and_parses_native_tools(monkeypatch) -> None:
