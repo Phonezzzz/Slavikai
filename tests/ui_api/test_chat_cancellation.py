@@ -2,11 +2,15 @@ from __future__ import annotations
 
 # ruff: noqa: F403,F405
 import asyncio
+import http.server
+import socketserver
 import threading
 import time
 
 from llm.cancellation import bind_cancellation_resource
+from llm.local_http_brain import LocalHttpBrain
 from llm.stream_model import Done, TextDelta
+from llm.types import ModelConfig
 from server.agent_provider import AgentScope
 
 from .fakes import *
@@ -152,5 +156,126 @@ def test_chat_cancel_partial_response_not_saved() -> None:
             assert [message["role"] for message in history_messages] == ["user"]
         finally:
             await client.close()
+
+    asyncio.run(run())
+
+
+class _HeaderHoldingHandler(http.server.BaseHTTPRequestHandler):
+    """Test provider that accepts the request and holds the response headers."""
+
+    request_count = 0
+    release = threading.Event()
+
+    def do_POST(self) -> None:  # noqa: N802
+        type(self).request_count += 1
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            self.rfile.read(length)
+        if type(self).request_count == 1:
+            # Never send response headers: the client stays in the header wait.
+            type(self).release.wait(timeout=30)
+        body = b'{"choices":[{"message":{"content":"second-ok"}}]}'
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, *args) -> None:  # noqa: ANN001,ANN202
+        pass
+
+
+class _DynamicBrainAgent(DummyAgent):
+    """Drives a real dynamic LocalHttpBrain, like core/tool_loop.py does."""
+
+    def __init__(self, brain: LocalHttpBrain) -> None:
+        super().__init__()
+        self._brain = brain
+        self.last_stream_response_raw: str | None = None
+
+    def respond_stream(self, messages, cancellation_token=None):  # noqa: ANN001
+        yield from self._brain.generate_stream_events(
+            messages,
+            cancellation_token=cancellation_token,
+        )
+
+
+def test_chat_cancel_aborts_header_wait() -> None:
+    async def run() -> None:
+        _HeaderHoldingHandler.request_count = 0
+        _HeaderHoldingHandler.release.clear()
+        socketserver.TCPServer.allow_reuse_address = True
+        server = socketserver.TCPServer(("127.0.0.1", 0), _HeaderHoldingHandler)
+        server.daemon_threads = True
+        port = server.server_address[1]
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            brain = LocalHttpBrain(
+                default_config=ModelConfig(
+                    provider="custom-0123456789abcdef0123456789abcdef",
+                    model="opaque/model",
+                    base_url=f"http://127.0.0.1:{port}/v1/chat/completions",
+                ),
+                native_tools=False,
+            )
+            agent = _DynamicBrainAgent(brain)
+            client = await _create_client(agent)
+            try:
+                status_response = await client.get("/ui/api/status")
+                session_id = (await status_response.json())["session_id"]
+                assert isinstance(session_id, str) and session_id
+                await _select_local_model(client, session_id)
+                send_task = asyncio.create_task(
+                    client.post(
+                        "/ui/api/chat/send",
+                        json={"content": "hi"},
+                        headers={"X-Slavik-Session": session_id},
+                    )
+                )
+                # Wait until the provider is holding the response headers.
+                for _ in range(200):
+                    if _HeaderHoldingHandler.request_count >= 1:
+                        break
+                    await asyncio.sleep(0.05)
+                assert _HeaderHoldingHandler.request_count == 1
+                await asyncio.sleep(0.3)
+
+                started = time.monotonic()
+                cancel_response = await asyncio.wait_for(
+                    client.post(
+                        "/ui/api/chat/cancel",
+                        headers={"X-Slavik-Session": session_id},
+                    ),
+                    timeout=9,
+                )
+                cancel_elapsed = time.monotonic() - started
+                assert cancel_response.status == 200, await cancel_response.text()
+                assert (await cancel_response.json())["cancelled"] is True
+                assert cancel_elapsed < 9
+
+                send_response = await asyncio.wait_for(send_task, timeout=5)
+                assert send_response.status == 200
+                assert (await send_response.json())["cancelled"] is True
+                # No retry after cancellation.
+                assert _HeaderHoldingHandler.request_count == 1
+
+                # The session is freed: a follow-up generation runs normally.
+                _HeaderHoldingHandler.release.set()
+                send2 = await client.post(
+                    "/ui/api/chat/send",
+                    json={"content": "again"},
+                    headers={"X-Slavik-Session": session_id},
+                )
+                assert send2.status == 200
+                assert (await send2.json()).get("cancelled") is not True
+            finally:
+                await client.close()
+        finally:
+            server.shutdown()
+            server.server_close()
 
     asyncio.run(run())
