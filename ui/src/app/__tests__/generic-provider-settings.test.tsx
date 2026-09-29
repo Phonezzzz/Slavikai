@@ -157,8 +157,10 @@ describe('generic provider onboarding', () => {
 
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
     rerender(<Settings isOpen onClose={() => undefined} />);
-    // Busy state owned by the invalidated probe is released on close.
-    screen.getByRole('button', { name: 'Test connection' });
+    // Reopening triggers an async settings load; wait for it to finish.
+    // findByRole keeps the assertion strict: a stuck-busy UI would render
+    // 'Checking...' here instead and this would time out.
+    await screen.findByRole('button', { name: 'Test connection' });
 
     // Late completion of the stale probe must not disturb the reopened form.
     resolveProbe(0, { base_url: 'https://example.test/v1', models: [], status: 'ready' });
