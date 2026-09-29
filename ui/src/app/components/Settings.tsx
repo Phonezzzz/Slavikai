@@ -774,14 +774,23 @@ export function Settings({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const modalRef = useRef<HTMLDivElement | null>(null);
   const onboardingEpoch = useRef(0);
+  const providerInstancesRevision = useRef(0);
 
   const presetIsCustom = !THRESHOLD_PRESETS.includes(longPasteThresholdChars);
 
   useFocusTrap(isOpen, modalRef);
 
-  const applyParsedSettings = (parsed: ParsedSettings): void => {
+  const applyParsedSettings = (parsed: ParsedSettings, providerRevisionAtRequestStart: number): void => {
     setProviders(parsed.providers);
-    setProviderInstances(parsed.providerInstances);
+    setProviderInstances((current) => {
+      if (providerInstancesRevision.current === providerRevisionAtRequestStart) {
+        return parsed.providerInstances;
+      }
+      // A provider confirmed after this snapshot was requested must survive
+      // a late settings response. Keep the server's entries when IDs overlap.
+      const snapshotIds = new Set(parsed.providerInstances.map((item) => item.provider));
+      return [...parsed.providerInstances, ...current.filter((item) => !snapshotIds.has(item.provider))];
+    });
     setApiKeys({ ...EMPTY_API_KEYS });
     setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
     setTtsBackend(parsed.ttsBackend);
@@ -811,6 +820,7 @@ export function Settings({
   };
 
   const loadSettings = async (): Promise<void> => {
+    const providerRevisionAtRequestStart = providerInstancesRevision.current;
     setLoading(true);
     setStatus(null);
     setProviderRuntimeLoading(true);
@@ -829,7 +839,7 @@ export function Settings({
       if (!settingsResponse.ok) {
         throw new Error(extractErrorMessage(settingsPayload, 'Failed to load settings.'));
       }
-      applyParsedSettings(parseSettingsPayload(settingsPayload));
+      applyParsedSettings(parseSettingsPayload(settingsPayload), providerRevisionAtRequestStart);
 
       const providerRuntimePayload: unknown = await providerRuntimeResponse.json();
       if (!providerRuntimeResponse.ok) {
@@ -1014,6 +1024,7 @@ export function Settings({
       const providerId = created.provider;
       const displayName = created.display_name;
       const baseUrl = created.base_url;
+      providerInstancesRevision.current += 1;
       // The server may have persisted the provider even when the response is
       // stale for the new epoch: reconcile it into the list (deduplicated)
       // and notify the picker, but never touch the new epoch's form fields,
@@ -1069,6 +1080,7 @@ export function Settings({
     if (saving) {
       return;
     }
+    const providerRevisionAtRequestStart = providerInstancesRevision.current;
     setSaving(true);
     setStatus(null);
     try {
@@ -1123,7 +1135,7 @@ export function Settings({
       if (!response.ok) {
         throw new Error(extractErrorMessage(body, 'Failed to save settings.'));
       }
-      applyParsedSettings(parseSettingsPayload(body));
+      applyParsedSettings(parseSettingsPayload(body), providerRevisionAtRequestStart);
       setStatus('Global settings saved.');
       onSaved?.();
     } catch (error) {
