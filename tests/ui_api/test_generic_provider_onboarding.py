@@ -331,6 +331,65 @@ def test_rejected_saved_key_cannot_use_manual_model(
     asyncio.run(run())
 
 
+def test_settings_models_skip_custom_probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    key_path = isolate(monkeypatch, tmp_path)
+    provider = ui_settings._save_provider_instance(
+        display_name="Slow", base_url="https://example.test/v1"
+    )
+    from config.api_keys import save_api_keys
+    from server import http_api
+
+    save_api_keys({provider: "probe-secret"}, path=key_path)
+
+    probed_urls: list[str] = []
+
+    def fake_probe(base_url: str, api_key: str) -> tuple[list[str], str, str | None]:
+        probed_urls.append(base_url)
+        assert api_key == "probe-secret"
+        return ["custom/model"], "ready", None
+
+    def fake_fetch_provider_models(
+        provider_name: str, allow_local_fallback: bool = True
+    ) -> tuple[list[str], str | None]:
+        return [f"{provider_name}-model"], None
+
+    monkeypatch.setattr(ui_settings, "_probe_openai_models", fake_probe)
+    monkeypatch.setattr(http_api, "_fetch_provider_models", fake_fetch_provider_models)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            # Initial Settings diagnostics: no network probe of custom endpoints.
+            diagnostics = await client.get("/ui/api/models?skip_custom_probe=1")
+            assert diagnostics.status == 200
+            items = (await diagnostics.json())["providers"]
+            custom_item = next(item for item in items if item["provider"] == provider)
+            assert custom_item["display_name"] == "Slow"
+            assert custom_item["models"] == []
+            assert probed_urls == []
+            # Built-in diagnostics keep working.
+            assert {"deepseek", "local", "xai", "openrouter", "inception"} <= {
+                item["provider"] for item in items
+            }
+            deepseek_item = next(item for item in items if item["provider"] == "deepseek")
+            assert deepseek_item["models"] == ["deepseek-model"]
+
+            # Explicit custom discovery still probes the endpoint.
+            discovered = await client.get(f"/ui/api/models?provider={provider}")
+            assert discovered.status == 200
+            assert probed_urls == ["https://example.test/v1"]
+            assert (await discovered.json())["providers"][0]["models"] == ["custom/model"]
+
+            # Default behaviour (no flag) still probes custom endpoints.
+            full = await client.get("/ui/api/models")
+            assert full.status == 200
+            assert probed_urls == ["https://example.test/v1"] * 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_create_rejects_model_field(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     isolate(monkeypatch, tmp_path)
 

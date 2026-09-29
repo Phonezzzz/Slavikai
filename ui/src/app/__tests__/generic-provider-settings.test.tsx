@@ -215,4 +215,74 @@ describe('generic provider onboarding', () => {
     await screen.findByText('Connected. Found 1 models.');
     screen.getByRole('button', { name: 'Test connection' });
   });
+
+  it('ignores a stale save response after Settings is closed and reopened', async () => {
+    const saveResolvers: Array<(value: Response) => void> = [];
+    const probeResolvers: Array<(value: Response) => void> = [];
+    const resolveDeferred = (
+      resolvers: Array<(value: Response) => void>,
+      index: number,
+      payload: unknown,
+    ): void => {
+      const resolve = resolvers[index];
+      if (!resolve) {
+        throw new Error('deferred request was not started');
+      }
+      resolve(new Response(JSON.stringify(payload), { status: 200 }));
+    };
+    const onSaved = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      if (url === '/ui/api/models') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
+      if (url === '/ui/api/provider-instances/probe') {
+        return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
+      }
+      if (url === '/ui/api/provider-instances') {
+        return new Promise<Response>((resolve) => { saveResolvers.push(resolve); });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const fillOnboardingFields = async (name: string): Promise<void> => {
+      fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: name } });
+      fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
+      fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
+    };
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    await fillOnboardingFields('Old');
+    fireEvent.click(screen.getByRole('button', { name: 'Save provider' }));
+    await vi.waitFor(() => expect(saveResolvers.length).toBe(1));
+
+    // Close during the slow save, reopen, enter new data.
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
+    await fillOnboardingFields('New');
+
+    // Start a fresh probe so the new epoch owns the busy state.
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await vi.waitFor(() => expect(probeResolvers.length).toBe(1));
+    await screen.findByRole('button', { name: 'Checking...' });
+
+    // The stale save completes now: it must change nothing.
+    resolveDeferred(saveResolvers, 0, {
+      provider: 'custom-0123456789abcdef0123456789abcdef',
+      display_name: 'Old',
+      base_url: 'https://example.test/v1',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect((screen.getByRole('textbox', { name: 'Provider display name' }) as HTMLInputElement).value).toBe('New');
+    expect((screen.getByRole('textbox', { name: 'Provider Base URL' }) as HTMLInputElement).value).toBe('https://example.test');
+    expect(screen.queryByText('Old')).toBeNull();
+    expect(screen.queryByText('Provider saved. Select it in the chat model picker when ready.')).toBeNull();
+    expect(onSaved).not.toHaveBeenCalled();
+    // The stale save's finally must not clear the new probe's busy state.
+    screen.getByRole('button', { name: 'Checking...' });
+
+    // The new probe completes normally afterwards.
+    resolveDeferred(probeResolvers, 0, { base_url: 'https://example.test/v1', models: ['m'], status: 'ready' });
+    await screen.findByText('Connected. Found 1 models.');
+    screen.getByRole('button', { name: 'Test connection' });
+  });
 });

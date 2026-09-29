@@ -153,6 +153,11 @@ async def handle_ui_models(request: web.Request) -> web.Response:
     provider_query = request.query.get("provider", "").strip().lower()
     summary_only = request.query.get("summary", "").strip().lower() in {"1", "true", "yes"}
     strict = request.query.get("strict", "").strip().lower() in {"1", "true", "yes"}
+    skip_custom_probe = request.query.get("skip_custom_probe", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     providers: list[str]
     if provider_query:
         normalized = _normalize_provider(provider_query)
@@ -189,6 +194,19 @@ async def handle_ui_models(request: web.Request) -> web.Response:
         return json_response({"providers": payload_items})
     for provider in providers:
         instance = _load_provider_instance(provider)
+        if instance is not None and skip_custom_probe and not provider_query:
+            # Initial diagnostics must not network-probe saved custom
+            # endpoints (one unreachable endpoint stalls Settings open by
+            # ~20s); explicit ?provider=custom-... discovery still probes.
+            payload_items.append(
+                {
+                    "provider": provider,
+                    "display_name": instance["display_name"],
+                    "models": [],
+                    "error": None,
+                }
+            )
+            continue
         catalog_status: str | None = None
         if instance is not None:
             key = api._resolve_provider_api_key(provider)
