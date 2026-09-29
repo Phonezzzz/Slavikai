@@ -218,6 +218,17 @@ class LocalHttpBrain(Brain):
     ) -> Iterator[StreamEvent]:
         if tools and not self.supports_native_tools:
             raise RuntimeError("native_tools_required")
+        if not self.supports_native_tools:
+            # Unqualified dynamic endpoint: SSE support is not verified, so
+            # never claim native streaming. Use a plain chat completion and
+            # convert it into stream events via the Brain fallback instead.
+            yield from super().generate_stream_events(
+                messages,
+                config=config,
+                tools=tools,
+                cancellation_token=cancellation_token,
+            )
+            return
         if cancellation_requested(cancellation_token):
             yield from iter_cancellable((), cancellation_token=cancellation_token)
             return
