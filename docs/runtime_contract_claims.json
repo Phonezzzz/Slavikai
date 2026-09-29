@@ -154,8 +154,7 @@
       "version": 1,
       "source": "docs/architecture/GENERIC_PROVIDER_ONBOARDING.md",
       "verified_by": [
-        "tests/ui_api/test_generic_provider_onboarding.py",
-        "tests/ui_api/test_provider_model_settings.py"
+        "tests/ui_api/test_generic_provider_onboarding.py"
       ],
       "summary": "Owner can save an OpenAI-compatible endpoint without a model, then discover and select an opaque model ID in the chat session picker; manual IDs require an unavailable catalog. Member use of owner credentials is denied, dynamic native tools are unqualified, and remote HTTP is rejected."
     },

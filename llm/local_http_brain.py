@@ -169,7 +169,7 @@ class LocalHttpBrain(Brain):
                 allow_redirects=False,
             )
 
-        response = request_with_retry(send_request, provider="local")
+        response = request_with_retry(send_request, provider=cfg.provider)
         data_json = response.json()
         if not isinstance(data_json, dict):
             raise RuntimeError("Некорректный ответ локального LLM.")

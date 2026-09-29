@@ -3,12 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import requests
 
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.inception_brain import InceptionBrain
 from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
+from llm.retry import ProviderRequestError
 from llm.stream_model import Done, TextDelta
 from llm.types import LLMResult, ModelConfig, ToolSpec
 from llm.xai_brain import XAiBrain
@@ -89,6 +91,33 @@ def test_local_http_generate(monkeypatch) -> None:
     assert result.text == "pong"
     assert calls["url"] == "http://localhost:9999/v1/chat/completions"
     assert calls["json"]["model"] == "local-model"
+
+
+def test_local_http_generate_preserves_custom_provider_identity_in_errors(
+    monkeypatch,
+) -> None:
+    provider_id = "custom-0123456789abcdef0123456789abcdef"
+
+    def fake_post(url, json, headers, timeout, allow_redirects):
+        del url, json, headers, timeout, allow_redirects
+        response = requests.Response()
+        response.status_code = 401
+        raise requests.HTTPError("401 Client Error", response=response)
+
+    monkeypatch.setattr("llm.local_http_brain.requests.post", fake_post)
+    config = ModelConfig(
+        provider=provider_id,
+        model="opaque/model",
+        temperature=0.2,
+        base_url="https://example.test/v1/chat/completions",
+    )
+    brain = LocalHttpBrain(default_config=config, native_tools=False)
+
+    with pytest.raises(ProviderRequestError) as exc_info:
+        brain.generate([LLMMessage(role="user", content="hello")])
+
+    assert exc_info.value.provider == provider_id
+    assert exc_info.value.user_message == (f"Провайдер {provider_id} отклонил запрос (HTTP 401).")
 
 
 def test_local_http_generate_sends_and_parses_native_tools(monkeypatch) -> None:

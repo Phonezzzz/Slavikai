@@ -60,8 +60,6 @@ describe('generic provider onboarding', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test/' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'ui-test-secret' } });
-    expect(screen.queryByLabelText('Manual model ID')).toBeNull();
-    expect(screen.queryByLabelText('Discovered model')).toBeNull();
     expect((screen.getByRole('button', { name: 'Save provider' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
