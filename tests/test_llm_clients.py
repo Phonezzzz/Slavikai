@@ -220,14 +220,14 @@ def test_dynamic_provider_plain_completion_is_cancellable(monkeypatch) -> None:
                 raise requests.exceptions.ChunkedEncodingError("connection closed")
             return {"choices": [{"message": {"content": "hi"}}]}
 
-    def fake_post(url, json, headers, timeout, **kwargs):
-        del url, headers, timeout, kwargs
+    def fake_post(self, url, json=None, headers=None, timeout=None, **kwargs):
+        del self, url, headers, timeout, kwargs
         post_calls.append(json)
         # Plain completion: the OpenAI "stream" parameter must stay absent.
         assert json.get("stream") is not True
         return HangingResponse()
 
-    monkeypatch.setattr("llm.local_http_brain.requests.post", fake_post)
+    monkeypatch.setattr("requests.Session.post", fake_post)
     config = ModelConfig(
         provider=provider_id,
         model="opaque/model",

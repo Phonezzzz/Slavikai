@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Iterator
-from typing import Final
+import socket
+import threading
+from collections.abc import Iterator, Mapping
+from typing import Any, Final
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
@@ -136,6 +139,100 @@ def _parse_chat_result(data_json: object) -> LLMResult:
         raw=data,
         tool_calls=tool_calls,
     )
+
+
+def _close_socket(sock: socket.socket) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+class _HeaderWaitAbort:
+    """Closable handle that aborts the HTTP header wait of one request attempt.
+
+    Bound to the cancellation token via :func:`bind_cancellation_resource`
+    *before* the blocking ``post()`` starts, so ``cancel_generation`` can
+    close the live socket while response headers are still awaited. Fits the
+    existing cancellation contract: the only required method is ``close()``.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._armed = True
+        self._sock: socket.socket | None = None
+
+    def note_socket(self, sock: socket.socket | None) -> None:
+        """Register the live socket right after ``connect()``."""
+        with self._lock:
+            if not self._armed:
+                # Cancel fired before connect(): fail fast instead of hanging.
+                notify = sock
+            else:
+                self._sock = sock
+                notify = None
+        if notify is not None:
+            _close_socket(notify)
+
+    def disarm(self) -> None:
+        """Headers arrived: the socket now belongs to the response binding."""
+        with self._lock:
+            self._armed = False
+            self._sock = None
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._armed:
+                return
+            self._armed = False
+            sock, self._sock = self._sock, None
+        if sock is not None:
+            _close_socket(sock)
+
+
+class _CancellableAdapter(HTTPAdapter):
+    """HTTPAdapter that exposes the live socket to a :class:`_HeaderWaitAbort`.
+
+    Hooks the documented subclassing point ``get_connection_with_tls_context``
+    so each new connection registers its socket right after ``connect()``.
+    The pool instance is owned by a per-attempt ``Session``, so the transient
+    ``_new_conn`` wrap never affects shared/global pools.
+    """
+
+    def __init__(self, abort: _HeaderWaitAbort, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._abort = abort
+
+    def get_connection_with_tls_context(
+        self,
+        request: requests.PreparedRequest,
+        verify: bool | str | None,
+        proxies: Mapping[str, str] | None = None,
+        cert: str | tuple[str, str] | None = None,
+    ) -> Any:
+        pool: Any = super().get_connection_with_tls_context(
+            request, verify, proxies=proxies, cert=cert
+        )
+        original_new_conn = pool._new_conn
+        abort = self._abort
+
+        def _new_conn() -> Any:
+            conn: Any = original_new_conn()
+            original_connect = conn.connect
+
+            def connect() -> None:
+                original_connect()
+                abort.note_socket(conn.sock)
+
+            conn.connect = connect
+            return conn
+
+        pool._new_conn = _new_conn
+        return pool
 
 
 class LocalHttpBrain(Brain):
@@ -324,13 +421,17 @@ class LocalHttpBrain(Brain):
         Uses transport-level ``stream=True`` only (the OpenAI ``stream``
         parameter stays absent) so the response object exists before the body
         arrives and can be bound to the cancellation token: closing it aborts
-        a hanging read instead of waiting out the provider timeout.
+        a hanging read instead of waiting out the provider timeout. The header
+        wait itself is abortable too: a per-attempt session exposes the live
+        socket to a :class:`_HeaderWaitAbort` bound to the token *before* the
+        blocking ``post()`` starts.
         """
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_chat_payload(cfg, messages, None)
         if cancellation_requested(cancellation_token):
             raise GenerationCancelled("dynamic provider request cancelled")
+        session: requests.Session | None = None
         try:
             if cancellation_token is None:
                 response = request_with_retry(
@@ -344,15 +445,32 @@ class LocalHttpBrain(Brain):
                     provider=cfg.provider,
                 )
             else:
+                session = requests.Session()
+
+                def _post_cancellable() -> requests.Response:
+                    # Fresh abort handle per attempt: a previous attempt may
+                    # have disarmed/closed its own handle already.
+                    abort = _HeaderWaitAbort()
+                    adapter = _CancellableAdapter(abort)
+                    assert session is not None
+                    session.mount("http://", adapter)
+                    session.mount("https://", adapter)
+                    with bind_cancellation_resource(cancellation_token, abort):
+                        response = session.post(
+                            self.base_url,
+                            json=payload,
+                            headers=headers,
+                            timeout=DEFAULT_TIMEOUT,
+                            allow_redirects=False,
+                            stream=True,
+                        )
+                        # Headers arrived: the socket now belongs to the
+                        # response, which is bound to the token below.
+                        abort.disarm()
+                        return response
+
                 response = request_with_retry(
-                    lambda: requests.post(
-                        self.base_url,
-                        json=payload,
-                        headers=headers,
-                        timeout=DEFAULT_TIMEOUT,
-                        allow_redirects=False,
-                        stream=True,
-                    ),
+                    _post_cancellable,
                     provider=cfg.provider,
                     stop_requested=cancellation_token.is_set,
                 )
@@ -365,6 +483,11 @@ class LocalHttpBrain(Brain):
             if cancellation_requested(cancellation_token):
                 raise GenerationCancelled("dynamic provider request cancelled") from exc
             raise
+        finally:
+            # The session must outlive the response body read above; closing
+            # it here releases the per-attempt adapters and their pools.
+            if session is not None:
+                session.close()
         return _parse_chat_result(data_json)
 
     def _inject_system(self, messages: list[LLMMessage], config: ModelConfig) -> list[LLMMessage]:
