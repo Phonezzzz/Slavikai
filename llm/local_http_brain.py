@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import socket
+import sys
 import threading
 from collections.abc import Iterator, Mapping
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import (
+    ConnectTimeoutError,
+    LocationParseError,
+    NameResolutionError,
+    NewConnectionError,
+)
+from urllib3.util.connection import _set_socket_options, allowed_gai_family
 
 from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
@@ -152,6 +162,33 @@ def _close_socket(sock: socket.socket) -> None:
         pass
 
 
+def is_loopback_url(url: str) -> bool:
+    """True when the URL targets a loopback host (127/8, ::1, localhost)."""
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
+
+
+def proxies_for_provider_url(url: str) -> dict[str, Any] | None:
+    """Proxy mapping for provider HTTP calls.
+
+    requests honors the process proxy env (trust_env=True) even for loopback
+    URLs, which would send the Authorization API key to the configured
+    HTTP_PROXY in cleartext. An explicit None disables the proxy for that
+    scheme (supported at runtime despite the narrower type stub);
+    returning None keeps the default behavior for non-loopback URLs.
+    """
+    if is_loopback_url(url):
+        return {"http": None, "https": None}
+    return None
+
+
 class _HeaderWaitAbort:
     """Closable handle that aborts the HTTP header wait of one request attempt.
 
@@ -197,10 +234,13 @@ class _HeaderWaitAbort:
 class _CancellableAdapter(HTTPAdapter):
     """HTTPAdapter that exposes the live socket to a :class:`_HeaderWaitAbort`.
 
-    Hooks the documented subclassing point ``get_connection_with_tls_context``
-    so each new connection registers its socket right after ``connect()``.
-    The pool instance is owned by a per-attempt ``Session``, so the transient
-    ``_new_conn`` wrap never affects shared/global pools.
+    Hooks the documented subclassing point ``get_connection_with_tls_context``.
+    Each new urllib3 connection gets its socket factory (``HTTPConnection._new_conn``)
+    replaced with an abortable variant that registers the socket with the abort
+    handle BEFORE the blocking connect(), so cancellation can interrupt the
+    DNS/TCP-connect phase as well as the TLS handshake and the HTTP header
+    wait that follow on the same socket. The pool instance is owned by a
+    per-attempt ``Session``, so the wraps never affect shared/global pools.
     """
 
     def __init__(self, abort: _HeaderWaitAbort, *args: Any, **kwargs: Any) -> None:
@@ -217,22 +257,74 @@ class _CancellableAdapter(HTTPAdapter):
         pool: Any = super().get_connection_with_tls_context(
             request, verify, proxies=proxies, cert=cert
         )
-        original_new_conn = pool._new_conn
+        original_pool_new_conn = pool._new_conn
         abort = self._abort
 
-        def _new_conn() -> Any:
-            conn: Any = original_new_conn()
-            original_connect = conn.connect
+        def _pool_new_conn() -> Any:
+            conn: Any = original_pool_new_conn()
 
-            def connect() -> None:
-                original_connect()
-                abort.note_socket(conn.sock)
+            def _conn_new_conn() -> socket.socket:
+                return _abortable_tcp_connect(conn, abort)
 
-            conn.connect = connect
+            conn._new_conn = _conn_new_conn
             return conn
 
-        pool._new_conn = _new_conn
+        pool._new_conn = _pool_new_conn
         return pool
+
+
+def _abortable_tcp_connect(conn: Any, abort: _HeaderWaitAbort) -> socket.socket:
+    """Replacement for urllib3 ``HTTPConnection._new_conn``.
+
+    Mirrors ``urllib3.util.connection.create_connection``, but the socket is
+    handed to the abort handle BEFORE the blocking ``connect()``. Error
+    translation matches urllib3's own ``_new_conn`` so retry/timeout behavior
+    is unchanged.
+    """
+    host: str = conn._dns_host
+    port: int = conn.port
+    timeout = conn.timeout
+    try:
+        if host.startswith("["):
+            host = host.strip("[]")
+        try:
+            host.encode("idna")
+        except UnicodeError as exc:
+            raise LocationParseError(f"'{host}', label empty or too long") from exc
+        err: OSError | None = None
+        for res in socket.getaddrinfo(host, port, allowed_gai_family(), socket.SOCK_STREAM):
+            af, socktype, proto, _canonname, sa = res
+            sock: socket.socket | None = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                _set_socket_options(sock, conn.socket_options)
+                if timeout is not None:
+                    sock.settimeout(timeout)
+                if conn.source_address:
+                    sock.bind(conn.source_address)
+                # Register before the blocking connect: this is what makes
+                # the DNS/TCP-connect phase (and the TLS handshake that
+                # follows on the same socket) cancellable.
+                abort.note_socket(sock)
+                sock.connect(sa)
+                sys.audit("http.client.connect", conn, conn.host, port)
+                return sock
+            except OSError as exc:
+                err = exc
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+        raise err if err is not None else OSError(f"no addresses for {host}:{port}")
+    except socket.gaierror as exc:
+        raise NameResolutionError(conn.host, conn, exc) from exc
+    except TimeoutError as exc:
+        raise ConnectTimeoutError(
+            conn, f"Connection to {conn.host} timed out. (connect timeout={timeout})"
+        ) from exc
+    except OSError as exc:
+        raise NewConnectionError(conn, f"Failed to establish a new connection: {exc}") from exc
 
 
 class LocalHttpBrain(Brain):
@@ -282,6 +374,8 @@ class LocalHttpBrain(Brain):
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_chat_payload(cfg, messages, tools)
+        # Never send the API key through a system proxy for loopback providers.
+        proxies = proxies_for_provider_url(self.base_url)
 
         def send_request() -> requests.Response:
             if self.supports_native_tools:
@@ -290,6 +384,7 @@ class LocalHttpBrain(Brain):
                     json=payload,
                     headers=headers,
                     timeout=DEFAULT_TIMEOUT,
+                    proxies=proxies,
                 )
             return requests.post(
                 self.base_url,
@@ -297,6 +392,7 @@ class LocalHttpBrain(Brain):
                 headers=headers,
                 timeout=DEFAULT_TIMEOUT,
                 allow_redirects=False,
+                proxies=proxies,
             )
 
         response = request_with_retry(send_request, provider=cfg.provider)
@@ -429,6 +525,8 @@ class LocalHttpBrain(Brain):
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
         payload = self._build_chat_payload(cfg, messages, None)
+        # Never send the API key through a system proxy for loopback providers.
+        proxies = proxies_for_provider_url(self.base_url)
         if cancellation_requested(cancellation_token):
             raise GenerationCancelled("dynamic provider request cancelled")
         session: requests.Session | None = None
@@ -441,6 +539,7 @@ class LocalHttpBrain(Brain):
                         headers=headers,
                         timeout=DEFAULT_TIMEOUT,
                         allow_redirects=False,
+                        proxies=proxies,
                     ),
                     provider=cfg.provider,
                 )
@@ -453,6 +552,14 @@ class LocalHttpBrain(Brain):
                     abort = _HeaderWaitAbort()
                     adapter = _CancellableAdapter(abort)
                     assert session is not None
+                    # Session.mount() does not close evicted adapters: release
+                    # the previous attempt's adapter (and its pool) before
+                    # replacing it, otherwise retryable upstream errors leak
+                    # sockets until GC.
+                    for prefix in ("http://", "https://"):
+                        previous = session.adapters.get(prefix)
+                        if isinstance(previous, _CancellableAdapter):
+                            previous.close()
                     session.mount("http://", adapter)
                     session.mount("https://", adapter)
                     with bind_cancellation_resource(cancellation_token, abort):
@@ -463,10 +570,20 @@ class LocalHttpBrain(Brain):
                             timeout=DEFAULT_TIMEOUT,
                             allow_redirects=False,
                             stream=True,
+                            proxies=proxies,
                         )
                         # Headers arrived: the socket now belongs to the
                         # response, which is bound to the token below.
                         abort.disarm()
+                        try:
+                            response.raise_for_status()
+                        except Exception:
+                            # request_with_retry raises outside this operation,
+                            # before the outer bind: close the streaming error
+                            # response here so its socket is not leaked across
+                            # the retry.
+                            response.close()
+                            raise
                         return response
 
                 response = request_with_retry(
