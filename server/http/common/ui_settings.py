@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import difflib
-import ipaddress
 import json
 import os
 import re
@@ -31,7 +30,7 @@ from config.ui_embeddings_settings import (
     load_ui_embeddings_settings,
     save_ui_embeddings_settings,
 )
-from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
+from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT, is_loopback_url, proxies_for_provider_url
 from llm.types import (
     CUSTOM_PROVIDER_ID_PATTERN,
     ModelConfig,
@@ -123,12 +122,7 @@ def _normalize_openai_base_url(raw: str) -> str:
     ):
         raise ValueError("Base URL должен быть HTTP(S) URL без credentials, query и fragment.")
     if parsed.scheme == "http":
-        host = parsed.hostname.lower()
-        try:
-            loopback = ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            loopback = host == "localhost"
-        if not loopback:
+        if not is_loopback_url(value):
             raise ValueError(
                 "Удалённый Base URL должен использовать HTTPS; HTTP разрешён только для loopback."
             )
@@ -208,6 +202,9 @@ def _probe_openai_models(base_url: str, api_key: str) -> tuple[list[str], str, s
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=MODEL_FETCH_TIMEOUT,
             allow_redirects=False,
+            # Loopback providers must not go through a system proxy: the
+            # Authorization key would leak to the proxy in cleartext.
+            proxies=proxies_for_provider_url(base_url),
         )
         if response.status_code == 401:
             return [], "invalid_api_key", "API-ключ отклонён провайдером."
