@@ -2,170 +2,144 @@
 
 With requests' default trust_env=True, even http://127.0.0.1 goes through
 HTTP_PROXY, which would receive the Authorization API key in cleartext.
+These tests use stubs only (no real sockets, per DevRules.md): they capture
+the ``proxies`` kwarg our code passes and verify through requests'
+``resolve_proxies`` that the environment proxy is actually bypassed.
 """
 
 from __future__ import annotations
 
-import asyncio
-import http.server
-import socketserver
-import threading
-
 import pytest
+import requests
+from requests.utils import resolve_proxies
 
-from llm.local_http_brain import LocalHttpBrain
+from llm.local_http_brain import LocalHttpBrain, proxies_for_provider_url
 from llm.types import ModelConfig
+from server.http.common import ui_settings
 from server.http.common.ui_settings import _probe_openai_models
 from shared.models import LLMMessage
 
 _API_KEY = "secret-proxy-test-key"
+_ENV_PROXY = "http://127.0.0.1:9999"
 
 
-class _RequestRecorder:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._requests: list[dict[str, str | None]] = []
+class FakeResponse:
+    def __init__(self, status: int, payload: object) -> None:
+        self.status_code = status
+        self.payload = payload
 
-    def record(self, handler: http.server.BaseHTTPRequestHandler) -> None:
-        length = int(handler.headers.get("Content-Length", 0) or 0)
-        if length:
-            handler.rfile.read(length)
-        with self._lock:
-            self._requests.append(
-                {
-                    "path": handler.path,
-                    "authorization": handler.headers.get("Authorization"),
-                }
-            )
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            response = requests.Response()
+            response.status_code = self.status_code
+            raise requests.HTTPError(response=response)
 
-    def saw_key(self, key: str) -> bool:
-        with self._lock:
-            return any(item["authorization"] == f"Bearer {key}" for item in self._requests)
-
-    def count(self) -> int:
-        with self._lock:
-            return len(self._requests)
+    def json(self) -> object:
+        return self.payload
 
 
-def _make_handler(recorder: _RequestRecorder, body: bytes | None):
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def _handle(self) -> None:
-            recorder.record(self)
-            payload = body if body is not None else b"{}"
-            try:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-
-        def do_GET(self) -> None:  # noqa: N802
-            self._handle()
-
-        def do_POST(self) -> None:  # noqa: N802
-            self._handle()
-
-        def log_message(self, *args) -> None:  # noqa: ANN001, ANN202
-            pass
-
-    return Handler
+@pytest.fixture
+def proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", _ENV_PROXY)
+    monkeypatch.setenv("http_proxy", _ENV_PROXY)
+    # Empty NO_PROXY: without the fix, requests would use the proxy.
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
 
 
-class _ProxyEnv:
-    """A loopback provider plus a fake proxy, with proxy env forced on."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, provider_body: bytes) -> None:
-        self.provider_recorder = _RequestRecorder()
-        self.proxy_recorder = _RequestRecorder()
-        socketserver.TCPServer.allow_reuse_address = True
-        self._provider = socketserver.TCPServer(
-            ("127.0.0.1", 0), _make_handler(self.provider_recorder, provider_body)
-        )
-        self._proxy = socketserver.TCPServer(
-            ("127.0.0.1", 0), _make_handler(self.proxy_recorder, None)
-        )
-        self.provider_port = self._provider.server_address[1]
-        proxy_port = self._proxy.server_address[1]
-        self._threads = [
-            threading.Thread(target=self._provider.serve_forever, daemon=True),
-            threading.Thread(target=self._proxy.serve_forever, daemon=True),
-        ]
-        for thread in self._threads:
-            thread.start()
-        proxy_url = f"http://127.0.0.1:{proxy_port}"
-        monkeypatch.setenv("HTTP_PROXY", proxy_url)
-        monkeypatch.setenv("http_proxy", proxy_url)
-        # Empty NO_PROXY: without the fix, requests would use the proxy.
-        monkeypatch.setenv("NO_PROXY", "")
-        monkeypatch.setenv("no_proxy", "")
-        monkeypatch.delenv("ALL_PROXY", raising=False)
-        monkeypatch.delenv("all_proxy", raising=False)
-
-    @property
-    def provider_base(self) -> str:
-        return f"http://127.0.0.1:{self.provider_port}/v1"
-
-    def close(self) -> None:
-        self._provider.shutdown()
-        self._proxy.shutdown()
-        self._provider.server_close()
-        self._proxy.server_close()
+def _resolved_proxy(url: str, proxies: object) -> str | None:
+    """What requests would actually use for this URL with trust_env=True."""
+    prepared = requests.Request("GET", url).prepare()
+    resolved = resolve_proxies(prepared, proxies, trust_env=True)  # type: ignore[arg-type]
+    return resolved.get("http")
 
 
-def _make_brain(env: _ProxyEnv) -> LocalHttpBrain:
+def test_proxies_for_provider_url() -> None:
+    assert proxies_for_provider_url("http://127.0.0.1:8080/v1") == {
+        "http": None,
+        "https": None,
+    }
+    assert proxies_for_provider_url("http://localhost:8080/v1") == {
+        "http": None,
+        "https": None,
+    }
+    assert proxies_for_provider_url("http://[::1]:8080/v1") == {
+        "http": None,
+        "https": None,
+    }
+    assert proxies_for_provider_url("https://example.test/v1") is None
+    assert proxies_for_provider_url("not a url") is None
+
+
+def test_probe_bypasses_system_proxy_for_loopback(
+    monkeypatch: pytest.MonkeyPatch, proxy_env: None
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_get(url: str, **kwargs: object) -> FakeResponse:
+        captured.update(kwargs)
+        assert kwargs["headers"]["Authorization"] == f"Bearer {_API_KEY}"  # type: ignore[index]
+        return FakeResponse(200, {"data": [{"id": "m1"}]})
+
+    monkeypatch.setattr(ui_settings.requests, "get", fake_get)
+    models, status, _ = _probe_openai_models("http://127.0.0.1:1234/v1", _API_KEY)
+    assert status == "ready"
+    assert models == ["m1"]
+    # The captured proxies mapping must defeat the environment proxy.
+    assert _resolved_proxy("http://127.0.0.1:1234/v1/models", captured["proxies"]) is None
+    # Negative control: without our mapping the env proxy would be used.
+    assert _resolved_proxy("http://127.0.0.1:1234/v1/models", None) == _ENV_PROXY
+
+
+def _make_brain() -> LocalHttpBrain:
     return LocalHttpBrain(
         default_config=ModelConfig(
             provider="custom-0123456789abcdef0123456789abcdef",
             model="opaque/model",
-            base_url=f"{env.provider_base}/chat/completions",
+            base_url="http://127.0.0.1:1234/v1/chat/completions",
             api_key=_API_KEY,
         ),
         native_tools=False,
     )
 
 
-def test_probe_bypasses_system_proxy_for_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
-    env = _ProxyEnv(monkeypatch, b'{"data":[{"id":"m1"}]}')
-    try:
-        models, status, _ = _probe_openai_models(env.provider_base, _API_KEY)
-        assert status == "ready"
-        assert models == ["m1"]
-        assert env.provider_recorder.saw_key(_API_KEY)
-        assert not env.proxy_recorder.saw_key(_API_KEY), "API key leaked to the proxy"
-        assert env.proxy_recorder.count() == 0
-    finally:
-        env.close()
+def test_brain_plain_completion_bypasses_system_proxy(
+    monkeypatch: pytest.MonkeyPatch, proxy_env: None
+) -> None:
+    captured: dict[str, object] = {}
 
+    def fake_post(url: str, **kwargs: object) -> FakeResponse:
+        captured.update(kwargs)
+        return FakeResponse(200, {"choices": [{"message": {"content": "hi"}}]})
 
-def test_brain_plain_completion_bypasses_system_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
-    env = _ProxyEnv(monkeypatch, b'{"choices":[{"message":{"content":"hi"}}]}')
-    try:
-        result = _make_brain(env).generate([LLMMessage(role="user", content="hi")])
-        assert result.text == "hi"
-        assert env.provider_recorder.saw_key(_API_KEY)
-        assert not env.proxy_recorder.saw_key(_API_KEY), "API key leaked to the proxy"
-        assert env.proxy_recorder.count() == 0
-    finally:
-        env.close()
+    monkeypatch.setattr("llm.local_http_brain.requests.post", fake_post)
+    result = _make_brain().generate([LLMMessage(role="user", content="hi")])
+    assert result.text == "hi"
+    assert _resolved_proxy("http://127.0.0.1:1234/v1/chat/completions", captured["proxies"]) is None
+    assert _resolved_proxy("http://127.0.0.1:1234/v1/chat/completions", None) == _ENV_PROXY
 
 
 def test_brain_cancellable_completion_bypasses_system_proxy(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, proxy_env: None
 ) -> None:
-    env = _ProxyEnv(monkeypatch, b'{"choices":[{"message":{"content":"hi"}}]}')
-    try:
-        token: asyncio.Event = asyncio.Event()
-        events = list(
-            _make_brain(env).generate_stream_events(
-                [LLMMessage(role="user", content="hi")],
-                cancellation_token=token,
-            )
+    captured: dict[str, object] = {}
+
+    def fake_post(self: object, url: str, **kwargs: object) -> FakeResponse:
+        captured.update(kwargs)
+        assert kwargs.get("stream") is True
+        return FakeResponse(200, {"choices": [{"message": {"content": "hi"}}]})
+
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    import asyncio
+
+    events = list(
+        _make_brain().generate_stream_events(
+            [LLMMessage(role="user", content="hi")],
+            cancellation_token=asyncio.Event(),
         )
-        assert events, "expected stream events"
-        assert env.provider_recorder.saw_key(_API_KEY)
-        assert not env.proxy_recorder.saw_key(_API_KEY), "API key leaked to the proxy"
-        assert env.proxy_recorder.count() == 0
-    finally:
-        env.close()
+    )
+    assert events, "expected stream events"
+    assert _resolved_proxy("http://127.0.0.1:1234/v1/chat/completions", captured["proxies"]) is None
+    assert _resolved_proxy("http://127.0.0.1:1234/v1/chat/completions", None) == _ENV_PROXY

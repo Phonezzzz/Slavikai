@@ -94,7 +94,12 @@ def test_discovery_persistence_selection_and_completion(
     observed: list[tuple[str, str, str]] = []
 
     def fake_get(
-        url: str, *, headers: dict[str, str], timeout: int, allow_redirects: bool
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout: int,
+        allow_redirects: bool,
+        proxies: object = None,
     ) -> FakeResponse:
         assert timeout == ui_settings.MODEL_FETCH_TIMEOUT
         assert allow_redirects is False
@@ -108,6 +113,7 @@ def test_discovery_persistence_selection_and_completion(
         headers: dict[str, str],
         timeout: int,
         allow_redirects: bool,
+        proxies: object = None,
     ) -> FakeResponse:
         assert allow_redirects is False
         observed.append(("completion", url, headers["Authorization"]))
