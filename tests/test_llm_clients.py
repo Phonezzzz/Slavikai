@@ -77,7 +77,7 @@ def test_openrouter_generate(monkeypatch) -> None:
 def test_local_http_generate(monkeypatch) -> None:
     calls: dict[str, Any] = {}
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(url, json, headers, timeout, **kwargs):
         calls["url"] = url
         calls["json"] = json
         return _mock_response({"choices": [{"message": {"content": "pong"}}]})
@@ -102,7 +102,7 @@ def test_local_http_generate_preserves_custom_provider_identity_in_errors(
 ) -> None:
     provider_id = "custom-0123456789abcdef0123456789abcdef"
 
-    def fake_post(url, json, headers, timeout, allow_redirects):
+    def fake_post(url, json, headers, timeout, allow_redirects, **kwargs):
         del url, json, headers, timeout, allow_redirects
         response = requests.Response()
         response.status_code = 401
@@ -169,7 +169,7 @@ def test_dynamic_provider_streaming_falls_back_to_non_streaming_generate(
 ) -> None:
     calls: dict[str, Any] = {}
 
-    def fake_post(url, json, headers, timeout, allow_redirects):
+    def fake_post(url, json, headers, timeout, allow_redirects, **kwargs):
         del url, headers, timeout, allow_redirects
         calls["json"] = json
         # The endpoint rejects stream=true: the brain must not request SSE.
@@ -269,7 +269,7 @@ def test_dynamic_provider_plain_completion_is_cancellable(monkeypatch) -> None:
 def test_local_http_generate_sends_and_parses_native_tools(monkeypatch) -> None:
     calls: dict[str, Any] = {}
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(url, json, headers, timeout, **kwargs):
         del url, headers, timeout
         calls["json"] = json
         return _mock_response(
@@ -681,3 +681,65 @@ def test_brain_base_stream_events_default_adapter() -> None:
     assert deltas[0].mode == "append"
     assert "".join(event.text for event in deltas) == "abcdef"
     assert isinstance(events[-1], Done)
+
+
+def test_cancellable_retry_closes_error_response_and_adapter(monkeypatch) -> None:
+    """Retryable upstream errors must not leak the streaming response/adapter.
+
+    request_with_retry raises outside _post_cancellable, before the outer
+    bind: the failed attempt's response and its adapter have to be closed
+    inside the operation, otherwise Session.mount() evicts unclosed adapters
+    and sockets leak until GC.
+    """
+    from llm.local_http_brain import _CancellableAdapter
+
+    closed_responses: list[object] = []
+    closed_adapters: list[object] = []
+    real_adapter_close = _CancellableAdapter.close
+
+    def tracking_close(self) -> None:
+        closed_adapters.append(self)
+        real_adapter_close(self)
+
+    monkeypatch.setattr(_CancellableAdapter, "close", tracking_close)
+
+    class ErrorResponse:
+        status_code = 429
+
+        def raise_for_status(self) -> None:
+            response = requests.Response()
+            response.status_code = 429
+            raise requests.HTTPError(response=response)
+
+        def close(self) -> None:
+            closed_responses.append(self)
+
+    calls = {"count": 0}
+
+    def fake_post(self, url, **kwargs) -> object:  # noqa: ANN001, ANN202
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return ErrorResponse()
+        return _mock_response({"choices": [{"message": {"content": "recovered"}}]})
+
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    brain = LocalHttpBrain(
+        default_config=ModelConfig(
+            provider="custom-0123456789abcdef0123456789abcdef",
+            model="m",
+            base_url="http://127.0.0.1:1/v1/chat/completions",
+        ),
+        native_tools=False,
+    )
+    events = list(
+        brain.generate_stream_events(
+            [LLMMessage(role="user", content="hi")],
+            cancellation_token=asyncio.Event(),
+        )
+    )
+    assert calls["count"] == 2, "expected one retry after 429"
+    assert len(closed_responses) == 1, "error response was not closed"
+    assert len(closed_adapters) >= 1, "evicted attempt adapter was not closed"
+    assert any(getattr(event, "text", "") == "recovered" for event in events), (
+        f"unexpected events: {events}"
+    )
