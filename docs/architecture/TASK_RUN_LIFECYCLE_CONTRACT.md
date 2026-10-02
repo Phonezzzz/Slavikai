@@ -22,6 +22,10 @@ Current-runtime audit и его пределы находятся в
 Context, Multi-Agent и Memory snapshots `4b9a453`, `4ee7516`, `f883893`
 не интегрированы и не приобретают нормативный статус от ссылок здесь.
 
+Реализованный storage-only foundation и его пределы описаны в
+[`TASK_RUN_STORAGE_CONTRACT.md`](TASK_RUN_STORAGE_CONTRACT.md). Production admission,
+terminal authority и continuation от этого не становятся implemented.
+
 ## 1. Capability boundary и target model
 
 SlavikAI должен поддерживать единый lifecycle contract для обычного Ask, simple single-agent, Plan -> Act,

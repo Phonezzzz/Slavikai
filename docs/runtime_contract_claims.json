@@ -298,6 +298,18 @@
         "docs/architecture/TOOL_EXECUTION_RESULT_CONTRACT.md"
       ],
       "summary": "Complete scoped durable execution evidence precedes lossy projections; configurable seven-day terminal retention excludes active, resumable and recovery-pinned data."
+    },
+    {
+      "id": "runtime.lifecycle.admission_store",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
+      "verified_by": [
+        "tests/test_task_run_storage.py"
+      ],
+      "summary": "Storage-only foundation: scoped durable admission identities, immutable revision/history, transactional versioned transitions and restart reads. Not yet adopted by production runtime; completion/recovery remain target."
     }
   ]
 }
