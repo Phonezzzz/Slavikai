@@ -271,6 +271,33 @@
         "scripts/check_source_of_truth.py"
       ],
       "summary": "Production background execution has separate venv-prod pid and log targets."
+    },
+    {
+      "id": "runtime.tools.generic_process_outcome",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "tool_runtime",
+      "version": 1,
+      "source": "docs/architecture/TOOL_EXECUTION_RESULT_CONTRACT.md",
+      "verified_by": [
+        "tests/test_shell_tool_edges.py",
+        "tests/test_terminal_sandbox.py",
+        "tests/test_auto_runtime.py",
+        "tests/ui_api/test_workspace_and_tools.py"
+      ],
+      "summary": "Generic shell, terminal oneshot and workspace_run nonzero exits remain failed with available diagnostics through model and UI projections."
+    },
+    {
+      "id": "runtime.tools.canonical_execution_evidence",
+      "scope": "runtime",
+      "status": "target",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/TOOL_EXECUTION_RESULT_CONTRACT.md",
+      "verified_by": [
+        "docs/architecture/TOOL_EXECUTION_RESULT_CONTRACT.md"
+      ],
+      "summary": "Complete scoped durable execution evidence precedes lossy projections; configurable seven-day terminal retention excludes active, resumable and recovery-pinned data."
     }
   ]
 }

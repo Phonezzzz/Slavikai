@@ -12,7 +12,7 @@ from config.shell_config import (
     load_shell_config,
 )
 from shared.command_safety import is_hard_unsafe_command as _is_unsafe
-from shared.models import ToolRequest, ToolResult
+from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.sandbox import SandboxViolationError, normalize_shell_sandbox_root
 
 CHAIN_TOKENS: Final[set[str]] = {"&&", "||", ";"}
@@ -96,13 +96,16 @@ def handle_shell(
         output = combined.strip() or "(пустой вывод)"
         if len(output) > cfg.max_output_chars:
             output = output[: cfg.max_output_chars] + "\n…[output truncated]"
-        return ToolResult.success(
-            {"output": output, "returncode": result.returncode},
-            meta={
-                "duration_sec": round(duration, 3),
-                "cwd": str(sandbox_root),
-            },
-        )
+        data: dict[str, JSONValue] = {"output": output, "returncode": result.returncode}
+        meta: dict[str, JSONValue] = {
+            "duration_sec": round(duration, 3),
+            "cwd": str(sandbox_root),
+        }
+        if result.returncode != 0:
+            return ToolResult.failure(
+                f"Команда завершилась с кодом {result.returncode}.", meta=meta, data=data
+            )
+        return ToolResult.success(data, meta=meta)
     except subprocess.TimeoutExpired:
         return ToolResult.failure(
             "⏳ Команда превысила лимит времени.",

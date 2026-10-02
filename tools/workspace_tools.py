@@ -602,13 +602,16 @@ class RunCodeTool:
                 timeout=self.timeout,
                 check=False,
             )
-            return ToolResult.success(
-                {
-                    "output": proc.stdout,
-                    "stderr": proc.stderr,
-                    "exit_code": proc.returncode,
-                }
-            )
+            data: dict[str, JSONValue] = {
+                "output": proc.stdout,
+                "stderr": proc.stderr,
+                "exit_code": proc.returncode,
+            }
+            if proc.returncode != 0:
+                return ToolResult.failure(
+                    f"Скрипт завершился с кодом {proc.returncode}.", data=data
+                )
+            return ToolResult.success(data)
         except subprocess.TimeoutExpired:
             return ToolResult.failure(f"Время выполнения превышено ({self.timeout}с).")
         except Exception as exc:  # noqa: BLE001

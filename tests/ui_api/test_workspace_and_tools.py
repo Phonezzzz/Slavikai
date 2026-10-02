@@ -867,3 +867,43 @@ def test_browse_directories_index_policy_rejects_home(monkeypatch, tmp_path) -> 
         workspace_root=tmp_path,
     )
     assert result["path"] == str(outside_home)
+
+
+def test_ui_completed_process_failure_preserves_diagnostics() -> None:
+    class FailedProcessAgent(WorkspaceDecisionAgent):
+        def call_tool(self, name, args=None, raw_input=None):
+            if name in {"workspace_run", "workspace_terminal_run"}:
+                return ToolResult.failure(
+                    "Команда завершилась с кодом 7.",
+                    data={
+                        "output": "before failure\n",
+                        "stderr": "critical error\n",
+                        "exit_code": 7,
+                    },
+                )
+            return super().call_tool(name, args, raw_input)
+
+    async def run() -> None:
+        client = await _create_client(FailedProcessAgent())
+        try:
+            status = await (await client.get("/ui/api/status")).json()
+            for endpoint, args in [
+                ("run", {"path": "result.py"}),
+                ("terminal/run", {"command": "python result.py"}),
+            ]:
+                response = await client.post(
+                    f"/ui/api/workspace/{endpoint}",
+                    headers={"X-Slavik-Session": status["session_id"]},
+                    json=args,
+                )
+                assert response.status == 200
+                payload = await response.json()
+                assert payload["ok"] is False
+                assert payload["exit_code"] == 7
+                assert payload["stdout"] == "before failure\n"
+                assert payload["stderr"] == "critical error\n"
+                assert "7" in payload["error"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())

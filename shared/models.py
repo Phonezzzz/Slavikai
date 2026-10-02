@@ -36,8 +36,14 @@ class ToolResult:
         return cls(ok=True, data=data or {}, meta=meta)
 
     @classmethod
-    def failure(cls, error: str, meta: dict[str, JSONValue] | None = None) -> ToolResult:
-        return cls(ok=False, data={}, error=error, meta=meta)
+    def failure(
+        cls,
+        error: str,
+        meta: dict[str, JSONValue] | None = None,
+        *,
+        data: dict[str, JSONValue] | None = None,
+    ) -> ToolResult:
+        return cls(ok=False, data=data or {}, error=error, meta=meta)
 
 
 @dataclass(frozen=True)

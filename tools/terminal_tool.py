@@ -160,16 +160,17 @@ class TerminalTool:
             stdout = stdout[: cfg.max_output_chars] + "\n...[stdout truncated]"
         if len(stderr) > cfg.max_output_chars:
             stderr = stderr[: cfg.max_output_chars] + "\n...[stderr truncated]"
-        return ToolResult.success(
-            {
-                "mode": "oneshot",
-                "output": stdout,
-                "stderr": stderr,
-                "exit_code": proc.returncode,
-                "cwd": str(cwd),
-                "cwd_mode": cwd_mode,
-            }
-        )
+        data: dict[str, JSONValue] = {
+            "mode": "oneshot",
+            "output": stdout,
+            "stderr": stderr,
+            "exit_code": proc.returncode,
+            "cwd": str(cwd),
+            "cwd_mode": cwd_mode,
+        }
+        if proc.returncode != 0:
+            return ToolResult.failure(f"Команда завершилась с кодом {proc.returncode}.", data=data)
+        return ToolResult.success(data)
 
     async def create_or_get(
         self,

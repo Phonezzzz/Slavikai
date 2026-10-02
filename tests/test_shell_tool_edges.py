@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from shared.models import ToolRequest
 from tools.shell_tool import ShellConfig, handle_shell, handle_shell_request
+
+
+def test_shell_nonzero_exit_is_failure_with_diagnostics(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
+    monkeypatch.setattr(
+        "tools.shell_tool.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ["echo", "hello"], 7, stdout="before failure\n", stderr="critical error\n"
+        ),
+    )
+    result = handle_shell("echo hello", config=ShellConfig(allowed_commands=["echo"]))
+
+    assert not result.ok
+    assert result.error and "7" in result.error
+    assert result.data["returncode"] == 7
+    assert "before failure" in result.data["output"]
+    assert "critical error" in result.data["output"]
 
 
 def test_shell_allowed_command(tmp_path, monkeypatch) -> None:

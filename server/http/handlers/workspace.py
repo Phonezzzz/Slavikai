@@ -1350,7 +1350,7 @@ async def handle_ui_workspace_run(request: web.Request) -> web.Response:
     if isinstance(tool_result_or_error, web.Response):
         return tool_result_or_error
     tool_result = tool_result_or_error
-    if not tool_result.ok:
+    if not tool_result.ok and type(tool_result.data.get("exit_code")) is not int:
         return error_response(
             status=400,
             message=tool_result.error or "Не удалось выполнить файл.",
@@ -1366,6 +1366,8 @@ async def handle_ui_workspace_run(request: web.Request) -> web.Response:
     response = json_response(
         {
             "session_id": session_id,
+            "ok": tool_result.ok,
+            "error": tool_result.error,
             "path": path_value,
             "stdout": stdout,
             "stderr": stderr,
@@ -1433,7 +1435,7 @@ async def handle_ui_workspace_terminal_run(request: web.Request) -> web.Response
     if isinstance(tool_result_or_error, web.Response):
         return tool_result_or_error
     tool_result = tool_result_or_error
-    if not tool_result.ok:
+    if not tool_result.ok and type(tool_result.data.get("exit_code")) is not int:
         return error_response(
             status=400,
             message=tool_result.error or "Не удалось выполнить команду command runner.",
@@ -1448,6 +1450,8 @@ async def handle_ui_workspace_terminal_run(request: web.Request) -> web.Response
     response = json_response(
         {
             "session_id": session_id,
+            "ok": tool_result.ok,
+            "error": tool_result.error,
             "stdout": stdout_raw if isinstance(stdout_raw, str) else "",
             "stderr": stderr_raw if isinstance(stderr_raw, str) else "",
             "exit_code": exit_code_raw if isinstance(exit_code_raw, int) else 0,

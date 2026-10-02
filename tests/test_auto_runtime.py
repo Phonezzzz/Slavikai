@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import core.auto_runtime as auto_runtime
@@ -14,7 +16,58 @@ from llm.types import LLMResult, ToolCall, ToolSpec
 from shared.auto_models import AutoPlan, AutoRunStatus, AutoShard
 from shared.models import LLMMessage, ToolResult
 from tools.tool_registry import ToolRegistry
-from tools.workspace_tools import workspace_root_context
+from tools.workspace_tools import RunCodeTool, workspace_root_context
+
+
+@pytest.mark.parametrize("exit_code", [0, 9])
+def test_auto_process_outcome_through_gateway_and_next_model_request(tmp_path, exit_code) -> None:
+    (tmp_path / "result.py").write_text(
+        "import sys\nprint('process output')\nprint('process diagnostic', file=sys.stderr)\n"
+        f"sys.exit({exit_code})\n",
+        encoding="utf-8",
+    )
+
+    class ScriptBrain:
+        supports_native_tools = True
+
+        def __init__(self):
+            self.projection = None
+
+        def generate(self, messages, config=None, tools=None):
+            del config, tools
+            if messages[-1].role != "tool":
+                return LLMResult(
+                    text="run script",
+                    tool_calls=[
+                        ToolCall(
+                            id="script-call", name="workspace_run", arguments={"path": "result.py"}
+                        )
+                    ],
+                )
+            self.projection = json.loads(messages[-1].content)
+            assert messages[-1].tool_call_id == "script-call"
+            return LLMResult(text="script completed")
+
+    agent = _AutoV1Agent()
+    brain = ScriptBrain()
+    agent._brain = brain
+    agent.tool_registry.register(
+        "workspace_run",
+        RunCodeTool().handle,
+        description="Run a workspace script",
+        parameters_schema={"type": "object"},
+    )
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    with workspace_root_context(tmp_path):
+        outcome = orchestrator.run_v1("run script", run_root_override=tmp_path)
+
+    expected = AutoRunStatus.COMPLETED if exit_code == 0 else AutoRunStatus.FAILED_WORKER
+    assert outcome.status == expected
+    assert brain.projection["trust"] == "untrusted_observation"
+    assert brain.projection["ok"] is (exit_code == 0)
+    assert brain.projection["data"]["exit_code"] == exit_code
+    assert brain.projection["data"]["output"] == "process output\n"
+    assert brain.projection["data"]["stderr"] == "process diagnostic\n"
 
 
 class _FakeBrain:
