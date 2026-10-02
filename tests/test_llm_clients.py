@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from typing import Any
 
+import aiohttp
 import pytest
 import requests
 
@@ -191,79 +191,50 @@ def test_dynamic_provider_streaming_falls_back_to_non_streaming_generate(
     assert isinstance(events[-1], Done)
 
 
-def test_dynamic_provider_plain_completion_is_cancellable(monkeypatch) -> None:
-    provider_id = "custom-0123456789abcdef0123456789abcdef"
+def test_dynamic_provider_plain_completion_is_cancellable(monkeypatch):
+    from tests.fake_provider_http import HoldingProvider
+
+    upstream = HoldingProvider(monkeypatch, "body")
     token = asyncio.Event()
-    post_calls: list[dict[str, Any]] = []
-    body_read_started = threading.Event()
-    release_body = threading.Event()
-
-    class HangingResponse:
-        status_code = 200
-
-        def __init__(self) -> None:
-            self._closed = False
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def close(self) -> None:
-            self._closed = True
-            release_body.set()
-
-        def json(self) -> dict[str, Any]:
-            body_read_started.set()
-            # Simulate a hanging upstream: the body read blocks until the
-            # response is closed (cancellation) or the wait below expires.
-            release_body.wait(timeout=30)
-            if self._closed:
-                raise requests.exceptions.ChunkedEncodingError("connection closed")
-            return {"choices": [{"message": {"content": "hi"}}]}
-
-    def fake_post(self, url, json=None, headers=None, timeout=None, **kwargs):
-        del self, url, headers, timeout, kwargs
-        post_calls.append(json)
-        # Plain completion: the OpenAI "stream" parameter must stay absent.
-        assert json.get("stream") is not True
-        return HangingResponse()
-
-    monkeypatch.setattr("requests.Session.post", fake_post)
-    config = ModelConfig(
-        provider=provider_id,
-        model="opaque/model",
-        base_url="https://example.test/v1/chat/completions",
+    brain = LocalHttpBrain(
+        ModelConfig(
+            provider="custom-" + "0" * 32,
+            model="m",
+            base_url="https://provider.test/v1/chat/completions",
+        ),
+        native_tools=False,
     )
-    brain = LocalHttpBrain(default_config=config, native_tools=False)
+    events = []
+    errors = []
 
-    events: list[Any] = []
-    errors: list[BaseException] = []
-
-    def run_generation() -> None:
+    def run():
         try:
             events.extend(
                 brain.generate_stream_events(
-                    [LLMMessage(role="user", content="hi")],
-                    cancellation_token=token,
+                    [LLMMessage(role="user", content="hi")], cancellation_token=token
                 )
             )
-        except BaseException as exc:  # noqa: BLE001
+        except Exception as exc:
             errors.append(exc)
 
-    started = time.monotonic()
-    thread = threading.Thread(target=run_generation, daemon=True)
-    thread.start()
-    assert body_read_started.wait(timeout=10), "request did not reach the hanging body read"
-
-    cancel_generation(token)
-    thread.join(timeout=20)
-    elapsed = time.monotonic() - started
-
-    assert not thread.is_alive(), "cancellation did not stop the blocked generation"
-    assert not errors, f"generation leaked an exception: {errors!r}"
-    assert len(post_calls) == 1, "retry must not run after cancellation"
-    assert elapsed < 15, "cancellation waited out the provider timeout"
-    assert isinstance(events[-1], Done)
-    assert events[-1].finish_reason == "cancelled"
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert upstream.started.wait(2)
+        cancel_generation(token)
+        worker.join(2)
+        assert not worker.is_alive()
+        assert not errors
+        assert upstream.cleaned.is_set()
+        assert upstream.active == 0
+        assert upstream.calls == 1
+        assert all(response.closed for response in upstream.responses)
+        assert all(resolver.closed for resolver in upstream.resolvers)
+        assert isinstance(events[-1], Done)
+        assert events[-1].finish_reason == "cancelled"
+    finally:
+        cancel_generation(token)
+        worker.join(2)
 
 
 def test_local_http_generate_sends_and_parses_native_tools(monkeypatch) -> None:
@@ -683,63 +654,207 @@ def test_brain_base_stream_events_default_adapter() -> None:
     assert isinstance(events[-1], Done)
 
 
-def test_cancellable_retry_closes_error_response_and_adapter(monkeypatch) -> None:
-    """Retryable upstream errors must not leak the streaming response/adapter.
+def test_cancellable_retry_closes_error_response_and_connector(monkeypatch):
+    from tests.fake_provider_http import FakeHttpResponse, HoldingProvider
 
-    request_with_retry raises outside _post_cancellable, before the outer
-    bind: the failed attempt's response and its adapter have to be closed
-    inside the operation, otherwise Session.mount() evicts unclosed adapters
-    and sockets leak until GC.
-    """
-    from llm.local_http_brain import _CancellableAdapter
+    upstream = HoldingProvider(monkeypatch, "body")
+    responses = []
+    sessions = []
 
-    closed_responses: list[object] = []
-    closed_adapters: list[object] = []
-    real_adapter_close = _CancellableAdapter.close
+    async def error_body():
+        raise AssertionError("retryable status must be checked before error body")
 
-    def tracking_close(self) -> None:
-        closed_adapters.append(self)
-        real_adapter_close(self)
+    async def fake_request(session, method, url, **kwargs):
+        sessions.append(session)
+        response = (
+            FakeHttpResponse(status=429, headers={"Retry-After": "0"}, read=error_body)
+            if not responses
+            else FakeHttpResponse()
+        )
+        responses.append(response)
+        return response
 
-    monkeypatch.setattr(_CancellableAdapter, "close", tracking_close)
-
-    class ErrorResponse:
-        status_code = 429
-
-        def raise_for_status(self) -> None:
-            response = requests.Response()
-            response.status_code = 429
-            raise requests.HTTPError(response=response)
-
-        def close(self) -> None:
-            closed_responses.append(self)
-
-    calls = {"count": 0}
-
-    def fake_post(self, url, **kwargs) -> object:  # noqa: ANN001, ANN202
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return ErrorResponse()
-        return _mock_response({"choices": [{"message": {"content": "recovered"}}]})
-
-    monkeypatch.setattr(requests.Session, "post", fake_post)
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", fake_request)
     brain = LocalHttpBrain(
-        default_config=ModelConfig(
-            provider="custom-0123456789abcdef0123456789abcdef",
+        ModelConfig(
+            provider="custom-" + "0" * 32,
             model="m",
-            base_url="http://127.0.0.1:1/v1/chat/completions",
+            base_url="https://provider.test/v1/chat/completions",
         ),
         native_tools=False,
     )
     events = list(
         brain.generate_stream_events(
-            [LLMMessage(role="user", content="hi")],
-            cancellation_token=asyncio.Event(),
+            [LLMMessage(role="user", content="hi")], cancellation_token=asyncio.Event()
         )
     )
-    assert calls["count"] == 2, "expected one retry after 429"
-    assert len(closed_responses) == 1, "error response was not closed"
-    assert len(closed_adapters) >= 1, "evicted attempt adapter was not closed"
-    assert any(getattr(event, "text", "") == "recovered" for event in events), (
-        f"unexpected events: {events}"
+    assert len(responses) == 2
+    assert all(response.closed for response in responses)
+    assert all(session.closed for session in sessions)
+    assert all(resolver.closed for resolver in upstream.resolvers)
+    assert any(getattr(event, "text", "") == "ok" for event in events)
+
+
+def test_cancel_interrupts_retry_wait_without_another_request(monkeypatch):
+    from llm.retry import RetryPolicy
+    from tests.fake_provider_http import FakeHttpResponse, HoldingProvider
+
+    upstream = HoldingProvider(monkeypatch, "body")
+    waiting = threading.Event()
+    token = asyncio.Event()
+    responses = []
+    events = []
+    errors = []
+
+    async def fake_request(session, method, url, **kwargs):
+        response = FakeHttpResponse(status=429)
+        responses.append(response)
+        return response
+
+    def backoff(self, *args, **kwargs):
+        waiting.set()
+        return 8.0
+
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", fake_request)
+    monkeypatch.setattr(RetryPolicy, "_backoff_seconds", backoff)
+    brain = LocalHttpBrain(
+        ModelConfig(
+            provider="custom-" + "0" * 32,
+            model="m",
+            base_url="https://provider.test/v1/chat/completions",
+        ),
+        native_tools=False,
     )
+
+    def run():
+        try:
+            events.extend(
+                brain.generate_stream_events(
+                    [LLMMessage(role="user", content="hi")], cancellation_token=token
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert waiting.wait(2)
+        cancel_generation(token)
+        worker.join(1)
+        assert not worker.is_alive()
+        assert not errors
+        assert len(responses) == 1
+        assert responses[0].closed
+        assert all(resolver.closed for resolver in upstream.resolvers)
+        assert events[-1].finish_reason == "cancelled"
+    finally:
+        cancel_generation(token)
+        worker.join(2)
+
+
+def test_custom_transport_preserves_ca_bundle_and_remote_proxy(monkeypatch):
+    import ssl
+
+    from tests.fake_provider_http import FakeHttpResponse, HoldingProvider
+
+    HoldingProvider(monkeypatch, "body")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/synthetic/owner-ca.pem")
+    monkeypatch.setenv("ALL_PROXY", "http://remote-proxy.test:8888")
+    context = ssl.create_default_context()
+    ca_files = []
+
+    def create_context(*args, **kwargs):
+        ca_files.append(kwargs["cafile"])
+        return context
+
+    async def fake_request(session, method, url, **kwargs):
+        assert kwargs["ssl"] is context
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
+        assert kwargs["proxy"] == "http://remote-proxy.test:8888"
+        assert session.trust_env is False
+        return FakeHttpResponse()
+
+    monkeypatch.setattr(ssl, "create_default_context", create_context)
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", fake_request)
+    brain = LocalHttpBrain(
+        ModelConfig(
+            provider="custom-" + "0" * 32,
+            model="m",
+            base_url="https://provider.test/v1/chat/completions",
+        ),
+        native_tools=False,
+    )
+    assert list(
+        brain.generate_stream_events(
+            [LLMMessage(role="user", content="hi")], cancellation_token=asyncio.Event()
+        )
+    )
+    assert ca_files == ["/synthetic/owner-ca.pem"]
+
+
+def test_custom_requests_have_independent_cancellation_ownership(monkeypatch):
+    from tests.fake_provider_http import FakeHttpResponse, HoldingProvider
+
+    HoldingProvider(monkeypatch, "body")
+    started = [threading.Event(), threading.Event()]
+    responses = {}
+    events = [[], []]
+    errors = []
+    tokens = [asyncio.Event(), asyncio.Event()]
+
+    async def fake_request(session, method, url, **kwargs):
+        index = int(kwargs["json"]["messages"][0]["content"])
+
+        async def read():
+            started[index].set()
+            await asyncio.Future()
+
+        response = FakeHttpResponse(read=read)
+        responses[index] = response
+        return response
+
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", fake_request)
+    brain = LocalHttpBrain(
+        ModelConfig(
+            provider="custom-" + "0" * 32,
+            model="m",
+            base_url="https://provider.test/v1/chat/completions",
+        ),
+        native_tools=False,
+    )
+
+    def run(index):
+        try:
+            events[index].extend(
+                brain.generate_stream_events(
+                    [LLMMessage(role="user", content=str(index))], cancellation_token=tokens[index]
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    workers = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+    for worker in workers:
+        worker.start()
+    try:
+        assert all(event.wait(2) for event in started)
+        cancel_generation(tokens[0])
+        cancel_generation(tokens[0])
+        workers[0].join(2)
+        assert not workers[0].is_alive()
+        assert responses[0].closed
+        assert workers[1].is_alive()
+        assert not responses[1].closed
+        cancel_generation(tokens[1])
+        workers[1].join(2)
+        assert not workers[1].is_alive()
+        assert responses[1].closed
+        assert not errors
+        assert all(items[-1].finish_reason == "cancelled" for items in events)
+    finally:
+        for token in tokens:
+            cancel_generation(token)
+        for worker in workers:
+            worker.join(2)
