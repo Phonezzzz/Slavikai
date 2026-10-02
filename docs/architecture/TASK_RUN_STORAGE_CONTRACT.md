@@ -75,6 +75,22 @@ Payload storage, retention/GC, tombstones, paging/recovery и user deletion ещ
 ручное раннее удаление допускается. Duration metadata/history — отдельное open policy;
 B1 не вводит автоматический GC.
 
+## Structured Auto outcome — foundation B2a
+
+`AgentToolsMixin.handle_auto_command` возвращает исходный `AutoRunOutcome` из
+`AutoAgent.run_outcome`: status, stop reason, verifier, next steps и text остаются вместе.
+Sync/stream routing явно выбирает `.text` только для существующего ответа/history/stream.
+Отключённый `/auto` не входит в этот runtime; command-lane projection удалена из facade.
+Проверка `tests/test_auto_runtime.py` выполняет настоящий process через registry/gateway,
+передаёт diagnostics в следующий model request и проверяет typed success/failure outcome.
+
+Это **не** production adoption store или terminal authority: `Agent.respond` и HTTP ещё
+возвращают текст, а store не получает runtime observations. `resume_auto_run` также пока
+теряет typed outcome; текущий `AutoOrchestrator.resume` повторно запускает goal через
+`run_v1`, вместо восстановления execution continuation. До durable recovery нужно отдельно
+исправить этот путь с учётом уже совершённых effects; повторный execution нельзя выдавать
+за replay. B2a не меняет resume semantics и не заявляет canonical output readiness.
+
 ## Следующий обязательный срез B2
 
 1. Ввести admission boundary для реальных Ask/Auto/MWV paths с trusted scope, distinct

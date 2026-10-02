@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from config.memory_config import MemoryConfig
     from core.approval_policy import ApprovalRequest
+    from core.auto_runtime import AutoRunOutcome
     from core.decision.handler import DecisionHandler
     from core.decision.models import DecisionPacket
     from core.desktop_runtime import DesktopRuntime
@@ -73,9 +74,8 @@ class AgentRoutingMixin:
             self,
             goal: str,
             *,
-            command_lane: bool = False,
             skill_resolution: SkillResolution | None = None,
-        ) -> str: ...
+        ) -> AutoRunOutcome: ...
         def is_explicit_memory_request(self, text: str) -> bool: ...
         def build_memory_save_preview(
             self,
@@ -256,10 +256,11 @@ class AgentRoutingMixin:
                         raw_input=last_content,
                         record_in_history=record_in_history,
                     )
-                result = self.handle_auto_command(
+                outcome = self.handle_auto_command(
                     last_content,
                     skill_resolution=skill_resolution,
                 )
+                result = outcome.text
                 self._log_chat_interaction(raw_input=last_content, response_text=result)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=result)])
@@ -410,10 +411,11 @@ class AgentRoutingMixin:
                     self.last_stream_response_raw = response
                     yield from _text_response_events(response)
                     return
-                response = self.handle_auto_command(
+                outcome = self.handle_auto_command(
                     last_content,
                     skill_resolution=skill_resolution,
                 )
+                response = outcome.text
                 self.last_stream_response_raw = response
                 yield from _text_response_events(response)
                 return

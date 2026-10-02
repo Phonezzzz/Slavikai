@@ -57,7 +57,11 @@ def test_command_lane_dangerous_after_approve_passes(tmp_path: Path) -> None:
 
 def test_command_lane_auto_alias_has_command_label(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
-    agent.handle_auto_command = lambda goal, command_lane=False: f"auto:{goal}"  # type: ignore[method-assign]
+
+    def _auto_unreachable(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("/auto must not enter Auto runtime")
+
+    agent.handle_auto_command = _auto_unreachable  # type: ignore[method-assign]
     response = agent.handle_tool_command("/auto собрать отчёт")
     assert "Командный режим (без MWV)" in response
     assert "отключена" in response.lower()

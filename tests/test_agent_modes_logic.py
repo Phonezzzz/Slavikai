@@ -4,13 +4,25 @@ import json
 from pathlib import Path
 
 from core.agent import Agent
+from core.auto_runtime import AutoRunOutcome
 from core.skills.index import SkillIndex, SkillResolution
 from core.skills.models import SkillEntry, SkillManifest
 from llm.brain_base import Brain
 from llm.stream_model import Done, TextDelta
 from llm.types import LLMResult, ModelConfig
+from shared.auto_models import AutoRunStatus
 from shared.models import LLMMessage
 from tests.report_utils import extract_report_block
+
+
+def _auto_outcome(text: str) -> AutoRunOutcome:
+    return AutoRunOutcome(
+        text=text,
+        status=AutoRunStatus.COMPLETED,
+        stop_reason_code=None,
+        verifier=None,
+        next_steps=[],
+    )
 
 
 class CountingBrain(Brain):
@@ -81,13 +93,11 @@ def test_agent_auto_mode_chat_like_request_uses_auto_runtime(tmp_path: Path, mon
     def _auto_stub(
         goal: str,
         *,
-        command_lane: bool = False,
         skill_resolution: SkillResolution | None = None,
-    ) -> str:
+    ) -> AutoRunOutcome:
         calls["goal"] = goal
-        calls["command_lane"] = command_lane
         calls["skill_resolution"] = skill_resolution
-        return "auto-advisory"
+        return _auto_outcome("auto-advisory")
 
     monkeypatch.setattr(agent, "_run_chat_response", _chat_unreachable)
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
@@ -97,7 +107,6 @@ def test_agent_auto_mode_chat_like_request_uses_auto_runtime(tmp_path: Path, mon
     assert response == "auto-advisory"
     assert main.calls == 0
     assert calls.get("goal") == "Какой софт нужен для Raspberry Pi 4 для умной колонки?"
-    assert calls.get("command_lane") is False
     assert calls.get("skill_resolution") is None
 
 
@@ -112,13 +121,11 @@ def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, mon
     def _auto_stub(
         goal: str,
         *,
-        command_lane: bool = False,
         skill_resolution: SkillResolution | None = None,
-    ) -> str:
+    ) -> AutoRunOutcome:
         calls["goal"] = goal
-        calls["command_lane"] = command_lane
         calls["skill_resolution"] = skill_resolution
-        return "auto-run"
+        return _auto_outcome("auto-run")
 
     monkeypatch.setattr(agent, "_run_chat_response", _chat_unreachable)
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
@@ -129,7 +136,6 @@ def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, mon
     assert response == "auto-run"
     assert main.calls == 0
     assert calls.get("goal") == "исправь тесты и обнови файл src/main.py"
-    assert calls.get("command_lane") is False
     assert calls.get("skill_resolution") is None
 
 
@@ -143,12 +149,10 @@ def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypa
     def _auto_stub(
         goal: str,
         *,
-        command_lane: bool = False,
         skill_resolution: SkillResolution | None = None,
-    ) -> str:
-        assert command_lane is False
+    ) -> AutoRunOutcome:
         assert skill_resolution is None
-        return f"auto:{goal}"
+        return _auto_outcome(f"auto:{goal}")
 
     monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
@@ -169,12 +173,10 @@ def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkey
     def _auto_stub(
         goal: str,
         *,
-        command_lane: bool = False,
         skill_resolution: SkillResolution | None = None,
-    ) -> str:
-        assert command_lane is False
+    ) -> AutoRunOutcome:
         assert skill_resolution is None
-        return f"auto-stream:{goal}"
+        return _auto_outcome(f"auto-stream:{goal}")
 
     monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
@@ -197,13 +199,11 @@ def test_agent_auto_mode_passes_resolved_skill_to_auto_runtime(
     def _auto_stub(
         goal: str,
         *,
-        command_lane: bool = False,
         skill_resolution: SkillResolution | None = None,
-    ) -> str:
+    ) -> AutoRunOutcome:
         assert goal == "implement spec for skill runtime"
-        assert command_lane is False
         captured["resolution"] = skill_resolution
-        return "auto-skill"
+        return _auto_outcome("auto-skill")
 
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
 

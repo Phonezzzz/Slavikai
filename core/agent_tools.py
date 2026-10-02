@@ -72,6 +72,7 @@ _MAX_UX_SUMMARY_CHARS = 220
 if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
     from core.auto_agent import AutoAgent
+    from core.auto_runtime import AutoRunOutcome
     from core.decision.handler import DecisionHandler
     from core.desktop_policy import DesktopPolicyStore
     from core.desktop_security import DesktopPathSecurity
@@ -889,18 +890,14 @@ class AgentToolsMixin:
         self,
         goal: str,
         *,
-        command_lane: bool = False,
         skill_resolution: SkillResolution | None = None,
-    ) -> str:
+    ) -> AutoRunOutcome:
         goal_clean = goal.strip() or "auto run"
         self.tracer.log("auto_invoke", f"Auto v1 tool loop: {goal_clean}")
-        outcome = self.auto_agent.run_outcome(
+        return self.auto_agent.run_outcome(
             goal_clean,
             skill_resolution=skill_resolution,
         )
-        if command_lane:
-            return self._strip_report_block(outcome.text)
-        return outcome.text
 
     def resume_auto_run(self, run_id: str) -> str | None:
         run_id_clean = run_id.strip()

@@ -5,6 +5,7 @@ import json
 import pytest
 
 import core.auto_runtime as auto_runtime
+from core.agent_tools import AgentToolsMixin
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
 from core.auto_agent import AutoAgent
 from core.mwv.models import StopReasonCode, VerificationResult, VerificationStatus
@@ -48,7 +49,10 @@ def test_auto_process_outcome_through_gateway_and_next_model_request(tmp_path, e
             assert messages[-1].tool_call_id == "script-call"
             return LLMResult(text="script completed")
 
-    agent = _AutoV1Agent()
+    class FacadeAgent(_AutoV1Agent, AgentToolsMixin):
+        pass
+
+    agent = FacadeAgent()
     brain = ScriptBrain()
     agent._brain = brain
     agent.tool_registry.register(
@@ -57,12 +61,21 @@ def test_auto_process_outcome_through_gateway_and_next_model_request(tmp_path, e
         description="Run a workspace script",
         parameters_schema={"type": "object"},
     )
-    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    agent.auto_agent = AutoAgent(agent)
+    agent.auto_agent.orchestrator.workspace_root = tmp_path
     with workspace_root_context(tmp_path):
-        outcome = orchestrator.run_v1("run script", run_root_override=tmp_path)
+        outcome = agent.handle_auto_command("run script")
 
     expected = AutoRunStatus.COMPLETED if exit_code == 0 else AutoRunStatus.FAILED_WORKER
+    assert isinstance(outcome, auto_runtime.AutoRunOutcome)
     assert outcome.status == expected
+    if exit_code:
+        assert outcome.stop_reason_code == StopReasonCode.WORKER_FAILED
+        assert outcome.verifier is None
+        assert outcome.next_steps
+    else:
+        assert outcome.stop_reason_code is None
+        assert outcome.verifier is not None and outcome.verifier.ok
     assert brain.projection["trust"] == "untrusted_observation"
     assert brain.projection["ok"] is (exit_code == 0)
     assert brain.projection["data"]["exit_code"] == exit_code
