@@ -2,10 +2,10 @@ from __future__ import annotations
 
 # ruff: noqa: F403,F405
 import asyncio
-import http.server
-import socketserver
 import threading
 import time
+
+import pytest
 
 from llm.cancellation import bind_cancellation_resource
 from llm.local_http_brain import LocalHttpBrain
@@ -160,245 +160,84 @@ def test_chat_cancel_partial_response_not_saved() -> None:
     asyncio.run(run())
 
 
-class _HeaderHoldingHandler(http.server.BaseHTTPRequestHandler):
-    """Test provider that accepts the request and holds the response headers."""
-
-    request_count = 0
-    release = threading.Event()
-
-    def do_POST(self) -> None:  # noqa: N802
-        type(self).request_count += 1
-        length = int(self.headers.get("Content-Length", 0))
-        if length:
-            self.rfile.read(length)
-        if type(self).request_count == 1:
-            # Never send response headers: the client stays in the header wait.
-            type(self).release.wait(timeout=30)
-        body = b'{"choices":[{"message":{"content":"second-ok"}}]}'
-        try:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-
-    def log_message(self, *args) -> None:  # noqa: ANN001,ANN202
-        pass
-
-
 class _DynamicBrainAgent(DummyAgent):
-    """Drives a real dynamic LocalHttpBrain, like core/tool_loop.py does."""
-
     def __init__(self, brain: LocalHttpBrain) -> None:
         super().__init__()
         self._brain = brain
-        self.last_stream_response_raw: str | None = None
+        self.worker_finished = threading.Event()
+        self.last_stream_response_raw = None
 
-    def respond_stream(self, messages, cancellation_token=None):  # noqa: ANN001
-        yield from self._brain.generate_stream_events(
-            messages,
-            cancellation_token=cancellation_token,
-        )
-
-
-def test_chat_cancel_aborts_header_wait() -> None:
-    async def run() -> None:
-        _HeaderHoldingHandler.request_count = 0
-        _HeaderHoldingHandler.release.clear()
-        socketserver.TCPServer.allow_reuse_address = True
-        server = socketserver.TCPServer(("127.0.0.1", 0), _HeaderHoldingHandler)
-        server.daemon_threads = True
-        port = server.server_address[1]
-        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
+    def respond_stream(self, messages, cancellation_token=None):
+        self.worker_finished.clear()
         try:
-            brain = LocalHttpBrain(
-                default_config=ModelConfig(
-                    provider="custom-0123456789abcdef0123456789abcdef",
-                    model="opaque/model",
-                    base_url=f"http://127.0.0.1:{port}/v1/chat/completions",
-                ),
-                native_tools=False,
+            yield from self._brain.generate_stream_events(
+                messages, cancellation_token=cancellation_token
             )
-            agent = _DynamicBrainAgent(brain)
-            client = await _create_client(agent)
-            try:
-                status_response = await client.get("/ui/api/status")
-                session_id = (await status_response.json())["session_id"]
-                assert isinstance(session_id, str) and session_id
-                await _select_local_model(client, session_id)
-                send_task = asyncio.create_task(
-                    client.post(
-                        "/ui/api/chat/send",
-                        json={"content": "hi"},
-                        headers={"X-Slavik-Session": session_id},
-                    )
-                )
-                # Wait until the provider is holding the response headers.
-                for _ in range(200):
-                    if _HeaderHoldingHandler.request_count >= 1:
-                        break
-                    await asyncio.sleep(0.05)
-                assert _HeaderHoldingHandler.request_count == 1
-                await asyncio.sleep(0.3)
-
-                started = time.monotonic()
-                cancel_response = await asyncio.wait_for(
-                    client.post(
-                        "/ui/api/chat/cancel",
-                        headers={"X-Slavik-Session": session_id},
-                    ),
-                    timeout=9,
-                )
-                cancel_elapsed = time.monotonic() - started
-                assert cancel_response.status == 200, await cancel_response.text()
-                assert (await cancel_response.json())["cancelled"] is True
-                assert cancel_elapsed < 9
-
-                send_response = await asyncio.wait_for(send_task, timeout=5)
-                assert send_response.status == 200
-                assert (await send_response.json())["cancelled"] is True
-                # No retry after cancellation.
-                assert _HeaderHoldingHandler.request_count == 1
-
-                # The session is freed: a follow-up generation runs normally.
-                _HeaderHoldingHandler.release.set()
-                send2 = await client.post(
-                    "/ui/api/chat/send",
-                    json={"content": "again"},
-                    headers={"X-Slavik-Session": session_id},
-                )
-                assert send2.status == 200
-                assert (await send2.json()).get("cancelled") is not True
-            finally:
-                await client.close()
         finally:
-            server.shutdown()
-            server.server_close()
-
-    asyncio.run(run())
+            self.worker_finished.set()
 
 
-def test_chat_cancel_aborts_connect_phase(monkeypatch) -> None:  # noqa: ANN001
-    """Cancel while the provider TCP connect is hanging.
+@pytest.mark.parametrize("stage", ["dns", "connect", "tls", "headers", "body"])
+def test_custom_provider_cancel_releases_worker_and_reuses_session(monkeypatch, stage):
+    from tests.fake_provider_http import HoldingProvider
 
-    The abort handle registers the socket before the blocking connect(), so
-    cancel_generation closes it mid-connect: cancel completes before its
-    10s limit, no retry is issued, and the session is freed.
-    """
-    import socket as socket_module
+    upstream = HoldingProvider(monkeypatch, stage)
+    # Запрещаем старый blocking transport: regression не должна обращаться к сети.
+    monkeypatch.setattr(
+        "requests.Session.post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("blocking provider transport")
+        ),
+    )
 
-    with socket_module.socket() as probe_sock:
-        probe_sock.bind(("127.0.0.1", 0))
-        provider_port = probe_sock.getsockname()[1]
-    real_connect = socket_module.socket.connect
-    connect_started = threading.Event()
-    release_connect = threading.Event()
-    hang_enabled = threading.Event()
-    hang_enabled.set()
-    connect_attempts = 0
-
-    def fake_connect(sock, address):  # noqa: ANN001, ANN202
-        nonlocal connect_attempts
-        if address[1] == provider_port and hang_enabled.is_set():
-            connect_attempts += 1
-            connect_started.set()
-            # Emulate a hung TCP connect; aborting closes the socket, which
-            # we detect via fileno() like the real blocking connect() would.
-            while not release_connect.is_set():
-                if sock.fileno() == -1:
-                    raise OSError("socket closed during test connect")
-                time.sleep(0.01)
-        return real_connect(sock, address)
-
-    monkeypatch.setattr(socket_module.socket, "connect", fake_connect)
-
-    async def run() -> None:
+    async def run():
+        scheme = "https" if stage == "tls" else "http"
         brain = LocalHttpBrain(
-            default_config=ModelConfig(
-                provider="custom-0123456789abcdef0123456789abcdef",
-                model="opaque/model",
-                base_url=f"http://127.0.0.1:{provider_port}/v1/chat/completions",
+            ModelConfig(
+                provider="custom-" + "0" * 32,
+                model="m",
+                base_url=f"{scheme}://provider.test/v1/chat/completions",
             ),
             native_tools=False,
         )
         agent = _DynamicBrainAgent(brain)
         client = await _create_client(agent)
         try:
-            status_response = await client.get("/ui/api/status")
-            session_id = (await status_response.json())["session_id"]
-            assert isinstance(session_id, str) and session_id
+            status = await client.get("/ui/api/status")
+            session_id = (await status.json())["session_id"]
             await _select_local_model(client, session_id)
-            send_task = asyncio.create_task(
-                client.post(
-                    "/ui/api/chat/send",
-                    json={"content": "hi"},
-                    headers={"X-Slavik-Session": session_id},
-                )
+            headers = {"X-Slavik-Session": session_id}
+            send = asyncio.create_task(
+                client.post("/ui/api/chat/send", json={"content": "first"}, headers=headers)
             )
-            assert await asyncio.to_thread(connect_started.wait, 10)
-            await asyncio.sleep(0.3)
-
-            started = time.monotonic()
-            cancel_response = await asyncio.wait_for(
-                client.post(
-                    "/ui/api/chat/cancel",
-                    headers={"X-Slavik-Session": session_id},
-                ),
-                timeout=9,
+            assert await asyncio.to_thread(upstream.started.wait, 2)
+            cancel = await asyncio.wait_for(client.post("/ui/api/chat/cancel", headers=headers), 2)
+            assert cancel.status == 200, await cancel.text()
+            assert (await cancel.json())["cancelled"] is True
+            response = await asyncio.wait_for(send, 2)
+            assert (await response.json())["cancelled"] is True
+            assert agent.worker_finished.is_set()
+            assert upstream.cleaned.is_set()
+            assert upstream.active == 0
+            assert upstream.calls == 1
+            assert all(resolver.closed for resolver in upstream.resolvers)
+            second = await asyncio.wait_for(
+                client.post("/ui/api/chat/send", json={"content": "second"}, headers=headers), 2
             )
-            cancel_elapsed = time.monotonic() - started
-            assert cancel_response.status == 200, await cancel_response.text()
-            assert (await cancel_response.json())["cancelled"] is True
-            assert cancel_elapsed < 9
-
-            send_response = await asyncio.wait_for(send_task, timeout=5)
-            assert send_response.status == 200
-            assert (await send_response.json())["cancelled"] is True
-            # No retry after cancellation.
-            assert connect_attempts == 1
-
-            # The session is freed: a follow-up generation runs normally
-            # against a real provider.
-            hang_enabled.clear()
-            release_connect.set()
-            socketserver.TCPServer.allow_reuse_address = True
-            server = socketserver.TCPServer(("127.0.0.1", 0), _HeaderHoldingHandler)
-            server.daemon_threads = True
-            holder_port = server.server_address[1]
-            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-            server_thread.start()
-            try:
-                _HeaderHoldingHandler.request_count = 0
-                _HeaderHoldingHandler.release.set()
-                brain2 = LocalHttpBrain(
-                    default_config=ModelConfig(
-                        provider="custom-0123456789abcdef0123456789abcdef",
-                        model="opaque/model",
-                        base_url=f"http://127.0.0.1:{holder_port}/v1/chat/completions",
-                    ),
-                    native_tools=False,
-                )
-                agent2 = _DynamicBrainAgent(brain2)
-                client2 = await _create_client(agent2)
-                try:
-                    status2 = await client2.get("/ui/api/status")
-                    session2 = (await status2.json())["session_id"]
-                    await _select_local_model(client2, session2)
-                    send2 = await client2.post(
-                        "/ui/api/chat/send",
-                        json={"content": "again"},
-                        headers={"X-Slavik-Session": session2},
-                    )
-                    assert send2.status == 200
-                    assert (await send2.json()).get("cancelled") is not True
-                finally:
-                    await client2.close()
-            finally:
-                server.shutdown()
-                server.server_close()
+            assert second.status == 200, await second.text()
+            payload = await second.json()
+            assert payload.get("cancelled") is not True
+            assert payload["session_id"] == session_id
+            assert any(
+                item["role"] == "assistant" and item["content"] == "ok"
+                for item in payload["messages"]
+            )
+            assert upstream.calls == 2
+            assert agent._brain is brain
+            assert agent.worker_finished.is_set()
+            assert upstream.active == 0
+            assert all(resolver.closed for resolver in upstream.resolvers)
+            assert all(response.closed for response in upstream.responses)
         finally:
             await client.close()
 

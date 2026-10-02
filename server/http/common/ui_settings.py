@@ -30,7 +30,8 @@ from config.ui_embeddings_settings import (
     load_ui_embeddings_settings,
     save_ui_embeddings_settings,
 )
-from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT, is_loopback_url, proxies_for_provider_url
+from llm.local_http_brain import DEFAULT_LOCAL_ENDPOINT
+from llm.provider_http import is_loopback_url, proxies_for_provider_url
 from llm.types import (
     CUSTOM_PROVIDER_ID_PATTERN,
     ModelConfig,
