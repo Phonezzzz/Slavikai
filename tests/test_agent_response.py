@@ -348,3 +348,53 @@ def test_agent_never_auto_saves_dialogue(tmp_path: Path) -> None:
     agent.memory.save = _save  # type: ignore[method-assign]
     _ = agent.respond([LLMMessage(role="user", content="привет")]).text
     assert calls["count"] == 0
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_ask_network_approval_reaches_existing_handler(
+    tmp_path: Path, streaming: bool, prefetch: bool
+) -> None:
+    brain = ToolLoopBrain()
+    agent = Agent(
+        brain=brain,
+        main_config=ModelConfig(provider="local", model="local", web_search_enabled=prefetch),
+        enable_tools={"safe_mode": True},
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    agent.runtime_mode = "ask"
+    agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
+    agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    executions: list[ToolRequest] = []
+    tool_name = "web" if prefetch else "chat_lookup"
+    agent.tool_registry.register(
+        tool_name,
+        lambda request: executions.append(request) or ToolResult.success({"output": "network"}),
+        enabled=True,
+        capability="read",
+        risk_classes=["network"],
+        description="Read-only network lookup",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
+    messages = [LLMMessage(role="user", content="lookup")]
+    if streaming:
+        events = list(agent.respond_stream(messages))
+        produced = [event for event in events if isinstance(event, ResponseProduced)]
+        assert len(produced) == 1
+        envelope = produced[0].response
+        assert isinstance(events[-1], Done)
+        assert events[-1].finish_reason != "error"
+    else:
+        envelope = agent.respond(messages)
+    assert agent.last_approval_request is not None
+    assert agent.last_approval_request.tool == tool_name
+    assert agent.last_approval_request.required_categories == ["NETWORK_RISK"]
+    assert "APPROVAL_REQUIRED" in envelope.text
+    assert envelope.failure is None
+    assert envelope.runtime_result is None
+    assert executions == []
+    assert brain.calls == (0 if prefetch else 1)

@@ -1578,3 +1578,66 @@ def test_stream_response_contract_fault_does_not_reuse_stale_result_or_rerun(dup
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_ask_stream_creates_real_network_approval(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    class ApprovalReadBrain(_RealAgentStreamingBrain):
+        supports_native_tools = True
+        supports_streaming_tools = True
+
+        def generate(self, messages, config=None, tools=None):
+            del messages, config
+            assert any(tool.name == "network_lookup" for tool in tools or [])
+            return LLMResult(
+                text="",
+                tool_calls=[ToolCall(id="network-approval", name="network_lookup", arguments={})],
+            )
+
+    agent = _RealStreamingAgent(
+        brain=ApprovalReadBrain(),
+        enable_tools={"safe_mode": True},
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    executions = []
+    agent.tool_registry.register(
+        "network_lookup",
+        lambda request: executions.append(request) or ToolResult.success({"output": "network"}),
+        enabled=True,
+        capability="read",
+        risk_classes=["network"],
+        description="Read-only network lookup",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
+
+    async def run() -> None:
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            status_response = await client.get("/ui/api/status")
+            session_id = (await status_response.json())["session_id"]
+            await _select_local_model(client, session_id)
+            response = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "lookup"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            approval = payload["approval_request"]
+            assert isinstance(approval, dict)
+            assert approval["category"] == "NETWORK_RISK"
+            assert approval["tool"] == "network_lookup"
+            decision = payload["decision"]
+            assert isinstance(decision, dict)
+            assert decision["status"] == "pending"
+            assert decision["decision_type"] == "tool_approval"
+            assert payload.get("generation_error") is None
+            assert executions == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
