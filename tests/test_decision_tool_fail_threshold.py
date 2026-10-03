@@ -47,7 +47,7 @@ def test_disabled_command_lane_tool_does_not_emit_tool_fail_decision(
 
     response = ""
     for _ in range(SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD):
-        response = agent.respond([LLMMessage(role="user", content="/fs list")])
+        response = agent.respond([LLMMessage(role="user", content="/fs list")]).text
 
     assert "отключена" in response.lower()
     assert agent.brain.calls == 0

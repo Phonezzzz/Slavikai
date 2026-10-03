@@ -50,7 +50,7 @@ def test_m10_chat_route_does_not_call_mwv(tmp_path: Path, monkeypatch) -> None:
         raise AssertionError("MWV should not be called for chat input.")
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
-    response = agent.respond([LLMMessage(role="user", content="что такое переменная")])
+    response = agent.respond([LLMMessage(role="user", content="что такое переменная")]).text
     assert response.startswith("chat")
     assert brain.calls == 1
     report = extract_report_block(response)
@@ -83,7 +83,7 @@ def test_m10_code_route_returns_mwv_report(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(agent, "_mwv_worker_runner", _worker)
     monkeypatch.setattr(agent_module, "VerifierRuntime", DummyVerifierRuntime)
-    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")])
+    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")]).text
 
     assert "Итог:" in response
     assert "Verifier: PASS" in response
@@ -125,7 +125,7 @@ def test_m10_verifier_failure_returns_diagnostics(tmp_path: Path, monkeypatch) -
 
     monkeypatch.setattr(agent, "_mwv_worker_runner", _worker)
     monkeypatch.setattr(agent_module, "VerifierRuntime", DummyVerifierRuntime)
-    response = agent.respond([LLMMessage(role="user", content="почини тесты")])
+    response = agent.respond([LLMMessage(role="user", content="почини тесты")]).text
 
     payload = json.loads(response)
     assert payload["reason"] == "verifier_fail"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from core.agent_response import AgentResponse
 from core.mwv.interfaces import AgentFacade, VerifierFacade, WorkerFacade
 from core.mwv.models import (
     RunContext,
@@ -13,8 +14,8 @@ from shared.models import LLMMessage
 
 
 class DummyAgent:
-    def respond(self, messages: list[LLMMessage]) -> str:
-        return messages[-1].content if messages else ""
+    def respond(self, messages: list[LLMMessage]) -> AgentResponse:
+        return AgentResponse(messages[-1].content if messages else "")
 
 
 class DummyWorker:

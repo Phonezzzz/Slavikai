@@ -76,7 +76,7 @@ def test_agent_simple_response(tmp_path: Path) -> None:
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
-    response = agent.respond([LLMMessage(role="user", content="привет")])
+    response = agent.respond([LLMMessage(role="user", content="привет")]).text
     assert "hello" in response
     assert brain.calls >= 1
 
@@ -105,7 +105,7 @@ def test_agent_chat_response_can_use_read_only_native_tool_loop(tmp_path: Path) 
         chat_exposed=True,
     )
 
-    response = agent.respond([LLMMessage(role="user", content="use lookup")])
+    response = agent.respond([LLMMessage(role="user", content="use lookup")]).text
 
     assert "tool loop final" in response
     assert brain.calls == 2
@@ -139,7 +139,7 @@ def test_agent_local_web_search_executes_before_non_xai_answer(tmp_path: Path) -
     web_tool = FakeWebTool(ToolResult.success({"output": "Source — https://example.test"}))
     agent.tool_registry.register("web", web_tool.handle, enabled=True, capability="read")
 
-    response = agent.respond([LLMMessage(role="user", content="latest info")])
+    response = agent.respond([LLMMessage(role="user", content="latest info")]).text
 
     assert "answer from verified search" in response
     assert web_tool.calls == 1
@@ -162,7 +162,7 @@ def test_agent_local_web_search_error_blocks_final_answer(tmp_path: Path) -> Non
     web_tool = FakeWebTool(ToolResult.failure("SERPER_API_KEY missing"))
     agent.tool_registry.register("web", web_tool.handle, enabled=True, capability="read")
 
-    response = agent.respond([LLMMessage(role="user", content="latest info")])
+    response = agent.respond([LLMMessage(role="user", content="latest info")]).text
 
     assert "web_search_not_executed: SERPER_API_KEY missing" in response
     assert "should not be emitted" not in response
@@ -182,7 +182,7 @@ def test_agent_xai_web_search_without_evidence_blocks_answer(tmp_path: Path) -> 
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
 
-    response = agent.respond([LLMMessage(role="user", content="latest info")])
+    response = agent.respond([LLMMessage(role="user", content="latest info")]).text
 
     assert "web_search_not_executed: xAI response contained no web search evidence" in response
     assert "I checked the internet" not in response
@@ -207,7 +207,7 @@ def test_agent_xai_web_search_with_evidence_allows_answer(tmp_path: Path) -> Non
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
 
-    response = agent.respond([LLMMessage(role="user", content="latest info")])
+    response = agent.respond([LLMMessage(role="user", content="latest info")]).text
 
     assert "answer from xAI native web search" in response
     assert "web_search_not_executed" not in response
@@ -225,7 +225,7 @@ def test_agent_blocks_web_claim_without_runtime_evidence(tmp_path: Path) -> None
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
 
-    response = agent.respond([LLMMessage(role="user", content="hello")])
+    response = agent.respond([LLMMessage(role="user", content="hello")]).text
 
     assert (
         "web_search_not_executed: assistant claimed web access without runtime evidence" in response
@@ -243,7 +243,7 @@ def test_agent_plan_execution_path(tmp_path: Path) -> None:
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
-    result = agent.respond([LLMMessage(role="user", content="планируй задачу")])
+    result = agent.respond([LLMMessage(role="user", content="планируй задачу")]).text
     assert "ok" in result
 
 
@@ -264,5 +264,5 @@ def test_agent_never_auto_saves_dialogue(tmp_path: Path) -> None:
         calls["count"] += 1
 
     agent.memory.save = _save  # type: ignore[method-assign]
-    _ = agent.respond([LLMMessage(role="user", content="привет")])
+    _ = agent.respond([LLMMessage(role="user", content="привет")]).text
     assert calls["count"] == 0

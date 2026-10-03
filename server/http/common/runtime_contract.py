@@ -7,6 +7,7 @@ from typing import Protocol, cast
 import requests
 from aiohttp import web
 
+from core.agent_response import AgentResponse
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.desktop_policy import DesktopApprovalRule
 from core.mwv.manager import MWVRunResult
@@ -117,7 +118,7 @@ class AgentProtocol(Protocol):
         persist: bool = True,
     ) -> None: ...
 
-    def respond(self, messages: list[LLMMessage]) -> str: ...
+    def respond(self, messages: list[LLMMessage]) -> AgentResponse: ...
 
     def respond_stream(
         self,

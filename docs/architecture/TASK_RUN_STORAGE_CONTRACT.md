@@ -84,12 +84,36 @@ Sync/stream routing явно выбирает `.text` только для сущ
 Проверка `tests/test_auto_runtime.py` выполняет настоящий process через registry/gateway,
 передаёт diagnostics в следующий model request и проверяет typed success/failure outcome.
 
-Это **не** production adoption store или terminal authority: `Agent.respond` и HTTP ещё
-возвращают текст, а store не получает runtime observations. `resume_auto_run` также пока
+Это **не** production adoption store или terminal authority; store не получает runtime
+observations. Граница `Agent.respond` / HTTP теперь описана ниже. `resume_auto_run` также пока
 теряет typed outcome; текущий `AutoOrchestrator.resume` повторно запускает goal через
 `run_v1`, вместо восстановления execution continuation. До durable recovery нужно отдельно
 исправить этот путь с учётом уже совершённых effects; повторный execution нельзя выдавать
 за replay. B2a не меняет resume semantics и не заявляет canonical output readiness.
+
+## Request-local Agent response — foundation B2b
+
+`core/agent_response.py::AgentResponse` отделяет text projection от исходного
+`AutoRunOutcome`. Все sync `Agent.respond` paths возвращают envelope. У остальных paths
+пока есть только text; отсутствие Auto outcome не означает success, failure или acceptance.
+Существующие HTTP consumers принимают новый typed contract, без string compatibility.
+
+Stream передаёт envelope через внутренний `ResponseProduced` event. HTTP ловит его в
+локальной переменной текущего request и не отправляет как provider/UI protocol event.
+Ровно один result обязателен для успешного stream; missing/duplicate event — contract error,
+без sync rerun и без чтения старого `last_stream_response_raw`. Provider error и cancellation
+не требуют fabricated successful result. Provider/tool-loop `Done` — transport signal, не lifecycle completion. Agent удерживает
+внутренний `Done` до своей финальной projection: `ResponseProduced`, затем один Agent
+`Done`. HTTP принимает результат после исчерпания iterator, а не по первому `Done`.
+`last_stream_response_raw` пока остаётся runtime debug projection, не source of truth HTTP.
+
+`_project_agent_response` — HTTP presentation boundary. Для Auto status/stop reason/verifier/
+next steps берутся из typed outcome, даже если text содержит противоречащий report.
+Остальные report fields и остальные execution profiles остаются legacy presentation;
+их запрещено использовать как terminal authority или acceptance evidence.
+Envelope не является canonical tool payload, immutable evidence record или durable run.
+Store adoption, typed Ask/MWV/Desktop/approval/error observations, run identity propagation,
+acceptance и безопасный continuation остаются отдельными обязательными foundation шагами.
 
 ## Следующий обязательный срез B2
 

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from core.agent import Agent
+from core.agent_response import AgentResponse, ResponseProduced
 from core.auto_runtime import AutoRunOutcome
 from core.skills.index import SkillIndex, SkillResolution
 from core.skills.models import SkillEntry, SkillManifest
@@ -50,7 +51,7 @@ def _prepare_agent(tmp_path: Path) -> tuple[Agent, CountingBrain]:
 
 def test_agent_chat_uses_main_brain(tmp_path: Path) -> None:
     agent, main = _prepare_agent(tmp_path)
-    response = agent.respond([LLMMessage(role="user", content="привет")])
+    response = agent.respond([LLMMessage(role="user", content="привет")]).text
     assert response.startswith("main")
     assert main.calls == 1
     report = extract_report_block(response)
@@ -64,7 +65,7 @@ def test_agent_mwv_route_bypasses_brain(tmp_path: Path, monkeypatch) -> None:
         return "mwv"
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
-    response = agent.respond([LLMMessage(role="user", content="исправь тесты")])
+    response = agent.respond([LLMMessage(role="user", content="исправь тесты")]).text
     assert response == "mwv"
     assert main.calls == 0
 
@@ -77,7 +78,7 @@ def test_agent_ask_mode_uses_chat_path_for_action_text(tmp_path: Path, monkeypat
         raise AssertionError("MWV should not run in ask mode")
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_unreachable)
-    response = agent.respond([LLMMessage(role="user", content="исправь тесты")])
+    response = agent.respond([LLMMessage(role="user", content="исправь тесты")]).text
     assert response.startswith("main")
     assert main.calls == 1
 
@@ -103,7 +104,7 @@ def test_agent_auto_mode_chat_like_request_uses_auto_runtime(tmp_path: Path, mon
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
     response = agent.respond(
         [LLMMessage(role="user", content="Какой софт нужен для Raspberry Pi 4 для умной колонки?")]
-    )
+    ).text
     assert response == "auto-advisory"
     assert main.calls == 0
     assert calls.get("goal") == "Какой софт нужен для Raspberry Pi 4 для умной колонки?"
@@ -132,7 +133,7 @@ def test_agent_auto_mode_execution_request_uses_auto_runtime(tmp_path: Path, mon
 
     response = agent.respond(
         [LLMMessage(role="user", content="исправь тесты и обнови файл src/main.py")]
-    )
+    ).text
     assert response == "auto-run"
     assert main.calls == 0
     assert calls.get("goal") == "исправь тесты и обнови файл src/main.py"
@@ -157,7 +158,7 @@ def test_agent_auto_mode_does_not_call_route_classifier(tmp_path: Path, monkeypa
     monkeypatch.setattr("core.agent_routing.classify_request", _classifier_unreachable)
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
 
-    response = agent.respond([LLMMessage(role="user", content="workspace_read status")])
+    response = agent.respond([LLMMessage(role="user", content="workspace_read status")]).text
 
     assert response == "auto:workspace_read status"
     assert main.calls == 0
@@ -183,7 +184,15 @@ def test_agent_auto_stream_does_not_call_route_classifier(tmp_path: Path, monkey
 
     chunks = list(agent.respond_stream([LLMMessage(role="user", content="image_generate plan")]))
 
-    assert chunks == [TextDelta(text="auto-stream:image_generate plan"), Done()]
+    assert chunks == [
+        TextDelta(text="auto-stream:image_generate plan"),
+        ResponseProduced(
+            AgentResponse(
+                "auto-stream:image_generate plan", _auto_outcome("auto-stream:image_generate plan")
+            )
+        ),
+        Done(),
+    ]
     assert agent.last_stream_response_raw == "auto-stream:image_generate plan"
     assert main.calls == 0
 
@@ -207,7 +216,9 @@ def test_agent_auto_mode_passes_resolved_skill_to_auto_runtime(
 
     monkeypatch.setattr(agent, "handle_auto_command", _auto_stub)
 
-    response = agent.respond([LLMMessage(role="user", content="implement spec for skill runtime")])
+    response = agent.respond(
+        [LLMMessage(role="user", content="implement spec for skill runtime")]
+    ).text
 
     assert response == "auto-skill"
     resolution = captured["resolution"]
@@ -246,7 +257,7 @@ def test_agent_auto_mode_returns_structured_ambiguous_skill_decision(
 
     monkeypatch.setattr(agent, "handle_auto_command", _auto_unreachable)
 
-    response = agent.respond([LLMMessage(role="user", content="same trigger")])
+    response = agent.respond([LLMMessage(role="user", content="same trigger")]).text
     decision = json.loads(response)
 
     assert decision["reason"] == "ambiguous_skill"
@@ -292,3 +303,53 @@ def test_agent_auto_mode_stream_returns_structured_ambiguous_skill_decision(
     assert any(option["action"] == "select_skill" for option in decision["options"])
     assert agent.last_decision_packet is not None
     assert main.calls == 0
+
+
+def test_auto_sync_response_preserves_outcome_before_text_projection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    agent, _ = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+    outcome = AutoRunOutcome(
+        text="Модель утверждает, что всё выполнено",
+        status=AutoRunStatus.FAILED_WORKER,
+        stop_reason_code=None,
+        verifier=None,
+        next_steps=["Проверь фактический tool failure"],
+    )
+    monkeypatch.setattr(agent, "handle_auto_command", lambda *args, **kwargs: outcome)
+    response = agent.respond([LLMMessage(role="user", content="workspace_read status")])
+    assert response.auto_outcome is outcome
+    assert response.text == outcome.text
+
+
+def test_auto_stream_response_preserves_outcome_before_text_projection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    agent, _ = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+    outcome = _auto_outcome("Auto response")
+    monkeypatch.setattr(agent, "handle_auto_command", lambda *args, **kwargs: outcome)
+    events = list(agent.respond_stream([LLMMessage(role="user", content="workspace_read status")]))
+    produced = [event for event in events if isinstance(event, ResponseProduced)]
+    assert len(produced) == 1
+    assert produced[0].response.auto_outcome is outcome
+    assert produced[0].response.text == outcome.text
+    assert isinstance(events[-1], Done)
+
+
+def test_auto_observation_survives_interaction_logging_failure(tmp_path: Path, monkeypatch) -> None:
+    agent, _ = _prepare_agent(tmp_path)
+    agent.runtime_mode = "auto"
+    outcome = _auto_outcome("Фактический ответ runtime")
+    monkeypatch.setattr(agent, "handle_auto_command", lambda *args, **kwargs: outcome)
+
+    def fail_logging(*args, **kwargs):
+        raise RuntimeError("interaction log unavailable")
+
+    monkeypatch.setattr(agent, "_log_chat_interaction", fail_logging)
+    response = agent.respond([LLMMessage(role="user", content="workspace_read status")])
+    assert response.auto_outcome is outcome
+    assert response.text != outcome.text
+    assert "interaction log unavailable" in response.text
+    assert outcome.status == AutoRunStatus.COMPLETED

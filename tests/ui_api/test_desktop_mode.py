@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from core.agent_response import AgentResponse
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from core.desktop_policy import (
     DesktopApprovalRule,
@@ -61,7 +62,7 @@ class DesktopApprovalAgent(DummyAgent):
         self.consumed_rule_ids.clear()
         return consumed
 
-    def respond(self, messages) -> str:  # noqa: ANN001
+    def respond(self, messages) -> AgentResponse:  # noqa: ANN001
         del messages
         matching = [
             rule
@@ -74,7 +75,7 @@ class DesktopApprovalAgent(DummyAgent):
                 rule.rule_id for rule in matching if rule.source == "once"
             )
             self.completed += 1
-            return "desktop-sensitive-action-completed"
+            return AgentResponse("desktop-sensitive-action-completed")
         scope = DesktopApprovalScope(
             tool="desktop_file_delete",
             action="delete",
@@ -96,7 +97,7 @@ class DesktopApprovalAgent(DummyAgent):
             scope=scope,
             reason="destructive_action",
         )
-        return "approval required"
+        return AgentResponse("approval required")
 
 
 def test_desktop_mode_transition_and_session_approval_lifecycle(tmp_path: Path) -> None:

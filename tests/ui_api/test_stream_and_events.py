@@ -7,6 +7,7 @@ import time
 import pytest
 
 from core.agent import Agent
+from core.agent_response import AgentResponse, ResponseProduced
 from llm.brain_base import Brain
 from llm.stream_model import (
     Done,
@@ -64,11 +65,12 @@ class _SlowStreamingAgent(DummyAgent):
             yield TextDelta(text=part)
             time.sleep(0.3)
         self.last_stream_response_raw = "".join(parts)
+        yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
         yield Done()
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
-        return (
+        return AgentResponse(
             "Первая порция ответа достаточно длинная, чтобы пройти warmup и показаться на экране "
             "раньше окончания генерации. Вторая порция публикуется после паузы. "
             "Третья и последняя порция завершает сообщение."
@@ -95,6 +97,7 @@ class _AutoProgressAgent(DummyAgent):
         self.last_stream_response_raw = (
             "Первая порция ответа достаточно длинная для warmup. Вторая порция ответа."
         )
+        yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
         yield Done()
 
 
@@ -875,11 +878,12 @@ def test_chat_stream_supports_replace_mode_chunks() -> None:
             yield TextDelta(text="hel", mode="replace")
             yield TextDelta(text="hello " * 20, mode="replace")
             self.last_stream_response_raw = "hello " * 20
+            yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
             yield Done()
 
-        def respond(self, messages) -> str:  # noqa: ANN001
+        def respond(self, messages) -> AgentResponse:  # noqa: ANN001
             del messages
-            return "hello " * 20
+            return AgentResponse("hello " * 20)
 
     async def run() -> None:
         client = await _create_client(ReplaceStreamAgent())
@@ -951,6 +955,7 @@ def test_chat_stream_serializes_typed_tool_and_usage_events() -> None:
             yield Usage(usage=LLMUsage(3, 4, 7))
             yield TextDelta(text="Готово")
             self.last_stream_response_raw = "Готово"
+            yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
             yield Done()
 
     async def run() -> None:
@@ -1007,10 +1012,10 @@ def test_invalid_stream_contract_does_not_repeat_agent_request() -> None:
             del messages, cancellation_token
             yield "legacy chunk"
 
-        def respond(self, messages) -> str:  # noqa: ANN001
+        def respond(self, messages) -> AgentResponse:  # noqa: ANN001
             del messages
             self.respond_calls += 1
-            return "unexpected duplicate response"
+            return AgentResponse("unexpected duplicate response")
 
     async def run() -> None:
         agent = InvalidStreamAgent()
@@ -1342,6 +1347,7 @@ def test_chat_tool_error_publishes_failure_summary() -> None:
             )
             yield TextDelta(text="Ошибка")
             self.last_stream_response_raw = "Ошибка"
+            yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
             yield Done()
 
     async def run() -> None:
@@ -1416,6 +1422,7 @@ def test_chat_tool_multiple_sequential_calls() -> None:
             )
             yield TextDelta(text="Выполнено два действия")
             self.last_stream_response_raw = "Выполнено два действия"
+            yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
             yield Done()
 
     async def run() -> None:
@@ -1463,6 +1470,110 @@ def test_chat_tool_multiple_sequential_calls() -> None:
             assert isinstance(write_result, dict)
             assert write_result.get("ok") is True
             stream_resp.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_http_uses_request_local_auto_outcome_without_stale_agent_state(streaming) -> None:
+    from core.auto_runtime import AutoRunOutcome
+    from core.mwv.models import StopReasonCode
+    from shared.auto_models import AutoRunStatus
+
+    failed = AutoRunOutcome(
+        text='Готово\nMWV_REPORT_JSON={"route":"chat","verifier":{"status":"ok"},"stop_reason_code":null}',
+        status=AutoRunStatus.FAILED_WORKER,
+        stop_reason_code=StopReasonCode.WORKER_FAILED,
+        verifier=None,
+        next_steps=["Проверь stderr"],
+    )
+
+    class OutcomeAgent(DummyAgent):
+        def __init__(self):
+            super().__init__()
+            self.responses = iter(
+                [AgentResponse(failed.text, failed), AgentResponse("Следующий ответ")]
+            )
+            self.last_stream_response_raw = "СТАРЫЙ ЧУЖОЙ OUTPUT"
+
+        def respond(self, messages):
+            del messages
+            return next(self.responses)
+
+    class StreamingOutcomeAgent(OutcomeAgent):
+        def respond_stream(self, messages, cancellation_token=None):
+            del messages, cancellation_token
+            response = next(self.responses)
+            yield TextDelta(response.text)
+            yield ResponseProduced(response)
+            yield Done()
+
+    async def run() -> None:
+        agent = StreamingOutcomeAgent() if streaming else OutcomeAgent()
+        client = await _create_client(agent)
+        try:
+            status = await client.get("/ui/api/status")
+            session_id = (await status.json())["session_id"]
+            await _select_local_model(client, session_id)
+            headers = {"X-Slavik-Session": session_id}
+            first = await client.post(
+                "/ui/api/chat/send", json={"content": "first"}, headers=headers
+            )
+            assert first.status == 200
+            payload = await first.json()
+            assert payload["messages"][-1]["content"] == "Готово"
+            report = payload["mwv_report"]
+            assert report["runtime_status"] == "failed_worker"
+            assert report["stop_reason_code"] == "WORKER_FAILED"
+            assert report["verifier"]["status"] == "unknown"
+            second = await client.post(
+                "/ui/api/chat/send", json={"content": "second"}, headers=headers
+            )
+            assert second.status == 200
+            payload = await second.json()
+            assert payload["messages"][-1]["content"] == "Следующий ответ"
+            assert payload["mwv_report"] is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_stream_response_contract_fault_does_not_reuse_stale_result_or_rerun(duplicate) -> None:
+    class BrokenResponseAgent(DummyAgent):
+        last_stream_response_raw = "СТАРЫЙ SUCCESS"
+
+        def respond_stream(self, messages, cancellation_token=None):
+            del messages, cancellation_token
+            if duplicate:
+                yield ResponseProduced(AgentResponse("Первый результат"))
+                yield ResponseProduced(AgentResponse("Второй результат"))
+            yield Done()
+
+        def respond(self, messages):
+            raise AssertionError("Нельзя повторно выполнять Agent после stream contract error")
+
+    async def run() -> None:
+        client = await _create_client(BrokenResponseAgent())
+        try:
+            status = await client.get("/ui/api/status")
+            session_id = (await status.json())["session_id"]
+            await _select_local_model(client, session_id)
+            response = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "run"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload["generation_error"]["code"] == "stream_contract_error"
+            text = payload["messages"][-1]["content"]
+            assert "ResponseProduced" in text
+            assert "СТАРЫЙ SUCCESS" not in text
+            assert text.startswith("[Ошибка ответа:")
         finally:
             await client.close()
 

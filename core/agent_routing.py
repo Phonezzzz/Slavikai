@@ -2,16 +2,17 @@ from __future__ import annotations
 
 # ruff: noqa: F401
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from typing import TYPE_CHECKING, Literal
 
+from core.agent_response import AgentResponse, ResponseProduced
 from core.approval_policy import ApprovalRequired
 from core.decision.handler import DecisionContext
 from core.decision.memory_save import build_memory_save_packet
 from core.mwv.models import StopReasonCode
 from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
-from core.tool_loop import AgentToolLoop
+from core.tool_loop import AgentToolLoop, AgentToolLoopResult
 from llm.cancellation import GenerationCancelled, cancellation_requested
 from llm.retry import visible_provider_error
 from llm.stream_model import Done, Error, StreamEvent, TextDelta, Usage
@@ -38,10 +39,31 @@ if TYPE_CHECKING:
     from tools.tool_registry import ToolRegistry
 
 
-def _text_response_events(text: str) -> Iterator[StreamEvent]:
+def _text_response_events(
+    text: str, *, auto_outcome: AutoRunOutcome | None = None
+) -> Iterator[StreamEvent]:
     if text:
         yield TextDelta(text=text)
+    yield ResponseProduced(AgentResponse(text, auto_outcome=auto_outcome))
     yield Done()
+
+
+def _tool_stream_observations(
+    events: Generator[StreamEvent, None, AgentToolLoopResult],
+) -> Generator[StreamEvent, None, AgentToolLoopResult]:
+    """Tool-loop Done не завершает внешний Agent stream до response projection."""
+    try:
+        while True:
+            try:
+                event = next(events)
+            except StopIteration as stopped:
+                if not isinstance(stopped.value, AgentToolLoopResult):
+                    raise TypeError("tool stream requires AgentToolLoopResult") from stopped
+                return stopped.value
+            if not isinstance(event, Done):
+                yield event
+    finally:
+        events.close()
 
 
 class AgentRoutingMixin:
@@ -195,13 +217,14 @@ class AgentRoutingMixin:
         "i checked",
     )
 
-    def respond(self, messages: list[LLMMessage]) -> str:
+    def respond(self, messages: list[LLMMessage]) -> AgentResponse:
         if not messages:
-            return "[Пустое сообщение]"
+            return AgentResponse("[Пустое сообщение]")
 
         last_content = messages[-1].content.strip()
         self._last_user_input = last_content
         record_in_history = self._should_record_in_history(last_content)
+        outcome: AutoRunOutcome | None = None
         try:
             if record_in_history:
                 self._append_short_term(messages)
@@ -211,7 +234,7 @@ class AgentRoutingMixin:
             self._reset_workspace_diffs()
 
             if last_content.startswith("/"):
-                return self.handle_tool_command(last_content)
+                return AgentResponse(self.handle_tool_command(last_content))
 
             runtime_mode = getattr(self, "runtime_mode", "ask")
             if self.is_explicit_memory_request(last_content):
@@ -221,19 +244,23 @@ class AgentRoutingMixin:
                 )
                 claims = preview.get("claims")
                 if isinstance(claims, list) and claims:
-                    return self._handle_decision_packet(
-                        build_memory_save_packet(preview),
-                        raw_input=last_content,
-                        record_in_history=record_in_history,
+                    return AgentResponse(
+                        self._handle_decision_packet(
+                            build_memory_save_packet(preview),
+                            raw_input=last_content,
+                            record_in_history=record_in_history,
+                        )
                     )
                 response = "Не удалось выделить изменения для Memory."
                 self._log_chat_interaction(raw_input=last_content, response_text=response)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
-                return response
+                return AgentResponse(response)
 
             if runtime_mode == "ask":
-                return self._run_chat_response(messages, last_content, record_in_history)
+                return AgentResponse(
+                    self._run_chat_response(messages, last_content, record_in_history)
+                )
             if runtime_mode == "auto":
                 skill_decision, skill_resolution = self._resolve_skill_run(last_content)
                 if skill_decision and skill_decision.status == "deprecated":
@@ -241,7 +268,7 @@ class AgentRoutingMixin:
                     self._log_chat_interaction(raw_input=last_content, response_text=response)
                     if record_in_history:
                         self._append_short_term([LLMMessage(role="assistant", content=response)])
-                    return response
+                    return AgentResponse(response)
                 decision_packet = self.decision_handler.evaluate(
                     DecisionContext(
                         user_input=last_content,
@@ -251,10 +278,12 @@ class AgentRoutingMixin:
                     ),
                 )
                 if decision_packet is not None:
-                    return self._handle_decision_packet(
-                        decision_packet,
-                        raw_input=last_content,
-                        record_in_history=record_in_history,
+                    return AgentResponse(
+                        self._handle_decision_packet(
+                            decision_packet,
+                            raw_input=last_content,
+                            record_in_history=record_in_history,
+                        )
                     )
                 outcome = self.handle_auto_command(
                     last_content,
@@ -264,9 +293,9 @@ class AgentRoutingMixin:
                 self._log_chat_interaction(raw_input=last_content, response_text=result)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=result)])
-                return result
+                return AgentResponse(result, auto_outcome=outcome)
             if runtime_mode == "desktop":
-                return self._run_desktop_response(last_content, record_in_history)
+                return AgentResponse(self._run_desktop_response(last_content, record_in_history))
 
             decision = classify_request(
                 messages,
@@ -285,7 +314,7 @@ class AgentRoutingMixin:
                 self._log_chat_interaction(raw_input=last_content, response_text=response)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
-                return response
+                return AgentResponse(response)
             decision_packet = self.decision_handler.evaluate(
                 DecisionContext(
                     user_input=last_content,
@@ -296,22 +325,28 @@ class AgentRoutingMixin:
                 ),
             )
             if decision_packet is not None:
-                return self._handle_decision_packet(
-                    decision_packet,
-                    raw_input=last_content,
-                    record_in_history=record_in_history,
+                return AgentResponse(
+                    self._handle_decision_packet(
+                        decision_packet,
+                        raw_input=last_content,
+                        record_in_history=record_in_history,
+                    )
                 )
             if decision.route == "mwv":
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_inbox(last_content, decision)
                     self._record_unknown_skill_candidate(last_content, decision)
-                return self._run_mwv_flow(messages, last_content, decision, record_in_history)
-            return self._run_chat_response(messages, last_content, record_in_history)
+                return AgentResponse(
+                    self._run_mwv_flow(messages, last_content, decision, record_in_history)
+                )
+            return AgentResponse(self._run_chat_response(messages, last_content, record_in_history))
         except ApprovalRequired as exc:
-            return self._handle_approval_required(
-                exc.request,
-                raw_input=last_content,
-                record_in_history=record_in_history,
+            return AgentResponse(
+                self._handle_approval_required(
+                    exc.request,
+                    raw_input=last_content,
+                    record_in_history=record_in_history,
+                )
             )
         except Exception as exc:
             self.logger.exception("Agent.respond error: %s", exc)
@@ -324,7 +359,7 @@ class AgentRoutingMixin:
                 self.logger.error("Ошибка записи InteractionLog: %s", log_exc)
             if record_in_history:
                 self._append_short_term([LLMMessage(role="assistant", content=error_text)])
-            return error_text
+            return AgentResponse(error_text, auto_outcome=outcome)
 
     def respond_stream(
         self,
@@ -343,6 +378,7 @@ class AgentRoutingMixin:
         self._last_user_input = last_content
         record_in_history = self._should_record_in_history(last_content)
         self.last_stream_response_raw = None
+        outcome: AutoRunOutcome | None = None
         try:
             if record_in_history:
                 self._append_short_term(messages)
@@ -417,7 +453,7 @@ class AgentRoutingMixin:
                 )
                 response = outcome.text
                 self.last_stream_response_raw = response
-                yield from _text_response_events(response)
+                yield from _text_response_events(response, auto_outcome=outcome)
                 return
             if runtime_mode == "desktop":
                 response = self._run_desktop_response(
@@ -496,6 +532,7 @@ class AgentRoutingMixin:
             error_text = f"[{visible_message}]"
             self.last_stream_response_raw = error_text
             yield Error(message=visible_message, code=error_code)
+            yield ResponseProduced(AgentResponse(error_text, auto_outcome=outcome))
             yield Done(finish_reason="error")
 
     def _run_chat_response(
@@ -694,6 +731,7 @@ class AgentRoutingMixin:
                     response_text=blocked_text,
                 )
                 self.last_stream_response_raw = response_text
+                yield ResponseProduced(AgentResponse(response_text))
                 yield Done()
                 return
             collected_text = ""
@@ -730,16 +768,19 @@ class AgentRoutingMixin:
                     yield Usage(usage=reply.usage)
             else:
                 tool_specs = self._chat_read_tool_specs() if brain.supports_streaming_tools else []
-                tool_loop_result = yield from AgentToolLoop().run_stream_events(
-                    brain=brain,
-                    gateway=self._build_tool_gateway(safe_mode_override=None),
-                    messages=messages_with_context,
-                    tools=tool_specs,
-                    config=self.main_config,
-                    cancellation_token=cancellation_token,
+                tool_loop_result = yield from _tool_stream_observations(
+                    AgentToolLoop().run_stream_events(
+                        brain=brain,
+                        gateway=self._build_tool_gateway(safe_mode_override=None),
+                        messages=messages_with_context,
+                        tools=tool_specs,
+                        config=self.main_config,
+                        cancellation_token=cancellation_token,
+                    )
                 )
                 if tool_loop_result.cancelled:
                     self.last_stream_response_raw = None
+                    yield Done(finish_reason="cancelled")
                     return
                 collected_text = tool_loop_result.text
                 if tool_loop_result.tool_calls:
@@ -759,6 +800,8 @@ class AgentRoutingMixin:
                         response_text=error_text,
                     )
                     self.last_stream_response_raw = error_text
+                    yield ResponseProduced(AgentResponse(error_text))
+                    yield Done(finish_reason="error")
                     return
             if cancellation_requested(cancellation_token):
                 yield Done(finish_reason="cancelled")
@@ -780,8 +823,8 @@ class AgentRoutingMixin:
                 response_text=reviewed,
             )
             self.last_stream_response_raw = response_text
-            if web_evidence.requested and web_evidence.provider == "xai_native":
-                yield Done()
+            yield ResponseProduced(AgentResponse(response_text))
+            yield Done()
             return
         except Exception as exc:  # noqa: BLE001
             self.logger.error("Stream LLM error: %s", exc)

@@ -50,7 +50,7 @@ def _assert_required_contract_fields(report: dict[str, object]) -> None:
 
 def test_ux_contract_present_in_chat_response(tmp_path: Path) -> None:
     agent = _prepare_agent(tmp_path)
-    response = agent.respond([LLMMessage(role="user", content="привет")])
+    response = agent.respond([LLMMessage(role="user", content="привет")]).text
     report = extract_report_block(response)
     assert report["route"] == "chat"
     _assert_required_contract_fields(report)

@@ -3,6 +3,8 @@ from __future__ import annotations
 # ruff: noqa: F403,F405
 import pytest
 
+from core.agent_response import AgentResponse
+
 from .fakes import *
 
 
@@ -1415,53 +1417,55 @@ def test_ui_decision_respond_agent_decision_retry_replays_source_request() -> No
             super().__init__()
             self.calls = 0
 
-        def respond(self, messages) -> str:
+        def respond(self, messages) -> AgentResponse:
             del messages
             self.calls += 1
             if self.calls == 1:
-                return json.dumps(
-                    {
-                        "id": "decision-retry-1",
-                        "created_at": "2026-01-01T00:00:00+00:00",
-                        "reason": "need_user_input",
-                        "summary": "Need retry choice",
-                        "context": {},
-                        "options": [
-                            {
-                                "id": "ask_user",
-                                "title": "Ask user",
-                                "action": "ask_user",
-                                "payload": {},
-                                "risk": "low",
-                            },
-                            {
-                                "id": "proceed_safe",
-                                "title": "Proceed safe",
-                                "action": "proceed_safe",
-                                "payload": {},
-                                "risk": "low",
-                            },
-                            {
-                                "id": "retry",
-                                "title": "Retry",
-                                "action": "retry",
-                                "payload": {},
-                                "risk": "medium",
-                            },
-                            {
-                                "id": "abort",
-                                "title": "Abort",
-                                "action": "abort",
-                                "payload": {},
-                                "risk": "low",
-                            },
-                        ],
-                        "default_option_id": "ask_user",
-                        "ttl_seconds": 600,
-                        "policy": {"require_user_choice": True},
-                    }
+                return AgentResponse(
+                    json.dumps(
+                        {
+                            "id": "decision-retry-1",
+                            "created_at": "2026-01-01T00:00:00+00:00",
+                            "reason": "need_user_input",
+                            "summary": "Need retry choice",
+                            "context": {},
+                            "options": [
+                                {
+                                    "id": "ask_user",
+                                    "title": "Ask user",
+                                    "action": "ask_user",
+                                    "payload": {},
+                                    "risk": "low",
+                                },
+                                {
+                                    "id": "proceed_safe",
+                                    "title": "Proceed safe",
+                                    "action": "proceed_safe",
+                                    "payload": {},
+                                    "risk": "low",
+                                },
+                                {
+                                    "id": "retry",
+                                    "title": "Retry",
+                                    "action": "retry",
+                                    "payload": {},
+                                    "risk": "medium",
+                                },
+                                {
+                                    "id": "abort",
+                                    "title": "Abort",
+                                    "action": "abort",
+                                    "payload": {},
+                                    "risk": "low",
+                                },
+                            ],
+                            "default_option_id": "ask_user",
+                            "ttl_seconds": 600,
+                            "policy": {"require_user_choice": True},
+                        }
+                    )
                 )
-            return "retry-ok"
+            return AgentResponse("retry-ok")
 
     async def run() -> None:
         agent = RetryDecisionAgent()
@@ -1518,39 +1522,41 @@ def test_ui_decision_respond_agent_decision_retry_uses_chat_lane() -> None:
             super().__init__()
             self.calls = 0
 
-        def respond(self, messages) -> str:
+        def respond(self, messages) -> AgentResponse:
             del messages
             self.calls += 1
             if self.calls == 1:
-                return json.dumps(
-                    {
-                        "id": "decision-retry-workspace",
-                        "created_at": "2026-01-01T00:00:00+00:00",
-                        "reason": "need_user_input",
-                        "summary": "Need retry choice",
-                        "context": {},
-                        "options": [
-                            {
-                                "id": "retry",
-                                "title": "Retry",
-                                "action": "retry",
-                                "payload": {},
-                                "risk": "medium",
-                            },
-                            {
-                                "id": "abort",
-                                "title": "Abort",
-                                "action": "abort",
-                                "payload": {},
-                                "risk": "low",
-                            },
-                        ],
-                        "default_option_id": "retry",
-                        "ttl_seconds": 600,
-                        "policy": {"require_user_choice": True},
-                    }
+                return AgentResponse(
+                    json.dumps(
+                        {
+                            "id": "decision-retry-workspace",
+                            "created_at": "2026-01-01T00:00:00+00:00",
+                            "reason": "need_user_input",
+                            "summary": "Need retry choice",
+                            "context": {},
+                            "options": [
+                                {
+                                    "id": "retry",
+                                    "title": "Retry",
+                                    "action": "retry",
+                                    "payload": {},
+                                    "risk": "medium",
+                                },
+                                {
+                                    "id": "abort",
+                                    "title": "Abort",
+                                    "action": "abort",
+                                    "payload": {},
+                                    "risk": "low",
+                                },
+                            ],
+                            "default_option_id": "retry",
+                            "ttl_seconds": 600,
+                            "policy": {"require_user_choice": True},
+                        }
+                    )
                 )
-            return "retry-ok"
+            return AgentResponse("retry-ok")
 
     async def run() -> None:
         agent = RetryDecisionAgent()

@@ -30,7 +30,7 @@ def test_batch_review_is_manual_and_generates_candidates(tmp_path: Path) -> None
     )
     agent.save_to_memory = lambda prompt, answer: None  # type: ignore[method-assign]  # noqa: ARG005
 
-    _ = agent.respond([LLMMessage(role="user", content="hello")])
+    _ = agent.respond([LLMMessage(role="user", content="hello")]).text
     interaction_id = agent.last_chat_interaction_id
     assert interaction_id
 

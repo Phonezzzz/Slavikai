@@ -53,7 +53,7 @@ def test_agent_llm_error_path(tmp_path: Path) -> None:
     agent.memory.save(
         MemoryRecord(id="1", content="c", tags=[], timestamp="t", kind=MemoryKind.NOTE)
     )
-    resp = agent.respond([LLMMessage(role="user", content="fail me")])
+    resp = agent.respond([LLMMessage(role="user", content="fail me")]).text
     assert "Ошибка модели" in resp
 
 

@@ -310,6 +310,20 @@
         "tests/test_task_run_storage.py"
       ],
       "summary": "Storage-only foundation: scoped durable admission identities, immutable revision/history, transactional versioned transitions and restart reads. Not yet adopted by production runtime; completion/recovery remain target."
+    },
+    {
+      "id": "runtime.agent.request_local_response",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
+      "verified_by": [
+        "tests/test_agent_modes_logic.py",
+        "tests/test_agent_response_projection.py",
+        "tests/ui_api/test_stream_and_events.py"
+      ],
+      "summary": "Request-local typed Agent response reaches HTTP through sync return or ResponseProduced stream event; Auto outcome survives text projection. Missing/duplicate stream results fail without stale mutable result reads or execution rerun. This is not lifecycle authority or canonical durability."
     }
   ]
 }

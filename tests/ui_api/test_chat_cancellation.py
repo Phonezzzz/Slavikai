@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from core.agent_response import AgentResponse, ResponseProduced
 from llm.cancellation import bind_cancellation_resource
 from llm.local_http_brain import LocalHttpBrain
 from llm.stream_model import Done, TextDelta
@@ -170,9 +171,18 @@ class _DynamicBrainAgent(DummyAgent):
     def respond_stream(self, messages, cancellation_token=None):
         self.worker_finished.clear()
         try:
-            yield from self._brain.generate_stream_events(
+            text = ""
+            finished = False
+            for event in self._brain.generate_stream_events(
                 messages, cancellation_token=cancellation_token
-            )
+            ):
+                if isinstance(event, TextDelta):
+                    text = event.text if event.mode == "replace" else text + event.text
+                if isinstance(event, Done):
+                    finished = event.finish_reason not in {"cancelled", "error"}
+                yield event
+            if finished:
+                yield ResponseProduced(AgentResponse(text))
         finally:
             self.worker_finished.set()
 

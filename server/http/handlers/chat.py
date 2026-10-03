@@ -8,7 +8,7 @@ from aiohttp import web
 
 from server.http.common.auth import _request_principal_id
 from server.http.common.chat_payload import (
-    _split_response_and_report,
+    _project_agent_response,
 )
 from server.http.common.proxy_model import PUBLIC_PROXY_MODEL_ID
 from server.http.common.responses import error_response, json_response
@@ -210,8 +210,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                         auto_state=auto_state,
                         enforce_plan_guard=False,
                     )
-            response_raw = agent.respond(parsed.messages)
-            response_text, mwv_report = _split_response_and_report(response_raw)
+            agent_response = agent.respond(parsed.messages)
+            response_text, mwv_report = _project_agent_response(agent_response)
             trace_id = agent.last_chat_interaction_id
             if trace_id == previous_trace_id:
                 trace_id = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from core.agent_response import AgentResponse
 from llm.types import ModelConfig
 from server.http.common.auth import UI_AUTH_COOKIE, _ui_auth_cookie_value
 
@@ -1531,7 +1532,7 @@ def test_ui_chat_send_internal_error_is_sanitized() -> None:
             super().__init__()
             self.last_chat_interaction_id = "trace-internal-err"
 
-        def respond(self, messages) -> str:  # noqa: ANN001
+        def respond(self, messages) -> AgentResponse:  # noqa: ANN001
             del messages
             raise RuntimeError("internal secret: db://user:pass@host")
 

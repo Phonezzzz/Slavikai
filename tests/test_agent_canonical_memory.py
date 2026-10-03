@@ -102,7 +102,7 @@ def test_agent_explicit_remember_response_builds_preview_without_write(
 
     response = agent.respond(
         [LLMMessage(role="user", content="запомни: я предпочитаю короткие ответы")]
-    )
+    ).text
 
     decision = json.loads(response)
     assert decision["decision_type"] == "memory_save"
@@ -291,7 +291,7 @@ def test_agent_memory_preview_uses_llm_enrichment_and_waits_for_confirm(
     )
     agent.runtime_mode = "ask"
 
-    response = agent.respond([LLMMessage(role="user", content="remember my editor is neovim")])
+    response = agent.respond([LLMMessage(role="user", content="remember my editor is neovim")]).text
 
     decision = json.loads(response)
     proposed_action = decision["proposed_action"]

@@ -67,7 +67,7 @@ def test_decision_packet_on_verifier_fail(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(agent, "_mwv_worker_runner", _worker)
     monkeypatch.setattr(agent_module, "VerifierRuntime", DummyVerifierRuntime)
 
-    response = agent.respond([LLMMessage(role="user", content="почини тесты")])
+    response = agent.respond([LLMMessage(role="user", content="почини тесты")]).text
     payload = json.loads(response)
     assert payload["reason"] == "verifier_fail"
     assert 3 <= len(payload["options"]) <= 5

@@ -29,7 +29,7 @@ def test_mwv_internal_error_returns_stop_response(tmp_path: Path, monkeypatch) -
         raise RuntimeError("boom")
 
     monkeypatch.setattr(agent_module.ManagerRuntime, "run_flow", _boom)
-    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")])
+    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")]).text
 
     lowered = response.lower()
     assert "что случилось" in lowered

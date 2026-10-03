@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: F403,F405
 import asyncio
 
+from core.agent_response import AgentResponse, ResponseProduced
 from llm.stream_model import Done, Error, TextDelta
 
 from .fakes import *
@@ -19,6 +20,7 @@ class _SequencedResponseAgent(DummyAgent):
         response = next(self.responses)
         self.last_stream_response_raw = response
         yield TextDelta(text=response)
+        yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
         yield Done()
 
 

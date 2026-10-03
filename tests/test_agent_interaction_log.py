@@ -29,7 +29,7 @@ def test_agent_logs_chat_and_tool(tmp_path: Path) -> None:
         lambda messages, query: messages  # noqa: ARG005
     )
 
-    reply = agent.respond([LLMMessage(role="user", content="hello")])
+    reply = agent.respond([LLMMessage(role="user", content="hello")]).text
     assert reply.startswith("ok")
 
     _ = agent.handle_tool_command("/fs list")

@@ -6,6 +6,7 @@ from typing import Final
 
 from aiohttp import web
 
+from core.agent_response import AgentResponse
 from core.mwv.models import MWV_REPORT_PREFIX
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
@@ -171,6 +172,30 @@ def _split_response_and_report(response_text: str) -> tuple[str, dict[str, JSONV
         normalized_report[str(key)] = _normalize_json_value(value)
 
     return clean_text, normalized_report
+
+
+def _project_agent_response(response: AgentResponse) -> tuple[str, dict[str, JSONValue] | None]:
+    text, report = _split_response_and_report(response.text)
+    outcome = response.auto_outcome
+    if outcome is None:
+        return text, report
+    # Остальные поля остаются legacy UI presentation, не lifecycle authority.
+    projected = dict(report) if report is not None else {}
+    projected["route"] = "auto"
+    projected["runtime_status"] = outcome.status.value
+    projected["stop_reason_code"] = (
+        outcome.stop_reason_code.value if outcome.stop_reason_code is not None else None
+    )
+    projected["next_steps"] = list(outcome.next_steps)
+    projected["verifier"] = (
+        {
+            "status": "ok" if outcome.verifier.ok else "fail",
+            "duration_ms": outcome.verifier.duration_ms,
+        }
+        if outcome.verifier is not None
+        else {"status": "unknown", "duration_ms": None}
+    )
+    return text, projected
 
 
 def _normalize_trace_id(value: object) -> str | None:

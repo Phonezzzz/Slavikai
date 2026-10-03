@@ -44,7 +44,7 @@ def test_ask_mode_does_not_write_memory_or_claims(tmp_path: Path) -> None:
 
     agent.save_to_memory = _save  # type: ignore[method-assign]
     agent.capture_memory_claims_from_text = _capture  # type: ignore[method-assign]
-    response = agent.respond([LLMMessage(role="user", content="Привет")])
+    response = agent.respond([LLMMessage(role="user", content="Привет")]).text
 
     assert "ok" in response
     assert calls["save"] == 0
@@ -66,7 +66,9 @@ def test_ask_explicit_memory_request_only_builds_preview(tmp_path: Path) -> None
     agent._canonical_aggregator.upsert_claim = _upsert  # type: ignore[method-assign]
     agent._atom_embedding_index.sync_atom = _sync  # type: ignore[method-assign]
 
-    response = agent.respond([LLMMessage(role="user", content="Запомни: я предпочитаю кратко")])
+    response = agent.respond(
+        [LLMMessage(role="user", content="Запомни: я предпочитаю кратко")]
+    ).text
     decision = json.loads(response)
 
     assert decision["decision_type"] == "memory_save"
@@ -89,7 +91,7 @@ def test_ask_mode_vector_context_never_initializes_runtime(tmp_path: Path) -> No
         return []
 
     agent.vectors.search = _search  # type: ignore[method-assign]
-    response = agent.respond([LLMMessage(role="user", content="Покажи контекст проекта")])
+    response = agent.respond([LLMMessage(role="user", content="Покажи контекст проекта")]).text
 
     assert "ok" in response
     assert allow_runtime_init_values

@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from config.api_keys import load_api_keys
 from config.http_server_config import HttpAuthConfig
+from core.agent_response import AgentResponse
 from llm.brain_factory import create_brain
 from llm.types import ModelConfig
 from server.http.app import create_app
@@ -47,9 +48,9 @@ class CompletionAgent(CaptureConfigAgent):
         super().reconfigure_models(main_config, main_api_key=main_api_key, persist=persist)
         self.brain = create_brain(main_config, api_key=main_api_key)
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         assert self.brain is not None
-        return self.brain.generate(messages).text
+        return AgentResponse(self.brain.generate(messages).text)
 
 
 def isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:

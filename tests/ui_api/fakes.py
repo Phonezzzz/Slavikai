@@ -23,6 +23,7 @@ from config.tools_config import (
 from config.tools_config import (
     save_tools_config as save_tools_config_to_path,
 )
+from core.agent_response import AgentResponse, ResponseProduced
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
 from core.desktop_policy import DesktopPolicyStore
 from core.mwv.manager import MWVRunResult
@@ -63,8 +64,8 @@ class DummyAgent:
         self._session_id = session_id
         self._approved_categories = set(approved_categories)
 
-    def respond(self, messages) -> str:
-        return "ok"
+    def respond(self, messages) -> AgentResponse:
+        return AgentResponse("ok")
 
     def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
         del main_config, main_api_key, persist
@@ -295,17 +296,17 @@ class WorkspaceDecisionAgent(DummyAgent):
 
 
 class LongCodeAgent(DummyAgent):
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
         lines = [f"def step_{idx}() -> int:\n    return {idx}" for idx in range(1, 26)]
-        return "```python\n" + "\n\n".join(lines) + "\n```"
+        return AgentResponse("```python\n" + "\n\n".join(lines) + "\n```")
 
 
 class ShortCodeAgent(DummyAgent):
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
         lines = [f"const item{idx} = {idx};" for idx in range(1, 16)]
-        return "```ts\n" + "\n".join(lines) + "\n```"
+        return AgentResponse("```ts\n" + "\n".join(lines) + "\n```")
 
 
 class TracedStreamingAgent(DummyAgent):
@@ -326,18 +327,19 @@ class TracedStreamingAgent(DummyAgent):
         yield TextDelta(text="Hello")
         yield TextDelta(text=" ")
         yield TextDelta(text="stream")
+        yield ResponseProduced(AgentResponse("Hello stream"))
         yield Done()
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
         self._next_trace_id()
-        return "Hello stream"
+        return AgentResponse("Hello stream")
 
 
 class NamedFileArtifactsAgent(DummyAgent):
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
-        return (
+        return AgentResponse(
             "Код (`clock.py`):\n"
             "```python\n"
             "import time\n"
@@ -365,11 +367,12 @@ class StreamNamedFileArtifactsAgent(DummyAgent):
         for part in parts:
             yield TextDelta(text=part)
         self.last_stream_response_raw = "".join(parts)
+        yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
         yield Done()
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
-        return (
+        return AgentResponse(
             "Вот мини-приложение.\n\n"
             "Код (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n"
         )
@@ -387,19 +390,22 @@ class LateNamedFileStreamAgent(DummyAgent):
         yield TextDelta(text=intro)
         yield TextDelta(text=tail)
         self.last_stream_response_raw = f"{intro}{tail}"
+        yield ResponseProduced(AgentResponse(self.last_stream_response_raw))
         yield Done()
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
         intro = "Это подготовка результата для пользователя. " * 8
         tail = "\nКод (`clock.py`):\n```python\nimport time\nprint(time.time())\n```\n"
-        return f"{intro}{tail}"
+        return AgentResponse(f"{intro}{tail}")
 
 
 class EscapedFenceNamedFileAgent(DummyAgent):
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
-        return "Код (`clock.py`):\\n```python\\nimport time\\nprint(time.time())\\n```\\n"
+        return AgentResponse(
+            "Код (`clock.py`):\\n```python\\nimport time\\nprint(time.time())\\n```\\n"
+        )
 
 
 class CaptureConfigAgent(DummyAgent):
@@ -419,14 +425,14 @@ class CaptureConfigAgent(DummyAgent):
 
 
 class ProjectCommandAgent(DummyAgent):
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         if not messages:
-            return "empty"
+            return AgentResponse("empty")
         last = messages[-1]
         content = getattr(last, "content", "")
         if isinstance(content, str) and content.startswith("/project "):
-            return f"Командный режим (без MWV)\n{content}"
-        return "ok"
+            return AgentResponse(f"Командный режим (без MWV)\n{content}")
+        return AgentResponse("ok")
 
 
 class LiveToolsAgent(DummyAgent):
@@ -439,16 +445,16 @@ class LiveToolsAgent(DummyAgent):
         self.update_calls.append(dict(state))
         super().update_tools_enabled(state)
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         if not messages:
-            return "ok"
+            return AgentResponse("ok")
         last = messages[-1]
         content = getattr(last, "content", "")
         if isinstance(content, str) and content.startswith("/web "):
             if not self.tools_enabled.get("web", False):
-                return "Инструмент web отключён"
-            return "WEB_OK"
-        return "ok"
+                return AgentResponse("Инструмент web отключён")
+            return AgentResponse("WEB_OK")
+        return AgentResponse("ok")
 
 
 class LiveEmbeddingsAgent(DummyAgent):
@@ -595,17 +601,19 @@ class MemoryTriageAgent(DummyAgent):
 
 
 class UIReportAgent(DummyAgent):
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
-        return (
+        return AgentResponse(
             'ok\nMWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
         )
 
 
 class UIReportOnlyAgent(DummyAgent):
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
-        return 'MWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
+        return AgentResponse(
+            'MWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
+        )
 
 
 class ToolCallCaptureAgent(DummyAgent):
@@ -616,7 +624,7 @@ class ToolCallCaptureAgent(DummyAgent):
         self._counter = 0
         self.last_chat_interaction_id: str | None = None
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
         self._counter += 1
         interaction_id = f"interaction-{self._counter}"
@@ -632,7 +640,7 @@ class ToolCallCaptureAgent(DummyAgent):
             {"interaction_id": interaction_id},
         )
         self.last_chat_interaction_id = interaction_id
-        return "print('ok')"
+        return AgentResponse("print('ok')")
 
 
 class StaleTraceIdAgent(DummyAgent):
@@ -640,9 +648,9 @@ class StaleTraceIdAgent(DummyAgent):
         super().__init__()
         self.last_chat_interaction_id = trace_id
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
-        return "plain short answer"
+        return AgentResponse("plain short answer")
 
 
 class DecisionEchoAgent:
@@ -653,43 +661,45 @@ class DecisionEchoAgent:
         del approved_categories
         self._session_id = session_id
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
         session_id = self._session_id or "missing-session"
-        return json.dumps(
-            {
-                "id": f"decision-{session_id}",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "reason": "need_user_input",
-                "summary": f"Decision for {session_id}",
-                "context": {"session_id": session_id},
-                "options": [
-                    {
-                        "id": "ask_user",
-                        "title": "Ask user",
-                        "action": "ask_user",
-                        "payload": {},
-                        "risk": "low",
-                    },
-                    {
-                        "id": "proceed_safe",
-                        "title": "Proceed safely",
-                        "action": "proceed_safe",
-                        "payload": {},
-                        "risk": "low",
-                    },
-                    {
-                        "id": "abort",
-                        "title": "Abort",
-                        "action": "abort",
-                        "payload": {},
-                        "risk": "low",
-                    },
-                ],
-                "default_option_id": "ask_user",
-                "ttl_seconds": 600,
-                "policy": {"require_user_choice": True},
-            },
+        return AgentResponse(
+            json.dumps(
+                {
+                    "id": f"decision-{session_id}",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "reason": "need_user_input",
+                    "summary": f"Decision for {session_id}",
+                    "context": {"session_id": session_id},
+                    "options": [
+                        {
+                            "id": "ask_user",
+                            "title": "Ask user",
+                            "action": "ask_user",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                        {
+                            "id": "proceed_safe",
+                            "title": "Proceed safely",
+                            "action": "proceed_safe",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                        {
+                            "id": "abort",
+                            "title": "Abort",
+                            "action": "abort",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                    ],
+                    "default_option_id": "ask_user",
+                    "ttl_seconds": 600,
+                    "policy": {"require_user_choice": True},
+                },
+            )
         )
 
     def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
@@ -704,45 +714,47 @@ class DecisionOnlyForSessionAAgent:
         del approved_categories
         self._session_id = session_id
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         del messages
         session_id = self._session_id or "missing-session"
         if session_id != "session-a":
-            return "plain text response"
-        return json.dumps(
-            {
-                "id": "decision-session-a",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "reason": "need_user_input",
-                "summary": "Decision for session-a",
-                "context": {"session_id": "session-a"},
-                "options": [
-                    {
-                        "id": "ask_user",
-                        "title": "Ask user",
-                        "action": "ask_user",
-                        "payload": {},
-                        "risk": "low",
-                    },
-                    {
-                        "id": "proceed_safe",
-                        "title": "Proceed safely",
-                        "action": "proceed_safe",
-                        "payload": {},
-                        "risk": "low",
-                    },
-                    {
-                        "id": "abort",
-                        "title": "Abort",
-                        "action": "abort",
-                        "payload": {},
-                        "risk": "low",
-                    },
-                ],
-                "default_option_id": "ask_user",
-                "ttl_seconds": 600,
-                "policy": {"require_user_choice": True},
-            },
+            return AgentResponse("plain text response")
+        return AgentResponse(
+            json.dumps(
+                {
+                    "id": "decision-session-a",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "reason": "need_user_input",
+                    "summary": "Decision for session-a",
+                    "context": {"session_id": "session-a"},
+                    "options": [
+                        {
+                            "id": "ask_user",
+                            "title": "Ask user",
+                            "action": "ask_user",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                        {
+                            "id": "proceed_safe",
+                            "title": "Proceed safely",
+                            "action": "proceed_safe",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                        {
+                            "id": "abort",
+                            "title": "Abort",
+                            "action": "abort",
+                            "payload": {},
+                            "risk": "low",
+                        },
+                    ],
+                    "default_option_id": "ask_user",
+                    "ttl_seconds": 600,
+                    "policy": {"require_user_choice": True},
+                },
+            )
         )
 
     def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:

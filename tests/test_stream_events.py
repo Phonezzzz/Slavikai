@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from core.agent import Agent
+from core.agent_response import ResponseProduced
 from llm.brain_base import Brain
 from llm.deepseek_brain import DeepSeekBrain
 from llm.inception_brain import InceptionBrain
@@ -181,6 +182,10 @@ def test_agent_stream_runs_web_and_file_tools_in_one_response(tmp_path: Path) ->
         "Ответ использует веб и файл."
     )
     assert isinstance(events[-1], Done)
+    assert sum(isinstance(event, Done) for event in events) == 1
+    assert isinstance(events[-2], ResponseProduced)
+    assert "Ответ использует веб и файл." in events[-2].response.text
+    assert events[-2].response.auto_outcome is None
     assert brain.calls == 3
     assert brain.messages_seen[1][-1].role == "tool"
     assert brain.messages_seen[2][-1].role == "tool"

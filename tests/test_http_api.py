@@ -10,6 +10,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from config.http_server_config import HttpAuthConfig
+from core.agent_response import AgentResponse
 from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from core.tracer import Tracer
 from llm.brain_base import Brain
@@ -93,7 +94,7 @@ class DummyAgent:
             }
         )
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         content = messages[-1].content if messages else ""
         self.tracer.log("user_input", content)
         self.last_approval_request = None
@@ -123,7 +124,7 @@ class DummyAgent:
             "Chat interaction stored",
             {"interaction_id": interaction_id},
         )
-        return response_text
+        return AgentResponse(response_text)
 
     def record_feedback_event(
         self,
@@ -144,18 +145,20 @@ class DummyAgent:
 
 
 class ReportAgent(DummyAgent):
-    def respond(self, messages) -> str:
-        base = super().respond(messages)
-        return (
+    def respond(self, messages) -> AgentResponse:
+        base = super().respond(messages).text
+        return AgentResponse(
             f"{base}\n"
             'MWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
         )
 
 
 class ReportOnlyAgent(DummyAgent):
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         super().respond(messages)
-        return 'MWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
+        return AgentResponse(
+            'MWV_REPORT_JSON={"route":"chat","trace_id":null,"attempts":{"current":1,"max":1}}'
+        )
 
 
 async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> TestClient:
@@ -390,11 +393,11 @@ def test_chat_completions_returns_memory_preview_without_stale_trace(monkeypatch
             self.last_chat_interaction_id = "stale-trace"
             self.last_decision_packet = None
 
-        def respond(self, messages) -> str:
+        def respond(self, messages) -> AgentResponse:
             del messages
             self.last_approval_request = None
             self.last_decision_packet = SimpleNamespace(decision_type="memory_save")
-            return '{"decision_type":"memory_save","summary":"Confirm memory"}'
+            return AgentResponse('{"decision_type":"memory_save","summary":"Confirm memory"}')
 
     agent = MemoryPreviewAgent(trace_path)
 
@@ -731,11 +734,11 @@ def test_chat_completions_uses_runtime_global_main_config_for_scoped_default_age
             del main_api_key, persist
             self.main_config = main_config
 
-        def respond(self, messages) -> str:
+        def respond(self, messages) -> AgentResponse:
             del messages
             self._response_count += 1
             self.last_chat_interaction_id = f"trace-from-runtime-state-{self._response_count}"
-            return "ok"
+            return AgentResponse("ok")
 
         def record_feedback_event(
             self,

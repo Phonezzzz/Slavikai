@@ -47,7 +47,7 @@ def _sample_packet() -> DecisionPacket:
 
 def test_decision_layer_noop(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
-    response = agent.respond([LLMMessage(role="user", content="Привет")])
+    response = agent.respond([LLMMessage(role="user", content="Привет")]).text
     assert response
     assert agent.last_decision_packet is None
 
@@ -56,7 +56,7 @@ def test_decision_layer_forced_packet(tmp_path: Path) -> None:
     agent = _make_agent(tmp_path)
     packet = _sample_packet()
     agent.decision_handler.force_next(packet)
-    response = agent.respond([LLMMessage(role="user", content="Нужно решение")])
+    response = agent.respond([LLMMessage(role="user", content="Нужно решение")]).text
     payload = json.loads(response)
     assert payload["id"] == packet.id
     assert payload["reason"] == packet.reason.value

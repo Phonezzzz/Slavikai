@@ -109,7 +109,7 @@ def test_agent_applies_policies_and_logs_applied_ids(tmp_path: Path) -> None:
     )
     agent.save_to_memory = lambda prompt, answer: None  # type: ignore[method-assign]  # noqa: ARG005
 
-    reply = agent.respond([LLMMessage(role="user", content="hello")])
+    reply = agent.respond([LLMMessage(role="user", content="hello")]).text
     assert reply.startswith("ok")
 
     assert brain.last_messages is not None
@@ -157,7 +157,7 @@ def test_policies_not_applied_when_trigger_not_matched(tmp_path: Path) -> None:
     )
     agent.save_to_memory = lambda prompt, answer: None  # type: ignore[method-assign]  # noqa: ARG005
 
-    _ = agent.respond([LLMMessage(role="user", content="bye")])
+    _ = agent.respond([LLMMessage(role="user", content="bye")]).text
 
     assert brain.last_messages is not None
     assert not any(m.role == "system" and "Политики" in m.content for m in brain.last_messages)

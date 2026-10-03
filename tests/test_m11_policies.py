@@ -62,7 +62,7 @@ def test_command_lane_manual_mode_without_mwv(tmp_path: Path, monkeypatch) -> No
         raise AssertionError("MWV should not be called for / commands.")
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
-    response = agent.respond([LLMMessage(role="user", content="/plan goal")])
+    response = agent.respond([LLMMessage(role="user", content="/plan goal")]).text
 
     assert "без MWV" in response
     assert "отключена" in response.lower()
@@ -85,7 +85,7 @@ def test_skill_match_routes_to_mwv(tmp_path: Path, monkeypatch) -> None:
         return "mwv"
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
-    response = agent.respond([LLMMessage(role="user", content="use alpha skill")])
+    response = agent.respond([LLMMessage(role="user", content="use alpha skill")]).text
 
     assert response == "mwv"
     assert brain.calls == 0
@@ -109,7 +109,7 @@ def test_skill_ambiguous_blocks_with_instruction(tmp_path: Path, monkeypatch) ->
         raise AssertionError("MWV should not be called for ambiguous skill.")
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
-    response = agent.respond([LLMMessage(role="user", content="alpha request")])
+    response = agent.respond([LLMMessage(role="user", content="alpha request")]).text
 
     payload = json.loads(response)
     assert payload["reason"] == "ambiguous_skill"
@@ -135,7 +135,7 @@ def test_skill_deprecated_blocks_with_instruction(tmp_path: Path, monkeypatch) -
         raise AssertionError("MWV should not be called for deprecated skill.")
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
-    response = agent.respond([LLMMessage(role="user", content="legacy request")])
+    response = agent.respond([LLMMessage(role="user", content="legacy request")]).text
 
     lowered = response.lower()
     assert "что случилось" in lowered

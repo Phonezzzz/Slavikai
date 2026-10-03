@@ -35,7 +35,7 @@ def _make_agent(tmp_path: Path) -> Agent:
 
 
 def _seed_candidate(agent: Agent) -> str:
-    _ = agent.respond([LLMMessage(role="user", content="hello")])
+    _ = agent.respond([LLMMessage(role="user", content="hello")]).text
     interaction_id = agent.last_chat_interaction_id
     assert interaction_id
     agent.record_feedback_event(

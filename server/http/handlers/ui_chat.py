@@ -9,6 +9,7 @@ from typing import Literal
 
 from aiohttp import web
 
+from core.agent_response import AgentResponse, ResponseProduced
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
@@ -23,8 +24,8 @@ from server.http.common.chat_payload import (
     _extract_decision_payload,
     _normalize_trace_id,
     _parse_ui_chat_attachments,
+    _project_agent_response,
     _request_likely_web_intent,
-    _split_response_and_report,
     _ui_messages_to_llm,
 )
 from server.http.common.idempotency import (
@@ -899,6 +900,7 @@ async def _handle_ui_send_impl(
                 detail=lane,
             )
             response_raw: str
+            agent_response: AgentResponse | None = None
             respond_stream_method = getattr(agent, "respond_stream", None)
             if callable(respond_stream_method):
                 stream_text = ""
@@ -931,6 +933,13 @@ async def _handle_ui_send_impl(
                         if active_generation.token.is_set():
                             generation_cancelled = True
                             break
+                        if isinstance(stream_item, ResponseProduced):
+                            if not isinstance(stream_item.response, AgentResponse):
+                                raise TypeError("ResponseProduced requires AgentResponse")
+                            if agent_response is not None:
+                                raise RuntimeError("duplicate ResponseProduced event")
+                            agent_response = stream_item.response
+                            continue
                         if isinstance(stream_item, Done):
                             if stream_item.finish_reason == "cancelled":
                                 generation_cancelled = True
@@ -1101,13 +1110,12 @@ async def _handle_ui_send_impl(
                             lane=lane,
                         )
                         chat_content_stream_open = False
-                    response_raw_candidate = getattr(agent, "last_stream_response_raw", None)
-                    if isinstance(response_raw_candidate, str) and response_raw_candidate.strip():
-                        response_raw = response_raw_candidate
+                    if agent_response is not None:
+                        response_raw = agent_response.text
                     elif stream_error_message is not None:
                         response_raw = f"[Ошибка ответа: {stream_error_message}]"
                     else:
-                        response_raw = stream_text
+                        raise RuntimeError("respond_stream ended without ResponseProduced event")
                 except _ChatGenerationCancelled:
                     pending_chat_chunks = []
                     if chat_content_stream_open:
@@ -1155,18 +1163,21 @@ async def _handle_ui_send_impl(
                             lane=lane,
                         )
                         chat_content_stream_open = False
-                    response_raw_candidate = getattr(agent, "last_stream_response_raw", None)
-                    if isinstance(response_raw_candidate, str) and response_raw_candidate.strip():
-                        response_raw = response_raw_candidate
-                    else:
-                        response_raw = f"[Ошибка ответа: {exc}]"
+                    response_raw = f"[Ошибка ответа: {exc}]"
+                    agent_response = AgentResponse(
+                        response_raw,
+                        auto_outcome=(
+                            agent_response.auto_outcome if agent_response is not None else None
+                        ),
+                    )
                 finally:
                     stream_finished.set()
                     if not auto_progress_task.done():
                         auto_progress_task.cancel()
                         await asyncio.gather(auto_progress_task, return_exceptions=True)
             else:
-                response_raw = agent.respond(llm_messages)
+                agent_response = agent.respond(llm_messages)
+                response_raw = agent_response.text
             drain_consumed_rules = getattr(agent, "drain_consumed_desktop_rule_ids", None)
             if callable(drain_consumed_rules):
                 consumed_raw = drain_consumed_rules()
@@ -1176,7 +1187,9 @@ async def _handle_ui_send_impl(
                     else set()
                 )
                 await session_store.remove_desktop_rules(approval_scope, consumed_rule_ids)
-            response_text, mwv_report = _split_response_and_report(response_raw)
+            if agent_response is None:
+                agent_response = AgentResponse(response_raw)
+            response_text, mwv_report = _project_agent_response(agent_response)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,

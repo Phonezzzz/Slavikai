@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from core.agent_response import AgentResponse
 from core.decision.memory_save import build_memory_save_packet
 from server.http_api import MAX_CONTENT_CHARS
 from shared.models import JSONValue, ToolResult
@@ -30,9 +31,9 @@ class _MemoryConfirmationAgent(DummyAgent):
             ],
         }
 
-    def respond(self, messages) -> str:
+    def respond(self, messages) -> AgentResponse:
         text = messages[-1].content if messages else ""
-        return build_memory_save_packet(self._preview(text)).to_json()
+        return AgentResponse(build_memory_save_packet(self._preview(text)).to_json())
 
     def build_memory_save_preview(
         self,

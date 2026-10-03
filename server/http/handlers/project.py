@@ -11,7 +11,7 @@ from server import http_api as api
 from server.http.common.chat_payload import (
     _extract_decision_payload,
     _normalize_trace_id,
-    _split_response_and_report,
+    _project_agent_response,
     _ui_messages_to_llm,
 )
 from server.http.common.responses import error_response, json_response
@@ -367,8 +367,8 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 phase="agent.respond.start",
                 detail="project",
             )
-            response_raw = agent.respond(llm_messages)
-            response_text, mwv_report = _split_response_and_report(response_raw)
+            agent_response = agent.respond(llm_messages)
+            response_text, mwv_report = _project_agent_response(agent_response)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,

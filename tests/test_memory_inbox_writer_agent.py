@@ -43,7 +43,7 @@ def test_unknown_request_writes_inbox(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(agent.skill_index, "match_decision", _no_match)
     monkeypatch.setattr(agent, "_run_mwv_flow", lambda *a, **k: "ok")
 
-    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")])
+    response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")]).text
     assert response == "ok"
 
     inbox = agent._memory_inbox_store.list_items(MemoryCategory.INBOX, limit=10)

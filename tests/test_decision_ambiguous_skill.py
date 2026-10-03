@@ -60,7 +60,7 @@ def test_decision_packet_ambiguous_skill(tmp_path: Path, monkeypatch) -> None:
         raise AssertionError("MWV should not be called for ambiguous skill.")
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
-    response = agent.respond([LLMMessage(role="user", content="alpha request")])
+    response = agent.respond([LLMMessage(role="user", content="alpha request")]).text
 
     payload = json.loads(response)
     assert payload["reason"] == "ambiguous_skill"
