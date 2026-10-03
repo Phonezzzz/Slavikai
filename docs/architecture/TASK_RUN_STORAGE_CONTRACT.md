@@ -119,7 +119,7 @@ acceptance и безопасный continuation остаются отдельн�
 
 `AgentResponse.runtime_result` содержит исходный `AutoRunOutcome`, `LLMResult` или
 `AgentToolLoopResult`, отдельно от text projection. Это единственное поле для фактически
-возвращённого runtime result; alias `auto_outcome` удалён. HTTP выбирает Auto projection через
+возвращённого runtime result; прежнее поле `auto_outcome` заменено. HTTP выбирает Auto projection через
 тип результата. Raw result не публикуется в wire/UI протокол и не становится новым log/cache.
 
 Ask sync сохраняет result до review, web-evidence presentation и interaction logging.
@@ -130,6 +130,10 @@ error/cancelled observation. При отмене до получения result 
 `ToolResult.ok` или Auto outcome. Сбой review/logging после возвращённого result сохраняет
 этот result и не вызывает повторную generation/execution. Ошибка stream после tool loop
 возвращает request-local envelope, Error и один Done вместо потери result через outer catch.
+`ApprovalRequired` проходит через sync/stream Ask наружу к существующему approval handler;
+это policy control signal, а не `provider_model_error`. До подтверждения tool не выполняется.
+Эта ограниченная current-гарантия зарегистрирована как
+`runtime.agent.request_local_response` version 2 в `docs/runtime_contract_claims.json`.
 
 Это volatile boundary, **не full canonical capture или durable evidence**. LLMResult и
 вложенные collections не immutable. Если provider бросил exception до возврата loop result,

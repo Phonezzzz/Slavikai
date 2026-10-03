@@ -619,6 +619,8 @@ class AgentRoutingMixin:
                 ),
                 runtime_result=runtime_result,
             )
+        except ApprovalRequired:
+            raise
         except Exception as exc:  # noqa: BLE001
             self.logger.error("LLM error: %s", exc)
             try:
@@ -850,6 +852,8 @@ class AgentRoutingMixin:
             yield ResponseProduced(AgentResponse(response_text, runtime_result))
             yield Done()
             return
+        except ApprovalRequired:
+            raise
         except Exception as exc:  # noqa: BLE001
             self.logger.error("Stream LLM error: %s", exc)
             try:

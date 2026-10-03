@@ -316,14 +316,16 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
       "verified_by": [
         "tests/test_agent_modes_logic.py",
         "tests/test_agent_response_projection.py",
-        "tests/ui_api/test_stream_and_events.py"
+        "tests/ui_api/test_stream_and_events.py",
+        "tests/test_agent_response.py",
+        "tests/test_stream_events.py"
       ],
-      "summary": "Request-local typed Agent response reaches HTTP through sync return or ResponseProduced stream event; Auto outcome survives text projection. Missing/duplicate stream results fail without stale mutable result reads or execution rerun. This is not lifecycle authority or canonical durability."
+      "summary": "Request-local typed Agent response reaches HTTP through sync return or ResponseProduced stream event. Auto outcome and returned Ask LLMResult/AgentToolLoopResult remain separate from text projection; post-result review/logging errors retain observations, explicit stream error/cancellation retains returned loop result, and ApprovalRequired reaches the existing outer approval handler. Missing/duplicate stream results fail without stale mutable result reads or execution rerun. Volatile boundary only: lifecycle authority, partial observations before loop return and canonical durability remain target."
     }
   ]
 }
