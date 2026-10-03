@@ -7,6 +7,7 @@ from typing import Final
 from aiohttp import web
 
 from core.agent_response import AgentResponse
+from core.auto_runtime import AutoRunOutcome
 from core.mwv.models import MWV_REPORT_PREFIX
 from shared.models import JSONValue, LLMMessage
 from shared.sanitize import safe_json_loads
@@ -176,8 +177,8 @@ def _split_response_and_report(response_text: str) -> tuple[str, dict[str, JSONV
 
 def _project_agent_response(response: AgentResponse) -> tuple[str, dict[str, JSONValue] | None]:
     text, report = _split_response_and_report(response.text)
-    outcome = response.auto_outcome
-    if outcome is None:
+    outcome = response.runtime_result
+    if not isinstance(outcome, AutoRunOutcome):
         return text, report
     # Остальные поля остаются legacy UI presentation, не lifecycle authority.
     projected = dict(report) if report is not None else {}

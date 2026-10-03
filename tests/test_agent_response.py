@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from core.agent import Agent
+from core.agent_response import ResponseProduced
+from core.tool_loop import AgentToolLoopResult
 from llm.brain_base import Brain
+from llm.stream_model import Done
 from llm.types import LLMResult, ModelConfig, ToolCall, ToolSpec, WebSearchEvidence
 from shared.models import LLMMessage, ToolRequest, ToolResult
 
@@ -14,15 +19,18 @@ class SimpleBrain(Brain):
         self.calls = 0
         self.messages: list[LLMMessage] = []
         self.evidence: WebSearchEvidence | None = None
+        self.last_result: LLMResult | None = None
 
     def generate(self, messages: list[LLMMessage], config: ModelConfig | None = None) -> LLMResult:
         self.calls += 1
         self.messages = list(messages)
-        return LLMResult(text=self.text, web_search_evidence=self.evidence)
+        self.last_result = LLMResult(text=self.text, web_search_evidence=self.evidence)
+        return self.last_result
 
 
 class ToolLoopBrain(Brain):
     supports_native_tools = True
+    supports_streaming_tools = True
 
     def __init__(self) -> None:
         self.calls = 0
@@ -81,7 +89,12 @@ def test_agent_simple_response(tmp_path: Path) -> None:
     assert brain.calls >= 1
 
 
-def test_agent_chat_response_can_use_read_only_native_tool_loop(tmp_path: Path) -> None:
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("tool_ok", [False, True])
+@pytest.mark.parametrize("projection_failure", [None, "review", "log", "trace"])
+def test_agent_chat_response_can_use_read_only_native_tool_loop(
+    tmp_path: Path, monkeypatch, streaming: bool, tool_ok: bool, projection_failure: str | None
+) -> None:
     brain = ToolLoopBrain()
     agent = Agent(
         brain=brain,
@@ -91,9 +104,14 @@ def test_agent_chat_response_can_use_read_only_native_tool_loop(tmp_path: Path) 
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    observed = (
+        ToolResult.success({"output": "lookup:ping"})
+        if tool_ok
+        else ToolResult.failure("lookup failed", data={"output": "lookup:ping"})
+    )
     agent.tool_registry.register(
         "chat_lookup",
-        lambda request: ToolResult.success({"output": f"lookup:{request.args['query']}"}),
+        lambda request: observed,
         enabled=True,
         capability="read",
         description="Read-only chat lookup",
@@ -105,9 +123,47 @@ def test_agent_chat_response_can_use_read_only_native_tool_loop(tmp_path: Path) 
         chat_exposed=True,
     )
 
-    response = agent.respond([LLMMessage(role="user", content="use lookup")]).text
+    if projection_failure:
 
-    assert "tool loop final" in response
+        def _fail(*args, **kwargs):
+            raise RuntimeError("projection unavailable")
+
+        if projection_failure == "trace":
+            original_trace = agent.tracer.log
+
+            def _fail_trace(event, *args, **kwargs):
+                if event in {"native_tool_loop", "error"}:
+                    raise RuntimeError("projection unavailable")
+                return original_trace(event, *args, **kwargs)
+
+            monkeypatch.setattr(agent.tracer, "log", _fail_trace)
+        else:
+            monkeypatch.setattr(
+                agent,
+                "_review_answer" if projection_failure == "review" else "_log_chat_interaction",
+                _fail,
+            )
+    messages = [LLMMessage(role="user", content="use lookup")]
+    if streaming:
+        events = list(agent.respond_stream(messages))
+        produced = [event for event in events if isinstance(event, ResponseProduced)]
+        assert len(produced) == 1
+        envelope = produced[0].response
+        assert isinstance(events[-1], Done)
+        assert sum(isinstance(event, Done) for event in events) == 1
+    else:
+        envelope = agent.respond(messages)
+    response = envelope.text
+    assert isinstance(envelope.runtime_result, AgentToolLoopResult)
+    assert envelope.runtime_result.tool_calls[0].call.id == "lookup-1"
+    assert envelope.runtime_result.tool_calls[0].result is observed
+    assert envelope.runtime_result.tool_calls[0].result.ok is tool_ok
+    if projection_failure:
+        assert envelope.failure is not None
+        assert "projection unavailable" in envelope.failure.message
+    else:
+        assert envelope.failure is None
+        assert "tool loop final" in response
     assert brain.calls == 2
     assert (
         ToolSpec(
@@ -188,7 +244,11 @@ def test_agent_xai_web_search_without_evidence_blocks_answer(tmp_path: Path) -> 
     assert "I checked the internet" not in response
 
 
-def test_agent_xai_web_search_with_evidence_allows_answer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("projection_failure", [False, True])
+def test_agent_xai_web_search_with_evidence_allows_answer(
+    tmp_path: Path, monkeypatch, streaming: bool, projection_failure: bool
+) -> None:
     brain = SimpleBrain("answer from xAI native web search")
     brain.evidence = WebSearchEvidence(
         requested=True,
@@ -207,10 +267,32 @@ def test_agent_xai_web_search_with_evidence_allows_answer(tmp_path: Path) -> Non
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
 
-    response = agent.respond([LLMMessage(role="user", content="latest info")]).text
+    if projection_failure:
 
-    assert "answer from xAI native web search" in response
-    assert "web_search_not_executed" not in response
+        def _fail_review(_text):
+            raise RuntimeError("review unavailable")
+
+        monkeypatch.setattr(agent, "_review_answer", _fail_review)
+    messages = [LLMMessage(role="user", content="latest info")]
+    if streaming:
+        events = list(agent.respond_stream(messages))
+        produced = [event for event in events if isinstance(event, ResponseProduced)]
+        assert len(produced) == 1
+        envelope = produced[0].response
+    else:
+        envelope = agent.respond(messages)
+    assert isinstance(envelope.runtime_result, LLMResult)
+    assert envelope.runtime_result is brain.last_result
+    assert envelope.runtime_result.web_search_evidence is brain.evidence
+    assert envelope.runtime_result.text == "answer from xAI native web search"
+    assert brain.calls == 1
+    if projection_failure:
+        assert envelope.failure is not None
+        assert "review unavailable" in envelope.failure.message
+    else:
+        assert envelope.failure is None
+        assert "answer from xAI native web search" in envelope.text
+        assert "web_search_not_executed" not in envelope.text
 
 
 def test_agent_blocks_web_claim_without_runtime_evidence(tmp_path: Path) -> None:

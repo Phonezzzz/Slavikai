@@ -94,8 +94,8 @@ observations. Граница `Agent.respond` / HTTP теперь описана 
 ## Request-local Agent response — foundation B2b
 
 `core/agent_response.py::AgentResponse` отделяет text projection от исходного
-`AutoRunOutcome`. Все sync `Agent.respond` paths возвращают envelope. У остальных paths
-пока есть только text; отсутствие Auto outcome не означает success, failure или acceptance.
+`AutoRunOutcome`. Все sync `Agent.respond` paths возвращают envelope. B2c ниже расширяет
+поле до `runtime_result`; отсутствие result не означает success, failure или acceptance.
 Существующие HTTP consumers принимают новый typed contract, без string compatibility.
 
 Stream передаёт envelope через внутренний `ResponseProduced` event. HTTP ловит его в
@@ -112,8 +112,37 @@ next steps берутся из typed outcome, даже если text содер�
 Остальные report fields и остальные execution profiles остаются legacy presentation;
 их запрещено использовать как terminal authority или acceptance evidence.
 Envelope не является canonical tool payload, immutable evidence record или durable run.
-Store adoption, typed Ask/MWV/Desktop/approval/error observations, run identity propagation,
+Store adoption, typed MWV/Desktop/approval observations, run identity propagation,
 acceptance и безопасный continuation остаются отдельными обязательными foundation шагами.
+
+## Typed Ask observations — foundation B2c
+
+`AgentResponse.runtime_result` содержит исходный `AutoRunOutcome`, `LLMResult` или
+`AgentToolLoopResult`, отдельно от text projection. Это единственное поле для фактически
+возвращённого runtime result; alias `auto_outcome` удалён. HTTP выбирает Auto projection через
+тип результата. Raw result не публикуется в wire/UI протокол и не становится новым log/cache.
+
+Ask sync сохраняет result до review, web-evidence presentation и interaction logging.
+Ask stream сохраняет generator return tool loop, включая выполненные tool calls, explicit
+error/cancelled observation. При отмене до получения result envelope не фабрикуется.
+Отмена после получения result передаёт observation и cancelled Done, без assertion acceptance.
+`ResponseFailure` отдельно фиксирует исключение generation/projection/transport; она не меняет
+`ToolResult.ok` или Auto outcome. Сбой review/logging после возвращённого result сохраняет
+этот result и не вызывает повторную generation/execution. Ошибка stream после tool loop
+возвращает request-local envelope, Error и один Done вместо потери result через outer catch.
+
+Это volatile boundary, **не full canonical capture или durable evidence**. LLMResult и
+вложенные collections не immutable. Если provider бросил exception до возврата loop result,
+его частичные observations ещё не гарантированно сохраняются; отдельные tool-stream events
+не заменяют dispatch journal/canonical capture. Local web prefetch имеет отдельный legacy
+observation path. MWV/Desktop и approval/decision ещё теряют typed observations в projection;
+они остаются обязательным следующим B2 срезом до подключения lifecycle authority.
+
+Проверки: `tests/test_agent_response.py` — настоящий Ask tool loop/gateway, ok/failed tool,
+sync/stream, fault injection review/logging и сохранение исходного LLMResult native web path;
+`tests/test_stream_events.py` — сохранение tool observations после provider Error или
+cancellation, один request-local result и Done. Existing HTTP/Auto tests защищают pairing,
+request isolation и отсутствие rerun после stream contract error.
 
 ## Следующий обязательный срез B2
 

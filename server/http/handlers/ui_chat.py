@@ -9,7 +9,7 @@ from typing import Literal
 
 from aiohttp import web
 
-from core.agent_response import AgentResponse, ResponseProduced
+from core.agent_response import AgentResponse, ResponseFailure, ResponseProduced
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
@@ -1166,9 +1166,10 @@ async def _handle_ui_send_impl(
                     response_raw = f"[Ошибка ответа: {exc}]"
                     agent_response = AgentResponse(
                         response_raw,
-                        auto_outcome=(
-                            agent_response.auto_outcome if agent_response is not None else None
+                        runtime_result=(
+                            agent_response.runtime_result if agent_response is not None else None
                         ),
+                        failure=ResponseFailure(stream_error.code, stream_error.message),
                     )
                 finally:
                     stream_finished.set()

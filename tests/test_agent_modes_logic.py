@@ -319,7 +319,7 @@ def test_auto_sync_response_preserves_outcome_before_text_projection(
     )
     monkeypatch.setattr(agent, "handle_auto_command", lambda *args, **kwargs: outcome)
     response = agent.respond([LLMMessage(role="user", content="workspace_read status")])
-    assert response.auto_outcome is outcome
+    assert response.runtime_result is outcome
     assert response.text == outcome.text
 
 
@@ -333,7 +333,7 @@ def test_auto_stream_response_preserves_outcome_before_text_projection(
     events = list(agent.respond_stream([LLMMessage(role="user", content="workspace_read status")]))
     produced = [event for event in events if isinstance(event, ResponseProduced)]
     assert len(produced) == 1
-    assert produced[0].response.auto_outcome is outcome
+    assert produced[0].response.runtime_result is outcome
     assert produced[0].response.text == outcome.text
     assert isinstance(events[-1], Done)
 
@@ -349,7 +349,7 @@ def test_auto_observation_survives_interaction_logging_failure(tmp_path: Path, m
 
     monkeypatch.setattr(agent, "_log_chat_interaction", fail_logging)
     response = agent.respond([LLMMessage(role="user", content="workspace_read status")])
-    assert response.auto_outcome is outcome
+    assert response.runtime_result is outcome
     assert response.text != outcome.text
     assert "interaction log unavailable" in response.text
     assert outcome.status == AutoRunStatus.COMPLETED

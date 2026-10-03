@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from core.agent import Agent
 from core.agent_response import ResponseProduced
+from core.tool_loop import AgentToolLoopResult
 from llm.brain_base import Brain
 from llm.deepseek_brain import DeepSeekBrain
 from llm.inception_brain import InceptionBrain
@@ -13,6 +15,7 @@ from llm.local_http_brain import LocalHttpBrain
 from llm.openrouter_brain import OpenRouterBrain
 from llm.stream_model import (
     Done,
+    Error,
     StreamEvent,
     TextDelta,
     ToolCallArgumentsDelta,
@@ -141,7 +144,10 @@ class _WebAndFileBrain(Brain):
         return LLMResult(text="Ответ использует веб и файл.")
 
 
-def test_agent_stream_runs_web_and_file_tools_in_one_response(tmp_path: Path) -> None:
+@pytest.mark.parametrize("termination", ["normal", "error", "cancelled"])
+def test_agent_stream_runs_web_and_file_tools_in_one_response(
+    tmp_path: Path, monkeypatch, termination: str
+) -> None:
     brain = _WebAndFileBrain()
     agent = Agent(
         brain=brain,
@@ -173,19 +179,55 @@ def test_agent_stream_runs_web_and_file_tools_in_one_response(tmp_path: Path) ->
         chat_exposed=True,
     )
 
-    events = list(agent.respond_stream([LLMMessage(role="user", content="Сверь веб и README")]))
+    token = asyncio.Event()
+    if termination != "normal":
+        provider_stream = brain.generate_stream_events
+
+        def _interrupted_provider(*args, **kwargs):
+            if brain.calls == 1:
+                if termination == "error":
+                    yield Error(message="provider interrupted", code="provider_model_error")
+                    yield Done(finish_reason="error")
+                else:
+                    token.set()
+                    yield Done(finish_reason="cancelled")
+                return
+            yield from provider_stream(*args, **kwargs)
+
+        monkeypatch.setattr(brain, "generate_stream_events", _interrupted_provider)
+    events = list(
+        agent.respond_stream(
+            [LLMMessage(role="user", content="Сверь веб и README")], cancellation_token=token
+        )
+    )
 
     completed = [event for event in events if isinstance(event, ToolCallCompleted)]
-    assert [event.call.name for event in completed] == ["web", "workspace_read"]
+    expected_tools = ["web", "workspace_read"] if termination == "normal" else ["web"]
+    assert [event.call.name for event in completed] == expected_tools
     assert all(event.result is not None and event.result.ok for event in completed)
-    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == (
-        "Ответ использует веб и файл."
-    )
+    if termination == "normal":
+        assert "".join(event.text for event in events if isinstance(event, TextDelta)) == (
+            "Ответ использует веб и файл."
+        )
     assert isinstance(events[-1], Done)
     assert sum(isinstance(event, Done) for event in events) == 1
     assert isinstance(events[-2], ResponseProduced)
-    assert "Ответ использует веб и файл." in events[-2].response.text
-    assert events[-2].response.auto_outcome is None
-    assert brain.calls == 3
-    assert brain.messages_seen[1][-1].role == "tool"
-    assert brain.messages_seen[2][-1].role == "tool"
+    if termination == "normal":
+        assert "Ответ использует веб и файл." in events[-2].response.text
+    result = events[-2].response.runtime_result
+    assert isinstance(result, AgentToolLoopResult)
+    expected_ids = ["web-call", "file-call"] if termination == "normal" else ["web-call"]
+    assert [item.call.id for item in result.tool_calls] == expected_ids
+    assert all(
+        item.result is event.result
+        for item, event in zip(result.tool_calls, completed, strict=True)
+    )
+    if termination == "normal":
+        assert brain.calls == 3
+        assert brain.messages_seen[1][-1].role == "tool"
+        assert brain.messages_seen[2][-1].role == "tool"
+    else:
+        assert brain.calls == 1
+        assert events[-1].finish_reason == termination
+        assert result.cancelled is (termination == "cancelled")
+        assert result.error == ("provider interrupted" if termination == "error" else None)
