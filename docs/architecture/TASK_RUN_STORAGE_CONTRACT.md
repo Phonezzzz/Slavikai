@@ -161,3 +161,18 @@ request isolation и отсутствие rerun после stream contract error
 После этого — operation intents/dispatch journaling. До подключения единой authority
 не создавать второй authoritative lifecycle в Auto directories, UI snapshots или logs.
 Compression не начинается раньше PR F и всех canonical-output readiness gates.
+
+### Ask approval observation/retry — исправление B2c
+
+`ApprovalRequired` проходит через Ask sync/stream к существующему approval handler,
+не превращаясь в provider failure. Ask approval report имеет `route=chat`.
+При `approve_once` decision handler передаёт category grant только внутреннему повторному
+send; wire payload не задаёт grant, session storage его не сохраняет. Owning Agent lock
+удерживается до восстановления persisted approval context, в том числе при ошибке/отмене.
+HTTP regression проверяет настоящий Gateway execution после confirm, отсутствие grant в
+следующем send и provider failure после tool. Это текущая category-based permission на один
+повторный request, **не** immutable approval конкретных tool arguments. Повторный chat send
+снова вызывает модель; сохранённого tool continuation ещё нет. `edit_and_approve` здесь
+не предлагается и отклоняется до изменения decision, поскольку replay не применяет edits.
+Binding approval к сохранённому ToolRequest/continuation остаётся foundation prerequisite;
+этот corrective slice не повышает readiness capture/recovery/compression.

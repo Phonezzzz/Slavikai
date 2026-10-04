@@ -4,12 +4,14 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Literal
 
 from aiohttp import web
 
 from core.agent_response import AgentResponse, ResponseFailure, ResponseProduced
+from core.approval_policy import ApprovalCategory
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
@@ -34,6 +36,7 @@ from server.http.common.idempotency import (
     normalize_idempotency_key,
 )
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import AgentProtocol
 from server.http_api import (
     MAX_CONTENT_CHARS,
     MAX_TOTAL_PAYLOAD_CHARS,
@@ -339,6 +342,22 @@ def _normalize_agent_decision(
     return normalized
 
 
+@asynccontextmanager
+async def _send_approval_scope(
+    lock: asyncio.Lock,
+    agent: AgentProtocol,
+    session_id: str,
+    persisted: set[ApprovalCategory],
+    transient: set[ApprovalCategory] | None,
+) -> AsyncIterator[None]:
+    async with lock:
+        try:
+            yield
+        finally:
+            if transient is not None:
+                agent.set_session_context(session_id, persisted)
+
+
 async def _handle_ui_send_impl(
     request: web.Request,
     *,
@@ -346,6 +365,7 @@ async def _handle_ui_send_impl(
     lane: MessageLane,
     bypass_root_gate: bool = False,
     idempotency_enabled: bool = True,
+    transient_approval_categories: set[ApprovalCategory] | None = None,
 ) -> web.Response:
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
@@ -824,7 +844,9 @@ async def _handle_ui_send_impl(
         live_stream_sent = False
         generation_cancelled = False
         set_runtime_workspace_root(session_root)
-        async with agent_lock:
+        async with _send_approval_scope(
+            agent_lock, agent, session_id, approved_categories, transient_approval_categories
+        ):
             previous_trace_id = _normalize_trace_id(
                 getattr(agent, "last_chat_interaction_id", None)
             )
@@ -853,7 +875,9 @@ async def _handle_ui_send_impl(
                 )
             try:
                 await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
-                agent.set_session_context(session_id, approved_categories)
+                agent.set_session_context(
+                    session_id, approved_categories | (transient_approval_categories or set())
+                )
                 set_desktop_policy_context = getattr(agent, "set_desktop_policy_context", None)
                 clear_desktop_policy_context = getattr(agent, "clear_desktop_policy_context", None)
                 if mode == "desktop":
@@ -1693,6 +1717,7 @@ async def handle_ui_send_resume(
     payload: dict[str, JSONValue],
     lane: MessageLane,
     bypass_root_gate: bool,
+    transient_approval_categories: set[ApprovalCategory] | None = None,
 ) -> web.Response:
     return await _handle_ui_send_impl(
         request,
@@ -1700,4 +1725,5 @@ async def handle_ui_send_resume(
         lane=lane,
         bypass_root_gate=bypass_root_gate,
         idempotency_enabled=False,
+        transient_approval_categories=transient_approval_categories,
     )

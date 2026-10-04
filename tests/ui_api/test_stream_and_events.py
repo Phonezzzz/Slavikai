@@ -1580,7 +1580,10 @@ def test_stream_response_contract_fault_does_not_reuse_stale_result_or_rerun(dup
     asyncio.run(run())
 
 
-def test_ui_ask_stream_creates_real_network_approval(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("provider_fails_after_tool", [False, True])
+def test_ui_ask_stream_creates_real_network_approval(
+    tmp_path, monkeypatch, provider_fails_after_tool
+) -> None:
     monkeypatch.chdir(tmp_path)
 
     class ApprovalReadBrain(_RealAgentStreamingBrain):
@@ -1588,7 +1591,11 @@ def test_ui_ask_stream_creates_real_network_approval(tmp_path, monkeypatch) -> N
         supports_streaming_tools = True
 
         def generate(self, messages, config=None, tools=None):
-            del messages, config
+            del config
+            if messages[-1].role == "tool":
+                if provider_fails_after_tool:
+                    raise RuntimeError("provider failed after tool")
+                return LLMResult(text="network complete")
             assert any(tool.name == "network_lookup" for tool in tools or [])
             return LLMResult(
                 text="",
@@ -1635,9 +1642,82 @@ def test_ui_ask_stream_creates_real_network_approval(tmp_path, monkeypatch) -> N
             assert isinstance(decision, dict)
             assert decision["status"] == "pending"
             assert decision["decision_type"] == "tool_approval"
+            assert all(option["id"] != "edit_and_approve" for option in decision["options"])
             assert payload.get("generation_error") is None
             assert executions == []
+            assert payload["mwv_report"]["route"] == "chat"
+            edited = await client.post(
+                "/ui/api/decision/respond",
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision["id"],
+                    "choice": "edit_and_approve",
+                    "edited_action": {"args": {}},
+                },
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert edited.status == 400
+            assert executions == []
+            approved = await client.post(
+                "/ui/api/decision/respond",
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision["id"],
+                    "choice": "approve_once",
+                },
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert approved.status == 200
+            resumed = await approved.json()
+            assert resumed["resume"]["ok"] is True
+            assert resumed["resume"]["data"]["decision"] is None
+            assert len(executions) == 1
+            assert agent.approved_categories == set()
+            again = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "lookup again", "approved_categories": ["NETWORK_RISK"]},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert again.status == 200
+            assert (await again.json())["decision"]["status"] == "pending"
+            assert len(executions) == 1
         finally:
             await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_transient_send_approval_restored_before_lock_release(cancelled) -> None:
+    from server.http.handlers.ui_chat import _send_approval_scope
+
+    async def run() -> None:
+        agent = DummyAgent()
+        lock = asyncio.Lock()
+        persisted = {"FS_OUTSIDE_WORKSPACE"}
+        entered = asyncio.Event()
+
+        async def owner() -> None:
+            async with _send_approval_scope(lock, agent, "session", persisted, {"NETWORK_RISK"}):
+                agent.set_session_context("session", persisted | {"NETWORK_RISK"})
+                entered.set()
+                if cancelled:
+                    await asyncio.Future()
+                raise RuntimeError("send failed")
+
+        async def next_request() -> None:
+            await entered.wait()
+            async with lock:
+                assert agent._approved_categories == persisted
+
+        task = asyncio.create_task(owner())
+        follower = asyncio.create_task(next_request())
+        await entered.wait()
+        if cancelled:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+            await task
+        await follower
+        assert not lock.locked()
 
     asyncio.run(run())

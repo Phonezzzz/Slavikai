@@ -9,7 +9,7 @@ from typing import Literal
 from aiohttp import web
 
 from core.agent_computer import execute_local_commit
-from core.approval_policy import ApprovalRequired
+from core.approval_policy import ApprovalCategory, ApprovalRequired
 from core.desktop_policy import (
     DesktopApprovalRule,
     DesktopApprovalScope,
@@ -382,6 +382,13 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
+    if tool_source_endpoint in {"chat.send", "workspace.send"} and choice == "edit_and_approve":
+        return error_response(
+            status=400,
+            message="Редактирование tool call при повторном chat send не поддерживается.",
+            error_type="invalid_request_error",
+            code="invalid_request_error",
+        )
     if tool_source_endpoint == "chat.run_root":
         if choice == "approve_session":
             return error_response(
@@ -424,6 +431,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
         *,
         source_endpoint: str,
         resume_payload: dict[str, object],
+        approval_categories: set[ApprovalCategory],
     ) -> dict[str, JSONValue]:
         source_request_raw = resume_payload.get("source_request")
         if not isinstance(source_request_raw, dict):
@@ -447,6 +455,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             },
             lane=lane,
             bypass_root_gate=False,
+            transient_approval_categories=approval_categories,
         )
         parsed_resume_payload: dict[str, JSONValue] = {}
         if isinstance(resumed_response.text, str) and resumed_response.text.strip():
@@ -576,6 +585,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             return await _resume_chat_source_request(
                 source_endpoint=source_endpoint,
                 resume_payload={str(key): value for key, value in resume_payload.items()},
+                approval_categories=one_call_categories,
             )
 
         if source_endpoint == "workspace.root_select":

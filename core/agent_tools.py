@@ -1156,7 +1156,7 @@ class AgentToolsMixin:
         why_parts = [f"category={request.category}", f"required={required}"]
         if command_lane:
             why_parts.append("mode=command_lane (без MWV)")
-        route = "command" if command_lane else "mwv"
+        route = "command" if command_lane else "chat" if self.runtime_mode == "ask" else "mwv"
         next_source = source_endpoint.strip() if isinstance(source_endpoint, str) else ""
         next_resume = dict(resume_payload) if isinstance(resume_payload, dict) else {}
         if not command_lane and self.runtime_mode == "auto":
