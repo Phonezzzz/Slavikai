@@ -347,3 +347,84 @@ def test_continuation_retains_completed_tool_when_provider_raises() -> None:
     assert len(executions) == 1
     assert failed.value.result.tool_calls[0].result is canonical
     assert failed.value.result.messages[-1].tool_call_id == "original"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("tool_ok", [False, True])
+def test_cancel_during_dispatch_retains_completed_observation(streaming, tool_ok):
+    import asyncio
+    import json
+
+    token = asyncio.Event()
+    executions = []
+    observed = ToolResult(
+        ok=tool_ok,
+        data={"output": "full diagnostics\nsecond line", "stderr": "warning"},
+        error=None if tool_ok else "command failed",
+        meta={"exit_code": 0 if tool_ok else 7},
+    )
+
+    class BatchBrain:
+        calls = 0
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            assert self.calls == 1
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(id="first", name="lookup", arguments={"index": 1}),
+                    ToolCall(id="second", name="lookup", arguments={"index": 2}),
+                ],
+            )
+
+        def generate_stream_events(
+            self, messages, config=None, tools=None, cancellation_token=None
+        ):
+            for call in self.generate(messages, config, tools).tool_calls:
+                yield ToolCallCompleted(call=call)
+            yield Done()
+
+    def execute(request):
+        executions.append(request)
+        token.set()
+        return observed
+
+    registry = ToolRegistry()
+    registry.register("lookup", execute, capability="read")
+    brain = BatchBrain()
+    loop = AgentToolLoop()
+    args = dict(
+        brain=brain,
+        gateway=ToolGateway(registry),
+        messages=[LLMMessage(role="user", content="lookup")],
+        tools=registry.list_tool_specs(),
+        cancellation_token=token,
+    )
+    events = []
+    if streaming:
+        iterator = loop.run_stream_events(**args)
+        while True:
+            try:
+                events.append(next(iterator))
+            except StopIteration as stopped:
+                result = stopped.value
+                break
+        completed = [event for event in events if isinstance(event, ToolCallCompleted)]
+        assert len(completed) == 1 and completed[0].result is observed
+        assert events[-1].finish_reason == "cancelled"
+    else:
+        result = loop.run(**args)
+    assert result.cancelled is True
+    assert brain.calls == 1
+    assert len(executions) == 1 and executions[0].args == {"index": 1}
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].call.id == "first"
+    assert result.tool_calls[0].result is observed
+    assert result.tool_calls[0].result.ok is tool_ok
+    assert result.messages[-1].role == "tool"
+    assert result.messages[-1].tool_call_id == "first"
+    serialized = json.loads(result.messages[-1].content)
+    assert serialized["data"] == observed.data
+    assert serialized["meta"] == observed.meta
+    assert serialized["ok"] is tool_ok

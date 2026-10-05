@@ -107,14 +107,14 @@ async def _iterate_stream_in_thread(
 ) -> AsyncIterator[object]:
     try:
         while True:
-            if cancellation_token.is_set():
-                return
             item = await asyncio.to_thread(_next_stream_item, iterator)
             if item is _STREAM_EXHAUSTED:
                 return
+            if cancellation_token.is_set() and not isinstance(item, ResponseProduced):
+                continue
+            yield item
             if cancellation_token.is_set():
                 return
-            yield item
     finally:
         close = getattr(iterator, "close", None)
         if callable(close):
@@ -946,15 +946,15 @@ async def _handle_ui_send_impl(
                         stream_iterator,
                         active_generation.token,
                     ):
-                        if active_generation.token.is_set():
-                            generation_cancelled = True
-                            break
                         if isinstance(stream_item, ResponseProduced):
                             if not isinstance(stream_item.response, AgentResponse):
                                 raise TypeError("ResponseProduced requires AgentResponse")
                             if agent_response is not None:
                                 raise RuntimeError("duplicate ResponseProduced event")
                             agent_response = stream_item.response
+                            continue
+                        if active_generation.token.is_set():
+                            generation_cancelled = True
                             continue
                         if isinstance(stream_item, Done):
                             if stream_item.finish_reason == "cancelled":

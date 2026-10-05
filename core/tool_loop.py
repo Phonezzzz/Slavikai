@@ -412,15 +412,6 @@ class AgentToolLoop:
                         )
                     )
                     raise
-                if cancellation_requested(cancellation_token):
-                    yield Done(finish_reason="cancelled")
-                    return AgentToolLoopResult(
-                        text=visible_text,
-                        messages=history,
-                        tool_calls=executed,
-                        iterations=iteration,
-                        cancelled=True,
-                    )
                 executed_call = ExecutedToolCall(call=tool_call, result=tool_result)
                 executed.append(executed_call)
                 history.append(
@@ -440,6 +431,15 @@ class AgentToolLoop:
                         tool_calls=executed,
                         iterations=iteration,
                         error="tool_policy_denied",
+                    )
+                if cancellation_requested(cancellation_token):
+                    yield Done(finish_reason="cancelled")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        cancelled=True,
                     )
 
         message = f"Цикл инструментов превысил лимит: {self.max_iterations} итераций."

@@ -126,6 +126,11 @@ Ask sync сохраняет result до review, web-evidence presentation и int
 Ask stream сохраняет generator return tool loop, включая выполненные tool calls, explicit
 error/cancelled observation. При отмене до получения result envelope не фабрикуется.
 Отмена после получения result передаёт observation и cancelled Done, без assertion acceptance.
+Streaming dispatch записывает завершённый ToolResult и исходный call ID до проверки
+cancellation, как sync path. Следующий tool не выполняется. HTTP при cancellation
+дочитывает owning Agent iterator до request-local ResponseProduced либо его завершения;
+отменённые text/tool transport events не публикуются. Полученный typed result остаётся
+request-local и не добавляется в wire payload или durable storage.
 `ResponseFailure` отдельно фиксирует исключение generation/projection/transport; она не меняет
 `ToolResult.ok` или Auto outcome. Сбой review/logging после возвращённого result сохраняет
 этот result и не вызывает повторную generation/execution. Ошибка stream после tool loop
@@ -133,13 +138,13 @@ error/cancelled observation. При отмене до получения result 
 `ApprovalRequired` проходит через sync/stream Ask наружу к существующему approval handler;
 это policy control signal, а не `provider_model_error`. До подтверждения tool не выполняется.
 Эта ограниченная current-гарантия зарегистрирована как
-`runtime.agent.request_local_response` version 2 в `docs/runtime_contract_claims.json`.
+`runtime.agent.request_local_response` version 3 в `docs/runtime_contract_claims.json`.
 
 Это volatile boundary, **не full canonical capture или durable evidence**. LLMResult и
 вложенные collections не immutable. Если provider бросил exception до возврата loop result,
 его частичные observations ещё не гарантированно сохраняются; отдельные tool-stream events
-не заменяют dispatch journal/canonical capture. Local web prefetch имеет отдельный legacy
-observation path. MWV/Desktop и approval/decision ещё теряют typed observations в projection;
+не заменяют dispatch journal/canonical capture. Local web prefetch удалён; native approval
+continuation описан ниже. MWV/Desktop ещё не имеют полного typed observation contract;
 они остаются обязательным следующим B2 срезом до подключения lifecycle authority.
 
 Проверки: `tests/test_agent_response.py` — настоящий Ask tool loop/gateway, ok/failed tool,
@@ -147,6 +152,10 @@ sync/stream, fault injection review/logging и сохранение исходн
 `tests/test_stream_events.py` — сохранение tool observations после provider Error или
 cancellation, один request-local result и Done. Existing HTTP/Auto tests защищают pairing,
 request isolation и отсутствие rerun после stream contract error.
+`tests/test_tool_loop.py` проверяет отмену внутри реального Gateway dispatch для ok/failed
+result, diagnostics/meta, original call ID/history и отсутствие второго dispatch в sync/stream.
+`tests/ui_api/test_stream_and_events.py` проверяет тот же путь через настоящий Agent/HTTP:
+typed observation дочитывается transport consumer, а response остаётся cancelled.
 
 ## Следующий обязательный срез B2
 

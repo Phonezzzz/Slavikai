@@ -1999,3 +1999,104 @@ def test_ui_native_approval_returns_next_pending_decision(tmp_path, monkeypatch)
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("tool_ok", [False, True])
+def test_http_cancel_during_tool_drains_request_local_observation(tmp_path, monkeypatch, tool_ok):
+    from server.http.handlers import ui_chat
+
+    monkeypatch.chdir(tmp_path)
+    produced = []
+    consumed = []
+    original_iterator = ui_chat._iterate_stream_in_thread
+
+    async def record_consumed(iterator, cancellation_token):
+        async for event in original_iterator(iterator, cancellation_token):
+            if isinstance(event, ResponseProduced):
+                consumed.append(event.response)
+            yield event
+
+    monkeypatch.setattr(ui_chat, "_iterate_stream_in_thread", record_consumed)
+    tokens = []
+    executions = []
+    observed = ToolResult(
+        ok=tool_ok,
+        data={"output": "completed before cancellation", "stderr": "diagnostic"},
+        error=None if tool_ok else "lookup failed",
+        meta={"exit_code": 0 if tool_ok else 3},
+    )
+
+    class BatchBrain(_RealAgentStreamingBrain):
+        supports_native_tools = True
+        supports_streaming_tools = True
+        calls = 0
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            assert self.calls == 1
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(id="captured", name="lookup", arguments={"index": 1}),
+                    ToolCall(id="forbidden", name="lookup", arguments={"index": 2}),
+                ],
+            )
+
+    class RecordingAgent(_RealStreamingAgent):
+        def respond_stream(self, messages, cancellation_token=None):
+            tokens.append(cancellation_token)
+            for event in super().respond_stream(messages, cancellation_token):
+                if isinstance(event, ResponseProduced):
+                    produced.append(event.response)
+                yield event
+
+    agent = RecordingAgent(
+        brain=BatchBrain(),
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+
+    def execute(request):
+        executions.append(request)
+        tokens[-1].set()
+        return observed
+
+    agent.tool_registry.register(
+        "lookup",
+        execute,
+        capability="read",
+        description="Read lookup",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
+
+    async def run():
+        client = await _create_client(agent)
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session_id)
+            response = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "lookup"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert response.status == 200
+            payload = await response.json()
+            assert payload["cancelled"] is True
+            assert len(produced) == 1
+            assert consumed == produced
+            result = produced[0].runtime_result
+            assert result.cancelled is True
+            assert len(result.tool_calls) == 1
+            assert result.tool_calls[0].call.id == "captured"
+            assert result.tool_calls[0].result is observed
+            assert result.messages[-1].tool_call_id == "captured"
+            assert produced[0].text == ""
+            assert agent.brain.calls == 1
+            assert len(executions) == 1 and executions[0].args == {"index": 1}
+            assert payload.get("generation_error") is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
