@@ -31,6 +31,7 @@ class SimpleBrain(Brain):
 class ToolLoopBrain(Brain):
     supports_native_tools = True
     supports_streaming_tools = True
+    tool_name = "chat_lookup"
 
     def __init__(self) -> None:
         self.calls = 0
@@ -53,7 +54,7 @@ class ToolLoopBrain(Brain):
                 tool_calls=[
                     ToolCall(
                         id="lookup-1",
-                        name="chat_lookup",
+                        name=self.tool_name,
                         arguments={"query": "ping"},
                     )
                 ],
@@ -181,7 +182,8 @@ def test_agent_chat_response_can_use_read_only_native_tool_loop(
 
 
 def test_agent_local_web_search_executes_before_non_xai_answer(tmp_path: Path) -> None:
-    brain = SimpleBrain("answer from verified search")
+    brain = ToolLoopBrain()
+    brain.tool_name = "web"
     agent = Agent(
         brain=brain,
         main_config=ModelConfig(provider="local", model="local", web_search_enabled=True),
@@ -193,18 +195,38 @@ def test_agent_local_web_search_executes_before_non_xai_answer(tmp_path: Path) -
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     web_tool = FakeWebTool(ToolResult.success({"output": "Source — https://example.test"}))
-    agent.tool_registry.register("web", web_tool.handle, enabled=True, capability="read")
+    agent.tool_registry.register(
+        "web",
+        web_tool.handle,
+        enabled=True,
+        capability="read",
+        description="Search the web",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
 
     response = agent.respond([LLMMessage(role="user", content="latest info")]).text
 
-    assert "answer from verified search" in response
+    assert "Source — https://example.test" in response
     assert web_tool.calls == 1
-    assert brain.calls == 1
-    assert any("Verified runtime web search evidence" in item.content for item in brain.messages)
+    assert brain.calls == 2
+    assert brain.messages_seen[-1][-1].role == "tool"
+    assert brain.messages_seen[-1][-1].tool_call_id == "lookup-1"
 
 
-def test_agent_local_web_search_error_blocks_final_answer(tmp_path: Path) -> None:
-    brain = SimpleBrain("should not be emitted")
+@pytest.mark.parametrize(
+    "web_result, diagnostic",
+    [
+        (ToolResult.failure("SERPER_API_KEY missing"), "SERPER_API_KEY missing"),
+        (ToolResult.success({"output": " \n\t"}), "empty web result"),
+        (ToolResult.success({"output": {"unexpected": "payload"}}), "empty web result"),
+    ],
+)
+def test_agent_local_web_search_error_blocks_final_answer(
+    tmp_path: Path, web_result: ToolResult, diagnostic: str
+) -> None:
+    brain = ToolLoopBrain()
+    brain.tool_name = "web"
     agent = Agent(
         brain=brain,
         main_config=ModelConfig(provider="local", model="local", web_search_enabled=True),
@@ -215,15 +237,23 @@ def test_agent_local_web_search_error_blocks_final_answer(tmp_path: Path) -> Non
     agent.memory.get_recent = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     agent.memory.get_user_prefs = lambda: []  # type: ignore[attr-defined]
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
-    web_tool = FakeWebTool(ToolResult.failure("SERPER_API_KEY missing"))
-    agent.tool_registry.register("web", web_tool.handle, enabled=True, capability="read")
+    web_tool = FakeWebTool(web_result)
+    agent.tool_registry.register(
+        "web",
+        web_tool.handle,
+        enabled=True,
+        capability="read",
+        description="Search the web",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
 
     response = agent.respond([LLMMessage(role="user", content="latest info")]).text
 
-    assert "web_search_not_executed: SERPER_API_KEY missing" in response
+    assert f"web_search_not_executed: {diagnostic}" in response
     assert "should not be emitted" not in response
     assert web_tool.calls == 1
-    assert brain.calls == 0
+    assert brain.calls == 2
 
 
 def test_agent_xai_web_search_without_evidence_blocks_answer(tmp_path: Path) -> None:
@@ -370,6 +400,7 @@ def test_ask_network_approval_reaches_existing_handler(
     agent.vectors.search = lambda *args, **kwargs: []  # type: ignore[attr-defined]
     executions: list[ToolRequest] = []
     tool_name = "web" if prefetch else "chat_lookup"
+    brain.tool_name = tool_name
     agent.tool_registry.register(
         tool_name,
         lambda request: executions.append(request) or ToolResult.success({"output": "network"}),
@@ -397,18 +428,87 @@ def test_ask_network_approval_reaches_existing_handler(
     assert envelope.failure is None
     assert envelope.runtime_result is None
     assert executions == []
-    assert brain.calls == (0 if prefetch else 1)
-    if not prefetch:
-        from core.agent_tools import ChatApprovalUnavailable
+    assert brain.calls == 1
+    from core.agent_tools import ChatApprovalUnavailable
 
-        identity = agent.last_approval_resume_payload["continuation_id"]
-        with pytest.raises(ChatApprovalUnavailable):
-            agent.resume_chat_approval("spoofed")
-        resumed = agent.resume_chat_approval(identity)
-        assert len(executions) == 1
-        assert executions[0].args == {"query": "ping"}
-        assert resumed.runtime_result.tool_calls[0].call.id == "lookup-1"
+    identity = agent.last_approval_resume_payload["continuation_id"]
+    with pytest.raises(ChatApprovalUnavailable):
+        agent.resume_chat_approval("spoofed")
+    resumed = agent.resume_chat_approval(identity)
+    assert len(executions) == 1
+    assert executions[0].args == {"query": "ping"}
+    assert resumed.runtime_result.tool_calls[0].call.id == "lookup-1"
+    assert brain.calls == 2
+    with pytest.raises(ChatApprovalUnavailable):
+        agent.resume_chat_approval(identity)
+    assert len(executions) == 1
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("projection_failure", [False, True])
+def test_ask_continuation_finalizes_original_projection_context(
+    tmp_path, monkeypatch, streaming, projection_failure
+):
+    from core.rule_engine import PolicyApplication
+
+    class ClaimBrain(ToolLoopBrain):
+        def generate(self, messages, config=None, tools=None):
+            result = super().generate(messages, config, tools)
+            if not result.tool_calls:
+                result.text = "I checked the internet and found this."
+            return result
+
+    brain = ClaimBrain()
+    agent = Agent(
+        brain=brain,
+        enable_tools={"safe_mode": True},
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    agent.runtime_mode = "ask"
+    reviewed = []
+    monkeypatch.setattr(
+        agent, "_apply_policies", lambda _: PolicyApplication(["original-policy"], [])
+    )
+
+    def review(text):
+        reviewed.append(text)
+        if projection_failure:
+            raise RuntimeError("projection failure")
+        return text
+
+    monkeypatch.setattr(agent, "_review_answer", review)
+    agent.tool_registry.register(
+        "chat_lookup",
+        lambda _: ToolResult.success({"output": "not web evidence"}),
+        enabled=True,
+        capability="read",
+        risk_classes=["network"],
+        description="Network lookup",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
+    messages = [LLMMessage(role="user", content="lookup")]
+    if streaming:
+        list(agent.respond_stream(messages))
+    else:
+        agent.respond(messages)
+    identity = agent.last_approval_resume_payload["continuation_id"]
+    monkeypatch.setattr(agent, "_apply_policies", lambda _: pytest.fail("policy was recomputed"))
+    resumed = agent.resume_chat_approval(identity)
+    assert reviewed == ["I checked the internet and found this."]
+    if projection_failure:
+        assert resumed.failure.code == "response_projection_failed"
         assert brain.calls == 2
-        with pytest.raises(ChatApprovalUnavailable):
-            agent.resume_chat_approval(identity)
-        assert len(executions) == 1
+        assert resumed.runtime_result.tool_calls[0].call.id == "lookup-1"
+        assert resumed.runtime_result.tool_calls[0].result.ok is True
+        return
+    assert "web_search_not_executed" in resumed.text
+    assert agent.short_term[-1].content == resumed.text
+    interaction = agent._interaction_store.get_interaction(agent.last_chat_interaction_id)
+    assert interaction is not None
+    assert interaction.applied_policy_ids == ["original-policy"]
+    assert interaction.response_text == resumed.text
+    assert brain.calls == 2
+    assert resumed.runtime_result.tool_calls[0].call.id == "lookup-1"

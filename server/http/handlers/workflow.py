@@ -5,7 +5,6 @@ from pathlib import Path
 from aiohttp import web
 
 from core.mwv.verifier_runtime import has_canonical_repo_verifier
-from server.http.common.chat_cancellation import ChatCancellationRegistry
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import SessionApprovalStore
@@ -162,42 +161,44 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="mode_confirm_required",
             )
-    session_store: SessionApprovalStore = request.app["session_store"]
+    mode_agent = None
     if current_mode == "desktop" and next_mode != "desktop":
-        cancellation_registry: ChatCancellationRegistry = request.app["chat_cancellation_registry"]
+        cancellation_registry = request.app["chat_cancellation_registry"]
         await cancellation_registry.request_cancel(session_id)
-        await session_store.clear_desktop_rules(_agent_scope(request, session_id))
-        await hub.set_session_decision(session_id, None)
-    elif current_mode != "desktop" and next_mode == "desktop":
-        await session_store.clear_desktop_rules(_agent_scope(request, session_id))
-    if next_mode == "ask":
-        await hub.set_session_workflow(
-            session_id,
-            mode="ask",
-            active_task=None,
-        )
-    elif next_mode == "auto":
-        await hub.set_session_workflow(
-            session_id,
-            mode="auto",
-            active_plan=None,
-            active_task=None,
-        )
-    elif next_mode == "desktop":
-        await hub.set_session_workflow(
-            session_id,
-            mode="desktop",
-            active_plan=None,
-            active_task=None,
-            auto_state=None,
-        )
-    else:
-        await hub.set_session_workflow(session_id, mode=next_mode)
-    if current_mode == "desktop" and next_mode != "desktop":
-        agent = await _resolve_agent(request, session_id)
-        if agent is not None:
-            async with _agent_lock_for_request(request, session_id):
-                await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+        mode_agent = await _resolve_agent(request, session_id)
+    async with _agent_lock_for_request(request, session_id):
+        session_store: SessionApprovalStore = request.app["session_store"]
+        if current_mode == "desktop" and next_mode != "desktop":
+            await session_store.clear_desktop_rules(_agent_scope(request, session_id))
+            await hub.set_session_decision(session_id, None)
+        elif current_mode != "desktop" and next_mode == "desktop":
+            await session_store.clear_desktop_rules(_agent_scope(request, session_id))
+        if next_mode == "ask":
+            await hub.set_session_workflow(
+                session_id,
+                mode="ask",
+                active_task=None,
+            )
+        elif next_mode == "auto":
+            await hub.set_session_workflow(
+                session_id,
+                mode="auto",
+                active_plan=None,
+                active_task=None,
+            )
+        elif next_mode == "desktop":
+            await hub.set_session_workflow(
+                session_id,
+                mode="desktop",
+                active_plan=None,
+                active_task=None,
+                auto_state=None,
+            )
+        else:
+            await hub.set_session_workflow(session_id, mode=next_mode)
+        if current_mode == "desktop" and next_mode != "desktop":
+            if mode_agent is not None:
+                await _apply_agent_runtime_state(agent=mode_agent, hub=hub, session_id=session_id)
     updated = await hub.get_session_workflow(session_id)
     response = json_response(
         {

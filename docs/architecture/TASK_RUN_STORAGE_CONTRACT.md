@@ -170,8 +170,10 @@ Compression не начинается раньше PR F и всех canonical-ou
 оставшийся batch, tools/config и точный request subject ДО dispatch. Snapshot копируется
 от producer state; это внутренний scoped RAM checkpoint, не durable canonical evidence.
 Agent хранит один pending continuation с opaque identity на owning principal/session instance.
-Новый обычный turn сбрасывает snapshot; отсутствующий snapshot после restart даёт unavailable,
-никакой повторной generation или execution. Model/config и workspace root должны совпадать.
+Любой принятый UI turn сбрасывает snapshot до append, включая ранние ответы без Agent; отсутствующий snapshot после restart даёт unavailable,
+никакой повторной generation или execution. Model/config, mode, workspace root и последний user turn должны совпадать.
+После generation admission эти snapshots проверяются повторно под owning Agent lock;
+изменение mode/model/root использует тот же session lock.
 
 `chat.tool_continue` decision ссылается на checkpoint и исходный `user_message_id`.
 После atomic decision claim, generation admission и owning Agent lock runtime потребляет
@@ -192,14 +194,20 @@ observations. Provider cancellation также возвращает typed cancel
 `edit_and_approve` на этом пути пока отклоняется: edits требуют нового subject/consent.
 
 Legacy `chat.send` approval больше не вызывает ordinary send replay: без сохранённого native
-continuation возвращает unavailable. Local web prefetch, MWV approval continuation,
+continuation возвращает unavailable. Local web prefetch удалён: explicit web-search request
+добавляет инструкции, а модель вызывает доступный read-tool `web` через основной native loop.
+Успешный фактический web ToolResult даёт evidence; отсутствие/ошибка web call блокирует
+заявления о web-доступе. Provider без native tools не получает отдельного prefetch executor.
+MWV approval continuation,
 durable pause/restart recovery и terminal authority остаются отдельными foundation gaps.
 Gate canonical capture/durability не повышен, TinyJuice/compression не добавлены.
 
 Проверки: `tests/test_tool_loop.py` — sync/stream pause, exact subject/tamper rejection,
 same-category remaining batch, provider fault после dispatch; `tests/test_agent_response.py`
-— actual Agent/Gateway resume и single use; `tests/ui_api/test_stream_and_events.py` —
-HTTP confirm, busy retry, missing snapshot, changed workspace root, original call ID,
+— actual Agent/Gateway resume, single use, сохранённый policy context,
+review/web evidence/finalization, InteractionLog/short-term и projection fault; `tests/ui_api/test_stream_and_events.py` —
+HTTP confirm, busy retry, missing snapshot, mode/model/root admission races,
+HTTP cancellation до/после dispatch, web-search approval, original call ID,
 один user turn, отсутствие permission leak/wire injection, post-tool provider error.
 
 
@@ -214,10 +222,17 @@ browser/GUI/process resources сохраняются вместе. Execution, re
 
 Confirm продолжает исходный native call/history через тот же loop и Desktop verifier.
 Exact request validation не обходит DesktopPolicyRuntime, DENY или descriptor checks.
-Once/session/persistent consent применяет существующие scoped rules; отказ admission удаляет
-новые rules и сохраняет decision pending без execution. HTTP добавляет только assistant
+Session/persistent consent применяет существующие scoped rules; отказ admission удаляет
+новые session/persistent rules и сохраняет decision pending без execution. Once-grants
+принадлежат exact pending ToolRequest: при нескольких action scopes накапливаются в checkpoint
+до admission всего request, затем consumed/discarded после dispatch/cancel/invalidation.
+Они не сохраняются как session grants и не переходят следующему tool call. HTTP добавляет только assistant
 continuation к исходному user turn. Tests проверяют настоящий Agent/Gateway, file-delete и
 verifier, а не fake responder, самостоятельно интерпретирующий approval rules.
+Top-level decision response включает актуальные messages/output для обычного UI transport.
+При HTTP cancellation owned decision operation завершает transition: до dispatch pending,
+после consumed checkpoint resolved с cancelled response; transport cancellation не оставляет
+executing decision и не повторяет tool. Это request-task ownership, не durable run lifecycle.
 
 Это volatile runtime ownership, не durable lifecycle adoption, canonical storage или
 restart-safe continuation. После expiry UI decision возвращает unavailable при confirm;

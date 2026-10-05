@@ -134,7 +134,8 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
     required_category = "FS_OUTSIDE_WORKSPACE"
     approved = await session_store.get_categories(_agent_scope(request, session_id))
     if not require_approval or required_category in approved:
-        await hub.set_workspace_root(session_id, str(target_root))
+        async with api._agent_lock_for_request(request, session_id):
+            await hub.set_workspace_root(session_id, str(target_root))
         response = json_response(
             {
                 "session_id": session_id,

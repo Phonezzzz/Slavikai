@@ -90,7 +90,15 @@ class AgentRoutingMixin:
             history: list[LLMMessage] | None = None,
         ) -> None: ...
         def _reset_approval_state(self, *, cancel_runtime: bool = True) -> None: ...
-        def _capture_chat_approval(self, exc: ApprovalRequired, raw_input: str) -> None: ...
+        def _capture_chat_approval(
+            self,
+            exc: ApprovalRequired,
+            raw_input: str,
+            *,
+            policy_application: PolicyApplication | None = None,
+            web_evidence: WebSearchEvidence | None = None,
+            record_in_history: bool = False,
+        ) -> None: ...
 
         last_approval_source_endpoint: str | None
         last_approval_resume_payload: dict[str, JSONValue] | None
@@ -567,19 +575,6 @@ class AgentRoutingMixin:
                 messages_with_context,
                 web_evidence,
             )
-            if (
-                web_evidence.requested
-                and web_evidence.provider == "local"
-                and not web_evidence.executed
-            ):
-                return AgentResponse(
-                    self._finalize_chat_response(
-                        last_content=last_content,
-                        record_in_history=record_in_history,
-                        policy_application=policy_application,
-                        response_text=self._web_search_not_executed(web_evidence),
-                    )
-                )
             tool_loop_result = self._run_chat_tool_loop_if_available(messages_with_context)
             runtime_result = tool_loop_result
             if tool_loop_result is not None:
@@ -593,6 +588,7 @@ class AgentRoutingMixin:
                             "tools": [item.call.name for item in tool_loop_result.tool_calls],
                         },
                     )
+                web_evidence = self._merge_tool_web_search_evidence(web_evidence, tool_loop_result)
                 reviewed = self._review_answer(tool_loop_result.text)
                 blocked = self._web_search_block_reason(reviewed, web_evidence)
                 if blocked is not None:
@@ -630,7 +626,14 @@ class AgentRoutingMixin:
                 ),
                 runtime_result=runtime_result,
             )
-        except ApprovalRequired:
+        except ApprovalRequired as exc:
+            self._capture_chat_approval(
+                exc,
+                last_content,
+                policy_application=policy_application,
+                web_evidence=web_evidence,
+                record_in_history=record_in_history,
+            )
             raise
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, ToolLoopExecutionError):
@@ -752,26 +755,6 @@ class AgentRoutingMixin:
                 messages_with_context,
                 web_evidence,
             )
-            if (
-                web_evidence.requested
-                and web_evidence.provider == "local"
-                and not web_evidence.executed
-            ):
-                if cancellation_requested(cancellation_token):
-                    yield Done(finish_reason="cancelled")
-                    return
-                blocked_text = self._web_search_not_executed(web_evidence)
-                yield TextDelta(text=blocked_text)
-                response_text = self._finalize_chat_response(
-                    last_content=last_content,
-                    record_in_history=record_in_history,
-                    policy_application=policy_application,
-                    response_text=blocked_text,
-                )
-                self.last_stream_response_raw = response_text
-                yield ResponseProduced(AgentResponse(response_text))
-                yield Done()
-                return
             collected_text = ""
             brain = self._get_main_brain()
             if web_evidence.requested and web_evidence.provider == "xai_native":
@@ -824,6 +807,7 @@ class AgentRoutingMixin:
                     yield ResponseProduced(AgentResponse("", runtime_result))
                     yield Done(finish_reason="cancelled")
                     return
+                web_evidence = self._merge_tool_web_search_evidence(web_evidence, tool_loop_result)
                 collected_text = tool_loop_result.text
                 if tool_loop_result.tool_calls:
                     self.tracer.log(
@@ -870,7 +854,14 @@ class AgentRoutingMixin:
             yield ResponseProduced(AgentResponse(response_text, runtime_result))
             yield Done()
             return
-        except ApprovalRequired:
+        except ApprovalRequired as exc:
+            self._capture_chat_approval(
+                exc,
+                last_content,
+                policy_application=policy_application,
+                web_evidence=web_evidence,
+                record_in_history=record_in_history,
+            )
             raise
         except Exception as exc:  # noqa: BLE001
             self.logger.error("Stream LLM error: %s", exc)
@@ -909,42 +900,42 @@ class AgentRoutingMixin:
     ) -> tuple[list[LLMMessage], WebSearchEvidence]:
         if not evidence.requested or evidence.provider != "local":
             return messages_with_context, evidence
-        request = ToolRequest(name="web", args={"query": last_content})
-        result = self._call_tool_logged("web_search:runtime", request, safe_mode_override=None)
-        if not result.ok:
-            failed = WebSearchEvidence(
-                requested=True,
-                executed=False,
-                provider="local",
-                tool_call_seen=True,
-                error=result.error or "local web search failed",
-            )
-            self._log_web_search_evidence(failed)
-            return messages_with_context, failed
-        output_raw = result.data.get("output")
-        output = output_raw if isinstance(output_raw, str) else str(result.data)
-        local_result_seen = bool(output.strip())
-        next_evidence = WebSearchEvidence(
-            requested=True,
-            executed=local_result_seen,
+        return [
+            *messages_with_context,
+            LLMMessage(
+                role="system",
+                content=(
+                    "Web search was explicitly enabled for this request. Use the available web "
+                    "tool through native tool calling before answering. Only successful tool "
+                    "results are web evidence; never claim browsing without such evidence."
+                ),
+            ),
+        ], evidence
+
+    def _merge_tool_web_search_evidence(
+        self, existing: WebSearchEvidence, result: AgentToolLoopResult
+    ) -> WebSearchEvidence:
+        if existing.provider == "xai_native":
+            return existing
+        web_calls = [item for item in result.tool_calls if item.call.name == "web"]
+        if not web_calls:
+            return existing
+        successful = any(
+            item.result.ok
+            and isinstance(output := item.result.data.get("output"), str)
+            and bool(output.strip())
+            for item in web_calls
+        )
+        evidence = WebSearchEvidence(
+            requested=existing.requested,
+            executed=successful,
             provider="local",
             tool_call_seen=True,
-            local_result_seen=local_result_seen,
-            error=None if local_result_seen else "local web search returned empty result",
+            local_result_seen=successful,
+            error=None if successful else web_calls[-1].result.error or "empty web result",
         )
-        self._log_web_search_evidence(next_evidence)
-        if not next_evidence.executed:
-            return messages_with_context, next_evidence
-        web_context = LLMMessage(
-            role="system",
-            content=(
-                "Verified runtime web search evidence for the next answer:\n"
-                f"{output}\n\n"
-                "Use only this verified search result as web evidence. "
-                "Do not claim additional browsing."
-            ),
-        )
-        return [*messages_with_context, web_context], next_evidence
+        self._log_web_search_evidence(evidence)
+        return evidence
 
     def _merge_llm_web_search_evidence(
         self,

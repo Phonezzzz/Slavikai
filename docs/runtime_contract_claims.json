@@ -316,7 +316,7 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
       "verified_by": [
         "tests/test_tool_loop.py",
@@ -324,7 +324,7 @@
         "tests/ui_api/test_stream_and_events.py",
         "tests/ui_api/test_desktop_mode.py"
       ],
-      "summary": "Native Ask/Desktop approval continues the captured exact tool call and original history without user replay. Desktop retains a bounded host lease and thread-affine resources until resume or cleanup. Single-use state is principal/session-owned and volatile; missing/expired checkpoints fail closed. Durable continuation, prefetch/MWV continuation and canonical payload storage remain target."
+      "summary": "Native Ask/Desktop approval continues the captured exact tool call and original history without user replay. Desktop retains a bounded host lease and thread-affine resources until resume or cleanup. Single-use state is principal/session-owned and volatile; missing/expired checkpoints fail closed. Local web search uses this same native loop; admission snapshots, HTTP cancellation settlement, original Ask finalization, compound once-scopes and UI history projection are covered. Durable continuation, MWV continuation and canonical payload storage remain target."
     },
     {
       "id": "runtime.agent.request_local_response",

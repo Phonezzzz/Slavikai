@@ -141,6 +141,35 @@ async def _trace_desktop_approval_choice(
 
 
 async def handle_ui_decision_respond(request: web.Request) -> web.Response:
+    request_cancellation = asyncio.Event()
+    owned_session: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    operation = asyncio.create_task(
+        _complete_ui_decision(request, request_cancellation, owned_session)
+    )
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        request_cancellation.set()
+        if owned_session.done():
+            await request.app["chat_cancellation_registry"].request_cancel(owned_session.result())
+        else:
+            operation.cancel()
+        try:
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    continue
+            operation.result()
+        finally:
+            raise
+
+
+async def _complete_ui_decision(
+    request: web.Request,
+    request_cancellation: asyncio.Event,
+    owned_session: asyncio.Future[str],
+) -> web.Response:
     hub = request.app["ui_hub"]
     session_store = request.app["session_store"]
 
@@ -225,6 +254,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
+    owned_session.set_result(session_id)
     if choice == "always_allow":
         owner_error = _require_owner(request)
         if owner_error is not None:
@@ -482,6 +512,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 resume_payload={str(key): value for key, value in resume_payload.items()},
                 desktop_scope=desktop_scope,
                 choice=choice,
+                request_cancellation=request_cancellation,
             )
         if source_endpoint in {"chat.send", "workspace.send"}:
             return {
@@ -571,7 +602,8 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "error": str(exc),
                     "source_endpoint": source_endpoint,
                 }
-            await hub.set_workspace_root(session_id, str(target_root))
+            async with _agent_lock_for_request(request, session_id):
+                await hub.set_workspace_root(session_id, str(target_root))
             return {
                 "ok": True,
                 "source_endpoint": source_endpoint,
@@ -778,7 +810,8 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 )
                 await hub.append_message(session_id, assistant_message, lane="workspace")
                 if cloned:
-                    await hub.set_workspace_root(session_id, str(target_path))
+                    async with _agent_lock_for_request(request, session_id):
+                        await hub.set_workspace_root(session_id, str(target_path))
                 return {
                     "ok": cloned,
                     "source_endpoint": source_endpoint,
@@ -1369,7 +1402,8 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
-        await hub.set_workspace_root(session_id, str(root_candidate))
+        async with _agent_lock_for_request(request, session_id):
+            await hub.set_workspace_root(session_id, str(root_candidate))
 
         resolved = _decision_with_status(current_decision, status="resolved", resolved=True)
         updated, latest = await hub.transition_session_decision(
@@ -1764,6 +1798,8 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                     "ok": True,
                     "decision": latest_decision,
                     "status": latest_status,
+                    "messages": await hub.get_messages(session_id, lane="chat"),
+                    "output": await hub.get_session_output(session_id),
                     "resume_started": resume_started,
                     "already_resolved": latest_status in {"resolved", "rejected"},
                     "resume": resume,
@@ -1784,6 +1820,8 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             "ok": True,
             "decision": normalized_resolved,
             "status": "resolved",
+            "messages": await hub.get_messages(session_id, lane="chat"),
+            "output": await hub.get_session_output(session_id),
             "resume_started": resume_started,
             "already_resolved": True,
             "resume": resume,

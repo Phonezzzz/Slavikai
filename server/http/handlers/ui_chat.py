@@ -736,7 +736,19 @@ async def _handle_ui_send_impl(
             lane=lane,
             attachments=attachments,
         )
-        await hub.append_message(session_id, user_message, lane=lane)
+        async with agent_lock:
+            pending_payload = getattr(agent, "last_approval_resume_payload", None)
+            if isinstance(pending_payload, dict):
+                pending_identity = pending_payload.get("continuation_id")
+                if isinstance(pending_identity, str):
+                    await asyncio.to_thread(agent.cancel_chat_approval, pending_identity)
+                    await session_store.remove_desktop_rules(
+                        approval_scope,
+                        {rule.rule_id for rule in desktop_rules if rule.source == "once"},
+                    )
+                    desktop_rules = [rule for rule in desktop_rules if rule.source != "once"]
+                    await hub.set_session_decision(session_id, None)
+            await hub.append_message(session_id, user_message, lane=lane)
         user_message_id_raw = user_message.get("message_id")
         user_message_id = (
             user_message_id_raw
@@ -1752,6 +1764,7 @@ async def handle_ui_approval_continue(
     resume_payload: dict[str, object],
     desktop_scope: DesktopApprovalScope | None = None,
     choice: str = "approve_once",
+    request_cancellation: asyncio.Event | None = None,
 ) -> dict[str, JSONValue]:
     def not_started(code: str) -> dict[str, JSONValue]:
         return {"ok": False, "error": code, "resume_started": False}
@@ -1800,6 +1813,21 @@ async def handle_ui_approval_continue(
     persistent_store: DesktopPolicyStore = request.app["desktop_policy_store"]
     try:
         async with lock:
+            current_workflow = await hub.get_session_workflow(session_id)
+            current_model = await hub.get_session_model(session_id)
+            current_root = await _workspace_root_for_session(hub, session_id)
+            current_messages = await hub.get_messages(session_id, lane="chat")
+            current_users = [m for m in current_messages if m.get("role") == "user"]
+            if (
+                current_workflow.get("mode") != mode
+                or current_model != selected
+                or current_root != session_root
+                or not current_users
+                or current_users[-1].get("message_id") != parent
+                or generation.token.is_set()
+                or (request_cancellation is not None and request_cancellation.is_set())
+            ):
+                return not_started("approval_continuation_unavailable")
             try:
                 agent.validate_chat_approval(identity)
             except ChatApprovalUnavailable as exc:
@@ -1821,6 +1849,8 @@ async def handle_ui_approval_continue(
                 )
                 if choice == "always_allow":
                     persistent_store.add_rule(created_rule)
+                elif choice == "approve_once":
+                    agent.add_chat_approval_rule(identity, created_rule)
                 else:
                     await session_store.add_desktop_rule(scope, created_rule)
                 agent.set_desktop_policy_context(
@@ -1903,7 +1933,7 @@ async def handle_ui_approval_continue(
                 },
             }
     finally:
-        if created_rule is not None and (not started or created_rule.source == "once"):
+        if created_rule is not None and not started:
             if created_rule.source == "persistent":
                 persistent_store.remove_rule(created_rule.rule_id)
             else:

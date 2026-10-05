@@ -24,6 +24,7 @@ from server.http.common.ui_settings import _load_provider_instance, _load_provid
 from server.http_api import (
     SUPPORTED_MODEL_PROVIDERS,
     UI_SESSION_HEADER,
+    _agent_lock_for_request,
     _artifact_file_payload,
     _artifact_mime_from_ext,
     _closest_model_suggestion,
@@ -414,8 +415,9 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
         )
     model_config = api._build_model_config(provider, model_raw)
     runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
-    await runtime_model_state.set_session_override(session_id, model_config)
-    await hub.set_session_model(session_id, provider, model_raw)
+    async with _agent_lock_for_request(request, session_id):
+        await runtime_model_state.set_session_override(session_id, model_config)
+        await hub.set_session_model(session_id, provider, model_raw)
     response = json_response(
         {"session_id": session_id, "selected_model": {"provider": provider, "model": model_raw}}
     )

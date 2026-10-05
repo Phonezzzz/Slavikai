@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,11 +38,16 @@ from core.skills.candidates import CandidateDraft, sanitize_text, suggest_patter
 from core.skills.index import SkillMatch, SkillResolution
 from core.skills.models import SkillRisk
 from core.tool_gateway import ToolGateway
-from core.tool_loop import AgentToolLoop, ToolLoopContinuation, ToolLoopExecutionError
+from core.tool_loop import (
+    AgentToolLoop,
+    AgentToolLoopResult,
+    ToolLoopContinuation,
+    ToolLoopExecutionError,
+)
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.cancellation import cancellation_requested
-from llm.types import ModelConfig
+from llm.types import ModelConfig, WebSearchEvidence
 from shared.memory_companion_models import (
     BlockedReason,
     ChatInteractionLog,
@@ -125,6 +130,10 @@ class PendingChatApproval:
     raw_input: str
     session_id: str | None
     mode: str
+    desktop_once_rules: tuple[DesktopApprovalRule, ...] = ()
+    policy_application: PolicyApplication | None = None
+    web_evidence: WebSearchEvidence | None = None
+    record_in_history: bool = False
 
 
 class AgentToolsMixin:
@@ -158,6 +167,21 @@ class AgentToolsMixin:
         _computer_log: ComputerActivityLog
 
         def _project_desktop_outcome(self, outcome: DesktopRunOutcome) -> str: ...
+        def _review_answer(self, raw_answer: str) -> str: ...
+        def _merge_tool_web_search_evidence(
+            self, existing: WebSearchEvidence, result: AgentToolLoopResult
+        ) -> WebSearchEvidence: ...
+        def _web_search_block_reason(
+            self, answer: str, evidence: WebSearchEvidence
+        ) -> str | None: ...
+        def _finalize_chat_response(
+            self,
+            *,
+            last_content: str,
+            record_in_history: bool,
+            policy_application: PolicyApplication,
+            response_text: str,
+        ) -> str: ...
         def _build_brain(self) -> Brain: ...
         def build_memory_save_preview(
             self,
@@ -290,6 +314,10 @@ class AgentToolsMixin:
     def _reset_approval_state(self, *, cancel_runtime: bool = True) -> None:
         if cancel_runtime:
             self.desktop_runtime.cancel_pending()
+            if self._pending_chat_approval is not None:
+                self.desktop_policy_runtime.consume_once_rule_ids(
+                    {rule.rule_id for rule in self._pending_chat_approval.desktop_once_rules}
+                )
         self._pending_chat_approval = None
         self.last_approval_request = None
         self.last_approval_source_endpoint = None
@@ -352,8 +380,21 @@ class AgentToolsMixin:
             self._append_short_term([LLMMessage(role="assistant", content=response)])
         return response
 
-    def _capture_chat_approval(self, exc: ApprovalRequired, raw_input: str) -> None:
+    def _capture_chat_approval(
+        self,
+        exc: ApprovalRequired,
+        raw_input: str,
+        *,
+        policy_application: PolicyApplication | None = None,
+        web_evidence: WebSearchEvidence | None = None,
+        record_in_history: bool = False,
+    ) -> None:
         if self.runtime_mode not in {"ask", "desktop"} or exc.continuation is None:
+            return
+        if (
+            self._pending_chat_approval is not None
+            and self._pending_chat_approval.continuation is exc.continuation
+        ):
             return
         identity = uuid.uuid4().hex
         self._pending_chat_approval = PendingChatApproval(
@@ -363,6 +404,9 @@ class AgentToolsMixin:
             raw_input,
             self.session_id,
             self.runtime_mode,
+            policy_application=policy_application,
+            web_evidence=web_evidence,
+            record_in_history=record_in_history,
         )
         self.last_approval_source_endpoint = "chat.tool_continue"
         self.last_approval_resume_payload = {
@@ -379,12 +423,26 @@ class AgentToolsMixin:
             or self.runtime_mode != pending.mode
             or pending.continuation.config != self.main_config
             or pending.brain is not self._get_main_brain()
+            or (
+                pending.mode == "ask"
+                and (pending.policy_application is None or pending.web_evidence is None)
+            )
         ):
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
         if pending.mode == "desktop" and not self.desktop_runtime.has_continuation(
             pending.continuation
         ):
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
+
+    def add_chat_approval_rule(self, identity: str, rule: DesktopApprovalRule) -> None:
+        self.validate_chat_approval(identity)
+        pending = self._pending_chat_approval
+        assert pending is not None
+        if pending.mode != "desktop" or rule.source != "once":
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        self._pending_chat_approval = replace(
+            pending, desktop_once_rules=(*pending.desktop_once_rules, rule)
+        )
 
     def resume_chat_approval(
         self, identity: str, *, cancellation_token: asyncio.Event | None = None
@@ -422,6 +480,23 @@ class AgentToolsMixin:
             raise ChatApprovalUnavailable(str(exc)) from exc
         except ApprovalRequired as exc:
             self._capture_chat_approval(exc, pending.raw_input)
+            next_pending = self._pending_chat_approval
+            if next_pending is not None:
+                self._pending_chat_approval = replace(
+                    next_pending,
+                    policy_application=pending.policy_application,
+                    web_evidence=pending.web_evidence,
+                    record_in_history=pending.record_in_history,
+                )
+                next_pending = self._pending_chat_approval
+            if (
+                next_pending is not None
+                and next_pending.continuation.pending_calls[0]
+                == pending.continuation.pending_calls[0]
+            ):
+                self._pending_chat_approval = replace(
+                    next_pending, desktop_once_rules=pending.desktop_once_rules
+                )
             return AgentResponse(
                 self._handle_approval_required(
                     exc.request,
@@ -444,9 +519,41 @@ class AgentToolsMixin:
                 "[Ошибка продолжения ответа]",
                 failure=ResponseFailure("continuation_failed", "Ошибка продолжения ответа"),
             )
-        return AgentResponse(
-            "Продолжение отменено." if result.cancelled else result.text, runtime_result=result
-        )
+        finally:
+            remaining = self._pending_chat_approval
+            if (
+                remaining is None
+                or remaining.continuation.pending_calls[0] != pending.continuation.pending_calls[0]
+            ):
+                self.desktop_policy_runtime.consume_once_rule_ids(
+                    {rule.rule_id for rule in pending.desktop_once_rules}
+                )
+        if result.cancelled:
+            return AgentResponse("Продолжение отменено.", runtime_result=result)
+        assert pending.policy_application is not None and pending.web_evidence is not None
+        try:
+            reviewed = self._review_answer(result.text)
+            blocked = self._web_search_block_reason(
+                reviewed, self._merge_tool_web_search_evidence(pending.web_evidence, result)
+            )
+            return AgentResponse(
+                self._finalize_chat_response(
+                    last_content=pending.raw_input,
+                    record_in_history=pending.record_in_history,
+                    policy_application=pending.policy_application,
+                    response_text=blocked if blocked is not None else reviewed,
+                ),
+                runtime_result=result,
+            )
+        except Exception:
+            self.logger.exception("Chat continuation projection failed")
+            return AgentResponse(
+                "[Ошибка представления ответа]",
+                runtime_result=result,
+                failure=ResponseFailure(
+                    "response_projection_failed", "Ошибка представления ответа"
+                ),
+            )
 
     def cancel_chat_approval(self, identity: str) -> None:
         pending = self._pending_chat_approval
@@ -467,7 +574,9 @@ class AgentToolsMixin:
         principal_id: str = "legacy",
     ) -> None:
         persistent = self.desktop_policy_store.list_rules(subject_principal_id=principal_id)
-        self.desktop_policy_runtime = DesktopPolicyRuntime([*persistent, *rules])
+        pending = self._pending_chat_approval
+        once_rules = pending.desktop_once_rules if pending is not None else ()
+        self.desktop_policy_runtime = DesktopPolicyRuntime([*persistent, *rules, *once_rules])
 
     def clear_desktop_policy_context(self) -> None:
         self.desktop_policy_runtime = DesktopPolicyRuntime()

@@ -399,6 +399,10 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path, monkeypatch
             assert len(agent.brain.seen) == 3
             assert len(set(agent.brain.owner_threads)) == 1
             chat_messages = await client.server.app["ui_hub"].get_messages(session_id, lane="chat")
+            assert payload["messages"] == chat_messages
+            assert payload["output"] == await client.server.app["ui_hub"].get_session_output(
+                session_id
+            )
             assert len([m for m in chat_messages if m.get("role") == "user"]) == 1
             assert any(
                 event == "desktop_approval_decision"
@@ -502,7 +506,7 @@ def test_desktop_session_approval_reuses_then_expires_on_mode_exit(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("termination", ["reject", "cancel", "mode_exit", "timeout"])
+@pytest.mark.parametrize("termination", ["reject", "cancel", "mode_exit", "timeout", "new_turn"])
 def test_desktop_paused_run_owns_lease_until_cleanup(tmp_path, monkeypatch, termination):
     monkeypatch.chdir(tmp_path)
     target = tmp_path / "Downloads" / "pending.iso"
@@ -553,6 +557,13 @@ def test_desktop_paused_run_owns_lease_until_cleanup(tmp_path, monkeypatch, term
                 response = await client.post("/ui/api/chat/cancel", headers=headers)
                 assert response.status == 200
                 assert (await response.json())["cancelled"] is True
+            elif termination == "new_turn":
+                response = await client.post(
+                    "/ui/api/chat/send",
+                    headers=headers,
+                    json={"content": "найди в интернете погоду"},
+                )
+                assert response.status == 200
             elif termination == "mode_exit":
                 response = await client.post("/ui/api/mode", headers=headers, json={"mode": "ask"})
                 assert response.status == 200
@@ -670,3 +681,101 @@ def test_desktop_cancel_at_approval_does_not_retain_resources(tmp_path, monkeypa
         agent.desktop_runtime.run_coordinator.release()
     finally:
         agent.close()
+
+
+@pytest.mark.parametrize("finish", ["approve", "reject", "new_turn"])
+def test_desktop_compound_request_retains_exact_once_scopes(tmp_path, monkeypatch, finish):
+    from shared.models import ToolResult
+
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "Downloads" / "compound.iso"
+    target.parent.mkdir()
+    target.write_text("original")
+    agent = DesktopApprovalAgent(str(target))
+    calls = []
+    args = {
+        "operation": "download",
+        "url": "https://example.test/download",
+        "destination": str(target),
+        "overwrite": True,
+    }
+
+    def generate(messages, config=None, tools=None):
+        if not any(message.role == "tool" for message in messages):
+            return LLMResult(
+                text="",
+                tool_calls=[ToolCall(id="compound", name="desktop_browser", arguments=args)],
+            )
+        return LLMResult(text="browser offline")
+
+    monkeypatch.setattr(agent.brain, "generate", generate)
+
+    def browser(request):
+        calls.append(request)
+        return ToolResult.failure("fixture browser offline")
+
+    agent.tool_registry.register(
+        "desktop_browser",
+        browser,
+        enabled=True,
+        capability="exec",
+        execution_targets={"desktop"},
+        description="Browser download",
+        parameters_schema={"type": "object"},
+    )
+
+    async def run():
+        client = await _create_client(agent)
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            headers = {"X-Slavik-Session": session_id}
+            await _select_local_model(client, session_id)
+            await client.post("/ui/api/mode", headers=headers, json={"mode": "desktop"})
+            payload = await (
+                await client.post(
+                    "/ui/api/chat/send", headers=headers, json={"content": "download file"}
+                )
+            ).json()
+            first = payload["decision"]
+
+            async def respond(decision, choice):
+                return await client.post(
+                    "/ui/api/decision/respond",
+                    headers=headers,
+                    json={
+                        "session_id": session_id,
+                        "decision_id": decision["id"],
+                        "choice": choice,
+                    },
+                )
+
+            response = await respond(first, "approve_once")
+            assert response.status == 200
+            second = (await response.json())["decision"]
+            assert second["id"] != first["id"] and second["status"] == "pending"
+            assert calls == []
+            assert len(agent._pending_chat_approval.desktop_once_rules) == 1
+            if finish == "approve":
+                completed = await respond(second, "approve_once")
+                assert completed.status == 200
+                assert (await completed.json())["status"] == "resolved"
+                assert len(calls) == 1 and calls[0].args == args
+            elif finish == "reject":
+                assert (await respond(second, "reject")).status == 200
+                assert calls == []
+            else:
+                superseded = await client.post(
+                    "/ui/api/chat/send",
+                    headers=headers,
+                    json={"content": "найди в интернете погоду"},
+                )
+                assert superseded.status == 200
+                assert calls == []
+            assert agent._pending_chat_approval is None
+            assert target.read_text() == "original"
+            assert agent.desktop_runtime.run_coordinator.try_acquire()
+            agent.desktop_runtime.run_coordinator.release()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

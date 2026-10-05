@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: F403,F405
 import asyncio
+import threading
 import time
 
 import pytest
@@ -1581,11 +1582,26 @@ def test_stream_response_contract_fault_does_not_reuse_stale_result_or_rerun(dup
 
 
 @pytest.mark.parametrize("provider_fails_after_tool", [False, True])
-@pytest.mark.parametrize("admission", ["normal", "busy", "missing", "root_changed"])
+@pytest.mark.parametrize("web_requested", [False, True])
+@pytest.mark.parametrize(
+    "admission",
+    [
+        "normal",
+        "busy",
+        "missing",
+        "root_changed",
+        "mode_race",
+        "root_race",
+        "model_race",
+        "http_cancel",
+        "http_cancel_before",
+    ],
+)
 def test_ui_ask_stream_creates_real_network_approval(
-    tmp_path, monkeypatch, provider_fails_after_tool, admission
+    tmp_path, monkeypatch, provider_fails_after_tool, admission, web_requested
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    tool_name = "web" if web_requested else "network_lookup"
 
     class ApprovalReadBrain(_RealAgentStreamingBrain):
         calls = 0
@@ -1601,13 +1617,13 @@ def test_ui_ask_stream_creates_real_network_approval(
                 if provider_fails_after_tool:
                     raise RuntimeError("provider failed after tool")
                 return LLMResult(text="network complete")
-            assert any(tool.name == "network_lookup" for tool in tools or [])
+            assert any(tool.name == tool_name for tool in tools or [])
             return LLMResult(
                 text="",
                 tool_calls=[
                     ToolCall(
                         id="network-approval",
-                        name="network_lookup",
+                        name=tool_name,
                         arguments={} if self.calls == 1 else {"changed": True},
                     )
                 ],
@@ -1615,22 +1631,28 @@ def test_ui_ask_stream_creates_real_network_approval(
 
     agent = _RealStreamingAgent(
         brain=ApprovalReadBrain(),
+        main_config=ModelConfig(provider="local", model="local", web_search_enabled=web_requested),
         enable_tools={"safe_mode": True},
         memory_companion_db_path=str(tmp_path / "companion.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
         canonical_atoms_db_path=str(tmp_path / "atoms.db"),
     )
     executions = []
+    tool_started = threading.Event()
+    tool_release = threading.Event()
     roots = []
     from tools.workspace_tools import get_workspace_root
 
     def execute(request):
         roots.append(str(get_workspace_root()))
         executions.append(request)
+        if admission == "http_cancel":
+            tool_started.set()
+            assert tool_release.wait(5)
         return ToolResult.success({"output": "network"})
 
     agent.tool_registry.register(
-        "network_lookup",
+        tool_name,
         execute,
         enabled=True,
         capability="read",
@@ -1641,11 +1663,30 @@ def test_ui_ask_stream_creates_real_network_approval(
     )
 
     async def run() -> None:
+        handlers = []
+        handler_finished = asyncio.Event()
+        if admission.startswith("http_cancel"):
+            from server.http.handlers import decision as decision_handler
+
+            original_handler = decision_handler.handle_ui_decision_respond
+
+            async def capture_handler(request):
+                handlers.append(asyncio.current_task())
+                try:
+                    return await original_handler(request)
+                finally:
+                    handler_finished.set()
+
+            monkeypatch.setattr(decision_handler, "handle_ui_decision_respond", capture_handler)
         client = await _create_client(agent)  # type: ignore[arg-type]
         try:
             status_response = await client.get("/ui/api/status")
             session_id = (await status_response.json())["session_id"]
             await _select_local_model(client, session_id)
+            if web_requested:
+                await client.server.app["ui_hub"].set_session_tools_state(
+                    session_id, tools_state={"web": True, "safe_mode": True}
+                )
             response = await client.post(
                 "/ui/api/chat/send",
                 json={"content": "lookup"},
@@ -1656,7 +1697,7 @@ def test_ui_ask_stream_creates_real_network_approval(
             approval = payload["approval_request"]
             assert isinstance(approval, dict)
             assert approval["category"] == "NETWORK_RISK"
-            assert approval["tool"] == "network_lookup"
+            assert approval["tool"] == tool_name
             decision = payload["decision"]
             assert isinstance(decision, dict)
             assert decision["status"] == "pending"
@@ -1665,6 +1706,67 @@ def test_ui_ask_stream_creates_real_network_approval(
             assert payload.get("generation_error") is None
             assert executions == []
             assert payload["mwv_report"]["route"] == "chat"
+            if admission.startswith("http_cancel"):
+                from aiohttp import ServerDisconnectedError
+
+                admission_started = asyncio.Event()
+                admission_release = asyncio.Event()
+                registry = client.server.app["chat_cancellation_registry"]
+                original_start = registry.start
+                if admission == "http_cancel_before":
+
+                    async def paused_start(*, session_id, stream_id):
+                        admission_started.set()
+                        await admission_release.wait()
+                        return await original_start(session_id=session_id, stream_id=stream_id)
+
+                    monkeypatch.setattr(registry, "start", paused_start)
+                confirmation = asyncio.create_task(
+                    client.post(
+                        "/ui/api/decision/respond",
+                        json={
+                            "session_id": session_id,
+                            "decision_id": decision["id"],
+                            "choice": "approve_once",
+                        },
+                        headers={"X-Slavik-Session": session_id},
+                    )
+                )
+                if admission == "http_cancel_before":
+                    await asyncio.wait_for(admission_started.wait(), 3)
+                else:
+                    assert await asyncio.to_thread(tool_started.wait, 3)
+                assert len(handlers) == 1
+                handlers[0].cancel()
+                await asyncio.sleep(0)
+                tool_release.set()
+                admission_release.set()
+                with pytest.raises(ServerDisconnectedError):
+                    await confirmation
+                await asyncio.wait_for(handler_finished.wait(), 3)
+                current = await client.server.app["ui_hub"].get_session_decision(session_id)
+                if admission == "http_cancel_before":
+                    assert current["status"] == "pending"
+                    assert executions == []
+                    monkeypatch.setattr(registry, "start", original_start)
+                    retry = await client.post(
+                        "/ui/api/decision/respond",
+                        json={
+                            "session_id": session_id,
+                            "decision_id": decision["id"],
+                            "choice": "approve_once",
+                        },
+                        headers={"X-Slavik-Session": session_id},
+                    )
+                    assert retry.status == 200
+                    assert len(executions) == 1
+                    return
+                assert current["status"] == "resolved"
+                assert len(executions) == 1
+                assert agent._pending_chat_approval is None
+                messages = await client.server.app["ui_hub"].get_messages(session_id, lane="chat")
+                assert "отменено" in messages[-1]["content"]
+                return
             edited = await client.post(
                 "/ui/api/decision/respond",
                 json={
@@ -1713,6 +1815,27 @@ def test_ui_ask_stream_creates_real_network_approval(
                 current = await client.server.app["ui_hub"].get_session_decision(session_id)
                 assert current["status"] == "pending"
                 return
+            if admission.endswith("_race"):
+                original_start = cancellation_registry.start
+
+                async def start_after_snapshot(*, session_id, stream_id):
+                    hub = client.server.app["ui_hub"]
+                    if admission == "mode_race":
+                        changed = await client.post(
+                            "/ui/api/mode",
+                            headers={"X-Slavik-Session": session_id},
+                            json={"mode": "desktop"},
+                        )
+                        assert changed.status == 200
+                    elif admission == "root_race":
+                        alternate = tmp_path / "raced-root"
+                        alternate.mkdir()
+                        await hub.set_workspace_root(session_id, str(alternate))
+                    else:
+                        await hub.set_session_model(session_id, "local", "changed-model")
+                    return await original_start(session_id=session_id, stream_id=stream_id)
+
+                monkeypatch.setattr(cancellation_registry, "start", start_after_snapshot)
             approved = await client.post(
                 "/ui/api/decision/respond",
                 json={
@@ -1722,6 +1845,12 @@ def test_ui_ask_stream_creates_real_network_approval(
                 },
                 headers={"X-Slavik-Session": session_id},
             )
+            if admission.endswith("_race"):
+                assert approved.status == 409
+                assert executions == []
+                current = await client.server.app["ui_hub"].get_session_decision(session_id)
+                assert current["status"] == "pending"
+                return
             assert approved.status == 200
             resumed = await approved.json()
             assert resumed["resume"]["ok"] is True
