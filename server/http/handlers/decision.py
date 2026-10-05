@@ -9,7 +9,7 @@ from typing import Literal
 from aiohttp import web
 
 from core.agent_computer import execute_local_commit
-from core.approval_policy import ApprovalCategory, ApprovalRequired
+from core.approval_policy import ApprovalRequired
 from core.desktop_policy import (
     DesktopApprovalRule,
     DesktopApprovalScope,
@@ -26,7 +26,7 @@ from server.http.common.workspace_git import (
     git_unstage,
     parse_git_operation_paths,
 )
-from server.http.handlers.ui_chat import handle_ui_send_resume
+from server.http.handlers.ui_chat import handle_ui_approval_continue, handle_ui_send_resume
 from server.http_api import (
     MAX_CONTENT_CHARS,
     UI_DECISION_RESPONSES,
@@ -382,7 +382,10 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
-    if tool_source_endpoint in {"chat.send", "workspace.send"} and choice == "edit_and_approve":
+    if (
+        tool_source_endpoint in {"chat.send", "workspace.send", "chat.tool_continue"}
+        and choice == "edit_and_approve"
+    ):
         return error_response(
             status=400,
             message="Редактирование tool call при повторном chat send не поддерживается.",
@@ -427,71 +430,6 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 code="invalid_request_error",
             )
 
-    async def _resume_chat_source_request(
-        *,
-        source_endpoint: str,
-        resume_payload: dict[str, object],
-        approval_categories: set[ApprovalCategory],
-    ) -> dict[str, JSONValue]:
-        source_request_raw = resume_payload.get("source_request")
-        if not isinstance(source_request_raw, dict):
-            return {
-                "ok": False,
-                "error": "resume_payload.source_request is missing.",
-                "source_endpoint": source_endpoint,
-            }
-        content_raw = source_request_raw.get("content")
-        if not isinstance(content_raw, str) or not content_raw.strip():
-            return {
-                "ok": False,
-                "error": "resume_payload.source_request.content is missing.",
-                "source_endpoint": source_endpoint,
-            }
-        lane = _normalize_message_lane(source_request_raw.get("lane"))
-        resumed_response = await handle_ui_send_resume(
-            request,
-            payload={
-                str(key): _normalize_json_value(value) for key, value in source_request_raw.items()
-            },
-            lane=lane,
-            bypass_root_gate=False,
-            transient_approval_categories=approval_categories,
-        )
-        parsed_resume_payload: dict[str, JSONValue] = {}
-        if isinstance(resumed_response.text, str) and resumed_response.text.strip():
-            try:
-                parsed = json.loads(resumed_response.text)
-                if isinstance(parsed, dict):
-                    parsed_resume_payload = {
-                        str(key): _normalize_json_value(value) for key, value in parsed.items()
-                    }
-            except json.JSONDecodeError:
-                parsed_resume_payload = {}
-        if resumed_response.status < 400:
-            return {
-                "ok": True,
-                "source_endpoint": source_endpoint,
-                "data": {
-                    "status_code": resumed_response.status,
-                    "trace_id": parsed_resume_payload.get("trace_id"),
-                    "output": parsed_resume_payload.get("output"),
-                    "decision": parsed_resume_payload.get("decision"),
-                },
-                "resume_started": True,
-            }
-        error_raw = parsed_resume_payload.get("error")
-        message = error_raw.get("message") if isinstance(error_raw, dict) else None
-        return {
-            "ok": False,
-            "source_endpoint": source_endpoint,
-            "error": (
-                message
-                if isinstance(message, str) and message.strip()
-                else f"{source_endpoint} failed: {resumed_response.status}"
-            ),
-            "resume_started": True,
-        }
-
     async def _resolve_tool_decision() -> dict[str, JSONValue]:
         context_raw = current_decision.get("context")
         context = context_raw if isinstance(context_raw, dict) else {}
@@ -530,6 +468,28 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 "error": "always_allow is not permitted for command-based Desktop scopes.",
                 "source_endpoint": source_endpoint,
             }
+        if source_endpoint == "chat.tool_continue":
+            if desktop_scope is not None:
+                await _trace_desktop_approval_choice(
+                    request,
+                    session_id=session_id,
+                    choice=choice,
+                    scope=desktop_scope,
+                )
+            return await handle_ui_approval_continue(
+                request,
+                session_id=session_id,
+                resume_payload={str(key): value for key, value in resume_payload.items()},
+                desktop_scope=desktop_scope,
+                choice=choice,
+            )
+        if source_endpoint in {"chat.send", "workspace.send"}:
+            return {
+                "ok": False,
+                "error": "approval_continuation_unavailable",
+                "resume_started": False,
+            }
+
         if desktop_scope is not None and choice in {
             "approve_once",
             "approve_session",
@@ -580,13 +540,6 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             if choice in {"approve_once", "edit_and_approve"}
             else approved_categories
         )
-
-        if source_endpoint in {"chat.send", "workspace.send"}:
-            return await _resume_chat_source_request(
-                source_endpoint=source_endpoint,
-                resume_payload={str(key): value for key, value in resume_payload.items()},
-                approval_categories=one_call_categories,
-            )
 
         if source_endpoint == "workspace.root_select":
             if choice == "edit_and_approve":
@@ -1537,6 +1490,13 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 expected_id=decision_id,
                 actual_decision=normalized_latest,
             )
+        if source_endpoint == "chat.tool_continue":
+            identity = resume_payload.get("continuation_id")
+            if isinstance(identity, str):
+                agent = await _resolve_agent(request, session_id)
+                if agent is not None:
+                    async with _agent_lock_for_request(request, session_id):
+                        await asyncio.to_thread(agent.cancel_chat_approval, identity)
         normalized = (
             normalized_latest
             if normalized_latest is not None
@@ -1714,6 +1674,9 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
             status="done" if resume.get("ok") is True else "blocked",
         )
     validation_error_codes = {
+        "approval_continuation_unavailable",
+        "approval_continuation_not_started",
+        "chat_generation_in_progress",
         "resume_payload_missing",
         "plan_revision_mismatch",
         "plan_not_approved",
@@ -1786,7 +1749,7 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
     if not updated_resolved:
         nested_chat_resume = (
             decision_type == "tool_approval"
-            and current_source_endpoint in {"chat.send", "workspace.send"}
+            and current_source_endpoint in {"chat.send", "workspace.send", "chat.tool_continue"}
             and resume.get("ok") is True
         )
         if decision_type == "agent_decision" or nested_chat_resume:

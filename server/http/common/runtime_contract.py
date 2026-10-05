@@ -101,6 +101,7 @@ class AgentProtocol(Protocol):
     brain: object
     tools_enabled: dict[str, bool]
     last_approval_request: ApprovalRequest | None
+    last_approval_resume_payload: dict[str, JSONValue] | None
     last_chat_interaction_id: str | None
     tracer: TracerProtocol
 
@@ -119,6 +120,17 @@ class AgentProtocol(Protocol):
     ) -> None: ...
 
     def respond(self, messages: list[LLMMessage]) -> AgentResponse: ...
+
+    def validate_chat_approval(self, identity: str) -> None: ...
+    def cancel_chat_approval(self, identity: str) -> None: ...
+    def set_desktop_policy_context(
+        self, rules: list[DesktopApprovalRule], principal_id: str
+    ) -> None: ...
+    def drain_consumed_desktop_rule_ids(self) -> list[str]: ...
+
+    def resume_chat_approval(
+        self, identity: str, *, cancellation_token: asyncio.Event | None = None
+    ) -> AgentResponse: ...
 
     def respond_stream(
         self,

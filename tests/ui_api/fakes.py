@@ -64,6 +64,19 @@ class DummyAgent:
         self._session_id = session_id
         self._approved_categories = set(approved_categories)
 
+    def validate_chat_approval(self, identity):
+        from core.agent_tools import ChatApprovalUnavailable
+
+        raise ChatApprovalUnavailable("approval_continuation_unavailable")
+
+    def cancel_chat_approval(self, identity):
+        pass
+
+    def resume_chat_approval(self, identity, *, cancellation_token=None):
+        from core.agent_tools import ChatApprovalUnavailable
+
+        raise ChatApprovalUnavailable("approval_continuation_unavailable")
+
     def respond(self, messages) -> AgentResponse:
         return AgentResponse("ok")
 

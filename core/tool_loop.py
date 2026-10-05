@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Generator, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 
+from core.approval_policy import ApprovalRequest, ApprovalRequired
 from core.tool_gateway import ToolGateway
 from llm.brain_base import Brain
-from llm.cancellation import cancellation_requested
+from llm.cancellation import GenerationCancelled, cancellation_requested
 from llm.stream_model import (
     Done,
     Error,
@@ -15,7 +17,7 @@ from llm.stream_model import (
     TextDelta,
     ToolCallCompleted,
 )
-from llm.types import ModelConfig, ToolCall, ToolSpec
+from llm.types import LLMResult, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 
 
@@ -35,6 +37,26 @@ class AgentToolLoopResult:
     cancelled: bool = False
 
 
+class ToolLoopExecutionError(RuntimeError):
+    def __init__(self, result: AgentToolLoopResult, cause: Exception) -> None:
+        super().__init__("provider_generation_failed")
+        self.result = result
+        self.cause = cause
+
+
+@dataclass(frozen=True)
+class ToolLoopContinuation:
+    history: list[LLMMessage]
+    executed: list[ExecutedToolCall]
+    pending_calls: list[ToolCall]
+    approval: ApprovalRequest
+    text: str
+    iteration: int
+    max_iterations: int
+    tools: list[ToolSpec]
+    config: ModelConfig | None
+
+
 class AgentToolLoop:
     def __init__(self, max_iterations: int = 8) -> None:
         self.max_iterations = max(1, max_iterations)
@@ -49,13 +71,28 @@ class AgentToolLoop:
         config: ModelConfig | None = None,
         cancellation_token: asyncio.Event | None = None,
         final_gate: Callable[[Sequence[ExecutedToolCall]], str | None] | None = None,
+        continuation: ToolLoopContinuation | None = None,
     ) -> AgentToolLoopResult:
         history = list(messages)
         executed: list[ExecutedToolCall] = []
         final_text = ""
         allowed_tool_names = {tool.name for tool in tools}
 
-        for iteration in range(1, self.max_iterations + 1):
+        if continuation is not None:
+            continuation = deepcopy(continuation)
+            history = continuation.history
+            executed = continuation.executed
+            final_text = continuation.text
+            tools = continuation.tools
+            config = continuation.config
+            allowed_tool_names = {tool.name for tool in tools}
+        first_iteration = continuation.iteration if continuation is not None else 1
+        maximum = (
+            min(self.max_iterations, continuation.max_iterations)
+            if continuation is not None
+            else self.max_iterations
+        )
+        for iteration in range(first_iteration, maximum + 1):
             if cancellation_requested(cancellation_token):
                 return AgentToolLoopResult(
                     text=final_text,
@@ -64,7 +101,32 @@ class AgentToolLoop:
                     iterations=iteration - 1,
                     cancelled=True,
                 )
-            result = brain.generate(history, config=config, tools=tools)
+            resuming = continuation is not None and iteration == first_iteration
+            try:
+                result = (
+                    LLMResult(text=final_text, tool_calls=continuation.pending_calls)
+                    if resuming and continuation is not None
+                    else brain.generate(history, config=config, tools=tools)
+                )
+            except GenerationCancelled:
+                return AgentToolLoopResult(
+                    text=final_text,
+                    messages=history,
+                    tool_calls=executed,
+                    iterations=iteration,
+                    cancelled=True,
+                )
+            except Exception as exc:
+                raise ToolLoopExecutionError(
+                    AgentToolLoopResult(
+                        text=final_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="provider_generation_failed",
+                    ),
+                    exc,
+                ) from exc
             if cancellation_requested(cancellation_token):
                 return AgentToolLoopResult(
                     text=final_text,
@@ -74,13 +136,14 @@ class AgentToolLoop:
                     cancelled=True,
                 )
             final_text = result.text
-            history.append(
-                _assistant_message(
-                    text=result.text,
-                    tool_calls=result.tool_calls,
-                    reasoning=result.reasoning,
+            if not resuming:
+                history.append(
+                    _assistant_message(
+                        text=result.text,
+                        tool_calls=result.tool_calls,
+                        reasoning=result.reasoning,
+                    )
                 )
-            )
 
             if not result.tool_calls:
                 gate_error = final_gate(executed) if final_gate is not None else None
@@ -94,7 +157,7 @@ class AgentToolLoop:
                             ),
                         )
                     )
-                    if iteration < self.max_iterations:
+                    if iteration < maximum:
                         continue
                     return AgentToolLoopResult(
                         text=final_text,
@@ -110,7 +173,7 @@ class AgentToolLoop:
                     iterations=iteration,
                 )
 
-            for tool_call in result.tool_calls:
+            for call_index, tool_call in enumerate(result.tool_calls):
                 if cancellation_requested(cancellation_token):
                     return AgentToolLoopResult(
                         text=final_text,
@@ -119,11 +182,33 @@ class AgentToolLoop:
                         iterations=iteration,
                         cancelled=True,
                     )
-                tool_result = _dispatch_model_tool_call(
-                    gateway=gateway,
-                    tool_call=tool_call,
-                    allowed_tool_names=allowed_tool_names,
-                )
+                try:
+                    if resuming and call_index == 0 and continuation is not None:
+                        tool_result = gateway.call_approved_once(
+                            ToolRequest(name=tool_call.name, args=dict(tool_call.arguments)),
+                            continuation.approval,
+                        )
+                    else:
+                        tool_result = _dispatch_model_tool_call(
+                            gateway=gateway,
+                            tool_call=tool_call,
+                            allowed_tool_names=allowed_tool_names,
+                        )
+                except ApprovalRequired as exc:
+                    exc.continuation = deepcopy(
+                        ToolLoopContinuation(
+                            history,
+                            executed,
+                            result.tool_calls[call_index:],
+                            exc.request,
+                            final_text,
+                            iteration,
+                            maximum,
+                            tools,
+                            config,
+                        )
+                    )
+                    raise
                 executed.append(ExecutedToolCall(call=tool_call, result=tool_result))
                 history.append(
                     LLMMessage(
@@ -149,12 +234,12 @@ class AgentToolLoop:
                         cancelled=True,
                     )
 
-        message = f"Цикл инструментов превысил лимит: {self.max_iterations} итераций."
+        message = f"Цикл инструментов превысил лимит: {maximum} итераций."
         return AgentToolLoopResult(
             text=final_text,
             messages=history,
             tool_calls=executed,
-            iterations=self.max_iterations,
+            iterations=maximum,
             error=message,
         )
 
@@ -298,7 +383,7 @@ class AgentToolLoop:
                     iterations=iteration,
                 )
 
-            for tool_call in pending_calls:
+            for call_index, tool_call in enumerate(pending_calls):
                 if cancellation_requested(cancellation_token):
                     yield Done(finish_reason="cancelled")
                     return AgentToolLoopResult(
@@ -308,11 +393,25 @@ class AgentToolLoop:
                         iterations=iteration,
                         cancelled=True,
                     )
-                tool_result = _dispatch_model_tool_call(
-                    gateway=gateway,
-                    tool_call=tool_call,
-                    allowed_tool_names=allowed_tool_names,
-                )
+                try:
+                    tool_result = _dispatch_model_tool_call(
+                        gateway=gateway, tool_call=tool_call, allowed_tool_names=allowed_tool_names
+                    )
+                except ApprovalRequired as exc:
+                    exc.continuation = deepcopy(
+                        ToolLoopContinuation(
+                            history,
+                            executed,
+                            pending_calls[call_index:],
+                            exc.request,
+                            visible_text,
+                            iteration,
+                            self.max_iterations,
+                            tools,
+                            config,
+                        )
+                    )
+                    raise
                 if cancellation_requested(cancellation_token):
                     yield Done(finish_reason="cancelled")
                     return AgentToolLoopResult(

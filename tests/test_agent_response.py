@@ -398,3 +398,17 @@ def test_ask_network_approval_reaches_existing_handler(
     assert envelope.runtime_result is None
     assert executions == []
     assert brain.calls == (0 if prefetch else 1)
+    if not prefetch:
+        from core.agent_tools import ChatApprovalUnavailable
+
+        identity = agent.last_approval_resume_payload["continuation_id"]
+        with pytest.raises(ChatApprovalUnavailable):
+            agent.resume_chat_approval("spoofed")
+        resumed = agent.resume_chat_approval(identity)
+        assert len(executions) == 1
+        assert executions[0].args == {"query": "ping"}
+        assert resumed.runtime_result.tool_calls[0].call.id == "lookup-1"
+        assert brain.calls == 2
+        with pytest.raises(ChatApprovalUnavailable):
+            agent.resume_chat_approval(identity)
+        assert len(executions) == 1

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
+import asyncio
 import difflib
 import json
+import logging
 import re
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from config.model_store import save_model_configs
+from core.agent_response import AgentResponse, ResponseFailure
 from core.approval_policy import (
     ApprovalCategory,
     ApprovalContext,
@@ -21,6 +25,7 @@ from core.computer_activity_log import ComputerActivityLog
 from core.decision.handler import DecisionContext
 from core.decision.models import DecisionPacket
 from core.desktop_policy import DesktopApprovalRule, DesktopPolicyRuntime
+from core.desktop_runtime import DesktopContinuationUnavailable, DesktopRunOutcome, DesktopRuntime
 from core.mwv.models import (
     MWV_REPORT_PREFIX,
     StopReasonCode,
@@ -33,8 +38,10 @@ from core.skills.candidates import CandidateDraft, sanitize_text, suggest_patter
 from core.skills.index import SkillMatch, SkillResolution
 from core.skills.models import SkillRisk
 from core.tool_gateway import ToolGateway
+from core.tool_loop import AgentToolLoop, ToolLoopContinuation, ToolLoopExecutionError
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
+from llm.cancellation import cancellation_requested
 from llm.types import ModelConfig
 from shared.memory_companion_models import (
     BlockedReason,
@@ -106,8 +113,25 @@ def _looks_like_base64(value: str) -> bool:
     return bool(_BASE64_RE.fullmatch(stripped))
 
 
+class ChatApprovalUnavailable(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class PendingChatApproval:
+    identity: str
+    continuation: ToolLoopContinuation
+    brain: Brain
+    raw_input: str
+    session_id: str | None
+    mode: str
+
+
 class AgentToolsMixin:
     if TYPE_CHECKING:
+        desktop_runtime: DesktopRuntime
+        logger: logging.Logger
+        _pending_chat_approval: PendingChatApproval | None
         brain: Brain
         tracer: Tracer
         decision_handler: DecisionHandler
@@ -133,6 +157,7 @@ class AgentToolsMixin:
         _last_user_input: str | None
         _computer_log: ComputerActivityLog
 
+        def _project_desktop_outcome(self, outcome: DesktopRunOutcome) -> str: ...
         def _build_brain(self) -> Brain: ...
         def build_memory_save_preview(
             self,
@@ -262,7 +287,10 @@ class AgentToolsMixin:
         self._workspace_diff_baselines.clear()
         self._workspace_diffs.clear()
 
-    def _reset_approval_state(self) -> None:
+    def _reset_approval_state(self, *, cancel_runtime: bool = True) -> None:
+        if cancel_runtime:
+            self.desktop_runtime.cancel_pending()
+        self._pending_chat_approval = None
         self.last_approval_request = None
         self.last_approval_source_endpoint = None
         self.last_approval_resume_payload = None
@@ -324,6 +352,107 @@ class AgentToolsMixin:
             self._append_short_term([LLMMessage(role="assistant", content=response)])
         return response
 
+    def _capture_chat_approval(self, exc: ApprovalRequired, raw_input: str) -> None:
+        if self.runtime_mode not in {"ask", "desktop"} or exc.continuation is None:
+            return
+        identity = uuid.uuid4().hex
+        self._pending_chat_approval = PendingChatApproval(
+            identity,
+            exc.continuation,
+            self._get_main_brain(),
+            raw_input,
+            self.session_id,
+            self.runtime_mode,
+        )
+        self.last_approval_source_endpoint = "chat.tool_continue"
+        self.last_approval_resume_payload = {
+            "continuation_id": identity,
+            "execution_mode": self.runtime_mode,
+        }
+
+    def validate_chat_approval(self, identity: str) -> None:
+        pending = self._pending_chat_approval
+        if (
+            pending is None
+            or pending.identity != identity
+            or pending.session_id != self.session_id
+            or self.runtime_mode != pending.mode
+            or pending.continuation.config != self.main_config
+            or pending.brain is not self._get_main_brain()
+        ):
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        if pending.mode == "desktop" and not self.desktop_runtime.has_continuation(
+            pending.continuation
+        ):
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+
+    def resume_chat_approval(
+        self, identity: str, *, cancellation_token: asyncio.Event | None = None
+    ) -> AgentResponse:
+        self.validate_chat_approval(identity)
+        pending = self._pending_chat_approval
+        assert pending is not None
+        if cancellation_requested(cancellation_token):
+            raise ChatApprovalUnavailable("approval_continuation_not_started")
+        if pending.mode == "desktop" and not self.desktop_runtime.has_continuation(
+            pending.continuation
+        ):
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        self._reset_approval_state(cancel_runtime=False)
+        try:
+            if pending.mode == "desktop":
+                outcome = self.desktop_runtime.resume(
+                    pending.raw_input,
+                    pending.continuation,
+                    cancellation_token=cancellation_token,
+                )
+                return AgentResponse(
+                    self._project_desktop_outcome(outcome),
+                    runtime_result=outcome.loop_result,
+                )
+            result = AgentToolLoop(max_iterations=pending.continuation.max_iterations).run(
+                brain=pending.brain,
+                gateway=self._build_tool_gateway(safe_mode_override=None),
+                messages=[],
+                tools=[],
+                continuation=pending.continuation,
+                cancellation_token=cancellation_token,
+            )
+        except DesktopContinuationUnavailable as exc:
+            raise ChatApprovalUnavailable(str(exc)) from exc
+        except ApprovalRequired as exc:
+            self._capture_chat_approval(exc, pending.raw_input)
+            return AgentResponse(
+                self._handle_approval_required(
+                    exc.request,
+                    raw_input=pending.raw_input,
+                    source_endpoint=self.last_approval_source_endpoint,
+                    resume_payload=self.last_approval_resume_payload,
+                )
+            )
+        except ToolLoopExecutionError as exc:
+            return AgentResponse(
+                "[Ошибка модели при продолжении]",
+                runtime_result=exc.result,
+                failure=ResponseFailure(
+                    "provider_generation_failed", "Ошибка модели при продолжении"
+                ),
+            )
+        except Exception:
+            self.logger.exception("Chat continuation failed after claim")
+            return AgentResponse(
+                "[Ошибка продолжения ответа]",
+                failure=ResponseFailure("continuation_failed", "Ошибка продолжения ответа"),
+            )
+        return AgentResponse(
+            "Продолжение отменено." if result.cancelled else result.text, runtime_result=result
+        )
+
+    def cancel_chat_approval(self, identity: str) -> None:
+        pending = self._pending_chat_approval
+        if pending is not None and pending.identity == identity:
+            self._reset_approval_state()
+
     def set_session_context(
         self,
         session_id: str | None,
@@ -355,6 +484,8 @@ class AgentToolsMixin:
         auto_state: dict[str, JSONValue] | None = None,
         enforce_plan_guard: bool,
     ) -> None:
+        if mode != self.runtime_mode:
+            self._reset_approval_state()
         self.runtime_mode = mode.strip().lower() if isinstance(mode, str) else "ask"
         self.runtime_active_plan = dict(active_plan) if isinstance(active_plan, dict) else None
         self.runtime_active_task = dict(active_task) if isinstance(active_task, dict) else None

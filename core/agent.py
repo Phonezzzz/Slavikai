@@ -14,7 +14,7 @@ from core.agent_computer import AgentComputerRuntime
 from core.agent_memory import AgentMemoryMixin
 from core.agent_mwv import AgentMWVMixin
 from core.agent_routing import AgentRoutingMixin
-from core.agent_tools import AgentToolsMixin
+from core.agent_tools import AgentToolsMixin, PendingChatApproval
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.auto_agent import AutoAgent
 from core.computer_activity_log import ComputerActivityLog
@@ -314,6 +314,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             "candidate_written_count": 0,
         }
         self.decision_handler = DecisionHandler()
+        self._pending_chat_approval: PendingChatApproval | None = None
         self.last_approval_request: ApprovalRequest | None = None
         self.last_approval_source_endpoint: str | None = None
         self.last_approval_resume_payload: dict[str, JSONValue] | None = None
@@ -634,7 +635,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.desktop_gui_tool.close()
 
     def close(self) -> None:
-        self.close_desktop_resources()
+        self.desktop_runtime.close()
         self.memory.close()
         self.vectors.close()
         self._interaction_store.close()

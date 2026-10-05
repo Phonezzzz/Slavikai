@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from core.desktop_policy import (
     DesktopAction,
@@ -16,6 +16,10 @@ from core.desktop_policy import (
 from core.desktop_security import DesktopPathSecurity
 from shared.command_safety import is_hard_unsafe_command as _is_unsafe
 from shared.models import JSONValue, ToolRequest
+
+if TYPE_CHECKING:
+    from core.tool_loop import ToolLoopContinuation
+
 
 ApprovalCategory = Literal[
     "FS_DELETE_OVERWRITE",
@@ -79,12 +83,14 @@ class ApprovalRequest:
     scope: DesktopApprovalScope | None = None
     reason: str = "category_not_approved"
     policy_rule_id: str | None = None
+    request_json: str | None = None
 
 
 class ApprovalRequired(RuntimeError):
     def __init__(self, request: ApprovalRequest) -> None:
         super().__init__("approval_required")
         self.request = request
+        self.continuation: ToolLoopContinuation | None = None
 
 
 ALL_CATEGORIES: Final[set[ApprovalCategory]] = {

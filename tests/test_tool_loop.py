@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
+import pytest
+
 from core.approval_policy import ApprovalContext
 from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop
@@ -211,3 +215,135 @@ def test_streaming_policy_denial_stops_remaining_calls() -> None:
     assert completed[0].result.meta["policy_reason"] == "command_denied:hard_safety"
     assert any(isinstance(event, Error) and event.code == "tool_policy_denied" for event in events)
     assert isinstance(events[-1], Done) and events[-1].finish_reason == "error"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("second_value", ["shown", "other"])
+def test_approval_continuation_preserves_call_and_remaining_batch(streaming, second_value) -> None:
+    import pytest
+
+    from core.approval_policy import ApprovalRequired
+
+    class BatchBrain:
+        calls = 0
+
+        def generate_stream_events(self, messages, config=None, tools=None):
+            result = self.generate(messages, config, tools)
+            for call in result.tool_calls:
+                yield ToolCallCompleted(call=call)
+            yield Done()
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResult(
+                    text="",
+                    tool_calls=[
+                        ToolCall(id="original", name="lookup", arguments={"value": "shown"}),
+                        ToolCall(id="second", name="lookup", arguments={"value": second_value}),
+                    ],
+                )
+            raise AssertionError("Approval must dispatch saved call before regeneration")
+
+    executions = []
+    registry = ToolRegistry()
+    registry.register(
+        "lookup",
+        lambda request: executions.append(request) or ToolResult.success({"output": "ok"}),
+        capability="read",
+        risk_classes=["network"],
+    )
+    gateway = ToolGateway(
+        registry,
+        approval_context=ApprovalContext(
+            safe_mode=True, session_id="session", approved_categories=set()
+        ),
+    )
+    brain = BatchBrain()
+    loop = AgentToolLoop()
+    with pytest.raises(ApprovalRequired) as initial:
+        if streaming:
+            list(
+                loop.run_stream_events(
+                    brain=brain,
+                    gateway=gateway,
+                    messages=[LLMMessage(role="user", content="lookup")],
+                    tools=registry.list_tool_specs(),
+                )
+            )
+        else:
+            loop.run(
+                brain=brain,
+                gateway=gateway,
+                messages=[LLMMessage(role="user", content="lookup")],
+                tools=registry.list_tool_specs(),
+            )
+    assert executions == []
+    continuation = initial.value.continuation
+    assert continuation is not None
+    tampered = deepcopy(continuation)
+    tampered.pending_calls[0].arguments["value"] = "changed"
+    with pytest.raises(ValueError, match="approval_subject_mismatch"):
+        loop.run(brain=brain, gateway=gateway, messages=[], tools=[], continuation=tampered)
+    assert executions == []
+    with pytest.raises(ApprovalRequired) as second:
+        loop.run(
+            brain=brain,
+            gateway=gateway,
+            messages=[],
+            tools=registry.list_tool_specs(),
+            continuation=continuation,
+        )
+    assert brain.calls == 1
+    assert [request.args for request in executions] == [{"value": "shown"}]
+    assert second.value.continuation is not None
+    assert second.value.continuation.executed[0].call.id == "original"
+    assert second.value.continuation.history[-1].tool_call_id == "original"
+
+
+def test_continuation_retains_completed_tool_when_provider_raises() -> None:
+    from core.approval_policy import ApprovalRequired
+    from core.tool_loop import ToolLoopExecutionError
+
+    class FailingBrain:
+        calls = 0
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResult(
+                    text="", tool_calls=[ToolCall(id="original", name="lookup", arguments={})]
+                )
+            raise RuntimeError("provider crashed after dispatch")
+
+    canonical = ToolResult.success({"output": "complete diagnostic"})
+    executions = []
+    registry = ToolRegistry()
+    registry.register(
+        "lookup",
+        lambda request: executions.append(request) or canonical,
+        capability="read",
+        risk_classes=["network"],
+    )
+    gateway = ToolGateway(
+        registry,
+        approval_context=ApprovalContext(
+            safe_mode=True, session_id="session", approved_categories=set()
+        ),
+    )
+    brain = FailingBrain()
+    with pytest.raises(ApprovalRequired) as initial:
+        AgentToolLoop().run(
+            brain=brain, gateway=gateway, messages=[], tools=registry.list_tool_specs()
+        )
+    with pytest.raises(ToolLoopExecutionError) as failed:
+        AgentToolLoop().run(
+            brain=brain,
+            gateway=gateway,
+            messages=[],
+            tools=[],
+            continuation=initial.value.continuation,
+        )
+    assert len(executions) == 1
+    assert failed.value.result.tool_calls[0].result is canonical
+    assert failed.value.result.messages[-1].tool_call_id == "original"

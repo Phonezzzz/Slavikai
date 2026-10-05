@@ -12,7 +12,7 @@ from core.decision.memory_save import build_memory_save_packet
 from core.mwv.models import StopReasonCode
 from core.mwv.routing import RouteDecision, classify_request
 from core.skills.index import SkillMatchDecision
-from core.tool_loop import AgentToolLoop, AgentToolLoopResult
+from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ToolLoopExecutionError
 from llm.cancellation import GenerationCancelled, cancellation_requested
 from llm.retry import visible_provider_error
 from llm.stream_model import Done, Error, StreamEvent, TextDelta, Usage
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from core.auto_runtime import AutoRunOutcome
     from core.decision.handler import DecisionHandler
     from core.decision.models import DecisionPacket
-    from core.desktop_runtime import DesktopRuntime
+    from core.desktop_runtime import DesktopRunOutcome, DesktopRuntime
     from core.mwv.models import VerificationResult
     from core.rule_engine import PolicyApplication
     from core.skills.index import SkillIndex, SkillMatch, SkillResolution
@@ -89,7 +89,12 @@ class AgentRoutingMixin:
             *,
             history: list[LLMMessage] | None = None,
         ) -> None: ...
-        def _reset_approval_state(self) -> None: ...
+        def _reset_approval_state(self, *, cancel_runtime: bool = True) -> None: ...
+        def _capture_chat_approval(self, exc: ApprovalRequired, raw_input: str) -> None: ...
+
+        last_approval_source_endpoint: str | None
+        last_approval_resume_payload: dict[str, JSONValue] | None
+
         def _reset_workspace_diffs(self) -> None: ...
         def handle_tool_command(self, command: str) -> str: ...
         def handle_auto_command(
@@ -339,9 +344,12 @@ class AgentRoutingMixin:
                 )
             return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
+            self._capture_chat_approval(exc, last_content)
             return AgentResponse(
                 self._handle_approval_required(
                     exc.request,
+                    source_endpoint=self.last_approval_source_endpoint,
+                    resume_payload=self.last_approval_resume_payload,
                     raw_input=last_content,
                     record_in_history=record_in_history,
                 )
@@ -516,8 +524,11 @@ class AgentRoutingMixin:
                 cancellation_token,
             )
         except ApprovalRequired as exc:
+            self._capture_chat_approval(exc, last_content)
             response = self._handle_approval_required(
                 exc.request,
+                source_endpoint=self.last_approval_source_endpoint,
+                resume_payload=self.last_approval_resume_payload,
                 raw_input=last_content,
                 record_in_history=record_in_history,
             )
@@ -622,6 +633,9 @@ class AgentRoutingMixin:
         except ApprovalRequired:
             raise
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, ToolLoopExecutionError):
+                runtime_result = exc.result
+                exc = exc.cause
             self.logger.error("LLM error: %s", exc)
             try:
                 self.tracer.log("error", f"Ошибка модели: {exc}")
@@ -645,6 +659,13 @@ class AgentRoutingMixin:
         cancellation_token: asyncio.Event | None = None,
     ) -> str:
         outcome = self.desktop_runtime.run(goal, cancellation_token=cancellation_token)
+        response = self._project_desktop_outcome(outcome)
+        self._log_chat_interaction(raw_input=goal, response_text=response)
+        if record_in_history:
+            self._append_short_term([LLMMessage(role="assistant", content=response)])
+        return response
+
+    def _project_desktop_outcome(self, outcome: DesktopRunOutcome) -> str:
         self.last_plan_summary = "Desktop использовал native tool loop для host execution."
         self.last_execution_summary = (
             f"tool_calls={len(outcome.loop_result.tool_calls)}, "
@@ -666,9 +687,6 @@ class AgentRoutingMixin:
             plan_summary=self.last_plan_summary,
             execution_summary=self.last_execution_summary,
         )
-        self._log_chat_interaction(raw_input=goal, response_text=response)
-        if record_in_history:
-            self._append_short_term([LLMMessage(role="assistant", content=response)])
         return response
 
     def _run_chat_tool_loop_if_available(

@@ -2,16 +2,22 @@ from __future__ import annotations
 
 # ruff: noqa: F403,F405
 import asyncio
+import threading
 from pathlib import Path
 
-from core.agent_response import AgentResponse
-from core.approval_policy import ApprovalPrompt, ApprovalRequest
+import pytest
+
+from core.agent import Agent
 from core.desktop_policy import (
     DesktopApprovalRule,
     DesktopApprovalScope,
     DesktopPolicyStore,
 )
+from llm.brain_base import Brain
+from llm.types import LLMResult, ToolCall
 from server.agent_provider import AgentScope
+from shared.models import LLMMessage
+from tools.desktop_tools import DesktopFileDeleteTool
 
 from .fakes import *
 
@@ -29,75 +35,89 @@ class CapturingTracer:
         self.events.append((event_type, message, meta))
 
 
-class DesktopApprovalAgent(DummyAgent):
+class DesktopApprovalBrain(Brain):
+    supports_native_tools = True
+
     def __init__(self, target: str) -> None:
-        super().__init__()
         self.target = target
-        self.desktop_rules: list[DesktopApprovalRule] = []
-        self.desktop_rule_snapshots: list[list[DesktopApprovalRule]] = []
-        self.desktop_clear_count = 0
-        self.consumed_rule_ids: list[str] = []
-        self.last_approval_request: ApprovalRequest | None = None
-        self.last_approval_source_endpoint: str | None = None
-        self.last_approval_resume_payload: dict[str, JSONValue] | None = None
-        self.last_chat_interaction_id: str | None = None
+        self.seen = []
+        self.owner_threads = []
+
+    def generate(self, messages, config=None, tools=None):
+        self.owner_threads.append(threading.get_ident())
+        self.seen.append(list(messages))
+        if messages[-1].role == "tool":
+            if messages[-1].tool_call_id == "delete-original":
+                return LLMResult(
+                    text="verify",
+                    tool_calls=[
+                        ToolCall(
+                            id="verify-original",
+                            name="desktop_verify",
+                            arguments={"path": self.target, "check": "path_missing"},
+                        )
+                    ],
+                )
+            return LLMResult(text="desktop-sensitive-action-completed")
+        return LLMResult(
+            text="delete",
+            tool_calls=[
+                ToolCall(
+                    id="delete-original",
+                    name="desktop_file_delete",
+                    arguments={"path": self.target},
+                )
+            ],
+        )
+
+
+class DesktopApprovalAgent(Agent):
+    def __init__(self, target: str) -> None:
+        self.target = target
+        home = Path(target).parent.parent
+        super().__init__(
+            brain=DesktopApprovalBrain(target),
+            desktop_home=home,
+            desktop_policy_store=DesktopPolicyStore(home / ".config/slavik/policy.json"),
+        )
         self.completed = 0
+        self.desktop_rule_snapshots = []
+        self.desktop_clear_count = 0
         self.tracer = CapturingTracer()
+        tool = DesktopFileDeleteTool(self.desktop_security)
 
-    def set_desktop_policy_context(
-        self,
-        rules: list[DesktopApprovalRule],
-        principal_id: str = "legacy",
-    ) -> None:
-        del principal_id
-        self.desktop_rules = list(rules)
+        def execute(request):
+            result = tool.handle(request)
+            if result.ok:
+                self.completed += 1
+            return result
+
+        self.tool_registry.register(
+            "desktop_file_delete",
+            execute,
+            enabled=True,
+            capability="write",
+            risk_classes=["write", "destructive"],
+            execution_targets={"desktop"},
+            description="Delete one exact file",
+            parameters_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        )
+
+    def reconfigure_models(self, main_config, main_api_key=None, *, persist=True):
+        # Only the external provider is stubbed; the execution mechanism is production.
+        pass
+
+    def set_desktop_policy_context(self, rules, principal_id="legacy"):
         self.desktop_rule_snapshots.append(list(rules))
+        super().set_desktop_policy_context(rules, principal_id)
 
-    def clear_desktop_policy_context(self) -> None:
-        self.desktop_rules = []
+    def clear_desktop_policy_context(self):
         self.desktop_clear_count += 1
-
-    def drain_consumed_desktop_rule_ids(self) -> list[str]:
-        consumed = list(self.consumed_rule_ids)
-        self.consumed_rule_ids.clear()
-        return consumed
-
-    def respond(self, messages) -> AgentResponse:  # noqa: ANN001
-        del messages
-        matching = [
-            rule
-            for rule in self.desktop_rules
-            if rule.effect == "allow" and rule.scope.target_pattern == self.target
-        ]
-        if matching:
-            self.last_approval_request = None
-            self.consumed_rule_ids.extend(
-                rule.rule_id for rule in matching if rule.source == "once"
-            )
-            self.completed += 1
-            return AgentResponse("desktop-sensitive-action-completed")
-        scope = DesktopApprovalScope(
-            tool="desktop_file_delete",
-            action="delete",
-            target_pattern=self.target,
-            risk_class="destructive",
-        )
-        self.last_approval_request = ApprovalRequest(
-            category="FS_DELETE_OVERWRITE",
-            required_categories=["FS_DELETE_OVERWRITE"],
-            prompt=ApprovalPrompt(
-                what="Delete one exact file",
-                why="Requested by the user",
-                risk="Recoverable destructive action",
-                changes=[self.target],
-            ),
-            tool="desktop_file_delete",
-            details={"path": self.target},
-            session_id=self._session_id,
-            scope=scope,
-            reason="destructive_action",
-        )
-        return AgentResponse("approval required")
+        super().clear_desktop_policy_context()
 
 
 def test_desktop_mode_transition_and_session_approval_lifecycle(tmp_path: Path) -> None:
@@ -307,9 +327,13 @@ def test_desktop_always_allow_decision_persists_exact_scope(tmp_path: Path) -> N
     asyncio.run(run())
 
 
-def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path) -> None:
+def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
     async def run() -> None:
         target = str(tmp_path / "Downloads" / "sensitive.iso")
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text("sensitive fixture")
         agent = DesktopApprovalAgent(target)
         client = await _create_client(agent)
         try:
@@ -333,8 +357,11 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path) -> None:
                 json={"content": "delete the sensitive file"},
             )
             assert first.status == 200
-            decision = (await first.json()).get("decision")
-            assert isinstance(decision, dict)
+            first_payload = await first.json()
+            decision = first_payload.get("decision")
+            assert isinstance(decision, dict), [
+                event for event in agent.tracer.events if event[0] == "policy_denied"
+            ]
             decision_id = decision.get("id")
             assert isinstance(decision_id, str)
             current_decision = await client.server.app["ui_hub"].get_session_decision(session_id)
@@ -366,6 +393,13 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path) -> None:
                 await client.server.app["ui_hub"].get_session_workflow(session_id),
             )
             assert await client.server.app["session_store"].get_desktop_rules(scope) == []
+            assert not Path(target).exists()
+            assert agent.brain.seen[1][-1].tool_call_id == "delete-original"
+            assert agent.brain.seen[2][-1].tool_call_id == "verify-original"
+            assert len(agent.brain.seen) == 3
+            assert len(set(agent.brain.owner_threads)) == 1
+            chat_messages = await client.server.app["ui_hub"].get_messages(session_id, lane="chat")
+            assert len([m for m in chat_messages if m.get("role") == "user"]) == 1
             assert any(
                 event == "desktop_approval_decision"
                 and message == "approve_once"
@@ -374,6 +408,7 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path) -> None:
                 for event, message, meta in agent.tracer.events
             )
 
+            Path(target).write_text("second fixture")
             again = await client.post(
                 "/ui/api/chat/send",
                 headers={"X-Slavik-Session": session_id},
@@ -390,9 +425,15 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_desktop_session_approval_reuses_then_expires_on_mode_exit(tmp_path: Path) -> None:
+def test_desktop_session_approval_reuses_then_expires_on_mode_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
     async def run() -> None:
         target = str(tmp_path / "Downloads" / "session.iso")
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text("sensitive fixture")
         agent = DesktopApprovalAgent(target)
         client = await _create_client(agent)
         try:
@@ -410,8 +451,9 @@ def test_desktop_session_approval_reuses_then_expires_on_mode_exit(tmp_path: Pat
                 headers={"X-Slavik-Session": session_id},
                 json={"content": "delete it"},
             )
-            decision = (await first.json()).get("decision")
-            assert isinstance(decision, dict) and isinstance(decision.get("id"), str)
+            first_payload = await first.json()
+            decision = first_payload.get("decision")
+            assert isinstance(decision, dict) and isinstance(decision.get("id"), str), first_payload
             approved = await client.post(
                 "/ui/api/decision/respond",
                 headers={"X-Slavik-Session": session_id},
@@ -424,6 +466,7 @@ def test_desktop_session_approval_reuses_then_expires_on_mode_exit(tmp_path: Pat
             assert approved.status == 200
             assert agent.completed == 1
 
+            Path(target).write_text("second fixture")
             reused = await client.post(
                 "/ui/api/chat/send",
                 headers={"X-Slavik-Session": session_id},
@@ -443,6 +486,7 @@ def test_desktop_session_approval_reuses_then_expires_on_mode_exit(tmp_path: Pat
                 headers={"X-Slavik-Session": session_id},
                 json={"mode": "desktop"},
             )
+            Path(target).write_text("third fixture")
             expired = await client.post(
                 "/ui/api/chat/send",
                 headers={"X-Slavik-Session": session_id},
@@ -456,3 +500,173 @@ def test_desktop_session_approval_reuses_then_expires_on_mode_exit(tmp_path: Pat
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("termination", ["reject", "cancel", "mode_exit", "timeout"])
+def test_desktop_paused_run_owns_lease_until_cleanup(tmp_path, monkeypatch, termination):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "Downloads" / "pending.iso"
+    target.parent.mkdir()
+    target.write_text("pending")
+    agent = DesktopApprovalAgent(str(target))
+    closed = threading.Event()
+    closes = []
+
+    def close():
+        closes.append(threading.get_ident())
+        closed.set()
+
+    monkeypatch.setattr(agent, "close_desktop_resources", close)
+    if termination == "timeout":
+        agent.desktop_runtime.approval_timeout_seconds = 0.3
+
+    async def run():
+        client = await _create_client(agent)
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            headers = {"X-Slavik-Session": session_id}
+            await _select_local_model(client, session_id)
+            await client.post("/ui/api/mode", headers=headers, json={"mode": "desktop"})
+            payload = await (
+                await client.post(
+                    "/ui/api/chat/send", headers=headers, json={"content": "delete the file"}
+                )
+            ).json()
+            decision = payload["decision"]
+            assert decision["context"]["source_endpoint"] == "chat.tool_continue"
+            identity = agent.last_approval_resume_payload["continuation_id"]
+            assert agent.completed == 0 and target.exists()
+            assert not closed.is_set()
+            assert not agent.desktop_runtime.run_coordinator.try_acquire()
+            if termination == "reject":
+                response = await client.post(
+                    "/ui/api/decision/respond",
+                    headers=headers,
+                    json={
+                        "session_id": session_id,
+                        "decision_id": decision["id"],
+                        "choice": "reject",
+                    },
+                )
+                assert response.status == 200
+            elif termination == "cancel":
+                response = await client.post("/ui/api/chat/cancel", headers=headers)
+                assert response.status == 200
+                assert (await response.json())["cancelled"] is True
+            elif termination == "mode_exit":
+                response = await client.post("/ui/api/mode", headers=headers, json={"mode": "ask"})
+                assert response.status == 200
+            assert await asyncio.to_thread(closed.wait, 2)
+            assert closes == [agent.brain.owner_threads[0]]
+            assert agent.desktop_runtime.run_coordinator.try_acquire()
+            agent.desktop_runtime.run_coordinator.release()
+            from core.agent_tools import ChatApprovalUnavailable
+
+            with pytest.raises(ChatApprovalUnavailable):
+                agent.resume_chat_approval(identity)
+            agent.desktop_runtime.cancel_pending()
+            assert closes == [agent.brain.owner_threads[0]]
+            assert agent.completed == 0 and target.exists()
+            if termination == "timeout":
+                response = await client.post(
+                    "/ui/api/decision/respond",
+                    headers=headers,
+                    json={
+                        "session_id": session_id,
+                        "decision_id": decision["id"],
+                        "choice": "approve_once",
+                    },
+                )
+                assert response.status == 409
+                principal = await client.server.app["ui_hub"].get_session_principal_id(session_id)
+                assert (
+                    await client.server.app["session_store"].get_desktop_rules(
+                        AgentScope(principal, session_id)
+                    )
+                    == []
+                )
+        finally:
+            agent.desktop_runtime.cancel_pending()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_desktop_resume_preserves_result_on_provider_failure(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "Downloads" / "failure.iso"
+    target.parent.mkdir()
+    target.write_text("fixture")
+    agent = DesktopApprovalAgent(str(target))
+    agent.set_session_context("session", set())
+    agent.set_runtime_state(
+        mode="desktop", active_plan=None, active_task=None, enforce_plan_guard=False
+    )
+    try:
+        agent.respond([LLMMessage(role="user", content="delete file")])
+        assert agent.last_approval_request is not None
+        identity = agent.last_approval_resume_payload["continuation_id"]
+        rule = DesktopApprovalRule.create(
+            effect="allow", source="once", scope=agent.last_approval_request.scope
+        )
+        agent.set_desktop_policy_context([rule], "local")
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("provider unavailable after dispatch")
+
+        monkeypatch.setattr(agent.brain, "generate", fail)
+        response = agent.resume_chat_approval(identity)
+        assert agent.completed == 1 and not target.exists()
+        assert response.runtime_result.error == "provider_generation_failed"
+        assert len(response.runtime_result.tool_calls) == 1
+        assert response.runtime_result.tool_calls[0].result.ok is True
+        assert response.runtime_result.tool_calls[0].call.id == "delete-original"
+        from core.agent_tools import ChatApprovalUnavailable
+
+        with pytest.raises(ChatApprovalUnavailable):
+            agent.resume_chat_approval(identity)
+        assert agent.completed == 1
+        assert agent.desktop_runtime.run_coordinator.try_acquire()
+        agent.desktop_runtime.run_coordinator.release()
+    finally:
+        agent.close()
+
+
+def test_desktop_cancel_at_approval_does_not_retain_resources(tmp_path, monkeypatch):
+    from core.approval_policy import ApprovalRequired
+
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "Downloads" / "cancel.iso"
+    target.parent.mkdir()
+    target.write_text("fixture")
+    agent = DesktopApprovalAgent(str(target))
+    agent.set_session_context("session", set())
+    agent.set_runtime_state(
+        mode="desktop", active_plan=None, active_task=None, enforce_plan_guard=False
+    )
+    token = asyncio.Event()
+    original_builder = agent._build_tool_gateway
+
+    def builder(*args, **kwargs):
+        gateway = original_builder(*args, **kwargs)
+        call = gateway.call
+
+        def dispatch(request):
+            try:
+                return call(request)
+            except ApprovalRequired:
+                token.set()
+                raise
+
+        gateway.call = dispatch
+        return gateway
+
+    monkeypatch.setattr(agent, "_build_tool_gateway", builder)
+    try:
+        outcome = agent.desktop_runtime.run("delete file", cancellation_token=token)
+        assert outcome.loop_result.cancelled
+        assert agent.completed == 0 and target.exists()
+        assert agent.desktop_runtime.run_coordinator.try_acquire()
+        agent.desktop_runtime.run_coordinator.release()
+    finally:
+        agent.close()

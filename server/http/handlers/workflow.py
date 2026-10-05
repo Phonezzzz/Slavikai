@@ -12,6 +12,7 @@ from server.http.common.runtime_contract import SessionApprovalStore
 from server.http_api import (
     SESSION_MODES,
     UI_SESSION_HEADER,
+    _agent_lock_for_request,
     _agent_scope,
     _apply_agent_runtime_state,
     _load_effective_session_security,
@@ -192,6 +193,11 @@ async def handle_ui_mode(request: web.Request) -> web.Response:
         )
     else:
         await hub.set_session_workflow(session_id, mode=next_mode)
+    if current_mode == "desktop" and next_mode != "desktop":
+        agent = await _resolve_agent(request, session_id)
+        if agent is not None:
+            async with _agent_lock_for_request(request, session_id):
+                await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
     updated = await hub.get_session_workflow(session_id)
     response = json_response(
         {

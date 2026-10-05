@@ -284,7 +284,7 @@ def build_ui_approval_decision(
             },
         ]
     )
-    if source_endpoint in {"chat.send", "workspace.send"}:
+    if source_endpoint in {"chat.send", "workspace.send", "chat.tool_continue"}:
         options = [option for option in options if option["id"] != "edit_and_approve"]
     return {
         "id": f"decision-{uuid.uuid4().hex}",

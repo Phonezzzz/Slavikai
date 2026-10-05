@@ -4,14 +4,14 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Literal
 
 from aiohttp import web
 
 from core.agent_response import AgentResponse, ResponseFailure, ResponseProduced
-from core.approval_policy import ApprovalCategory
+from core.agent_tools import ChatApprovalUnavailable
+from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyStore
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
@@ -36,7 +36,7 @@ from server.http.common.idempotency import (
     normalize_idempotency_key,
 )
 from server.http.common.responses import error_response, json_response
-from server.http.common.runtime_contract import AgentProtocol
+from server.http.common.ui_runtime import _decision_with_status
 from server.http_api import (
     MAX_CONTENT_CHARS,
     MAX_TOTAL_PAYLOAD_CHARS,
@@ -81,6 +81,7 @@ from server.http_api import (
 from server.ui_hub import UIHub
 from shared.models import JSONValue, LLMMessage
 from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
+from tools.workspace_tools import workspace_root_context
 
 logger = logging.getLogger("SlavikAI.HttpAPI")
 
@@ -342,22 +343,6 @@ def _normalize_agent_decision(
     return normalized
 
 
-@asynccontextmanager
-async def _send_approval_scope(
-    lock: asyncio.Lock,
-    agent: AgentProtocol,
-    session_id: str,
-    persisted: set[ApprovalCategory],
-    transient: set[ApprovalCategory] | None,
-) -> AsyncIterator[None]:
-    async with lock:
-        try:
-            yield
-        finally:
-            if transient is not None:
-                agent.set_session_context(session_id, persisted)
-
-
 async def _handle_ui_send_impl(
     request: web.Request,
     *,
@@ -365,7 +350,6 @@ async def _handle_ui_send_impl(
     lane: MessageLane,
     bypass_root_gate: bool = False,
     idempotency_enabled: bool = True,
-    transient_approval_categories: set[ApprovalCategory] | None = None,
 ) -> web.Response:
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
@@ -844,9 +828,7 @@ async def _handle_ui_send_impl(
         live_stream_sent = False
         generation_cancelled = False
         set_runtime_workspace_root(session_root)
-        async with _send_approval_scope(
-            agent_lock, agent, session_id, approved_categories, transient_approval_categories
-        ):
+        async with agent_lock:
             previous_trace_id = _normalize_trace_id(
                 getattr(agent, "last_chat_interaction_id", None)
             )
@@ -875,9 +857,7 @@ async def _handle_ui_send_impl(
                 )
             try:
                 await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
-                agent.set_session_context(
-                    session_id, approved_categories | (transient_approval_categories or set())
-                )
+                agent.set_session_context(session_id, approved_categories)
                 set_desktop_policy_context = getattr(agent, "set_desktop_policy_context", None)
                 clear_desktop_policy_context = getattr(agent, "clear_desktop_policy_context", None)
                 if mode == "desktop":
@@ -1289,6 +1269,9 @@ async def _handle_ui_send_impl(
                         "user_message_id": user_message_id,
                         "selected_model_snapshot": dict(selected_model),
                     }
+                approval_resume_payload["workspace_root_snapshot"] = str(session_root)
+                approval_resume_payload["user_message_id"] = user_message_id
+                approval_resume_payload["selected_model_snapshot"] = dict(selected_model)
                 source_request_raw = approval_resume_payload.get("source_request")
                 source_request = (
                     dict(source_request_raw) if isinstance(source_request_raw, dict) else {}
@@ -1678,6 +1661,41 @@ async def handle_ui_chat_cancel(request: web.Request) -> web.Response:
     registry: ChatCancellationRegistry = request.app["chat_cancellation_registry"]
     result = await registry.request_cancel(resolved_session_id)
     if result is None:
+        decision = await hub.get_session_decision(resolved_session_id)
+        if isinstance(decision, dict) and decision.get("status") == "pending":
+            context = decision.get("context")
+            context = context if isinstance(context, dict) else {}
+            payload = context.get("resume_payload")
+            payload = payload if isinstance(payload, dict) else {}
+            identity = payload.get("continuation_id")
+            decision_id = decision.get("id")
+            if (
+                context.get("source_endpoint") == "chat.tool_continue"
+                and isinstance(identity, str)
+                and isinstance(decision_id, str)
+            ):
+                agent, _ = await _resolve_agent_for_ui_session(request, resolved_session_id)
+                if agent is not None:
+                    async with _agent_lock_for_request(request, resolved_session_id):
+                        rejected = _decision_with_status(decision, status="rejected", resolved=True)
+                        updated, _ = await hub.transition_session_decision(
+                            resolved_session_id,
+                            expected_id=decision_id,
+                            expected_status="pending",
+                            next_decision=rejected,
+                        )
+                        if updated:
+                            await asyncio.to_thread(agent.cancel_chat_approval, identity)
+                            response = json_response(
+                                {
+                                    "session_id": resolved_session_id,
+                                    "stream_id": None,
+                                    "cancelled": True,
+                                }
+                            )
+                            response.headers[UI_SESSION_HEADER] = resolved_session_id
+                            return response
+    if result is None:
         return error_response(
             status=409,
             message="В этой сессии нет активной генерации.",
@@ -1717,7 +1735,6 @@ async def handle_ui_send_resume(
     payload: dict[str, JSONValue],
     lane: MessageLane,
     bypass_root_gate: bool,
-    transient_approval_categories: set[ApprovalCategory] | None = None,
 ) -> web.Response:
     return await _handle_ui_send_impl(
         request,
@@ -1725,5 +1742,170 @@ async def handle_ui_send_resume(
         lane=lane,
         bypass_root_gate=bypass_root_gate,
         idempotency_enabled=False,
-        transient_approval_categories=transient_approval_categories,
     )
+
+
+async def handle_ui_approval_continue(
+    request: web.Request,
+    *,
+    session_id: str,
+    resume_payload: dict[str, object],
+    desktop_scope: DesktopApprovalScope | None = None,
+    choice: str = "approve_once",
+) -> dict[str, JSONValue]:
+    def not_started(code: str) -> dict[str, JSONValue]:
+        return {"ok": False, "error": code, "resume_started": False}
+
+    identity = resume_payload.get("continuation_id")
+    parent = resume_payload.get("user_message_id")
+    if not isinstance(identity, str) or not isinstance(parent, str):
+        return not_started("approval_continuation_unavailable")
+    hub: UIHub = request.app["ui_hub"]
+    workflow = await hub.get_session_workflow(session_id)
+    mode = resume_payload.get("execution_mode", "ask")
+    if mode not in {"ask", "desktop"} or workflow.get("mode") != mode:
+        return not_started("approval_continuation_unavailable")
+    selected = await hub.get_session_model(session_id)
+    if selected != resume_payload.get("selected_model_snapshot"):
+        return not_started("approval_continuation_unavailable")
+    messages = await hub.get_messages(session_id, lane="chat")
+    if not any(
+        message.get("message_id") == parent and message.get("role") == "user"
+        for message in messages
+    ):
+        return not_started("approval_continuation_unavailable")
+    session_root = await _workspace_root_for_session(hub, session_id)
+    if str(session_root) != resume_payload.get("workspace_root_snapshot"):
+        return not_started("approval_continuation_unavailable")
+    try:
+        agent, _ = await _resolve_agent_for_ui_session(request, session_id)
+    except (ValueError, PermissionError):
+        return not_started("approval_continuation_unavailable")
+    if agent is None:
+        return not_started("approval_continuation_unavailable")
+    lock = _agent_lock_for_request(request, session_id)
+    if lock.locked():
+        return not_started("chat_generation_in_progress")
+    registry: ChatCancellationRegistry = request.app["chat_cancellation_registry"]
+    stream_id = uuid.uuid4().hex
+    try:
+        generation = await registry.start(session_id=session_id, stream_id=stream_id)
+    except ChatGenerationAlreadyActive:
+        return not_started("chat_generation_in_progress")
+    worker: asyncio.Task[AgentResponse] | None = None
+    created_rule: DesktopApprovalRule | None = None
+    started = False
+    scope = _agent_scope(request, session_id)
+    session_store = request.app["session_store"]
+    persistent_store: DesktopPolicyStore = request.app["desktop_policy_store"]
+    try:
+        async with lock:
+            try:
+                agent.validate_chat_approval(identity)
+            except ChatApprovalUnavailable as exc:
+                return not_started(str(exc))
+            if mode == "desktop":
+                principal_id = _request_principal_id(request)
+                if principal_id is None or desktop_scope is None:
+                    return not_started("approval_continuation_unavailable")
+                created_rule = DesktopApprovalRule.create(
+                    effect="allow",
+                    scope=desktop_scope,
+                    source="persistent"
+                    if choice == "always_allow"
+                    else "session"
+                    if choice == "approve_session"
+                    else "once",
+                    subject_principal_id=principal_id,
+                    description="Approved from Desktop UI",
+                )
+                if choice == "always_allow":
+                    persistent_store.add_rule(created_rule)
+                else:
+                    await session_store.add_desktop_rule(scope, created_rule)
+                agent.set_desktop_policy_context(
+                    await session_store.get_desktop_rules(scope), principal_id
+                )
+            categories = await request.app["session_store"].get_categories(
+                _agent_scope(request, session_id)
+            )
+            if (
+                mode == "ask"
+                and choice == "approve_session"
+                and agent.last_approval_request is not None
+            ):
+                categories = await session_store.approve(
+                    scope, set(agent.last_approval_request.required_categories)
+                )
+            agent.set_session_context(session_id, categories)
+            with workspace_root_context(session_root):
+                worker = asyncio.create_task(
+                    asyncio.to_thread(
+                        agent.resume_chat_approval, identity, cancellation_token=generation.token
+                    )
+                )
+            try:
+                response = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                generation.token.set()
+                await asyncio.shield(worker)
+                raise
+            except ChatApprovalUnavailable as exc:
+                return not_started(str(exc))
+            started = True
+            if mode == "desktop":
+                await session_store.remove_desktop_rules(
+                    scope, set(agent.drain_consumed_desktop_rule_ids())
+                )
+            text, report = _project_agent_response(response)
+            approval = _serialize_approval_request(agent.last_approval_request)
+            next_decision: dict[str, JSONValue] | None = None
+            if approval is not None:
+                next_payload = dict(agent.last_approval_resume_payload or {})
+                next_payload["workspace_root_snapshot"] = str(session_root)
+                next_payload["user_message_id"] = parent
+                next_payload["selected_model_snapshot"] = selected
+                next_decision = _build_ui_approval_decision(
+                    approval_request=approval,
+                    session_id=session_id,
+                    source_endpoint="chat.tool_continue",
+                    resume_payload=next_payload,
+                    trace_id=None,
+                    workflow_context=_decision_workflow_context(
+                        mode=str(mode), active_plan=None, active_task=None
+                    ),
+                )
+            await hub.append_message(
+                session_id,
+                hub.create_message(
+                    role="assistant", content=text, lane="chat", parent_user_message_id=parent
+                ),
+                lane="chat",
+            )
+            await hub.set_session_output(session_id, text)
+            if next_decision is not None:
+                await hub.set_session_decision(session_id, next_decision)
+            await _publish_chat_stream_from_text(
+                hub, session_id=session_id, stream_id=stream_id, content=text, lane="chat"
+            )
+            return {
+                "ok": True,
+                "source_endpoint": "chat.tool_continue",
+                "resume_started": True,
+                "data": {
+                    "status_code": 200,
+                    "output": text,
+                    "decision": next_decision,
+                    "mwv_report": report,
+                    "generation_error": response.failure.code
+                    if response.failure is not None
+                    else None,
+                },
+            }
+    finally:
+        if created_rule is not None and (not started or created_rule.source == "once"):
+            if created_rule.source == "persistent":
+                persistent_store.remove_rule(created_rule.rule_id)
+            else:
+                await session_store.remove_desktop_rules(scope, {created_rule.rule_id})
+        await registry.finish(generation)

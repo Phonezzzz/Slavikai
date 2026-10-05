@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from core.approval_policy import (
     ApprovalContext,
+    ApprovalRequest,
     ApprovalRequired,
     build_approval_request,
     decide_request,
@@ -24,6 +26,38 @@ class ToolGateway:
     approval_context: ApprovalContext | None = None
     log_event: Callable[[str, str, dict[str, JSONValue] | None], None] | None = None
     confirmed_decision: bool = False
+
+    def call_approved_once(self, request: ToolRequest, approval: ApprovalRequest) -> ToolResult:
+        context = self.approval_context
+        subject = json.dumps(
+            {"name": request.name, "args": request.args}, sort_keys=True, allow_nan=False
+        )
+        if (
+            context is None
+            or context.session_id != approval.session_id
+            or subject != approval.request_json
+        ):
+            raise ValueError("approval_subject_mismatch")
+        if context.execution_target == "desktop":
+            # Scoped Desktop rules remain authoritative; never inject categories.
+            return self.call(request)
+        decision, _ = decide_request(
+            context=context,
+            request=request,
+            risk_classes=self.registry.get_risk_classes(request.name),
+        )
+        if decision.status != "require_approval":
+            return self.call(request)
+        if set(decision.required_categories) != set(approval.required_categories):
+            return self.call(request)
+        scoped_gateway = replace(
+            self,
+            approval_context=replace(
+                context,
+                approved_categories=context.approved_categories | set(approval.required_categories),
+            ),
+        )
+        return scoped_gateway.call(request)
 
     def call(self, request: ToolRequest) -> ToolResult:
         bypass_safe_mode = False
@@ -60,6 +94,14 @@ class ToolGateway:
                             "policy_rule_id": approval_request.policy_rule_id,
                         },
                     )
+                approval_request = replace(
+                    approval_request,
+                    request_json=json.dumps(
+                        {"name": request.name, "args": request.args},
+                        sort_keys=True,
+                        allow_nan=False,
+                    ),
+                )
                 raise ApprovalRequired(approval_request)
             if decision.status == "block":
                 if self.log_event:

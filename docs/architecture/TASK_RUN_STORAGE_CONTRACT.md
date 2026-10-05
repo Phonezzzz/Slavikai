@@ -162,17 +162,63 @@ request isolation и отсутствие rerun после stream contract error
 не создавать второй authoritative lifecycle в Auto directories, UI snapshots или logs.
 Compression не начинается раньше PR F и всех canonical-output readiness gates.
 
-### Ask approval observation/retry — исправление B2c
+### Native Ask approval continuation — исправление B2c
 
-`ApprovalRequired` проходит через Ask sync/stream к существующему approval handler,
+`ApprovalRequired` проходит через Ask sync/stream к существующему handler,
 не превращаясь в provider failure. Ask approval report имеет `route=chat`.
-При `approve_once` decision handler передаёт category grant только внутреннему повторному
-send; wire payload не задаёт grant, session storage его не сохраняет. Owning Agent lock
-удерживается до восстановления persisted approval context, в том числе при ошибке/отмене.
-HTTP regression проверяет настоящий Gateway execution после confirm, отсутствие grant в
-следующем send и provider failure после tool. Это текущая category-based permission на один
-повторный request, **не** immutable approval конкретных tool arguments. Повторный chat send
-снова вызывает модель; сохранённого tool continuation ещё нет. `edit_and_approve` здесь
-не предлагается и отклоняется до изменения decision, поскольку replay не применяет edits.
-Binding approval к сохранённому ToolRequest/continuation остаётся foundation prerequisite;
-этот corrective slice не повышает readiness capture/recovery/compression.
+`ToolLoopContinuation` capture'ит историю с model tool-call IDs, уже выполненные observations,
+оставшийся batch, tools/config и точный request subject ДО dispatch. Snapshot копируется
+от producer state; это внутренний scoped RAM checkpoint, не durable canonical evidence.
+Agent хранит один pending continuation с opaque identity на owning principal/session instance.
+Новый обычный turn сбрасывает snapshot; отсутствующий snapshot после restart даёт unavailable,
+никакой повторной generation или execution. Model/config и workspace root должны совпадать.
+
+`chat.tool_continue` decision ссылается на checkpoint и исходный `user_message_id`.
+После atomic decision claim, generation admission и owning Agent lock runtime потребляет
+checkpoint и исполняет сохранённый call через `ToolGateway.call_approved_once`.
+Gateway проверяет exact name/JSON args/session, заново применяет policy, включая DENY,
+и создаёт permission context только для этого одного dispatch. Original Gateway/Agent/session
+categories не расширяются. Остальные calls batch требуют собственных approvals, даже если
+имена/args совпадают. Явное `approve_session` остаётся отдельным более широким разрешением.
+После результата продолжает исходный loop с original tool call/result pairing; новый user
+turn не создаётся, approval stop-text не используется для восстановления model history.
+Resume публикует итоговый text stream; provider token streaming при resume здесь не заявлен.
+
+Busy/config/snapshot failure до начала сохраняет исходный decision pending. После claim
+snapshot не используется повторно; double-confirm отклоняется. Provider exception sync loop
+несёт `ToolLoopExecutionError.result` с уже завершёнными calls/history, не теряя execution
+observations. Provider cancellation также возвращает typed cancelled result. UI transport
+успех continuation не определяет `ToolResult.ok` или lifecycle completion.
+`edit_and_approve` на этом пути пока отклоняется: edits требуют нового subject/consent.
+
+Legacy `chat.send` approval больше не вызывает ordinary send replay: без сохранённого native
+continuation возвращает unavailable. Local web prefetch, MWV approval continuation,
+durable pause/restart recovery и terminal authority остаются отдельными foundation gaps.
+Gate canonical capture/durability не повышен, TinyJuice/compression не добавлены.
+
+Проверки: `tests/test_tool_loop.py` — sync/stream pause, exact subject/tamper rejection,
+same-category remaining batch, provider fault после dispatch; `tests/test_agent_response.py`
+— actual Agent/Gateway resume и single use; `tests/ui_api/test_stream_and_events.py` —
+HTTP confirm, busy retry, missing snapshot, changed workspace root, original call ID,
+один user turn, отсутствие permission leak/wire injection, post-tool provider error.
+
+
+### Native Desktop approval continuation (volatile)
+
+Desktop pause принадлежит `DesktopRuntime`: исходный tool-loop checkpoint, host lease и
+browser/GUI/process resources сохраняются вместе. Execution, resume и cleanup выполняются
+на одном runtime-owned потоке, в том числе для thread-affine browser resources. Пауза
+ограничена 300 секундами; timeout, reject, новый user turn, выход из Desktop и Agent shutdown
+инвалидируют checkpoint и освобождают lease после cleanup через ToolGateway. После cleanup
+сохранённое действие не регенерируется и не исполняется.
+
+Confirm продолжает исходный native call/history через тот же loop и Desktop verifier.
+Exact request validation не обходит DesktopPolicyRuntime, DENY или descriptor checks.
+Once/session/persistent consent применяет существующие scoped rules; отказ admission удаляет
+новые rules и сохраняет decision pending без execution. HTTP добавляет только assistant
+continuation к исходному user turn. Tests проверяют настоящий Agent/Gateway, file-delete и
+verifier, а не fake responder, самостоятельно интерпретирующий approval rules.
+
+Это volatile runtime ownership, не durable lifecycle adoption, canonical storage или
+restart-safe continuation. После expiry UI decision возвращает unavailable при confirm;
+archival/history recovery остаётся отдельной foundation dependency. TinyJuice BLOCKED.

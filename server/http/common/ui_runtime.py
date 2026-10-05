@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Final
@@ -52,7 +53,14 @@ def _serialize_approval_request(
         "category": approval_request.category,
         "required_categories": list(approval_request.required_categories),
         "tool": approval_request.tool,
-        "details": dict(approval_request.details),
+        "details": {
+            **approval_request.details,
+            **(
+                {"request": json.loads(approval_request.request_json)}
+                if approval_request.request_json is not None
+                else {}
+            ),
+        },
         "session_id": approval_request.session_id,
         "scope": approval_request.scope.to_dict() if approval_request.scope is not None else None,
         "policy_reason": approval_request.reason,

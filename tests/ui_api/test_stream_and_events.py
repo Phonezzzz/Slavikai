@@ -1581,25 +1581,36 @@ def test_stream_response_contract_fault_does_not_reuse_stale_result_or_rerun(dup
 
 
 @pytest.mark.parametrize("provider_fails_after_tool", [False, True])
+@pytest.mark.parametrize("admission", ["normal", "busy", "missing", "root_changed"])
 def test_ui_ask_stream_creates_real_network_approval(
-    tmp_path, monkeypatch, provider_fails_after_tool
+    tmp_path, monkeypatch, provider_fails_after_tool, admission
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
     class ApprovalReadBrain(_RealAgentStreamingBrain):
+        calls = 0
+        seen_tool_ids = []
         supports_native_tools = True
         supports_streaming_tools = True
 
         def generate(self, messages, config=None, tools=None):
             del config
+            self.calls += 1
             if messages[-1].role == "tool":
+                self.seen_tool_ids.append(messages[-1].tool_call_id)
                 if provider_fails_after_tool:
                     raise RuntimeError("provider failed after tool")
                 return LLMResult(text="network complete")
             assert any(tool.name == "network_lookup" for tool in tools or [])
             return LLMResult(
                 text="",
-                tool_calls=[ToolCall(id="network-approval", name="network_lookup", arguments={})],
+                tool_calls=[
+                    ToolCall(
+                        id="network-approval",
+                        name="network_lookup",
+                        arguments={} if self.calls == 1 else {"changed": True},
+                    )
+                ],
             )
 
     agent = _RealStreamingAgent(
@@ -1610,9 +1621,17 @@ def test_ui_ask_stream_creates_real_network_approval(
         canonical_atoms_db_path=str(tmp_path / "atoms.db"),
     )
     executions = []
+    roots = []
+    from tools.workspace_tools import get_workspace_root
+
+    def execute(request):
+        roots.append(str(get_workspace_root()))
+        executions.append(request)
+        return ToolResult.success({"output": "network"})
+
     agent.tool_registry.register(
         "network_lookup",
-        lambda request: executions.append(request) or ToolResult.success({"output": "network"}),
+        execute,
         enabled=True,
         capability="read",
         risk_classes=["network"],
@@ -1658,6 +1677,42 @@ def test_ui_ask_stream_creates_real_network_approval(
             )
             assert edited.status == 400
             assert executions == []
+            cancellation_registry = client.server.app["chat_cancellation_registry"]
+            if admission == "busy":
+                busy = await cancellation_registry.start(session_id=session_id, stream_id="other")
+                denied = await client.post(
+                    "/ui/api/decision/respond",
+                    json={
+                        "session_id": session_id,
+                        "decision_id": decision["id"],
+                        "choice": "approve_once",
+                    },
+                )
+                assert denied.status == 409
+                assert executions == []
+                current = await client.server.app["ui_hub"].get_session_decision(session_id)
+                assert current["id"] == decision["id"] and current["status"] == "pending"
+                await cancellation_registry.finish(busy)
+            if admission in {"missing", "root_changed"}:
+                if admission == "missing":
+                    agent._pending_chat_approval = None
+                else:
+                    alternate = tmp_path / "other-root"
+                    alternate.mkdir()
+                    await client.server.app["ui_hub"].set_workspace_root(session_id, str(alternate))
+                denied = await client.post(
+                    "/ui/api/decision/respond",
+                    json={
+                        "session_id": session_id,
+                        "decision_id": decision["id"],
+                        "choice": "approve_once",
+                    },
+                )
+                assert denied.status == 409
+                assert executions == []
+                current = await client.server.app["ui_hub"].get_session_decision(session_id)
+                assert current["status"] == "pending"
+                return
             approved = await client.post(
                 "/ui/api/decision/respond",
                 json={
@@ -1672,6 +1727,27 @@ def test_ui_ask_stream_creates_real_network_approval(
             assert resumed["resume"]["ok"] is True
             assert resumed["resume"]["data"]["decision"] is None
             assert len(executions) == 1
+            assert executions[0].args == {}
+            assert roots == [decision["context"]["resume_payload"]["workspace_root_snapshot"]]
+            assert agent.brain.seen_tool_ids == ["network-approval"]
+            messages = await client.server.app["ui_hub"].get_messages(session_id, lane="chat")
+            assert (
+                sum(
+                    message["role"] == "user" and message["content"] == "lookup"
+                    for message in messages
+                )
+                == 1
+            )
+            repeated = await client.post(
+                "/ui/api/decision/respond",
+                json={
+                    "session_id": session_id,
+                    "decision_id": decision["id"],
+                    "choice": "approve_once",
+                },
+            )
+            assert repeated.status == 409
+            assert len(executions) == 1
             assert agent.approved_categories == set()
             again = await client.post(
                 "/ui/api/chat/send",
@@ -1683,41 +1759,5 @@ def test_ui_ask_stream_creates_real_network_approval(
             assert len(executions) == 1
         finally:
             await client.close()
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("cancelled", [False, True])
-def test_transient_send_approval_restored_before_lock_release(cancelled) -> None:
-    from server.http.handlers.ui_chat import _send_approval_scope
-
-    async def run() -> None:
-        agent = DummyAgent()
-        lock = asyncio.Lock()
-        persisted = {"FS_OUTSIDE_WORKSPACE"}
-        entered = asyncio.Event()
-
-        async def owner() -> None:
-            async with _send_approval_scope(lock, agent, "session", persisted, {"NETWORK_RISK"}):
-                agent.set_session_context("session", persisted | {"NETWORK_RISK"})
-                entered.set()
-                if cancelled:
-                    await asyncio.Future()
-                raise RuntimeError("send failed")
-
-        async def next_request() -> None:
-            await entered.wait()
-            async with lock:
-                assert agent._approved_categories == persisted
-
-        task = asyncio.create_task(owner())
-        follower = asyncio.create_task(next_request())
-        await entered.wait()
-        if cancelled:
-            task.cancel()
-        with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
-            await task
-        await follower
-        assert not lock.locked()
 
     asyncio.run(run())

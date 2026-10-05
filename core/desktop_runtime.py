@@ -3,18 +3,30 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeVar
 
+from core.approval_policy import ApprovalRequired
 from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.tool_gateway import ToolGateway
-from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ExecutedToolCall
+from core.tool_loop import (
+    AgentToolLoop,
+    AgentToolLoopResult,
+    ExecutedToolCall,
+    ToolLoopContinuation,
+    ToolLoopExecutionError,
+)
 from llm.brain_base import Brain
+from llm.cancellation import cancellation_requested
 from llm.types import ModelConfig, ToolSpec
 from shared.models import LLMMessage, ToolRequest, ToolResult
 from tools.tool_registry import ToolRegistry
+
+_T = TypeVar("_T")
 
 DESKTOP_SYSTEM_PROMPT = """You are executing the user's task on their real Linux host.
 Choose capabilities in this strict reliability order: native/application API; typed Desktop
@@ -107,6 +119,10 @@ class DesktopRunOutcome:
     loop_result: AgentToolLoopResult
 
 
+class DesktopContinuationUnavailable(ValueError):
+    pass
+
+
 class DesktopRuntime:
     def __init__(
         self,
@@ -114,11 +130,20 @@ class DesktopRuntime:
         *,
         max_iterations: int = 12,
         run_coordinator: DesktopRunCoordinator | None = None,
+        approval_timeout_seconds: float = 300,
     ) -> None:
         self.parent = parent
         self.max_iterations = max(2, max_iterations)
         self.verifier = VerifierRuntime()
         self.run_coordinator = run_coordinator or DesktopRunCoordinator()
+        self.approval_timeout_seconds = max(0.01, approval_timeout_seconds)
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="desktop-runtime")
+        self._state_lock = threading.RLock()
+        self._paused: ToolLoopContinuation | None = None
+        self._paused_gateway: ToolGateway | None = None
+        self._timer: threading.Timer | None = None
+        self._lease_held = False
+        self._closed = False
 
     def run(
         self,
@@ -126,28 +151,137 @@ class DesktopRuntime:
         *,
         cancellation_token: asyncio.Event | None = None,
     ) -> DesktopRunOutcome:
-        if not self.run_coordinator.try_acquire():
-            verification = _failed_verification("desktop_host_busy")
-            empty = AgentToolLoopResult(
-                text="",
-                messages=[],
-                error="desktop_host_busy",
-            )
-            return DesktopRunOutcome(
-                text="Desktop task stopped: another Desktop run is active.",
-                verification=verification,
-                loop_result=empty,
-            )
-        try:
-            return self._run_with_lease(goal, cancellation_token=cancellation_token)
-        finally:
+        return self._on_owner(lambda: self._run(goal, cancellation_token=cancellation_token))
+
+    def _on_owner(self, operation: Callable[[], _T]) -> _T:
+        context = copy_context()
+        return self._executor.submit(context.run, operation).result()
+
+    def _run(
+        self, goal: str, *, cancellation_token: asyncio.Event | None = None
+    ) -> DesktopRunOutcome:
+        with self._state_lock:
+            self._cancel_pending()
+            if not self.run_coordinator.try_acquire():
+                verification = _failed_verification("desktop_host_busy")
+                empty = AgentToolLoopResult(text="", messages=[], error="desktop_host_busy")
+                return DesktopRunOutcome(
+                    text="Desktop task stopped: another Desktop run is active.",
+                    verification=verification,
+                    loop_result=empty,
+                )
+            self._lease_held = True
+            try:
+                return self._run_with_lease(goal, cancellation_token=cancellation_token)
+            finally:
+                if self._paused is None:
+                    self._release_lease()
+
+    def has_continuation(self, continuation: ToolLoopContinuation) -> bool:
+        with self._state_lock:
+            return self._paused is continuation and self._lease_held
+
+    def resume(
+        self,
+        goal: str,
+        continuation: ToolLoopContinuation,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> DesktopRunOutcome:
+        return self._on_owner(
+            lambda: self._resume(goal, continuation, cancellation_token=cancellation_token)
+        )
+
+    def _resume(
+        self,
+        goal: str,
+        continuation: ToolLoopContinuation,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> DesktopRunOutcome:
+        with self._state_lock:
+            if not self.has_continuation(continuation):
+                raise DesktopContinuationUnavailable("approval_continuation_unavailable")
+            self._paused = None
+            self._paused_gateway = None
+            self._cancel_timer()
+            try:
+                return self._run_with_lease(
+                    goal,
+                    cancellation_token=cancellation_token,
+                    continuation=continuation,
+                )
+            finally:
+                if self._paused is None:
+                    self._release_lease()
+
+    def cancel_pending(self) -> None:
+        with self._state_lock:
+            if self._paused is None:
+                return
+        self._on_owner(self._cancel_pending)
+
+    def close(self) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+        self._on_owner(self._close)
+        self._executor.shutdown(wait=True)
+
+    def _close(self) -> None:
+        with self._state_lock:
+            if self._paused is not None:
+                self._cancel_pending()
+            else:
+                self._close_resources()
+            self._closed = True
+
+    def _cancel_pending(self) -> None:
+        with self._state_lock:
+            gateway = self._paused_gateway
+            if self._paused is None:
+                return
+            self._paused = None
+            self._paused_gateway = None
+            self._cancel_timer()
+            try:
+                if gateway is not None:
+                    self._cleanup_unverified_launches(gateway)
+            finally:
+                self._close_resources()
+                self.parent.desktop_execution_control.clear()
+                self._release_lease()
+
+    def _cancel_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _release_lease(self) -> None:
+        if self._lease_held:
+            self._lease_held = False
             self.run_coordinator.release()
+
+    def _expire(self, continuation: ToolLoopContinuation) -> None:
+        try:
+            self._on_owner(lambda: self._expire_on_owner(continuation))
+        except RuntimeError:
+            if not self._closed:
+                raise
+            # Shutdown уже освободил ресурсы и остановил owning executor.
+            return
+
+    def _expire_on_owner(self, continuation: ToolLoopContinuation) -> None:
+        with self._state_lock:
+            if self._paused is continuation:
+                self._cancel_pending()
 
     def _run_with_lease(
         self,
         goal: str,
         *,
         cancellation_token: asyncio.Event | None = None,
+        continuation: ToolLoopContinuation | None = None,
     ) -> DesktopRunOutcome:
         brain = self.parent._get_main_brain()
         if not brain.supports_native_tools:
@@ -199,13 +333,40 @@ class DesktopRuntime:
                 config=self.parent.main_config,
                 cancellation_token=cancellation_token,
                 final_gate=_final_gate,
+                continuation=continuation,
             )
+        except ApprovalRequired as exc:
+            if exc.continuation is None:
+                self._cleanup_unverified_launches(gateway)
+                raise
+            if cancellation_requested(cancellation_token):
+                loop_result = AgentToolLoopResult(
+                    text=exc.continuation.text,
+                    messages=exc.continuation.history,
+                    tool_calls=exc.continuation.executed,
+                    iterations=exc.continuation.iteration,
+                    cancelled=True,
+                )
+            else:
+                self._paused = exc.continuation
+                self._paused_gateway = gateway
+                self._timer = threading.Timer(
+                    self.approval_timeout_seconds,
+                    self._expire,
+                    args=(exc.continuation,),
+                )
+                self._timer.daemon = True
+                self._timer.start()
+                raise
+        except ToolLoopExecutionError as exc:
+            loop_result = exc.result
         except Exception:
             self._cleanup_unverified_launches(gateway)
             raise
         finally:
-            self._close_resources()
-            self.parent.desktop_execution_control.clear()
+            if self._paused is None:
+                self._close_resources()
+                self.parent.desktop_execution_control.clear()
         verification = self._verify(loop_result.tool_calls)
         if loop_result.cancelled:
             cleanup = self._cleanup_unverified_launches(gateway)
