@@ -230,6 +230,9 @@ Session/persistent consent применяет существующие scoped ru
 continuation к исходному user turn. Tests проверяют настоящий Agent/Gateway, file-delete и
 verifier, а не fake responder, самостоятельно интерпретирующий approval rules.
 Top-level decision response включает актуальные messages/output для обычного UI transport.
+Desktop run/resume используют общую финализацию InteractionLog/short-term history;
+post-dispatch provider failure в Ask continuation также записывает terminal response,
+сохраняя typed tool observations независимо от ошибки generation.
 При HTTP cancellation owned decision operation завершает transition: до dispatch pending,
 после consumed checkpoint resolved с cancelled response; transport cancellation не оставляет
 executing decision и не повторяет tool. Это request-task ownership, не durable run lifecycle.

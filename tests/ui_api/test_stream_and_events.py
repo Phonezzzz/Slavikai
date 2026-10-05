@@ -1860,6 +1860,13 @@ def test_ui_ask_stream_creates_real_network_approval(
             assert roots == [decision["context"]["resume_payload"]["workspace_root_snapshot"]]
             assert agent.brain.seen_tool_ids == ["network-approval"]
             messages = await client.server.app["ui_hub"].get_messages(session_id, lane="chat")
+            if provider_fails_after_tool:
+                assert agent.short_term[-1].content == messages[-1]["content"]
+                interaction = agent._interaction_store.get_interaction(
+                    agent.last_chat_interaction_id
+                )
+                assert interaction is not None
+                assert interaction.response_text == messages[-1]["content"]
             assert (
                 sum(
                     message["role"] == "user" and message["content"] == "lookup"

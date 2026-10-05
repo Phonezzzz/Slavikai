@@ -400,6 +400,11 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path, monkeypatch
             assert len(set(agent.brain.owner_threads)) == 1
             chat_messages = await client.server.app["ui_hub"].get_messages(session_id, lane="chat")
             assert payload["messages"] == chat_messages
+            assert agent.short_term[-1].content.startswith(chat_messages[-1]["content"])
+            assert "desktop-sensitive-action-completed" in agent.short_term[-1].content
+            interaction = agent._interaction_store.get_interaction(agent.last_chat_interaction_id)
+            assert interaction is not None
+            assert interaction.response_text == agent.short_term[-1].content
             assert payload["output"] == await client.server.app["ui_hub"].get_session_output(
                 session_id
             )

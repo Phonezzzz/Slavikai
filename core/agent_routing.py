@@ -352,7 +352,7 @@ class AgentRoutingMixin:
                 )
             return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
-            self._capture_chat_approval(exc, last_content)
+            self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
             return AgentResponse(
                 self._handle_approval_required(
                     exc.request,
@@ -532,7 +532,7 @@ class AgentRoutingMixin:
                 cancellation_token,
             )
         except ApprovalRequired as exc:
-            self._capture_chat_approval(exc, last_content)
+            self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
             response = self._handle_approval_required(
                 exc.request,
                 source_endpoint=self.last_approval_source_endpoint,
@@ -662,6 +662,11 @@ class AgentRoutingMixin:
         cancellation_token: asyncio.Event | None = None,
     ) -> str:
         outcome = self.desktop_runtime.run(goal, cancellation_token=cancellation_token)
+        return self._finalize_desktop_response(outcome, goal, record_in_history)
+
+    def _finalize_desktop_response(
+        self, outcome: DesktopRunOutcome, goal: str, record_in_history: bool
+    ) -> str:
         response = self._project_desktop_outcome(outcome)
         self._log_chat_interaction(raw_input=goal, response_text=response)
         if record_in_history:

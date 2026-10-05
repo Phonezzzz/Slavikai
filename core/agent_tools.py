@@ -167,6 +167,9 @@ class AgentToolsMixin:
         _computer_log: ComputerActivityLog
 
         def _project_desktop_outcome(self, outcome: DesktopRunOutcome) -> str: ...
+        def _finalize_desktop_response(
+            self, outcome: DesktopRunOutcome, goal: str, record_in_history: bool
+        ) -> str: ...
         def _review_answer(self, raw_answer: str) -> str: ...
         def _merge_tool_web_search_evidence(
             self, existing: WebSearchEvidence, result: AgentToolLoopResult
@@ -457,6 +460,7 @@ class AgentToolsMixin:
         ):
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
         self._reset_approval_state(cancel_runtime=False)
+        runtime_result: AgentToolLoopResult | None = None
         try:
             if pending.mode == "desktop":
                 outcome = self.desktop_runtime.resume(
@@ -464,8 +468,11 @@ class AgentToolsMixin:
                     pending.continuation,
                     cancellation_token=cancellation_token,
                 )
+                runtime_result = outcome.loop_result
                 return AgentResponse(
-                    self._project_desktop_outcome(outcome),
+                    self._finalize_desktop_response(
+                        outcome, pending.raw_input, pending.record_in_history
+                    ),
                     runtime_result=outcome.loop_result,
                 )
             result = AgentToolLoop(max_iterations=pending.continuation.max_iterations).run(
@@ -506,8 +513,15 @@ class AgentToolsMixin:
                 )
             )
         except ToolLoopExecutionError as exc:
+            error_text = "[Ошибка модели при продолжении]"
+            try:
+                self._log_chat_interaction(raw_input=pending.raw_input, response_text=error_text)
+                if pending.record_in_history:
+                    self._append_short_term([LLMMessage(role="assistant", content=error_text)])
+            except Exception:
+                self.logger.exception("Continuation failed response history unavailable")
             return AgentResponse(
-                "[Ошибка модели при продолжении]",
+                error_text,
                 runtime_result=exc.result,
                 failure=ResponseFailure(
                     "provider_generation_failed", "Ошибка модели при продолжении"
@@ -517,6 +531,7 @@ class AgentToolsMixin:
             self.logger.exception("Chat continuation failed after claim")
             return AgentResponse(
                 "[Ошибка продолжения ответа]",
+                runtime_result=runtime_result,
                 failure=ResponseFailure("continuation_failed", "Ошибка продолжения ответа"),
             )
         finally:
