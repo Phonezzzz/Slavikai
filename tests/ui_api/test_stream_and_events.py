@@ -1761,3 +1761,105 @@ def test_ui_ask_stream_creates_real_network_approval(
             await client.close()
 
     asyncio.run(run())
+
+
+def test_ui_native_approval_returns_next_pending_decision(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    executions = []
+
+    class BatchBrain(_RealAgentStreamingBrain):
+        supports_native_tools = True
+        supports_streaming_tools = True
+        calls = 0
+        seen_tool_ids = []
+
+        def generate(self, messages, config=None, tools=None):
+            del config, tools
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResult(
+                    text="",
+                    tool_calls=[
+                        ToolCall(id=value, name="network_lookup", arguments={"value": value})
+                        for value in ("first", "second")
+                    ],
+                )
+            self.seen_tool_ids = [
+                message.tool_call_id for message in messages if message.role == "tool"
+            ]
+            return LLMResult(text="complete")
+
+    agent = _RealStreamingAgent(
+        brain=BatchBrain(),
+        enable_tools={"safe_mode": True},
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+
+    def execute(request):
+        executions.append(request.args["value"])
+        return ToolResult.success({"output": request.args["value"]})
+
+    agent.tool_registry.register(
+        "network_lookup",
+        execute,
+        enabled=True,
+        capability="read",
+        risk_classes=["network"],
+        description="Read-only network lookup",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
+
+    async def run() -> None:
+        client = await _create_client(agent)
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session_id)
+            response = await client.post(
+                "/ui/api/chat/send",
+                json={"content": "lookup both"},
+                headers={"X-Slavik-Session": session_id},
+            )
+            first = (await response.json())["decision"]
+            assert executions == []
+
+            async def approve(decision):
+                return await client.post(
+                    "/ui/api/decision/respond",
+                    json={
+                        "session_id": session_id,
+                        "decision_id": decision["id"],
+                        "choice": "approve_once",
+                    },
+                    headers={"X-Slavik-Session": session_id},
+                )
+
+            approved = await approve(first)
+            assert approved.status == 200
+            payload = await approved.json()
+            second = payload["decision"]
+            assert second["id"] != first["id"]
+            assert second["status"] == "pending"
+            assert payload["status"] == "pending"
+            assert payload["already_resolved"] is False
+            assert payload["resume"]["data"]["decision"]["id"] == second["id"]
+            assert executions == ["first"]
+            assert agent.brain.calls == 1
+            assert (await approve(first)).status == 409
+            assert executions == ["first"]
+            completed = await approve(second)
+            assert completed.status == 200
+            final = await completed.json()
+            assert final["status"] == "resolved"
+            assert final["already_resolved"] is True
+            assert executions == ["first", "second"]
+            assert agent.brain.seen_tool_ids == ["first", "second"]
+            assert agent.approved_categories == set()
+            messages = await client.server.app["ui_hub"].get_messages(session_id, lane="chat")
+            assert sum(message["role"] == "user" for message in messages) == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())

@@ -1758,13 +1758,14 @@ async def handle_ui_decision_respond(request: web.Request) -> web.Response:
                 await hub.get_session_decision(session_id),
                 session_id=session_id,
             )
+            latest_status = latest_decision["status"] if latest_decision else "resolved"
             return json_response(
                 {
                     "ok": True,
                     "decision": latest_decision,
-                    "status": "resolved",
+                    "status": latest_status,
                     "resume_started": resume_started,
-                    "already_resolved": True,
+                    "already_resolved": latest_status in {"resolved", "rejected"},
                     "resume": resume,
                     "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
                     "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
