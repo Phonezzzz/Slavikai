@@ -2002,7 +2002,8 @@ def test_ui_native_approval_returns_next_pending_decision(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("tool_ok", [False, True])
-def test_http_cancel_during_tool_drains_request_local_observation(tmp_path, monkeypatch, tool_ok):
+@pytest.mark.parametrize("termination", ["cancelled", "exception"])
+def test_http_stream_retains_request_local_observation(tmp_path, monkeypatch, tool_ok, termination):
     from server.http.handlers import ui_chat
 
     monkeypatch.chdir(tmp_path)
@@ -2033,6 +2034,8 @@ def test_http_cancel_during_tool_drains_request_local_observation(tmp_path, monk
 
         def generate(self, messages, config=None, tools=None):
             self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("provider failed after dispatch")
             assert self.calls == 1
             return LLMResult(
                 text="",
@@ -2059,7 +2062,8 @@ def test_http_cancel_during_tool_drains_request_local_observation(tmp_path, monk
 
     def execute(request):
         executions.append(request)
-        tokens[-1].set()
+        if termination == "cancelled":
+            tokens[-1].set()
         return observed
 
     agent.tool_registry.register(
@@ -2083,19 +2087,28 @@ def test_http_cancel_during_tool_drains_request_local_observation(tmp_path, monk
             )
             assert response.status == 200
             payload = await response.json()
-            assert payload["cancelled"] is True
+            assert bool(payload.get("cancelled")) is (termination == "cancelled")
             assert len(produced) == 1
             assert consumed == produced
             result = produced[0].runtime_result
-            assert result.cancelled is True
-            assert len(result.tool_calls) == 1
+            assert result.cancelled is (termination == "cancelled")
+            expected_count = 1 if termination == "cancelled" else 2
+            assert len(result.tool_calls) == expected_count
             assert result.tool_calls[0].call.id == "captured"
             assert result.tool_calls[0].result is observed
-            assert result.messages[-1].tool_call_id == "captured"
-            assert produced[0].text == ""
-            assert agent.brain.calls == 1
-            assert len(executions) == 1 and executions[0].args == {"index": 1}
-            assert payload.get("generation_error") is None
+            assert result.messages[-1].tool_call_id == (
+                "captured" if termination == "cancelled" else "forbidden"
+            )
+            assert agent.brain.calls == expected_count
+            assert len(executions) == expected_count
+            assert executions[0].args == {"index": 1}
+            if termination == "cancelled":
+                assert produced[0].text == ""
+                assert payload.get("generation_error") is None
+            else:
+                assert produced[0].failure is not None
+                assert result.error == "provider_generation_failed"
+                assert payload["generation_error"]["code"] == produced[0].failure.code
         finally:
             await client.close()
 

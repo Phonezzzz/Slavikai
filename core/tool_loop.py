@@ -273,48 +273,23 @@ class AgentToolLoop:
             pending_calls: list[ToolCall] = []
             stream_error: str | None = None
             stream_tools = tools if tools else None
-            if cancellation_token is None:
-                provider_events = brain.generate_stream_events(
-                    history,
-                    config=config,
-                    tools=stream_tools,
-                )
-            else:
-                provider_events = brain.generate_stream_events(
-                    history,
-                    config=config,
-                    tools=stream_tools,
-                    cancellation_token=cancellation_token,
-                )
-            for event in provider_events:
-                if cancellation_requested(cancellation_token):
-                    yield Done(finish_reason="cancelled")
-                    return AgentToolLoopResult(
-                        text=visible_text,
-                        messages=history,
-                        tool_calls=executed,
-                        iterations=iteration,
-                        cancelled=True,
+            try:
+                if cancellation_token is None:
+                    provider_events = brain.generate_stream_events(
+                        history,
+                        config=config,
+                        tools=stream_tools,
                     )
-                if isinstance(event, TextDelta):
-                    if event.mode == "replace":
-                        iteration_text = event.text
-                        visible_text = event.text
-                    else:
-                        iteration_text = f"{iteration_text}{event.text}"
-                        visible_text = f"{visible_text}{event.text}"
-                    yield event
-                    continue
-                if isinstance(event, ToolCallCompleted):
-                    pending_calls.append(event.call)
-                    continue
-                if isinstance(event, Error):
-                    stream_error = event.message
-                    yield event
-                    continue
-                if isinstance(event, Done):
-                    if event.finish_reason == "cancelled":
-                        yield event
+                else:
+                    provider_events = brain.generate_stream_events(
+                        history,
+                        config=config,
+                        tools=stream_tools,
+                        cancellation_token=cancellation_token,
+                    )
+                for event in provider_events:
+                    if cancellation_requested(cancellation_token):
+                        yield Done(finish_reason="cancelled")
                         return AgentToolLoopResult(
                             text=visible_text,
                             messages=history,
@@ -322,8 +297,55 @@ class AgentToolLoop:
                             iterations=iteration,
                             cancelled=True,
                         )
-                    continue
-                yield event
+                    if isinstance(event, TextDelta):
+                        if event.mode == "replace":
+                            iteration_text = event.text
+                            visible_text = event.text
+                        else:
+                            iteration_text = f"{iteration_text}{event.text}"
+                            visible_text = f"{visible_text}{event.text}"
+                        yield event
+                        continue
+                    if isinstance(event, ToolCallCompleted):
+                        pending_calls.append(event.call)
+                        continue
+                    if isinstance(event, Error):
+                        stream_error = event.message
+                        yield event
+                        continue
+                    if isinstance(event, Done):
+                        if event.finish_reason == "cancelled":
+                            yield event
+                            return AgentToolLoopResult(
+                                text=visible_text,
+                                messages=history,
+                                tool_calls=executed,
+                                iterations=iteration,
+                                cancelled=True,
+                            )
+                        continue
+                    yield event
+
+            except GenerationCancelled:
+                yield Done(finish_reason="cancelled")
+                return AgentToolLoopResult(
+                    text=visible_text,
+                    messages=history,
+                    tool_calls=executed,
+                    iterations=iteration,
+                    cancelled=True,
+                )
+            except Exception as exc:
+                raise ToolLoopExecutionError(
+                    AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="provider_generation_failed",
+                    ),
+                    exc,
+                ) from exc
 
             if cancellation_requested(cancellation_token):
                 yield Done(finish_reason="cancelled")

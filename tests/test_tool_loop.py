@@ -428,3 +428,73 @@ def test_cancel_during_dispatch_retains_completed_observation(streaming, tool_ok
     assert serialized["data"] == observed.data
     assert serialized["meta"] == observed.meta
     assert serialized["ok"] is tool_ok
+
+
+@pytest.mark.parametrize("stage", ["creation", "iteration", "cancelled"])
+@pytest.mark.parametrize("tool_ok", [False, True])
+def test_stream_provider_exception_retains_previous_dispatch(stage, tool_ok):
+    from core.tool_loop import ToolLoopExecutionError
+    from llm.cancellation import GenerationCancelled
+
+    observed = ToolResult(
+        ok=tool_ok,
+        data={"output": "original diagnostics", "stderr": "warning"},
+        error=None if tool_ok else "execution failed",
+        meta={"exit_code": 0 if tool_ok else 8},
+    )
+    executions = []
+    failure = GenerationCancelled() if stage == "cancelled" else RuntimeError("provider offline")
+
+    class Provider:
+        calls = 0
+
+        def generate_stream_events(self, messages, config=None, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return iter(
+                    [
+                        ToolCallCompleted(
+                            call=ToolCall(id="original", name="lookup", arguments={})
+                        ),
+                        Done(),
+                    ]
+                )
+            if stage == "creation":
+                raise failure
+
+            def interrupted():
+                yield from ()
+                raise failure
+
+            return interrupted()
+
+    registry = ToolRegistry()
+    registry.register("lookup", lambda request: executions.append(request) or observed)
+    provider = Provider()
+    iterator = AgentToolLoop().run_stream_events(
+        brain=provider,
+        gateway=ToolGateway(registry),
+        messages=[LLMMessage(role="user", content="lookup")],
+        tools=registry.list_tool_specs(),
+    )
+    if stage == "cancelled":
+        events = []
+        while True:
+            try:
+                events.append(next(iterator))
+            except StopIteration as stopped:
+                result = stopped.value
+                break
+        assert events[-1].finish_reason == "cancelled"
+        assert result.cancelled is True
+    else:
+        with pytest.raises(ToolLoopExecutionError) as caught:
+            list(iterator)
+        assert caught.value.cause is failure
+        result = caught.value.result
+        assert result.error == "provider_generation_failed"
+    assert provider.calls == 2 and len(executions) == 1
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].result is observed
+    assert result.tool_calls[0].call.id == "original"
+    assert result.messages[-1].tool_call_id == "original"

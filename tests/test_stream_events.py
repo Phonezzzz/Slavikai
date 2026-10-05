@@ -144,7 +144,7 @@ class _WebAndFileBrain(Brain):
         return LLMResult(text="Ответ использует веб и файл.")
 
 
-@pytest.mark.parametrize("termination", ["normal", "error", "cancelled"])
+@pytest.mark.parametrize("termination", ["normal", "error", "cancelled", "exception"])
 def test_agent_stream_runs_web_and_file_tools_in_one_response(
     tmp_path: Path, monkeypatch, termination: str
 ) -> None:
@@ -188,6 +188,8 @@ def test_agent_stream_runs_web_and_file_tools_in_one_response(
                 if termination == "error":
                     yield Error(message="provider interrupted", code="provider_model_error")
                     yield Done(finish_reason="error")
+                elif termination == "exception":
+                    raise RuntimeError("provider interrupted")
                 else:
                     token.set()
                     yield Done(finish_reason="cancelled")
@@ -228,6 +230,12 @@ def test_agent_stream_runs_web_and_file_tools_in_one_response(
         assert brain.messages_seen[2][-1].role == "tool"
     else:
         assert brain.calls == 1
-        assert events[-1].finish_reason == termination
+        assert events[-1].finish_reason == ("error" if termination == "exception" else termination)
         assert result.cancelled is (termination == "cancelled")
-        assert result.error == ("provider interrupted" if termination == "error" else None)
+        assert result.error == (
+            "provider_generation_failed"
+            if termination == "exception"
+            else "provider interrupted"
+            if termination == "error"
+            else None
+        )

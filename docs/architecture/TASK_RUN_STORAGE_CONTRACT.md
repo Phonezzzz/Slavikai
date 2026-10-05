@@ -138,12 +138,16 @@ request-local и не добавляется в wire payload или durable stor
 `ApprovalRequired` проходит через sync/stream Ask наружу к существующему approval handler;
 это policy control signal, а не `provider_model_error`. До подтверждения tool не выполняется.
 Эта ограниченная current-гарантия зарегистрирована как
-`runtime.agent.request_local_response` version 3 в `docs/runtime_contract_claims.json`.
+`runtime.agent.request_local_response` version 4 в `docs/runtime_contract_claims.json`.
 
 Это volatile boundary, **не full canonical capture или durable evidence**. LLMResult и
-вложенные collections не immutable. Если provider бросил exception до возврата loop result,
-его частичные observations ещё не гарантированно сохраняются; отдельные tool-stream events
-не заменяют dispatch journal/canonical capture. Local web prefetch удалён; native approval
+вложенные collections не immutable. При provider exception во время создания или чтения
+stream loop возвращает ранее выполненные observations через ToolLoopExecutionError;
+Agent сохраняет их в request-local error response без повторного dispatch. GenerationCancelled
+сохраняет их в cancelled loop result, как sync path. Незавершённый provider tool call не
+становится execution observation. Другие exceptional dispatch/serialization paths и durable
+capture ещё не гарантированы; отдельные tool-stream events не заменяют dispatch journal/canonical
+capture. Local web prefetch удалён; native approval
 continuation описан ниже. MWV/Desktop ещё не имеют полного typed observation contract;
 они остаются обязательным следующим B2 срезом до подключения lifecycle authority.
 

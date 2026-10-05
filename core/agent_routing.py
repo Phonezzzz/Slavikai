@@ -869,6 +869,9 @@ class AgentRoutingMixin:
             )
             raise
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, ToolLoopExecutionError):
+                runtime_result = exc.result
+                exc = exc.cause
             self.logger.error("Stream LLM error: %s", exc)
             try:
                 self.tracer.log("error", f"Ошибка потоковой модели: {exc}")
