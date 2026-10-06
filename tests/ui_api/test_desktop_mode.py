@@ -633,10 +633,10 @@ def test_desktop_resume_preserves_result_on_provider_failure(tmp_path, monkeypat
         monkeypatch.setattr(agent.brain, "generate", fail)
         response = agent.resume_chat_approval(identity)
         assert agent.completed == 1 and not target.exists()
-        assert response.runtime_result.error == "provider_generation_failed"
-        assert len(response.runtime_result.tool_calls) == 1
-        assert response.runtime_result.tool_calls[0].result.ok is True
-        assert response.runtime_result.tool_calls[0].call.id == "delete-original"
+        assert response.runtime_result.loop_result.error == "provider_generation_failed"
+        assert len(response.runtime_result.loop_result.tool_calls) == 1
+        assert response.runtime_result.loop_result.tool_calls[0].result.ok is True
+        assert response.runtime_result.loop_result.tool_calls[0].call.id == "delete-original"
         from core.agent_tools import ChatApprovalUnavailable
 
         with pytest.raises(ChatApprovalUnavailable):

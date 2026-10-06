@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: F401
 import asyncio
+import json
 from collections.abc import Callable, Generator, Iterator
 from typing import TYPE_CHECKING, Literal
 
@@ -306,7 +307,7 @@ class AgentRoutingMixin:
                     self._append_short_term([LLMMessage(role="assistant", content=result)])
                 return AgentResponse(result, runtime_result=outcome)
             if runtime_mode == "desktop":
-                return AgentResponse(self._run_desktop_response(last_content, record_in_history))
+                return self._run_desktop_response(last_content, record_in_history)
 
             decision = classify_request(
                 messages,
@@ -468,13 +469,22 @@ class AgentRoutingMixin:
                 yield from _text_response_events(response, runtime_result=outcome)
                 return
             if runtime_mode == "desktop":
-                response = self._run_desktop_response(
+                desktop_response = self._run_desktop_response(
                     last_content,
                     record_in_history,
                     cancellation_token=cancellation_token,
                 )
-                self.last_stream_response_raw = response
-                yield from _text_response_events(response)
+                self.last_stream_response_raw = desktop_response.text
+                if desktop_response.failure is not None:
+                    yield Error(
+                        code=desktop_response.failure.code, message=desktop_response.failure.message
+                    )
+                if desktop_response.text:
+                    yield TextDelta(text=desktop_response.text)
+                yield ResponseProduced(desktop_response)
+                yield Done(
+                    finish_reason="error" if desktop_response.failure is not None else "stop"
+                )
                 return
 
             decision = classify_request(
@@ -667,18 +677,39 @@ class AgentRoutingMixin:
         record_in_history: bool,
         *,
         cancellation_token: asyncio.Event | None = None,
-    ) -> str:
+    ) -> AgentResponse:
         outcome = self.desktop_runtime.run(goal, cancellation_token=cancellation_token)
         return self._finalize_desktop_response(outcome, goal, record_in_history)
 
     def _finalize_desktop_response(
         self, outcome: DesktopRunOutcome, goal: str, record_in_history: bool
-    ) -> str:
-        response = self._project_desktop_outcome(outcome)
-        self._log_chat_interaction(raw_input=goal, response_text=response)
-        if record_in_history:
-            self._append_short_term([LLMMessage(role="assistant", content=response)])
-        return response
+    ) -> AgentResponse:
+        try:
+            response = self._project_desktop_outcome(outcome)
+            self._log_chat_interaction(raw_input=goal, response_text=response)
+            if record_in_history:
+                self._append_short_term([LLMMessage(role="assistant", content=response)])
+            return AgentResponse(response, runtime_result=outcome)
+        except ApprovalRequired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Presentation не меняет execution/verifier facts и не повторяет tools.
+            text = (
+                "Что случилось: ошибка представления результата Desktop\n"
+                f"Почему: {exc}\n"
+                "Что делать дальше:\n- Проверь логи; не повторяй выполненные tools автоматически.\n"
+                "MWV_REPORT_JSON="
+                + json.dumps(
+                    {
+                        "route": "desktop",
+                        "trace_id": None,
+                        "stop_reason_code": StopReasonCode.MWV_INTERNAL_ERROR.value,
+                    }
+                )
+            )
+            return AgentResponse(
+                text, outcome, ResponseFailure("desktop_projection_error", str(exc))
+            )
 
     def _project_desktop_outcome(self, outcome: DesktopRunOutcome) -> str:
         self.last_plan_summary = "Desktop использовал native tool loop для host execution."

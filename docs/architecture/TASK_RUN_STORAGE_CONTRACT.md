@@ -138,7 +138,7 @@ request-local и не добавляется в wire payload или durable stor
 `ApprovalRequired` проходит через sync/stream Ask наружу к существующему approval handler;
 это policy control signal, а не `provider_model_error`. До подтверждения tool не выполняется.
 Эта ограниченная current-гарантия зарегистрирована как
-`runtime.agent.request_local_response` version 5 в `docs/runtime_contract_claims.json`.
+`runtime.agent.request_local_response` version 6 в `docs/runtime_contract_claims.json`.
 
 Это volatile boundary, **не full canonical capture или durable evidence**. LLMResult и
 вложенные collections не immutable. При provider exception во время создания или чтения
@@ -271,3 +271,19 @@ execution success. ApprovalRequired остаётся отдельным control 
 предыдущие attempts, exception до manager return, approval pause и durable lifecycle
 остаются foundation gaps. HTTP report вне Auto пока legacy presentation, не authority.
 TinyJuice/recovery readiness не повышен.
+
+## Typed Desktop outcome — foundation result boundary
+
+Initial Desktop и native approval resume передают исходный `DesktopRunOutcome`
+в `AgentResponse.runtime_result`, включая `verification` и `loop_result`. Presentation
+и InteractionLog используют общую `_finalize_desktop_response`; её ошибка сохраняет outcome
+с отдельным `ResponseFailure(desktop_projection_error)`. Stream передаёт тот же envelope
+через `ResponseProduced`, а presentation error — через `Error` и error `Done`.
+`ApprovalRequired` остаётся control signal, не presentation failure.
+
+`tests/ui_api/test_desktop_response_observation.py` использует настоящий Agent, DesktopRuntime,
+Gateway, file-delete и verifier, включая initial sync/HTTP stream iterator, approval resume,
+provider failure после dispatch, failed tool и presentation/logging faults. Проверяются
+identity исходного outcome, original call IDs, tool/verifier facts и освобождение host lease.
+Это volatile boundary, не canonical payload/attempt history/restart recovery. Resource owner,
+policy/approval и verifier не заменяются новым runtime; readiness TinyJuice не повышается.

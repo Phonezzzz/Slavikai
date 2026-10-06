@@ -169,7 +169,7 @@ class AgentToolsMixin:
         def _project_desktop_outcome(self, outcome: DesktopRunOutcome) -> str: ...
         def _finalize_desktop_response(
             self, outcome: DesktopRunOutcome, goal: str, record_in_history: bool
-        ) -> str: ...
+        ) -> AgentResponse: ...
         def _review_answer(self, raw_answer: str) -> str: ...
         def _merge_tool_web_search_evidence(
             self, existing: WebSearchEvidence, result: AgentToolLoopResult
@@ -460,7 +460,7 @@ class AgentToolsMixin:
         ):
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
         self._reset_approval_state(cancel_runtime=False)
-        runtime_result: AgentToolLoopResult | None = None
+        runtime_result: AgentToolLoopResult | DesktopRunOutcome | None = None
         try:
             if pending.mode == "desktop":
                 outcome = self.desktop_runtime.resume(
@@ -468,12 +468,9 @@ class AgentToolsMixin:
                     pending.continuation,
                     cancellation_token=cancellation_token,
                 )
-                runtime_result = outcome.loop_result
-                return AgentResponse(
-                    self._finalize_desktop_response(
-                        outcome, pending.raw_input, pending.record_in_history
-                    ),
-                    runtime_result=outcome.loop_result,
+                runtime_result = outcome
+                return self._finalize_desktop_response(
+                    outcome, pending.raw_input, pending.record_in_history
                 )
             result = AgentToolLoop(max_iterations=pending.continuation.max_iterations).run(
                 brain=pending.brain,
