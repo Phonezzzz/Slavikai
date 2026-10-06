@@ -1776,7 +1776,7 @@ async def handle_ui_approval_continue(
     hub: UIHub = request.app["ui_hub"]
     workflow = await hub.get_session_workflow(session_id)
     mode = resume_payload.get("execution_mode", "ask")
-    if mode not in {"ask", "desktop"} or workflow.get("mode") != mode:
+    if mode not in {"ask", "desktop", "auto"} or workflow.get("mode") != mode:
         return not_started("approval_continuation_unavailable")
     selected = await hub.get_session_model(session_id)
     if selected != resume_payload.get("selected_model_snapshot"):
@@ -1860,7 +1860,7 @@ async def handle_ui_approval_continue(
                 _agent_scope(request, session_id)
             )
             if (
-                mode == "ask"
+                mode in {"ask", "auto"}
                 and choice == "approve_session"
                 and agent.last_approval_request is not None
             ):
@@ -1887,6 +1887,10 @@ async def handle_ui_approval_continue(
                 await session_store.remove_desktop_rules(
                     scope, set(agent.drain_consumed_desktop_rule_ids())
                 )
+            if mode == "auto":
+                auto_state = _normalize_auto_state(getattr(agent, "last_auto_state", None))
+                if auto_state is not None:
+                    await hub.set_session_workflow(session_id, auto_state=auto_state)
             text, report = _project_agent_response(response)
             approval = _serialize_approval_request(agent.last_approval_request)
             next_decision: dict[str, JSONValue] | None = None

@@ -14,13 +14,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from config.model_store import save_model_configs
-from core.agent_response import AgentResponse, ResponseFailure
+from core.agent_response import AgentResponse, ResponseFailure, RuntimeResult
 from core.approval_policy import (
     ApprovalCategory,
     ApprovalContext,
     ApprovalRequest,
     ApprovalRequired,
 )
+from core.auto_runtime import AutoContinuationUnavailable
 from core.computer_activity_log import ComputerActivityLog
 from core.decision.handler import DecisionContext
 from core.decision.models import DecisionPacket
@@ -130,6 +131,7 @@ class PendingChatApproval:
     raw_input: str
     session_id: str | None
     mode: str
+    auto_run_id: str | None = None
     desktop_once_rules: tuple[DesktopApprovalRule, ...] = ()
     policy_application: PolicyApplication | None = None
     web_evidence: WebSearchEvidence | None = None
@@ -317,6 +319,9 @@ class AgentToolsMixin:
     def _reset_approval_state(self, *, cancel_runtime: bool = True) -> None:
         if cancel_runtime:
             self.desktop_runtime.cancel_pending()
+            pending = self._pending_chat_approval
+            if pending is not None and pending.auto_run_id is not None:
+                self.auto_agent.cancel_run(pending.auto_run_id)
             if self._pending_chat_approval is not None:
                 self.desktop_policy_runtime.consume_once_rule_ids(
                     {rule.rule_id for rule in self._pending_chat_approval.desktop_once_rules}
@@ -392,7 +397,7 @@ class AgentToolsMixin:
         web_evidence: WebSearchEvidence | None = None,
         record_in_history: bool = False,
     ) -> None:
-        if self.runtime_mode not in {"ask", "desktop"} or exc.continuation is None:
+        if self.runtime_mode not in {"ask", "desktop", "auto"} or exc.continuation is None:
             return
         if (
             self._pending_chat_approval is not None
@@ -407,6 +412,9 @@ class AgentToolsMixin:
             raw_input,
             self.session_id,
             self.runtime_mode,
+            auto_run_id=self.auto_agent.orchestrator.pending_run_id(exc.continuation)
+            if self.runtime_mode == "auto"
+            else None,
             policy_application=policy_application,
             web_evidence=web_evidence,
             record_in_history=record_in_history,
@@ -436,6 +444,15 @@ class AgentToolsMixin:
             pending.continuation
         ):
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        if pending.mode == "auto":
+            try:
+                if pending.auto_run_id is None:
+                    raise AutoContinuationUnavailable("auto_continuation_unavailable")
+                self.auto_agent.orchestrator.validate_resume(
+                    pending.auto_run_id, pending.continuation
+                )
+            except AutoContinuationUnavailable as exc:
+                raise ChatApprovalUnavailable(str(exc)) from exc
 
     def add_chat_approval_rule(self, identity: str, rule: DesktopApprovalRule) -> None:
         self.validate_chat_approval(identity)
@@ -460,8 +477,23 @@ class AgentToolsMixin:
         ):
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
         self._reset_approval_state(cancel_runtime=False)
-        runtime_result: AgentToolLoopResult | DesktopRunOutcome | None = None
+        runtime_result: RuntimeResult | None = None
         try:
+            if pending.mode == "auto":
+                assert pending.auto_run_id is not None
+                auto_outcome = self.auto_agent.resume_outcome(
+                    pending.auto_run_id,
+                    cancellation_token=cancellation_token,
+                )
+                runtime_result = auto_outcome
+                self._log_chat_interaction(
+                    raw_input=pending.raw_input, response_text=auto_outcome.text
+                )
+                if pending.record_in_history:
+                    self._append_short_term(
+                        [LLMMessage(role="assistant", content=auto_outcome.text)]
+                    )
+                return AgentResponse(auto_outcome.text, runtime_result=auto_outcome)
             if pending.mode == "desktop":
                 outcome = self.desktop_runtime.resume(
                     pending.raw_input,
@@ -1151,15 +1183,6 @@ class AgentToolsMixin:
             skill_resolution=skill_resolution,
         )
 
-    def resume_auto_run(self, run_id: str) -> str | None:
-        run_id_clean = run_id.strip()
-        if not run_id_clean:
-            return None
-        outcome = self.auto_agent.resume_outcome(run_id_clean)
-        if outcome is None:
-            return None
-        return outcome.text
-
     def cancel_auto_run(
         self,
         run_id: str,
@@ -1413,12 +1436,6 @@ class AgentToolsMixin:
         next_resume = dict(resume_payload) if isinstance(resume_payload, dict) else {}
         if not command_lane and self.runtime_mode == "auto":
             route = "auto"
-            if not next_source:
-                next_source = "auto.run"
-            if not next_resume and isinstance(self.last_auto_state, dict):
-                run_id_raw = self.last_auto_state.get("run_id")
-                if isinstance(run_id_raw, str) and run_id_raw.strip():
-                    next_resume = {"run_id": run_id_raw.strip()}
         self.last_approval_source_endpoint = next_source or None
         self.last_approval_resume_payload = next_resume or None
         error_text = self._format_stop_response(

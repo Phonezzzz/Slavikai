@@ -315,47 +315,10 @@ def test_ui_decision_respond_reject_does_not_execute_workspace_tool() -> None:
     asyncio.run(run())
 
 
-def test_ui_decision_respond_auto_run_resume() -> None:
+def test_ui_decision_rejects_legacy_auto_replay() -> None:
     class AutoResumeAgent(DummyAgent):
-        def __init__(self) -> None:
-            super().__init__()
-            self.last_chat_interaction_id = "trace-auto-1"
-            self.last_auto_state: dict[str, JSONValue] | None = None
-
         def resume_auto_run(self, run_id: str) -> str:
-            self.last_auto_state = {
-                "run_id": run_id,
-                "status": "completed",
-                "goal": "goal",
-                "pool_size": 3,
-                "started_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:01+00:00",
-                "planner": {"status": "completed"},
-                "plan": {"plan_id": "p1", "goal": "goal", "shards": []},
-                "coders": [],
-                "merge": {"status": "completed", "changed_paths": []},
-                "verifier": {"status": "passed", "command": ["check"], "exit_code": 0},
-                "approval": None,
-                "error": None,
-            }
-            return "auto resumed"
-
-        def cancel_auto_run(self, run_id: str, *, reason: str = "cancelled_by_user"):  # noqa: ANN001
-            return {
-                "run_id": run_id,
-                "status": "cancelled",
-                "goal": "goal",
-                "pool_size": 3,
-                "started_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:02+00:00",
-                "planner": {"status": "completed"},
-                "plan": {"plan_id": "p1", "goal": "goal", "shards": []},
-                "coders": [],
-                "merge": {"status": "cancelled"},
-                "verifier": None,
-                "approval": {"status": "rejected"},
-                "error": reason,
-            }
+            raise AssertionError("Legacy Auto replay must remain unreachable")
 
     async def run() -> None:
         client = await _create_client(AutoResumeAgent())
@@ -399,15 +362,9 @@ def test_ui_decision_respond_auto_run_resume() -> None:
                     "choice": "approve_once",
                 },
             )
-            assert respond.status == 200
+            assert respond.status == 409
             payload = await respond.json()
-            resume = payload.get("resume")
-            assert isinstance(resume, dict)
-            assert resume.get("ok") is True
-            assert resume.get("source_endpoint") == "auto.run"
-            auto_state = payload.get("auto_state")
-            assert isinstance(auto_state, dict)
-            assert auto_state.get("status") == "completed"
+            assert payload["error"]["code"] == "approval_continuation_unavailable"
         finally:
             await client.close()
 

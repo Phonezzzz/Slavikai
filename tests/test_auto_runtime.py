@@ -109,6 +109,9 @@ class _FakeAgent:
         self._brain = _FakeBrain(brain_text)
         self.main_config = None
         self.session_id = "session-test"
+        self.user_id = "test-principal"
+        self.runtime_mode = "auto"
+        self.runtime_workspace_root = None
         self.tools_enabled = {"safe_mode": True}
         self.approved_categories: set[str] = set()
         self.tracer = _FakeTracer()
@@ -612,7 +615,7 @@ def test_auto_orchestrator_has_no_legacy_run_entrypoint() -> None:
 
 
 @pytest.mark.behavior
-def test_auto_runtime_v1_waiting_approval_and_resume(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+def test_auto_runtime_rejects_approval_without_native_checkpoint(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     other_root = tmp_path / "other"
@@ -662,20 +665,6 @@ def test_auto_runtime_v1_waiting_approval_and_resume(monkeypatch, tmp_path) -> N
     monkeypatch.setattr(auto_runtime, "VerifierRuntime", _PassingVerifierRuntime)
 
     with workspace_root_context(runtime_root):
-        with pytest.raises(ApprovalRequired):
+        with pytest.raises(auto_runtime.AutoContinuationUnavailable):
             orchestrator.run_v1("goal")
-
-    assert isinstance(agent.last_auto_state, dict)
-    assert agent.last_auto_state.get("status") == AutoRunStatus.WAITING_APPROVAL.value
-    assert agent.last_auto_state.get("root_path") == str(runtime_root.resolve())
-    run_id_raw = agent.last_auto_state.get("run_id")
-    assert isinstance(run_id_raw, str)
-
-    with workspace_root_context(other_root):
-        resumed = orchestrator.resume(run_id_raw)
-
-    assert resumed is not None
-    assert resumed.status == AutoRunStatus.COMPLETED
-    assert isinstance(agent.last_auto_state, dict)
-    assert agent.last_auto_state.get("status") == AutoRunStatus.COMPLETED.value
-    assert agent.last_auto_state.get("root_path") == str(runtime_root.resolve())
+    assert not orchestrator._paused_runs

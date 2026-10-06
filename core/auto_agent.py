@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -94,8 +95,13 @@ class AutoAgent:
         self.tracer.log("auto_invoke", f"AgentToolLoop->Verifier: {goal}")
         return self.orchestrator.run_v1(goal, skill_resolution=skill_resolution)
 
-    def resume_outcome(self, run_id: str) -> AutoRunOutcome | None:
-        return self.orchestrator.resume(run_id)
+    def resume_outcome(
+        self,
+        run_id: str,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> AutoRunOutcome:
+        return self.orchestrator.resume(run_id, cancellation_token=cancellation_token)
 
     def cancel_run(
         self,

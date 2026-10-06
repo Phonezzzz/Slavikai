@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -26,7 +27,13 @@ from core.mwv.verifier_runtime import (
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.skills.index import SkillResolution
 from core.skills.runtime import skill_run_metadata, skill_run_report
-from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ExecutedToolCall
+from core.tool_loop import (
+    AgentToolLoop,
+    AgentToolLoopResult,
+    ExecutedToolCall,
+    ToolLoopContinuation,
+)
+from llm.brain_base import Brain
 from shared.auto_models import (
     AUTO_CODER_POOL_DEFAULT,
     AUTO_CODER_POOL_MAX,
@@ -119,14 +126,29 @@ class AutoBudgets:
 
 
 @dataclass
-class _PausedRun:
+class _RunFrame:
     run_id: str
     goal: str
-    pool_size: int
-    plan: AutoPlan | None
     started_at: str
+    started_monotonic: float
     workspace_root: Path
-    skill_resolution: SkillResolution | None = None
+    budgets: AutoBudgets
+    state: dict[str, JSONValue]
+    skill_resolution: SkillResolution | None
+    brain: Brain
+    principal_id: str
+    session_id: str | None
+    runtime_root: str | None
+
+
+@dataclass
+class _PausedRun:
+    frame: _RunFrame
+    continuation: ToolLoopContinuation
+
+
+class AutoContinuationUnavailable(ValueError):
+    pass
 
 
 class AutoOrchestrator:
@@ -147,12 +169,10 @@ class AutoOrchestrator:
         goal: str,
         *,
         skill_resolution: SkillResolution | None = None,
-        run_id: str | None = None,
-        started_at: str | None = None,
         run_root_override: Path | None = None,
     ) -> AutoRunOutcome:
-        run_id_value = run_id or f"auto-{uuid.uuid4().hex}"
-        started = started_at or utc_now_iso()
+        run_id_value = f"auto-{uuid.uuid4().hex}"
+        started = utc_now_iso()
         started_monotonic = time.monotonic()
         budgets = _resolve_auto_budgets()
         runtime_root = get_workspace_root().resolve()
@@ -188,9 +208,34 @@ class AutoOrchestrator:
             ),
         }
         self._set_state(state)
+        frame = _RunFrame(
+            run_id_value,
+            goal,
+            started,
+            started_monotonic,
+            run_root,
+            budgets,
+            state,
+            skill_resolution,
+            self.parent._get_main_brain(),
+            self.parent.user_id,
+            self.parent.session_id,
+            self.parent.runtime_workspace_root,
+        )
+        return self._execute_frame(frame)
 
+    def _execute_frame(
+        self,
+        frame: _RunFrame,
+        *,
+        continuation: ToolLoopContinuation | None = None,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> AutoRunOutcome:
+        goal, run_id_value = frame.goal, frame.run_id
+        run_root, budgets, state = frame.workspace_root, frame.budgets, frame.state
+        started_monotonic, skill_resolution = frame.started_monotonic, frame.skill_resolution
         try:
-            brain = self.parent._get_main_brain()
+            brain = frame.brain
             if not brain.supports_native_tools:
                 reason = "Выбранный provider не поддерживает native tool calls для Auto."
                 state["error"] = reason
@@ -227,28 +272,29 @@ class AutoOrchestrator:
                     skill=_skill_state(state),
                 )
 
-            plan = AutoPlan(
-                plan_id=f"plan-{uuid.uuid4().hex}",
-                goal=goal,
-                shards=[
-                    AutoShard(
-                        shard_id="tool-loop",
-                        goal=goal,
-                        path_scope=["."],
-                        acceptance_checks=[
-                            "Native tool loop completed",
-                            "Canonical verifier completed",
-                        ],
-                    )
-                ],
-            )
-            state["planner"] = {
-                "status": "completed",
-                "runtime": "auto_v1_tool_loop",
-                "shards_total": 1,
-            }
-            state["plan"] = plan.to_dict()
-            self._set_state(state)
+            if continuation is None:
+                plan = AutoPlan(
+                    plan_id=f"plan-{uuid.uuid4().hex}",
+                    goal=goal,
+                    shards=[
+                        AutoShard(
+                            shard_id="tool-loop",
+                            goal=goal,
+                            path_scope=["."],
+                            acceptance_checks=[
+                                "Native tool loop completed",
+                                "Canonical verifier completed",
+                            ],
+                        )
+                    ],
+                )
+                state["planner"] = {
+                    "status": "completed",
+                    "runtime": "auto_v1_tool_loop",
+                    "shards_total": 1,
+                }
+                state["plan"] = plan.to_dict()
+                self._set_state(state)
 
             self._set_status(state, AutoRunStatus.CODING)
             gateway = self.parent._build_tool_gateway()
@@ -265,6 +311,8 @@ class AutoOrchestrator:
                 ],
                 tools=tool_specs,
                 config=self.parent.main_config,
+                continuation=continuation,
+                cancellation_token=cancellation_token,
             )
             tool_call_states = [_auto_v1_tool_call_state(item) for item in loop_result.tool_calls]
             state["coders"] = tool_call_states
@@ -279,6 +327,16 @@ class AutoOrchestrator:
                 "files_touched": 0,
             }
             self._set_state(state)
+            if loop_result.cancelled:
+                state["error"] = "cancelled_by_user"
+                self._set_status(state, AutoRunStatus.CANCELLED)
+                return AutoRunOutcome(
+                    text="Auto-run отменён; дальнейшие tools не выполняются.",
+                    status=AutoRunStatus.CANCELLED,
+                    stop_reason_code=None,
+                    verifier=None,
+                    next_steps=[],
+                )
             if len(loop_result.tool_calls) >= budgets.max_tool_calls:
                 reason = (
                     f"Budget exhausted: tool_calls={len(loop_result.tool_calls)} "
@@ -420,15 +478,10 @@ class AutoOrchestrator:
                 next_steps=[],
             )
         except ApprovalRequired as exc:
-            self._paused_runs[run_id_value] = _PausedRun(
-                run_id=run_id_value,
-                goal=goal,
-                pool_size=1,
-                plan=None,
-                started_at=started,
-                workspace_root=run_root,
-                skill_resolution=skill_resolution,
-            )
+            if exc.continuation is None:
+                raise AutoContinuationUnavailable("auto_continuation_unavailable") from exc
+            self._paused_runs[run_id_value] = _PausedRun(frame, exc.continuation)
+            state["coders"] = [_auto_v1_tool_call_state(item) for item in exc.continuation.executed]
             state["approval"] = {
                 "status": "required",
                 "required_categories": list(exc.request.required_categories),
@@ -464,16 +517,45 @@ class AutoOrchestrator:
                 ],
             )
 
-    def resume(self, run_id: str) -> AutoRunOutcome | None:
-        paused = self._paused_runs.pop(run_id, None)
+    def pending_run_id(self, continuation: ToolLoopContinuation) -> str:
+        for run_id, paused in self._paused_runs.items():
+            if paused.continuation is continuation:
+                return run_id
+        raise AutoContinuationUnavailable("auto_continuation_unavailable")
+
+    def validate_resume(
+        self, run_id: str, continuation: ToolLoopContinuation | None = None
+    ) -> None:
+        paused = self._paused_runs.get(run_id)
         if paused is None:
-            return None
-        return self.run_v1(
-            paused.goal,
-            run_id=paused.run_id,
-            started_at=paused.started_at,
-            run_root_override=paused.workspace_root,
-            skill_resolution=paused.skill_resolution,
+            raise AutoContinuationUnavailable("auto_continuation_unavailable")
+        frame = paused.frame
+        if (
+            (continuation is not None and paused.continuation is not continuation)
+            or self.parent.session_id != frame.session_id
+            or self.parent.user_id != frame.principal_id
+            or self.parent.runtime_mode != "auto"
+            or self.parent.runtime_workspace_root != frame.runtime_root
+            or self.parent._get_main_brain() is not frame.brain
+            or self.parent.main_config != paused.continuation.config
+        ):
+            raise AutoContinuationUnavailable("auto_continuation_unavailable")
+
+    def resume(
+        self,
+        run_id: str,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> AutoRunOutcome:
+        self.validate_resume(run_id)
+        if cancellation_token is not None and cancellation_token.is_set():
+            raise AutoContinuationUnavailable("auto_continuation_not_started")
+        paused = self._paused_runs.pop(run_id)
+        paused.frame.state["approval"] = None
+        return self._execute_frame(
+            paused.frame,
+            continuation=paused.continuation,
+            cancellation_token=cancellation_token,
         )
 
     def cancel(
@@ -485,33 +567,10 @@ class AutoOrchestrator:
         paused = self._paused_runs.pop(run_id, None)
         if paused is None:
             return None
-        state: dict[str, JSONValue] = {
-            "run_id": run_id,
-            "status": AutoRunStatus.CANCELLED.value,
-            "goal": paused.goal,
-            "root_path": str(paused.workspace_root),
-            "pool_size": paused.pool_size,
-            "started_at": paused.started_at,
-            "updated_at": utc_now_iso(),
-            "planner": {"status": "completed", "runtime": "auto_v1_tool_loop"},
-            "plan": paused.plan.to_dict() if paused.plan is not None else None,
-            "coders": [],
-            "merge": {"status": "cancelled", "runtime": "auto_v1_tool_loop"},
-            "verifier": None,
-            "approval": {"status": "rejected"},
-            "error": reason,
-            "error_code": None,
-            "missing_paths": [],
-            "skill": (
-                skill_run_report(
-                    paused.skill_resolution,
-                    status="failed",
-                    reason=reason,
-                )
-                if paused.skill_resolution is not None
-                else skill_run_report(None, status="skipped", reason="no_match")
-            ),
-        }
+        state = dict(paused.frame.state)
+        state["status"] = AutoRunStatus.CANCELLED.value
+        state["error"] = reason
+        state["approval"] = {"status": "rejected"}
         return self._set_state(state)
 
     def _run_verifier(

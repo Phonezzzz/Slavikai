@@ -287,3 +287,20 @@ provider failure после dispatch, failed tool и presentation/logging faults
 identity исходного outcome, original call IDs, tool/verifier facts и освобождение host lease.
 Это volatile boundary, не canonical payload/attempt history/restart recovery. Resource owner,
 policy/approval и verifier не заменяются новым runtime; readiness TinyJuice не повышается.
+
+## Native Auto approval continuation — foundation
+
+Auto хранит native `ToolLoopContinuation` вместе с original run frame: run identity,
+plan, skill, budgets и monotonic start. Resume продолжает exact pending call через тот же
+AgentToolLoop/Gateway, не вызывает повторно initial goal и не повторяет completed calls.
+Principal/session, mode, runtime root, Brain и config проверяются до consumption checkpoint.
+Предварительно отменённый resume оставляет checkpoint невыполненным. HTTP использует общий
+native approval controller: approve_once не превращается в category grant для всего batch.
+Legacy `auto.run` decision возвращает unavailable; UI state не создаёт execution authority.
+
+`tests/test_auto_native_continuation.py` проверяет настоящий Agent/Gateway, original call IDs,
+однократность, сохранение plan/start/run identity, scope mismatch и cancellation до dispatch.
+`tests/ui_api/test_auto_native_approval.py` проверяет nested approvals одного risk category
+через настоящий HTTP/runtime и duplicate confirmation. Это volatile continuation, не durable
+run lifecycle или canonical payload storage. Existing budget enforcement остаётся прежним;
+этот срез устраняет reset budgets при resume, не вводит новый dispatch budget controller.

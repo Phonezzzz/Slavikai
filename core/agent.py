@@ -635,6 +635,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.desktop_gui_tool.close()
 
     def close(self) -> None:
+        self._reset_approval_state()
         self.desktop_runtime.close()
         self.memory.close()
         self.vectors.close()
