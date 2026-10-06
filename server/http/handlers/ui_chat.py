@@ -121,6 +121,27 @@ async def _iterate_stream_in_thread(
             await asyncio.to_thread(close)
 
 
+async def _drain_auto_progress(*, hub: UIHub, session_id: str, agent: object) -> None:
+    drain = getattr(agent, "drain_auto_progress_events", None)
+    if not callable(drain):
+        return
+    drained = drain()
+    if isinstance(drained, list):
+        for item in drained:
+            normalized = _normalize_auto_state(item)
+            if normalized is not None:
+                await hub.publish(
+                    session_id,
+                    {
+                        "type": "auto.progress",
+                        "payload": {
+                            "session_id": session_id,
+                            "auto_state": normalized,
+                        },
+                    },
+                )
+
+
 async def _publish_auto_progress_while(
     *,
     hub: UIHub,
@@ -133,21 +154,7 @@ async def _publish_auto_progress_while(
     if not callable(drain):
         return
     while not stop_event.is_set():
-        drained = drain()
-        if isinstance(drained, list):
-            for item in drained:
-                normalized = _normalize_auto_state(item)
-                if normalized is not None:
-                    await hub.publish(
-                        session_id,
-                        {
-                            "type": "auto.progress",
-                            "payload": {
-                                "session_id": session_id,
-                                "auto_state": normalized,
-                            },
-                        },
-                    )
+        await _drain_auto_progress(hub=hub, session_id=session_id, agent=agent)
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=0.2)
         except TimeoutError:
@@ -1828,6 +1835,7 @@ async def handle_ui_approval_continue(
                 or (request_cancellation is not None and request_cancellation.is_set())
             ):
                 return not_started("approval_continuation_unavailable")
+            await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
             try:
                 agent.validate_chat_approval(identity)
             except ChatApprovalUnavailable as exc:
@@ -1891,6 +1899,7 @@ async def handle_ui_approval_continue(
                 auto_state = _normalize_auto_state(getattr(agent, "last_auto_state", None))
                 if auto_state is not None:
                     await hub.set_session_workflow(session_id, auto_state=auto_state)
+                await _drain_auto_progress(hub=hub, session_id=session_id, agent=agent)
             text, report = _project_agent_response(response)
             approval = _serialize_approval_request(agent.last_approval_request)
             next_decision: dict[str, JSONValue] | None = None

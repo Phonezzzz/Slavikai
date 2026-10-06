@@ -315,13 +315,18 @@ def test_ui_decision_respond_reject_does_not_execute_workspace_tool() -> None:
     asyncio.run(run())
 
 
-def test_ui_decision_rejects_legacy_auto_replay() -> None:
+@pytest.mark.parametrize("choice", ["approve_once", "approve_session"])
+def test_ui_decision_rejects_legacy_auto_replay(choice, monkeypatch) -> None:
     class AutoResumeAgent(DummyAgent):
         def resume_auto_run(self, run_id: str) -> str:
             raise AssertionError("Legacy Auto replay must remain unreachable")
 
     async def run() -> None:
         client = await _create_client(AutoResumeAgent())
+        from unittest.mock import AsyncMock
+
+        grant = AsyncMock(wraps=client.server.app["session_store"].approve)
+        monkeypatch.setattr(client.server.app["session_store"], "approve", grant)
         try:
             status_resp = await client.get("/ui/api/status")
             status_payload = await status_resp.json()
@@ -359,12 +364,13 @@ def test_ui_decision_rejects_legacy_auto_replay() -> None:
                 json={
                     "session_id": session_id,
                     "decision_id": "decision-auto-1",
-                    "choice": "approve_once",
+                    "choice": choice,
                 },
             )
             assert respond.status == 409
             payload = await respond.json()
             assert payload["error"]["code"] == "approval_continuation_unavailable"
+            grant.assert_not_called()
         finally:
             await client.close()
 

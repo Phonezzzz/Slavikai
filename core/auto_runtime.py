@@ -327,7 +327,9 @@ class AutoOrchestrator:
                 "files_touched": 0,
             }
             self._set_state(state)
-            if loop_result.cancelled:
+            if loop_result.cancelled or (
+                cancellation_token is not None and cancellation_token.is_set()
+            ):
                 state["error"] = "cancelled_by_user"
                 self._set_status(state, AutoRunStatus.CANCELLED)
                 return AutoRunOutcome(
@@ -415,9 +417,20 @@ class AutoOrchestrator:
                 run_root=run_root,
                 budgets=budgets,
                 loop_result=loop_result,
+                cancellation_token=cancellation_token,
             )
             state["verifier"] = _verification_state(verification)
             self._set_state(state)
+            if cancellation_token is not None and cancellation_token.is_set():
+                state["error"] = "cancelled_by_user"
+                self._set_status(state, AutoRunStatus.CANCELLED)
+                return AutoRunOutcome(
+                    text="Auto-run отменён.",
+                    status=AutoRunStatus.CANCELLED,
+                    stop_reason_code=None,
+                    verifier=verification,
+                    next_steps=[],
+                )
             if verification.status != VerificationStatus.PASSED:
                 self._set_status(state, AutoRunStatus.FAILED_VERIFIER)
                 return AutoRunOutcome(
@@ -571,7 +584,7 @@ class AutoOrchestrator:
         state["status"] = AutoRunStatus.CANCELLED.value
         state["error"] = reason
         state["approval"] = {"status": "rejected"}
-        return self._set_state(state)
+        return self._set_status(state, AutoRunStatus.CANCELLED)
 
     def _run_verifier(
         self,
@@ -581,6 +594,7 @@ class AutoOrchestrator:
         run_root: Path,
         budgets: AutoBudgets,
         loop_result: AgentToolLoopResult,
+        cancellation_token: asyncio.Event | None = None,
     ) -> VerificationResult:
         if not loop_result.tool_calls:
             response = loop_result.text.strip()
@@ -670,6 +684,8 @@ class AutoOrchestrator:
             scope={"workspace_root": str(run_root)},
             verifier={"command": canonical_check_command(), "cwd": str(run_root)},
         )
+        if cancellation_token is not None:
+            return verifier.run(verifier_task, context, cancelled=cancellation_token.is_set)
         return verifier.run(verifier_task, context)
 
     def _set_status(

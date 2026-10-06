@@ -15,6 +15,7 @@ class AutoBatchBrain(Brain):
     supports_native_tools = True
 
     def __init__(self):
+        self.network_tool = "auto_network"
         self.initial_requests = 0
         self.history = []
 
@@ -27,8 +28,8 @@ class AutoBatchBrain(Brain):
             text="native batch",
             tool_calls=[
                 ToolCall(id="first-original", name="auto_read", arguments={"index": 0}),
-                ToolCall(id="network-original-1", name="auto_network", arguments={"index": 1}),
-                ToolCall(id="network-original-2", name="auto_network", arguments={"index": 2}),
+                ToolCall(id="network-original-1", name=self.network_tool, arguments={"index": 1}),
+                ToolCall(id="network-original-2", name=self.network_tool, arguments={"index": 2}),
             ],
         )
 
@@ -39,11 +40,13 @@ class AutoNativeAgent(Agent):
         pass
 
 
-@pytest.mark.parametrize("cleanup", [None, "close", "reject"])
+@pytest.mark.parametrize("cleanup", [None, "close", "reject", "security", "claim_race"])
 def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monkeypatch, cleanup):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "Makefile").write_text("check:\n\t@true\n")
     brain = AutoBatchBrain()
+    if cleanup == "security":
+        brain.network_tool = "web"
     agent = AutoNativeAgent(
         brain=brain,
         enable_tools={"safe_mode": True},
@@ -52,7 +55,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
         canonical_atoms_db_path=str(tmp_path / "atoms.db"),
     )
     executed = []
-    for name, risks in [("auto_read", []), ("auto_network", ["network"])]:
+    for name, risks in [("auto_read", []), (brain.network_tool, ["network"])]:
         agent.tool_registry.register(
             name,
             lambda request: executed.append(dict(request.args))
@@ -71,6 +74,13 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
             headers = {"X-Slavik-Session": session}
             await _select_local_model(client, session)
             await client.server.app["ui_hub"].set_workspace_root(session, str(tmp_path))
+            if cleanup == "security":
+                enabled = await client.post(
+                    "/ui/api/session/security",
+                    headers=headers,
+                    json={"tools": {"state": {"web": True}}},
+                )
+                assert enabled.status == 200
             await client.post("/ui/api/mode", headers=headers, json={"mode": "auto"})
             response = await client.post(
                 "/ui/api/chat/send", headers=headers, json={"content": "read three"}
@@ -81,6 +91,46 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
             assert decision["context"]["resume_payload"]["execution_mode"] == "auto"
             assert executed == [{"index": 0}]
             original_run = agent.last_auto_state["run_id"]
+            if cleanup == "security":
+                disabled = await client.post(
+                    "/ui/api/session/security",
+                    headers=headers,
+                    json={"tools": {"state": {"web": False}}},
+                )
+                assert disabled.status == 200
+                accepted = await client.post(
+                    "/ui/api/decision/respond",
+                    headers=headers,
+                    json={
+                        "session_id": session,
+                        "decision_id": decision["id"],
+                        "choice": "approve_once",
+                    },
+                )
+                assert accepted.status == 200
+                assert agent.tools_enabled["web"] is False
+                assert executed == [{"index": 0}]
+                paused = agent.auto_agent.orchestrator._paused_runs[original_run]
+                assert paused.continuation.executed[-1].result.ok is False
+                return
+            if cleanup == "claim_race":
+                identity = decision["context"]["resume_payload"]["continuation_id"]
+                token = asyncio.Event()
+                original_resume = agent.auto_agent.resume_outcome
+
+                def race(run_id, *, cancellation_token=None):
+                    token.set()
+                    return original_resume(run_id, cancellation_token=cancellation_token)
+
+                monkeypatch.setattr(agent.auto_agent, "resume_outcome", race)
+                with pytest.raises(ChatApprovalUnavailable, match="not_started"):
+                    agent.resume_chat_approval(identity, cancellation_token=token)
+                token.clear()
+                agent.validate_chat_approval(identity)
+                assert original_run in agent.auto_agent.orchestrator._paused_runs
+                assert agent.last_approval_resume_payload["continuation_id"] == identity
+                assert executed == [{"index": 0}]
+                return
             if cleanup is not None:
                 identity = decision["context"]["resume_payload"]["continuation_id"]
                 if cleanup == "close":
@@ -96,6 +146,10 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                         },
                     )
                     assert rejected.status == 200
+                    rejected_payload = await rejected.json()
+                    assert rejected_payload["auto_state"]["status"] == "cancelled"
+                    workflow = await client.server.app["ui_hub"].get_session_workflow(session)
+                    assert workflow["auto_state"]["status"] == "cancelled"
                 with pytest.raises(ChatApprovalUnavailable):
                     agent.validate_chat_approval(identity)
                 assert original_run not in agent.auto_agent.orchestrator._paused_runs
@@ -116,6 +170,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 assert result["resume"]["ok"] is True, result
                 assert executed == [{"index": i} for i in range(expected_index + 1)]
                 assert agent.approved_categories == set()
+                assert agent.drain_auto_progress_events() == []
                 assert agent.last_auto_state["run_id"] == original_run
                 if expected_index == 1:
                     following = result["decision"]

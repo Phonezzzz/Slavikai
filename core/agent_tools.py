@@ -476,6 +476,11 @@ class AgentToolsMixin:
             pending.continuation
         ):
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        approval_snapshot = (
+            self.last_approval_request,
+            self.last_approval_source_endpoint,
+            self.last_approval_resume_payload,
+        )
         self._reset_approval_state(cancel_runtime=False)
         runtime_result: RuntimeResult | None = None
         try:
@@ -512,6 +517,14 @@ class AgentToolsMixin:
                 continuation=pending.continuation,
                 cancellation_token=cancellation_token,
             )
+        except AutoContinuationUnavailable as exc:
+            self._pending_chat_approval = pending
+            (
+                self.last_approval_request,
+                self.last_approval_source_endpoint,
+                self.last_approval_resume_payload,
+            ) = approval_snapshot
+            raise ChatApprovalUnavailable(str(exc)) from exc
         except DesktopContinuationUnavailable as exc:
             raise ChatApprovalUnavailable(str(exc)) from exc
         except ApprovalRequired as exc:

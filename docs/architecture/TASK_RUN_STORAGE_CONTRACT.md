@@ -304,3 +304,12 @@ Legacy `auto.run` decision возвращает unavailable; UI state не со�
 через настоящий HTTP/runtime и duplicate confirmation. Это volatile continuation, не durable
 run lifecycle или canonical payload storage. Existing budget enforcement остаётся прежним;
 этот срез устраняет reset budgets при resume, не вводит новый dispatch budget controller.
+
+Auto resume перечитывает effective session security под существующим Agent lock до claim;
+legacy decision отклоняется до session grant. Отмена до claim сохраняет native approval handle,
+reject публикует cancelled projection и финализирует skill state. Native resume выгружает
+накопленный progress. Verifier принимает cancellation callback: принадлежащая ему process
+group останавливается и дожидается завершения с сохранением доступных stdout/stderr;
+Auto проверяет cancellation после tool loop и verifier и не публикует completed при отмене.
+Проверки: `tests/test_auto_native_continuation.py`, `tests/test_verifier_runtime.py`,
+`tests/ui_api/test_auto_native_approval.py`, `tests/ui_api/test_decision_and_approval.py`.

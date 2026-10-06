@@ -179,3 +179,46 @@ def test_verifier_runtime_fallback_os_error(
 
     assert result.status == VerificationStatus.ERROR
     assert result.error and "fallback_failed" in result.error
+
+
+def test_verifier_cancellation_stops_owned_process_group(tmp_path: Path) -> None:
+    import threading
+    import time
+
+    ready = tmp_path / "ready"
+    cancelled = threading.Event()
+    script = (
+        "import pathlib,subprocess,sys,time; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        "print('critical diagnostic',flush=True); "
+        f"pathlib.Path({str(ready)!r}).write_text(str(child.pid)); time.sleep(60)"
+    )
+
+    def cancel_when_started() -> None:
+        deadline = time.monotonic() + 3
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancelled.set()
+
+    worker = threading.Thread(target=cancel_when_started)
+    worker.start()
+    started = time.monotonic()
+    try:
+        result = VerifierRuntime(project_root=tmp_path).run(
+            _task(tmp_path, verifier={"command": [sys.executable, "-c", script]}),
+            _context(tmp_path),
+            cancelled=cancelled.is_set,
+        )
+    finally:
+        worker.join(timeout=4)
+    assert time.monotonic() - started < 4
+    assert result.error == "verifier_cancelled"
+    assert result.status == VerificationStatus.ERROR
+    assert "critical diagnostic" in result.stdout
+    assert ready.exists()
+    child_status = Path(f"/proc/{ready.read_text()}/status")
+    try:
+        status = child_status.read_text()
+    except FileNotFoundError:
+        status = "State:\tZ"
+    assert "State:\tZ" in status

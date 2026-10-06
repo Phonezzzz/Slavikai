@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
+import signal
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -13,6 +15,61 @@ from core.mwv.models import RunContext, TaskPacket, VerificationResult, Verifica
 from core.mwv.verifier import VerifierRunner
 from core.mwv.verifier_summary import extract_verifier_excerpt, verifier_fail_type
 from shared.models import JSONValue, ToolResult
+
+
+class VerifierCancelled(Exception):
+    def __init__(self, stdout: str = "", stderr: str = "") -> None:
+        super().__init__("verifier_cancelled")
+        self.stdout, self.stderr = stdout, stderr
+
+
+def _execute_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+    cancelled: Callable[[], bool] | None,
+) -> subprocess.CompletedProcess[str]:
+    if cancelled is None:
+        return subprocess.run(
+            command, cwd=cwd, capture_output=True, text=True, timeout=timeout_seconds, check=False
+        )
+    if cancelled():
+        raise VerifierCancelled()
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            stopped = cancelled()
+            remaining = deadline - time.monotonic()
+            if stopped or remaining <= 0:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
+                if stopped:
+                    raise VerifierCancelled(stdout, stderr)
+                raise subprocess.TimeoutExpired(command, timeout_seconds, stdout, stderr)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.05, remaining))
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
 
 
 class VerifierRunnerProtocol(Protocol):
@@ -263,7 +320,9 @@ class VerifierRuntime:
             duration_seconds=time.monotonic() - start,
         )
 
-    def run(self, task: TaskPacket, context: RunContext) -> VerificationResult:
+    def run(
+        self, task: TaskPacket, context: RunContext, *, cancelled: Callable[[], bool] | None = None
+    ) -> VerificationResult:
         start = time.monotonic()
         try:
             workspace_root = _resolve_workspace_root(context.workspace_root)
@@ -289,7 +348,9 @@ class VerifierRuntime:
             )
 
         if command is not None:
-            return self._run_command(command, cwd=cwd, timeout_seconds=timeout_seconds)
+            return self._run_command(
+                command, cwd=cwd, timeout_seconds=timeout_seconds, cancelled=cancelled
+            )
 
         if not is_repo_workspace(workspace_root):
             return VerificationResult(
@@ -304,7 +365,7 @@ class VerifierRuntime:
                 excerpt=NON_REPO_VERIFIER_REQUIRED_ERROR,
                 verifier_profile="fallback",
             )
-        return self._run_fallback(cwd=cwd, timeout_seconds=timeout_seconds)
+        return self._run_fallback(cwd=cwd, timeout_seconds=timeout_seconds, cancelled=cancelled)
 
     def _run_command(
         self,
@@ -312,16 +373,25 @@ class VerifierRuntime:
         *,
         cwd: Path,
         timeout_seconds: int,
+        cancelled: Callable[[], bool] | None = None,
     ) -> VerificationResult:
         start = time.monotonic()
         try:
-            completed = subprocess.run(
-                command,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
+            completed = _execute_command(
+                command, cwd=cwd, timeout_seconds=timeout_seconds, cancelled=cancelled
+            )
+        except VerifierCancelled as exc:
+            return VerificationResult(
+                status=VerificationStatus.ERROR,
+                command=command,
+                exit_code=None,
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+                duration_seconds=time.monotonic() - start,
+                error="verifier_cancelled",
+                fail_type="cancelled",
+                excerpt="verifier_cancelled",
+                verifier_profile="explicit",
             )
         except subprocess.TimeoutExpired as exc:
             return VerificationResult(
@@ -396,6 +466,7 @@ class VerifierRuntime:
         *,
         cwd: Path,
         timeout_seconds: int,
+        cancelled: Callable[[], bool] | None = None,
     ) -> VerificationResult:
         start = time.monotonic()
         stdout_parts: list[str] = []
@@ -405,13 +476,21 @@ class VerifierRuntime:
             command = list(command_tuple)
             last_command = command
             try:
-                completed = subprocess.run(
-                    command,
-                    cwd=cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                    check=False,
+                completed = _execute_command(
+                    command, cwd=cwd, timeout_seconds=timeout_seconds, cancelled=cancelled
+                )
+            except VerifierCancelled as exc:
+                return VerificationResult(
+                    status=VerificationStatus.ERROR,
+                    command=command,
+                    exit_code=None,
+                    stdout=_join_output([*stdout_parts, exc.stdout]),
+                    stderr=_join_output([*stderr_parts, exc.stderr]),
+                    duration_seconds=time.monotonic() - start,
+                    error="verifier_cancelled",
+                    fail_type="cancelled",
+                    excerpt="verifier_cancelled",
+                    verifier_profile="fallback",
                 )
             except subprocess.TimeoutExpired as exc:
                 return VerificationResult(

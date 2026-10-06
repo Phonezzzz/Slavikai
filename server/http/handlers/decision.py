@@ -514,7 +514,7 @@ async def _complete_ui_decision(
                 choice=choice,
                 request_cancellation=request_cancellation,
             )
-        if source_endpoint in {"chat.send", "workspace.send"}:
+        if source_endpoint in {"chat.send", "workspace.send", "auto.run"}:
             return {
                 "ok": False,
                 "error": "approval_continuation_unavailable",
@@ -608,13 +608,6 @@ async def _complete_ui_decision(
                 "ok": True,
                 "source_endpoint": source_endpoint,
                 "data": {"root_path": str(target_root)},
-            }
-
-        if source_endpoint == "auto.run":
-            return {
-                "ok": False,
-                "error": "approval_continuation_unavailable",
-                "resume_started": False,
             }
 
         if source_endpoint == "plan.execute_runner":
@@ -1441,6 +1434,12 @@ async def _complete_ui_decision(
                 if agent is not None:
                     async with _agent_lock_for_request(request, session_id):
                         await asyncio.to_thread(agent.cancel_chat_approval, identity)
+                        if resume_payload.get("execution_mode") == "auto":
+                            auto_state = _normalize_auto_state(
+                                getattr(agent, "last_auto_state", None)
+                            )
+                            if auto_state is not None:
+                                await hub.set_session_workflow(session_id, auto_state=auto_state)
         normalized = (
             normalized_latest
             if normalized_latest is not None
