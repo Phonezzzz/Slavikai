@@ -313,3 +313,10 @@ group останавливается и дожидается завершени�
 Auto проверяет cancellation после tool loop и verifier и не публикует completed при отмене.
 Проверки: `tests/test_auto_native_continuation.py`, `tests/test_verifier_runtime.py`,
 `tests/ui_api/test_auto_native_approval.py`, `tests/ui_api/test_decision_and_approval.py`.
+
+Session security writer и native claim используют один Agent lock. Session grant при отказе
+до claim откатывает только добавленные categories под тем же lock; прежние grants сохраняются.
+Pending Auto `/chat/cancel` также синхронизирует workflow/progress. Cancellation перед nested
+approval не оставляет новый checkpoint. Drain verifier pipes после остановки owning group
+ограничен: escaped descendant не удерживает worker бесконечно; при неполном capture диагностика
+явно содержит `verifier pipe capture incomplete`. Это не гарантия полного canonical capture.

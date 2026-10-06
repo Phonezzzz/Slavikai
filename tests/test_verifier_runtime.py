@@ -181,7 +181,8 @@ def test_verifier_runtime_fallback_os_error(
     assert result.error and "fallback_failed" in result.error
 
 
-def test_verifier_cancellation_stops_owned_process_group(tmp_path: Path) -> None:
+@pytest.mark.parametrize("detached", [False, True])
+def test_verifier_cancellation_stops_owned_process_group(tmp_path: Path, detached: bool) -> None:
     import threading
     import time
 
@@ -189,7 +190,8 @@ def test_verifier_cancellation_stops_owned_process_group(tmp_path: Path) -> None
     cancelled = threading.Event()
     script = (
         "import pathlib,subprocess,sys,time; "
-        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], "
+        f"start_new_session={detached}); "
         "print('critical diagnostic',flush=True); "
         f"pathlib.Path({str(ready)!r}).write_text(str(child.pid)); time.sleep(60)"
     )
@@ -211,14 +213,29 @@ def test_verifier_cancellation_stops_owned_process_group(tmp_path: Path) -> None
         )
     finally:
         worker.join(timeout=4)
+        if detached and ready.exists():
+            import os
+            import signal
+
+            try:
+                os.killpg(int(ready.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    if detached:
+        assert "capture incomplete" in result.stderr
     assert time.monotonic() - started < 4
     assert result.error == "verifier_cancelled"
     assert result.status == VerificationStatus.ERROR
     assert "critical diagnostic" in result.stdout
     assert ready.exists()
     child_status = Path(f"/proc/{ready.read_text()}/status")
-    try:
-        status = child_status.read_text()
-    except FileNotFoundError:
-        status = "State:\tZ"
+    deadline = time.monotonic() + 1
+    while True:
+        try:
+            status = child_status.read_text()
+        except FileNotFoundError:
+            status = "State:\tZ"
+        if "State:\tZ" in status or time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
     assert "State:\tZ" in status

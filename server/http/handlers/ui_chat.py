@@ -11,6 +11,7 @@ from aiohttp import web
 
 from core.agent_response import AgentResponse, ResponseFailure, ResponseProduced
 from core.agent_tools import ChatApprovalUnavailable
+from core.approval_policy import ApprovalCategory
 from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyStore
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
@@ -1705,6 +1706,17 @@ async def handle_ui_chat_cancel(request: web.Request) -> web.Response:
                         )
                         if updated:
                             await asyncio.to_thread(agent.cancel_chat_approval, identity)
+                            if payload.get("execution_mode") == "auto":
+                                auto_state = _normalize_auto_state(
+                                    getattr(agent, "last_auto_state", None)
+                                )
+                                if auto_state is not None:
+                                    await hub.set_session_workflow(
+                                        resolved_session_id, auto_state=auto_state
+                                    )
+                                await _drain_auto_progress(
+                                    hub=hub, session_id=resolved_session_id, agent=agent
+                                )
                             response = json_response(
                                 {
                                     "session_id": resolved_session_id,
@@ -1864,87 +1876,103 @@ async def handle_ui_approval_continue(
                 agent.set_desktop_policy_context(
                     await session_store.get_desktop_rules(scope), principal_id
                 )
-            categories = await request.app["session_store"].get_categories(
-                _agent_scope(request, session_id)
-            )
-            if (
-                mode in {"ask", "auto"}
-                and choice == "approve_session"
-                and agent.last_approval_request is not None
-            ):
-                categories = await session_store.approve(
-                    scope, set(agent.last_approval_request.required_categories)
-                )
-            agent.set_session_context(session_id, categories)
-            with workspace_root_context(session_root):
-                worker = asyncio.create_task(
-                    asyncio.to_thread(
-                        agent.resume_chat_approval, identity, cancellation_token=generation.token
-                    )
-                )
+            added_categories: set[ApprovalCategory] = set()
             try:
-                response = await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                generation.token.set()
-                await asyncio.shield(worker)
-                raise
-            except ChatApprovalUnavailable as exc:
-                return not_started(str(exc))
-            started = True
-            if mode == "desktop":
-                await session_store.remove_desktop_rules(
-                    scope, set(agent.drain_consumed_desktop_rule_ids())
+                categories = await request.app["session_store"].get_categories(
+                    _agent_scope(request, session_id)
                 )
-            if mode == "auto":
-                auto_state = _normalize_auto_state(getattr(agent, "last_auto_state", None))
-                if auto_state is not None:
-                    await hub.set_session_workflow(session_id, auto_state=auto_state)
-                await _drain_auto_progress(hub=hub, session_id=session_id, agent=agent)
-            text, report = _project_agent_response(response)
-            approval = _serialize_approval_request(agent.last_approval_request)
-            next_decision: dict[str, JSONValue] | None = None
-            if approval is not None:
-                next_payload = dict(agent.last_approval_resume_payload or {})
-                next_payload["workspace_root_snapshot"] = str(session_root)
-                next_payload["user_message_id"] = parent
-                next_payload["selected_model_snapshot"] = selected
-                next_decision = _build_ui_approval_decision(
-                    approval_request=approval,
-                    session_id=session_id,
-                    source_endpoint="chat.tool_continue",
-                    resume_payload=next_payload,
-                    trace_id=None,
-                    workflow_context=_decision_workflow_context(
-                        mode=str(mode), active_plan=None, active_task=None
+                if (
+                    mode in {"ask", "auto"}
+                    and choice == "approve_session"
+                    and agent.last_approval_request is not None
+                ):
+                    added_categories = (
+                        set(agent.last_approval_request.required_categories) - categories
+                    )
+                    categories = await session_store.approve(
+                        scope, set(agent.last_approval_request.required_categories)
+                    )
+                agent.set_session_context(session_id, categories)
+                with workspace_root_context(session_root):
+                    worker = asyncio.create_task(
+                        asyncio.to_thread(
+                            agent.resume_chat_approval,
+                            identity,
+                            cancellation_token=generation.token,
+                        )
+                    )
+                try:
+                    response = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    generation.token.set()
+                    try:
+                        await asyncio.shield(worker)
+                    except ChatApprovalUnavailable:
+                        raise
+                    else:
+                        started = True
+                    raise
+                except ChatApprovalUnavailable as exc:
+                    return not_started(str(exc))
+                started = True
+                if mode == "desktop":
+                    await session_store.remove_desktop_rules(
+                        scope, set(agent.drain_consumed_desktop_rule_ids())
+                    )
+                if mode == "auto":
+                    auto_state = _normalize_auto_state(getattr(agent, "last_auto_state", None))
+                    if auto_state is not None:
+                        await hub.set_session_workflow(session_id, auto_state=auto_state)
+                    await _drain_auto_progress(hub=hub, session_id=session_id, agent=agent)
+                text, report = _project_agent_response(response)
+                approval = _serialize_approval_request(agent.last_approval_request)
+                next_decision: dict[str, JSONValue] | None = None
+                if approval is not None:
+                    next_payload = dict(agent.last_approval_resume_payload or {})
+                    next_payload["workspace_root_snapshot"] = str(session_root)
+                    next_payload["user_message_id"] = parent
+                    next_payload["selected_model_snapshot"] = selected
+                    next_decision = _build_ui_approval_decision(
+                        approval_request=approval,
+                        session_id=session_id,
+                        source_endpoint="chat.tool_continue",
+                        resume_payload=next_payload,
+                        trace_id=None,
+                        workflow_context=_decision_workflow_context(
+                            mode=str(mode), active_plan=None, active_task=None
+                        ),
+                    )
+                await hub.append_message(
+                    session_id,
+                    hub.create_message(
+                        role="assistant", content=text, lane="chat", parent_user_message_id=parent
                     ),
+                    lane="chat",
                 )
-            await hub.append_message(
-                session_id,
-                hub.create_message(
-                    role="assistant", content=text, lane="chat", parent_user_message_id=parent
-                ),
-                lane="chat",
-            )
-            await hub.set_session_output(session_id, text)
-            if next_decision is not None:
-                await hub.set_session_decision(session_id, next_decision)
-            await _publish_chat_stream_from_text(
-                hub, session_id=session_id, stream_id=stream_id, content=text, lane="chat"
-            )
-            return {
-                "ok": True,
-                "source_endpoint": "chat.tool_continue",
-                "resume_started": True,
-                "data": {
-                    "status_code": 200,
-                    "output": text,
-                    "decision": next_decision,
-                    "mwv_report": report,
-                    "generation_error": response.failure.code
-                    if response.failure is not None
-                    else None,
-                },
-            }
+                await hub.set_session_output(session_id, text)
+                if next_decision is not None:
+                    await hub.set_session_decision(session_id, next_decision)
+                await _publish_chat_stream_from_text(
+                    hub, session_id=session_id, stream_id=stream_id, content=text, lane="chat"
+                )
+                return {
+                    "ok": True,
+                    "source_endpoint": "chat.tool_continue",
+                    "resume_started": True,
+                    "data": {
+                        "status_code": 200,
+                        "output": text,
+                        "decision": next_decision,
+                        "mwv_report": report,
+                        "generation_error": response.failure.code
+                        if response.failure is not None
+                        else None,
+                    },
+                }
+            finally:
+                if added_categories and not started:
+                    categories = await session_store.revoke(scope, added_categories)
+                    agent.set_session_context(session_id, categories)
     finally:
         if created_rule is not None and not started:
             if created_rule.source == "persistent":

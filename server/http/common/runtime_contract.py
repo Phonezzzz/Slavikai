@@ -42,6 +42,14 @@ class SessionApprovalStore:
             self._approved[scope] = existing
             return set(existing)
 
+    async def revoke(
+        self, scope: AgentScope, categories: set[ApprovalCategory]
+    ) -> set[ApprovalCategory]:
+        async with self._lock:
+            existing = self._approved.get(scope, set())
+            existing.difference_update(categories)
+            return set(existing)
+
     async def is_approved(self, scope: AgentScope) -> bool:
         async with self._lock:
             return bool(self._approved.get(scope))

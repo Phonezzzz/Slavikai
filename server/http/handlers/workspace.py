@@ -1543,157 +1543,163 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
 
-    if "policy" in payload:
-        policy_raw = payload.get("policy")
-        if not isinstance(policy_raw, dict):
-            return error_response(
-                status=400,
-                message="policy должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        profile: str | None = None
-
-        if "profile" in policy_raw:
-            profile_raw = policy_raw.get("profile")
-            if (
-                not isinstance(profile_raw, str)
-                or profile_raw.strip().lower() not in POLICY_PROFILES
-            ):
+    async with api._agent_lock_for_request(request, session_id):
+        if "policy" in payload:
+            policy_raw = payload.get("policy")
+            if not isinstance(policy_raw, dict):
                 return error_response(
                     status=400,
-                    message="policy.profile должен быть sandbox|index|yolo.",
+                    message="policy должен быть объектом.",
                     error_type="invalid_request_error",
                     code="invalid_request_error",
                 )
-            profile = profile_raw.strip().lower()
+            profile: str | None = None
 
-        if "yolo_armed" in policy_raw:
-            return error_response(
-                status=400,
-                message=(
-                    "policy.yolo_armed больше не поддерживается; используйте только policy.profile."
-                ),
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        if "yolo_armed_at" in policy_raw:
-            return error_response(
-                status=400,
-                message="policy.yolo_armed_at больше не поддерживается.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
+            if "profile" in policy_raw:
+                profile_raw = policy_raw.get("profile")
+                if (
+                    not isinstance(profile_raw, str)
+                    or profile_raw.strip().lower() not in POLICY_PROFILES
+                ):
+                    return error_response(
+                        status=400,
+                        message="policy.profile должен быть sandbox|index|yolo.",
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                profile = profile_raw.strip().lower()
 
-        if profile == "yolo":
-            confirm_raw = policy_raw.get("yolo_confirm")
-            confirm_text_raw = policy_raw.get("yolo_confirm_text")
-            confirm_ok = (
-                confirm_raw is True
-                and isinstance(confirm_text_raw, str)
-                and confirm_text_raw.strip().upper() == "YOLO"
-            )
-            if not confirm_ok:
+            if "yolo_armed" in policy_raw:
                 return error_response(
                     status=400,
                     message=(
-                        "Для включения YOLO требуется подтверждение "
-                        "(yolo_confirm=true, yolo_confirm_text='YOLO')."
+                        "policy.yolo_armed больше не поддерживается; "
+                        "используйте только policy.profile."
                     ),
                     error_type="invalid_request_error",
-                    code="yolo_confirmation_required",
+                    code="invalid_request_error",
+                )
+            if "yolo_armed_at" in policy_raw:
+                return error_response(
+                    status=400,
+                    message="policy.yolo_armed_at больше не поддерживается.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
                 )
 
+            if profile == "yolo":
+                confirm_raw = policy_raw.get("yolo_confirm")
+                confirm_text_raw = policy_raw.get("yolo_confirm_text")
+                confirm_ok = (
+                    confirm_raw is True
+                    and isinstance(confirm_text_raw, str)
+                    and confirm_text_raw.strip().upper() == "YOLO"
+                )
+                if not confirm_ok:
+                    return error_response(
+                        status=400,
+                        message=(
+                            "Для включения YOLO требуется подтверждение "
+                            "(yolo_confirm=true, yolo_confirm_text='YOLO')."
+                        ),
+                        error_type="invalid_request_error",
+                        code="yolo_confirmation_required",
+                    )
+
+            workspace_root = await _workspace_root_for_session(hub, session_id)
+            current_policy = await hub.get_session_policy(session_id)
+            current_profile = _normalize_policy_profile(current_policy.get("profile"))
+            target_profile = profile or current_profile
+            try:
+                _resolve_workspace_root_candidate(
+                    str(workspace_root),
+                    policy_profile=target_profile,
+                )
+            except ValueError as exc:
+                return error_response(
+                    status=409,
+                    message=str(exc),
+                    error_type="invalid_request_error",
+                    code="policy_root_incompatible",
+                    details={
+                        "session_id": session_id,
+                        "workspace_root": str(workspace_root),
+                        "policy_profile": target_profile,
+                    },
+                )
+
+            await hub.set_session_policy(
+                session_id,
+                profile=profile,
+            )
+
+        if "tools" in payload:
+            tools_raw = payload.get("tools")
+            if not isinstance(tools_raw, dict):
+                return error_response(
+                    status=400,
+                    message="tools должен быть объектом.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            state_raw = tools_raw.get("state")
+            if not isinstance(state_raw, dict):
+                return error_response(
+                    status=400,
+                    message="tools.state должен быть объектом.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            if "safe_mode" in state_raw:
+                return error_response(
+                    status=400,
+                    message=(
+                        "tools.state.safe_mode больше не поддерживается; "
+                        "safe mode определяется через policy.profile."
+                    ),
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            unknown_tools = sorted(
+                {
+                    str(key).strip()
+                    for key in state_raw
+                    if str(key).strip() not in DEFAULT_TOOLS_STATE
+                }
+            )
+            if unknown_tools:
+                return error_response(
+                    status=400,
+                    message=f"Неизвестные tools ключи: {', '.join(unknown_tools)}.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            normalized_tools = _normalize_tools_state_payload(state_raw)
+            if len(normalized_tools) != len(state_raw):
+                return error_response(
+                    status=400,
+                    message="tools.state должен быть bool map.",
+                    error_type="invalid_request_error",
+                    code="invalid_request_error",
+                )
+            await hub.set_session_tools_state(
+                session_id,
+                tools_state=normalized_tools,
+                merge=True,
+            )
+
+        effective_tools, effective_policy = await _load_effective_session_security(
+            hub=hub,
+            session_id=session_id,
+        )
         workspace_root = await _workspace_root_for_session(hub, session_id)
-        current_policy = await hub.get_session_policy(session_id)
-        current_profile = _normalize_policy_profile(current_policy.get("profile"))
-        target_profile = profile or current_profile
-        try:
-            _resolve_workspace_root_candidate(
-                str(workspace_root),
-                policy_profile=target_profile,
-            )
-        except ValueError as exc:
-            return error_response(
-                status=409,
-                message=str(exc),
-                error_type="invalid_request_error",
-                code="policy_root_incompatible",
-                details={
-                    "session_id": session_id,
-                    "workspace_root": str(workspace_root),
-                    "policy_profile": target_profile,
-                },
-            )
-
-        await hub.set_session_policy(
-            session_id,
-            profile=profile,
+        response = json_response(
+            {
+                "session_id": session_id,
+                "tools_state": effective_tools,
+                "policy": effective_policy,
+                "workspace_root": str(workspace_root),
+            }
         )
-
-    if "tools" in payload:
-        tools_raw = payload.get("tools")
-        if not isinstance(tools_raw, dict):
-            return error_response(
-                status=400,
-                message="tools должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        state_raw = tools_raw.get("state")
-        if not isinstance(state_raw, dict):
-            return error_response(
-                status=400,
-                message="tools.state должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        if "safe_mode" in state_raw:
-            return error_response(
-                status=400,
-                message=(
-                    "tools.state.safe_mode больше не поддерживается; "
-                    "safe mode определяется через policy.profile."
-                ),
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        unknown_tools = sorted(
-            {str(key).strip() for key in state_raw if str(key).strip() not in DEFAULT_TOOLS_STATE}
-        )
-        if unknown_tools:
-            return error_response(
-                status=400,
-                message=f"Неизвестные tools ключи: {', '.join(unknown_tools)}.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        normalized_tools = _normalize_tools_state_payload(state_raw)
-        if len(normalized_tools) != len(state_raw):
-            return error_response(
-                status=400,
-                message="tools.state должен быть bool map.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        await hub.set_session_tools_state(
-            session_id,
-            tools_state=normalized_tools,
-            merge=True,
-        )
-
-    effective_tools, effective_policy = await _load_effective_session_security(
-        hub=hub,
-        session_id=session_id,
-    )
-    workspace_root = await _workspace_root_for_session(hub, session_id)
-    response = json_response(
-        {
-            "session_id": session_id,
-            "tools_state": effective_tools,
-            "policy": effective_policy,
-            "workspace_root": str(workspace_root),
-        }
-    )
-    response.headers[UI_SESSION_HEADER] = session_id
-    return response
+        response.headers[UI_SESSION_HEADER] = session_id
+        return response

@@ -23,6 +23,21 @@ class VerifierCancelled(Exception):
         self.stdout, self.stderr = stdout, stderr
 
 
+def _drain_stopped_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    try:
+        return process.communicate(timeout=0.5)
+    except subprocess.TimeoutExpired as exc:
+        # Отделившийся потомок может держать inherited pipes после остановки owning group.
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        process.wait(timeout=0.5)
+        return (
+            _coerce_output(exc.stdout),
+            _coerce_output(exc.stderr) + "\n[verifier pipe capture incomplete]",
+        )
+
+
 def _execute_command(
     command: list[str],
     *,
@@ -54,7 +69,7 @@ def _execute_command(
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                stdout, stderr = process.communicate()
+                stdout, stderr = _drain_stopped_process(process)
                 if stopped:
                     raise VerifierCancelled(stdout, stderr)
                 raise subprocess.TimeoutExpired(command, timeout_seconds, stdout, stderr)
@@ -69,7 +84,7 @@ def _execute_command(
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.communicate()
+            _drain_stopped_process(process)
 
 
 class VerifierRunnerProtocol(Protocol):

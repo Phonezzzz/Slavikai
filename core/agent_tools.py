@@ -524,7 +524,12 @@ class AgentToolsMixin:
                 self.last_approval_source_endpoint,
                 self.last_approval_resume_payload,
             ) = approval_snapshot
-            raise ChatApprovalUnavailable(str(exc)) from exc
+            code = (
+                "approval_continuation_not_started"
+                if str(exc) == "auto_continuation_not_started"
+                else "approval_continuation_unavailable"
+            )
+            raise ChatApprovalUnavailable(code) from exc
         except DesktopContinuationUnavailable as exc:
             raise ChatApprovalUnavailable(str(exc)) from exc
         except ApprovalRequired as exc:

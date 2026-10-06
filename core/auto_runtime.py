@@ -493,6 +493,19 @@ class AutoOrchestrator:
         except ApprovalRequired as exc:
             if exc.continuation is None:
                 raise AutoContinuationUnavailable("auto_continuation_unavailable") from exc
+            if cancellation_token is not None and cancellation_token.is_set():
+                state["coders"] = [
+                    _auto_v1_tool_call_state(item) for item in exc.continuation.executed
+                ]
+                state["error"] = "cancelled_by_user"
+                self._set_status(state, AutoRunStatus.CANCELLED)
+                return AutoRunOutcome(
+                    text="Auto-run отменён.",
+                    status=AutoRunStatus.CANCELLED,
+                    stop_reason_code=None,
+                    verifier=None,
+                    next_steps=[],
+                )
             self._paused_runs[run_id_value] = _PausedRun(frame, exc.continuation)
             state["coders"] = [_auto_v1_tool_call_state(item) for item in exc.continuation.executed]
             state["approval"] = {
