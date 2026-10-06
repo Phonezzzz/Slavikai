@@ -233,7 +233,7 @@ def test_verifier_cancellation_stops_owned_process_group(tmp_path: Path, detache
     while True:
         try:
             status = child_status.read_text()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             status = "State:\tZ"
         if "State:\tZ" in status or time.monotonic() >= deadline:
             break
