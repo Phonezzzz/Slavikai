@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
+import json
 import shlex
 import time
 import uuid
@@ -8,6 +9,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from core.agent_response import AgentResponse, ResponseFailure
 from core.approval_policy import ApprovalCategory, ApprovalRequest, ApprovalRequired
 from core.decision.handler import DecisionEvent
 from core.mwv.manager import ManagerRuntime, MWVRunResult
@@ -216,7 +218,7 @@ class AgentMWVMixin:
         raw_input: str,
         decision: RouteDecision,
         record_in_history: bool,
-    ) -> str:
+    ) -> AgentResponse:
         trace_id = str(uuid.uuid4())
         mwv_messages = self._to_mwv_messages(messages)
         context = self._build_mwv_context(trace_id=trace_id)
@@ -260,38 +262,67 @@ class AgentMWVMixin:
         except ApprovalRequired:
             raise
         except Exception as exc:  # noqa: BLE001
-            return self._handle_mwv_error(
-                exc,
-                raw_input=raw_input,
-                record_in_history=record_in_history,
-                trace_id=trace_id,
+            return AgentResponse(
+                self._handle_mwv_error(
+                    exc,
+                    raw_input=raw_input,
+                    record_in_history=record_in_history,
+                    trace_id=trace_id,
+                ),
+                failure=ResponseFailure("mwv_execution_error", str(exc)),
             )
-        if run_result.verification_result.status != VerificationStatus.PASSED:
-            self._inc_metric("verifier_fail_count")
-            decision_packet = self.decision_handler.evaluate(
-                event=DecisionEvent.verifier_fail(
-                    verification_result=run_result.verification_result,
-                    task_id=run_result.task.task_id,
-                    trace_id=run_result.task.trace_id,
-                    attempt=run_result.attempt,
-                    max_attempts=run_result.max_attempts,
-                    retry_allowed=bool(
-                        run_result.retry_decision and run_result.retry_decision.allow_retry
+        try:
+            if run_result.verification_result.status != VerificationStatus.PASSED:
+                self._inc_metric("verifier_fail_count")
+                decision_packet = self.decision_handler.evaluate(
+                    event=DecisionEvent.verifier_fail(
+                        verification_result=run_result.verification_result,
+                        task_id=run_result.task.task_id,
+                        trace_id=run_result.task.trace_id,
+                        attempt=run_result.attempt,
+                        max_attempts=run_result.max_attempts,
+                        retry_allowed=bool(
+                            run_result.retry_decision and run_result.retry_decision.allow_retry
+                        ),
+                    )
+                )
+                if decision_packet is None:
+                    raise RuntimeError("DecisionHandler did not build verifier_fail packet.")
+                return AgentResponse(
+                    self._handle_decision_packet(
+                        decision_packet,
+                        raw_input=raw_input,
+                        record_in_history=record_in_history,
                     ),
+                    runtime_result=run_result,
+                )
+            response = self._format_mwv_response(run_result)
+            self._log_chat_interaction(raw_input=raw_input, response_text=response)
+            if record_in_history:
+                self._append_short_term([LLMMessage(role="assistant", content=response)])
+            return AgentResponse(response, runtime_result=run_result)
+
+        except ApprovalRequired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Ошибка представления не отменяет завершённый runtime result.
+            text = (
+                "Что случилось: ошибка представления результата MWV\n"
+                f"Почему: {exc}\n"
+                "Что делать дальше:\n- Проверь логи; не повторяй выполненные tools автоматически.\n"
+                f"trace_id={trace_id}\n"
+                "MWV_REPORT_JSON="
+                + json.dumps(
+                    {
+                        "route": "mwv",
+                        "trace_id": trace_id,
+                        "stop_reason_code": StopReasonCode.MWV_INTERNAL_ERROR.value,
+                    }
                 )
             )
-            if decision_packet is None:
-                raise RuntimeError("DecisionHandler did not build verifier_fail packet.")
-            return self._handle_decision_packet(
-                decision_packet,
-                raw_input=raw_input,
-                record_in_history=record_in_history,
+            return AgentResponse(
+                text, run_result, ResponseFailure("mwv_projection_error", str(exc))
             )
-        response = self._format_mwv_response(run_result)
-        self._log_chat_interaction(raw_input=raw_input, response_text=response)
-        if record_in_history:
-            self._append_short_term([LLMMessage(role="assistant", content=response)])
-        return response
 
     def _build_mwv_context(self, *, trace_id: str | None = None) -> RunContext:
         session_id = self.session_id or "local"

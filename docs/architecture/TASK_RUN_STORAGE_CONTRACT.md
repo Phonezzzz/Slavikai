@@ -138,7 +138,7 @@ request-local и не добавляется в wire payload или durable stor
 `ApprovalRequired` проходит через sync/stream Ask наружу к существующему approval handler;
 это policy control signal, а не `provider_model_error`. До подтверждения tool не выполняется.
 Эта ограниченная current-гарантия зарегистрирована как
-`runtime.agent.request_local_response` version 4 в `docs/runtime_contract_claims.json`.
+`runtime.agent.request_local_response` version 5 в `docs/runtime_contract_claims.json`.
 
 Это volatile boundary, **не full canonical capture или durable evidence**. LLMResult и
 вложенные collections не immutable. При provider exception во время создания или чтения
@@ -253,3 +253,21 @@ executing decision и не повторяет tool. Это request-task ownershi
 Это volatile runtime ownership, не durable lifecycle adoption, canonical storage или
 restart-safe continuation. После expiry UI decision возвращает unavailable при confirm;
 archival/history recovery остаётся отдельной foundation dependency. TinyJuice BLOCKED.
+
+## Typed MWV observation — foundation B2e
+
+`_run_mwv_flow` возвращает `AgentResponse.runtime_result` с исходным
+`ManagerRuntime.run_flow` → `MWVRunResult`. Sync routing передаёт envelope напрямую;
+stream передаёт тот же envelope через `ResponseProduced` до `Done`. Ошибки formatting,
+decision presentation или InteractionLog после manager return сохраняют результат с
+отдельным `ResponseFailure(mwv_projection_error)`; tools не запускаются повторно.
+Worker failure и verifier PASS остаются разными typed facts; presentation не определяет
+execution success. ApprovalRequired остаётся отдельным control signal внешнего handler.
+
+Проверка `tests/test_mwv_response_observation.py` исполняет explicit TaskStepContract через
+настоящий Worker/Gateway, затем настоящий `make check` verifier и HTTP stream iterator.
+Проверяются обе комбинации worker/verifier, bounded retry, identity manager result и faults
+представления. Это volatile observation последнего returned attempt, не canonical payload:
+предыдущие attempts, exception до manager return, approval pause и durable lifecycle
+остаются foundation gaps. HTTP report вне Auto пока legacy presentation, не authority.
+TinyJuice/recovery readiness не повышен.

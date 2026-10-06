@@ -267,7 +267,7 @@ def test_mwv_flow_runs_through_worker_and_verifier(
         decision=decision,
         record_in_history=False,
     )
-    assert "Итог: проверки пройдены" in response
+    assert "Итог: проверки пройдены" in response.text
 
 
 def test_mwv_default_next_steps_on_verifier_fail(tmp_path: Path) -> None:

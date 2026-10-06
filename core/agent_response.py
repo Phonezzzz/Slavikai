@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from core.auto_runtime import AutoRunOutcome
+from core.mwv.manager import MWVRunResult
 from core.tool_loop import AgentToolLoopResult
 from llm.stream_model import StreamEvent
 from llm.types import LLMResult
 
-RuntimeResult = AutoRunOutcome | AgentToolLoopResult | LLMResult
+RuntimeResult = AutoRunOutcome | AgentToolLoopResult | LLMResult | MWVRunResult
 
 
 @dataclass(frozen=True, slots=True)

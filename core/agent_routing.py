@@ -134,7 +134,7 @@ class AgentRoutingMixin:
             last_content: str,
             route_decision: RouteDecision,
             record_in_history: bool,
-        ) -> str: ...
+        ) -> AgentResponse: ...
         def _handle_approval_required(
             self,
             request: ApprovalRequest,
@@ -347,9 +347,7 @@ class AgentRoutingMixin:
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_inbox(last_content, decision)
                     self._record_unknown_skill_candidate(last_content, decision)
-                return AgentResponse(
-                    self._run_mwv_flow(messages, last_content, decision, record_in_history)
-                )
+                return self._run_mwv_flow(messages, last_content, decision, record_in_history)
             return self._run_chat_response(messages, last_content, record_in_history)
         except ApprovalRequired as exc:
             self._capture_chat_approval(exc, last_content, record_in_history=record_in_history)
@@ -520,9 +518,18 @@ class AgentRoutingMixin:
                 if decision.skill_decision and decision.skill_decision.status == "no_match":
                     self._record_unknown_inbox(last_content, decision)
                     self._record_unknown_skill_candidate(last_content, decision)
-                response = self._run_mwv_flow(messages, last_content, decision, record_in_history)
-                self.last_stream_response_raw = response
-                yield from _text_response_events(response)
+                mwv_response = self._run_mwv_flow(
+                    messages, last_content, decision, record_in_history
+                )
+                self.last_stream_response_raw = mwv_response.text
+                if mwv_response.failure is not None:
+                    yield Error(
+                        code=mwv_response.failure.code, message=mwv_response.failure.message
+                    )
+                if mwv_response.text:
+                    yield TextDelta(text=mwv_response.text)
+                yield ResponseProduced(mwv_response)
+                yield Done(finish_reason="error" if mwv_response.failure is not None else "stop")
                 return
 
             yield from self._run_chat_response_stream(

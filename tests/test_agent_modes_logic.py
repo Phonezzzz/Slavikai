@@ -61,8 +61,8 @@ def test_agent_chat_uses_main_brain(tmp_path: Path) -> None:
 def test_agent_mwv_route_bypasses_brain(tmp_path: Path, monkeypatch) -> None:
     agent, main = _prepare_agent(tmp_path)
 
-    def _mwv_stub(*_args: object, **_kwargs: object) -> str:
-        return "mwv"
+    def _mwv_stub(*_args: object, **_kwargs: object) -> AgentResponse:
+        return AgentResponse("mwv")
 
     monkeypatch.setattr(agent, "_run_mwv_flow", _mwv_stub)
     response = agent.respond([LLMMessage(role="user", content="исправь тесты")]).text

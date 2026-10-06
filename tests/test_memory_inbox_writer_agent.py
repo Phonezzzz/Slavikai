@@ -4,6 +4,7 @@ from pathlib import Path
 
 import core.agent as agent_module
 from config.memory_config import MemoryConfig
+from core.agent_response import AgentResponse
 from core.skills.index import SkillMatchDecision
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig
@@ -41,7 +42,7 @@ def test_unknown_request_writes_inbox(tmp_path: Path, monkeypatch) -> None:
         )
 
     monkeypatch.setattr(agent.skill_index, "match_decision", _no_match)
-    monkeypatch.setattr(agent, "_run_mwv_flow", lambda *a, **k: "ok")
+    monkeypatch.setattr(agent, "_run_mwv_flow", lambda *a, **k: AgentResponse("ok"))
 
     response = agent.respond([LLMMessage(role="user", content="поправь баг в коде")]).text
     assert response == "ok"
