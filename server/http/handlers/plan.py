@@ -726,20 +726,38 @@ async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
         decision = await hub.get_session_decision(session_id)
         execution = task.get("execution") if task is not None else None
         checkpoint_id = execution.get("checkpoint_id") if isinstance(execution, dict) else None
-        if isinstance(checkpoint_id, str) and agent is not None:
-            agent.cancel_mwv_approval(checkpoint_id)
+        next_decision = decision
         if isinstance(decision, dict):
             context = decision.get("context")
             if (
                 isinstance(context, dict)
                 and context.get("source_endpoint") == "plan.execute_runner"
             ):
-                await hub.set_session_decision(session_id, None)
+                next_decision = None
         if plan is not None:
             plan = _plan_with_status(plan, status="cancelled")
         if task is not None:
             task = _task_with_status(task, status="cancelled", current_step_id=None)
-        await hub.set_session_workflow(session_id, active_plan=plan, active_task=task)
+        expected_id = decision.get("id") if decision is not None else None
+        expected_status = decision.get("status") if decision is not None else None
+        committed = await hub.set_session_workflow_and_decision(
+            session_id,
+            mode=_normalize_mode_value(workflow.get("mode"), default="ask"),
+            active_plan=plan,
+            active_task=task,
+            decision=next_decision,
+            expected_decision_id=expected_id if isinstance(expected_id, str) else None,
+            expected_decision_status=expected_status if isinstance(expected_status, str) else None,
+        )
+        if not committed:
+            return error_response(
+                status=409,
+                message="Состояние decision изменилось, повторите отмену.",
+                error_type="invalid_request_error",
+                code="plan_state_conflict",
+            )
+        if isinstance(checkpoint_id, str) and agent is not None:
+            agent.cancel_mwv_approval(checkpoint_id)
     updated = await hub.get_session_workflow(session_id)
     response = json_response(
         {

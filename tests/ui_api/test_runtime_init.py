@@ -3,6 +3,8 @@ from __future__ import annotations
 # ruff: noqa: F403,F405
 import time
 
+import pytest
+
 from .fakes import *
 
 
@@ -201,6 +203,105 @@ def test_plan_shutdown_timeout_allows_later_cleanup(monkeypatch, caplog) -> None
                 assert other_app["agent_provider"]._closed
                 assert "Timed out" in caplog.text
         finally:
+            monkeypatch.setattr(asyncio, "wait_for", original_wait_for)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("static", [False, True])
+@pytest.mark.parametrize("cancel_task", [False, True])
+def test_plan_shutdown_retains_active_agent_until_worker_finishes(
+    monkeypatch, static, cancel_task
+) -> None:
+    import threading
+    from contextvars import ContextVar
+
+    from server.agent_provider import AgentScope, ScopedAgentProvider
+    from server.http.app import create_app
+
+    class Owner:
+        closes = 0
+
+        def close(self):
+            self.closes += 1
+
+    async def run():
+        owner = Owner()
+        provider = (
+            ScopedAgentProvider.from_instance(owner)
+            if static
+            else ScopedAgentProvider(
+                factory=lambda scope, config: owner, retirement_timeout_seconds=0.01
+            )
+        )
+        provider._retirement_timeout_seconds = 0.01
+        app = create_app(
+            agent=DummyAgent(),
+            auth_config=HttpAuthConfig(
+                api_token=TEST_API_TOKEN, allow_unauth_local=False, browser_auth_mode="token"
+            ),
+            ui_storage=InMemoryUISessionStorage(),
+        )
+        app["agent_provider"] = provider
+        registry = app["plan_cancellation_registry"]
+        app.freeze()
+        scope = AgentScope("principal", "session")
+        entered, release = threading.Event(), threading.Event()
+        token_seen = []
+        marker = ContextVar("packet_scope_marker", default="missing")
+        original_wait_for = asyncio.wait_for
+
+        def worker():
+            assert marker.get() == "owned-scope"
+            entered.set()
+            assert release.wait(2)
+            assert owner.closes == 0
+
+        async def run_worker():
+            marker.set("owned-scope")
+            assert await provider.get_for_current_task(scope, None) is owner
+            async with registry.running(scope, "task", None) as token, provider.lock_for(scope):
+                from server.http.common.workflow_runtime import _run_owned_packet_thread
+
+                token_seen.append(token)
+                await _run_owned_packet_thread(worker, token)
+
+        async def plan_timeout(awaitable, *, timeout):
+            if timeout == 10:
+                awaitable.cancel()
+                try:
+                    await awaitable
+                except asyncio.CancelledError:
+                    pass
+                raise TimeoutError
+            return await original_wait_for(awaitable, timeout=timeout)
+
+        task = asyncio.create_task(run_worker())
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            monkeypatch.setattr(asyncio, "wait_for", plan_timeout)
+            await original_wait_for(app.cleanup(), timeout=0.3)
+            assert token_seen[0].is_set()
+            assert owner.closes == 0
+            assert provider._closed
+            assert provider._retirements
+            if cancel_task:
+                task.cancel()
+                await asyncio.sleep(0.01)
+                assert not task.done()
+                assert owner.closes == 0
+            release.set()
+            await asyncio.gather(task, return_exceptions=cancel_task)
+            for _ in range(30):
+                if owner.closes and not provider._retirements:
+                    break
+                await asyncio.sleep(0.01)
+            assert owner.closes == 1
+            assert registry._active == {}
+            assert provider._retirements == {}
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
             monkeypatch.setattr(asyncio, "wait_for", original_wait_for)
 
     asyncio.run(run())

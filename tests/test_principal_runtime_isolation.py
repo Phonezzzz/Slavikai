@@ -234,7 +234,7 @@ def test_ui_session_pruning_retires_its_scoped_agent() -> None:
     asyncio.run(_run())
 
 
-def test_scoped_provider_shutdown_forces_bounded_retirement() -> None:
+def test_scoped_provider_shutdown_defers_active_retirement() -> None:
     async def _run() -> None:
         class _Agent:
             def __init__(self) -> None:
@@ -265,9 +265,16 @@ def test_scoped_provider_shutdown_forces_bounded_retirement() -> None:
         await provider.release(scope)
         await asyncio.wait_for(provider.close(), timeout=0.2)
 
+        assert agent.closed is False
+        assert provider._retirements
+        never_finish.set()
+        await request_task
+        for _ in range(30):
+            if agent.closed:
+                break
+            await asyncio.sleep(0.01)
         assert agent.closed is True
-        request_task.cancel()
-        await asyncio.gather(request_task, return_exceptions=True)
+        assert provider._retirements == {}
 
     asyncio.run(_run())
 

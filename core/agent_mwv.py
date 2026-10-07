@@ -595,6 +595,7 @@ class AgentMWVMixin:
         stop_reason = StopReasonCode.WORKER_FAILED
         action_oriented = self._mwv_is_action_oriented_task(task)
         successful_tool_calls = prior_tool_calls
+        cancelled = False
 
         try:
             with workspace_root_context(workspace_root):
@@ -776,6 +777,10 @@ class AgentMWVMixin:
                         error_text = executed_step.result or ""
                         stop_reason = self._stop_reason_from_execution_error(error_text)
                         break
+        except MWVExecutionCancelled:
+            if not execution.started:
+                raise
+            cancelled = True
         finally:
             self._restore_runtime_execution_state(runtime_snapshot)
 
@@ -784,7 +789,7 @@ class AgentMWVMixin:
         self.last_plan = executed_plan
         status = (
             WorkStatus.FAILURE
-            if any(step.status == PlanStepStatus.ERROR for step in step_states)
+            if cancelled or any(step.status == PlanStepStatus.ERROR for step in step_states)
             else WorkStatus.SUCCESS
         )
         diff_entries = self.consume_workspace_diffs()
@@ -800,7 +805,9 @@ class AgentMWVMixin:
         diff_size = prior_diff_size + sum(
             max(0, diff.added) + max(0, diff.removed) for diff in diff_entries
         )
-        root_cause_tag = "success"
+        root_cause_tag = "cancelled" if cancelled else "success"
+        if cancelled:
+            diagnostics["cancelled"] = True
         if (
             status == WorkStatus.SUCCESS
             and action_oriented

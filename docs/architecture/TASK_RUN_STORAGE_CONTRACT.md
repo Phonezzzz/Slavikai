@@ -373,6 +373,8 @@ Reject заимствует существующий scoped owner без model r
 Terminal workflow и rejected decision фиксируются одной atomic записью с проверкой
 текущих decision identity/status; checkpoint удаляется только после commit. Storage fault
 оставляет прежний waiting state и checkpoint доступными для повторного явного решения.
+Cancel waiting plan использует ту же atomic CAS-запись terminal workflow и удаления
+decision; owned checkpoint удаляется только после успешного commit.
 
 Initial и resumed packet runner регистрируют matching `(principal, session, task_id)`
 cancellation token до ожидания Agent lock. Plan cancel сигнализирует token до lock,
@@ -381,8 +383,17 @@ cancellation token до ожидания Agent lock. Plan cancel сигнали�
 VerifierRuntime прекращает собственный process group. Уже совершённые tool side effects
 не откатываются. Отмена до первого dispatch, включая ожидание Agent lock,
 проецируется как cancelled. Timeout ожидания runner при shutdown логируется;
-остальные cleanup callbacks продолжаются. HTTP registry является volatile control handle,
-не lifecycle authority.
+остальные cleanup callbacks продолжаются. ScopedAgentProvider удерживает deferred
+retirement до фактического выхода borrowers и освобождения Agent lock, включая static
+owner; timeout не закрывает Agent ресурсы во время исполнения. Отмена asyncio runner
+сигнализирует worker и дожидается thread frame до освобождения lock/borrow. Пока opaque
+tool не завершился кооперативно, retirement остаётся pending; принудительное завершение
+процесса не даёт новой durability/recovery гарантии. HTTP registry является volatile control
+handle, не lifecycle authority.
+
+Cancellation внутри worker сохраняет накопленные completed step results, доступные changes,
+file/diff/tool counters и typed observations. Terminal UI проецирует завершённые шаги,
+а не возвращает их в todo/waiting_approval.
 
 После committed approval сбой event buffer/delivery логируется отдельно и не инвалидирует
 checkpoint: matching state остаётся доступен через UI state API.

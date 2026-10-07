@@ -302,6 +302,7 @@ def test_ui_plan_lifecycle_endpoints() -> None:
         ("approve_once", "reject_storage_fault"),
         ("approve_once", "reset"),
         ("approve_once", "cancel"),
+        ("approve_once", "cancel_storage_fault"),
         ("approve_session", "projection_fault"),
         ("approve_session", "publication_fault"),
         ("approve_once", "initial_model_conflict"),
@@ -571,6 +572,11 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 ] == "cancelled"
                 assert len(executed) == 1
                 assert len(agent.last_mwv_result.tool_observations) == 1
+                result = agent.last_mwv_result.work_result
+                assert result.tool_calls_used == 1
+                assert result.diagnostics["step_results"][0]["status"] == "done"
+                state = await hub.get_session_workflow(session_id)
+                assert state["active_plan"]["steps"][0]["status"] == "done"
                 assert agent._mwv_checkpoints == {}
                 return
 
@@ -609,6 +615,38 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert failed_events == [True]
             builds_before_resume = agent.brain_builds
             hub = client.server.app["ui_hub"]
+            if cleanup == "cancel_storage_fault":
+                before_workflow = await hub.get_session_workflow(session_id)
+                before_decision = await hub.get_session_decision(session_id)
+                before_checkpoints = dict(agent._mwv_checkpoints)
+                original_save = hub._storage.save_session
+
+                def fail_cancel_save(state):
+                    if state.decision is None or state.active_task.get("status") == "cancelled":
+                        raise RuntimeError("cancel storage fault")
+                    return original_save(state)
+
+                monkeypatch.setattr(hub._storage, "save_session", fail_cancel_save)
+                response = await client.post(
+                    "/ui/api/plan/cancel", headers={"X-Slavik-Session": session_id}
+                )
+                assert response.status == 500
+                assert agent._mwv_checkpoints == before_checkpoints
+                assert await hub.get_session_workflow(session_id) == before_workflow
+                assert await hub.get_session_decision(session_id) == before_decision
+                assert executed == []
+                monkeypatch.setattr(hub._storage, "save_session", original_save)
+                response = await client.post(
+                    "/ui/api/plan/cancel", headers={"X-Slavik-Session": session_id}
+                )
+                assert response.status == 200
+                assert agent._mwv_checkpoints == {}
+                assert await hub.get_session_decision(session_id) is None
+                assert (await hub.get_session_workflow(session_id))["active_task"][
+                    "status"
+                ] == "cancelled"
+                return
+
             if cleanup == "reject_storage_fault":
                 before_workflow = await hub.get_session_workflow(session_id)
                 before_decision = await hub.get_session_decision(session_id)
@@ -828,6 +866,11 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert state["active_task"]["status"] == "cancelled"
                 assert len(executed) == 1
                 assert len(agent.last_mwv_result.tool_observations) == 1
+                result = agent.last_mwv_result.work_result
+                assert result.tool_calls_used == 1
+                assert result.diagnostics["step_results"][0]["status"] == "done"
+                state = await hub.get_session_workflow(session_id)
+                assert state["active_plan"]["steps"][0]["status"] == "done"
                 assert agent._mwv_checkpoints == {}
                 assert (await hub.get_session_decision(session_id))["status"] == "resolved"
                 return

@@ -207,6 +207,11 @@ def test_owned_worker_checkpoint_preserves_prefix_and_exact_once(
             )
             assert cancelled.work_result.status == WorkStatus.FAILURE
             assert cancelled.work_result.root_cause_tag == "cancelled"
+            assert cancelled.work_result.tool_calls_used == 2
+            assert [s["status"] for s in cancelled.work_result.diagnostics["step_results"]] == [
+                "done",
+                "done",
+            ]
             assert len(cancelled.tool_observations) == 2
             assert cancelled.tool_observations[-1][1].data["output"] == "retained-after-cancel"
             assert executions == ["mwv_prefix", "mwv_pending"]
@@ -312,5 +317,81 @@ def test_retry_checkpoint_uses_owned_revision_and_fault_attempt(tmp_path, monkey
             WorkStatus.FAILURE if retry_fault else WorkStatus.SUCCESS
         )
         assert agent._mwv_checkpoints == {}
+    finally:
+        agent.close()
+
+
+def test_packet_cancellation_preserves_real_workspace_changes(tmp_path, monkeypatch):
+    import core.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "WORKSPACE_ROOT", tmp_path)
+    agent = Agent(
+        brain=SimpleBrain("unused"),
+        enable_tools={"safe_mode": True},
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    agent.set_session_context("session", {"FS_DELETE_OVERWRITE"})
+    agent.apply_runtime_workspace_root(str(tmp_path))
+    agent.set_runtime_state(
+        mode="act", active_plan=None, active_task=None, enforce_plan_guard=False
+    )
+    token = asyncio.Event()
+    original_post = agent._workspace_diff_post_call
+    observed = []
+
+    def cancel_after_write(request, result, context):
+        original_post(request, result, context)
+        observed.append((request, result))
+        token.set()
+
+    monkeypatch.setattr(agent, "_workspace_diff_post_call", cancel_after_write)
+    packet = with_task_packet_hash(
+        TaskPacket(
+            task_id="task",
+            session_id="session",
+            trace_id="trace",
+            goal="write files",
+            scope={"workspace_root": str(tmp_path)},
+            steps=[
+                TaskStepContract(
+                    step_id=name,
+                    title=name,
+                    description=name,
+                    allowed_tool_kinds=["workspace_write"],
+                    inputs={
+                        "operation": "workspace_write",
+                        "tool_args": {"path": name, "content": "observed\n"},
+                    },
+                )
+                for name in ["first.txt", "second.txt"]
+            ],
+        )
+    )
+    try:
+        result = agent.run_task_packet(
+            packet,
+            RunContext(
+                session_id="session",
+                trace_id="trace",
+                workspace_root=str(tmp_path),
+                safe_mode=True,
+                approved_categories=["FS_DELETE_OVERWRITE"],
+            ),
+            cancellation_token=token,
+        )
+        assert len(observed) == 1
+        assert observed[0][1].ok
+        assert (tmp_path / "first.txt").read_text() == "observed\n"
+        assert not (tmp_path / "second.txt").exists()
+        work = result.work_result
+        assert work.root_cause_tag == "cancelled"
+        assert work.tool_calls_used == 1
+        assert work.files_touched == 1
+        assert work.diff_size > 0
+        assert [change.path for change in work.changes] == ["first.txt"]
+        assert work.diagnostics["step_results"][0]["status"] == "done"
+        assert len(result.tool_observations) == 1
     finally:
         agent.close()

@@ -1436,9 +1436,9 @@ class UIHub:
         session_id: str,
         *,
         mode: str,
-        active_plan: dict[str, JSONValue],
-        active_task: dict[str, JSONValue],
-        decision: dict[str, JSONValue],
+        active_plan: dict[str, JSONValue] | None,
+        active_task: dict[str, JSONValue] | None,
+        decision: dict[str, JSONValue] | None,
         expected_decision_id: str | None = None,
         expected_decision_status: str | None = None,
     ) -> bool:
@@ -1457,10 +1457,10 @@ class UIHub:
             next_state = replace(
                 previous,
                 mode=self._normalize_mode(mode),
-                active_plan=dict(active_plan),
-                active_task=dict(active_task),
-                decision_packet=dict(decision),
-                last_decision_id=str(decision["id"]),
+                active_plan=dict(active_plan) if active_plan is not None else None,
+                active_task=dict(active_task) if active_task is not None else None,
+                decision_packet=dict(decision) if decision is not None else None,
+                last_decision_id=str(decision["id"]) if decision is not None else None,
                 updated_at=_utc_iso_now(),
             )
             events = [

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable, Coroutine
+from contextvars import copy_context
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -35,6 +36,30 @@ WorkflowRuntimeState = tuple[
 ]
 
 
+async def _run_owned_packet_thread(
+    call: Callable[[], MWVRunResult], token: asyncio.Event
+) -> MWVRunResult:
+    """Удерживает scope/lock до фактического выхода синхронного packet frame."""
+    context = copy_context()
+    worker = asyncio.get_running_loop().run_in_executor(None, lambda: context.run(call))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        token.set()
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:  # noqa: BLE001
+                break
+        try:
+            worker.result()
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).exception("Cancelled MWV packet frame failed during drain")
+        raise
+
+
 class WorkflowHubProtocol(Protocol):
     async def get_session_principal_id(self, session_id: str) -> str | None: ...
 
@@ -54,9 +79,9 @@ class WorkflowHubProtocol(Protocol):
         session_id: str,
         *,
         mode: str,
-        active_plan: dict[str, JSONValue],
-        active_task: dict[str, JSONValue],
-        decision: dict[str, JSONValue],
+        active_plan: dict[str, JSONValue] | None,
+        active_task: dict[str, JSONValue] | None,
+        decision: dict[str, JSONValue] | None,
         expected_decision_id: str | None = None,
         expected_decision_status: str | None = None,
     ) -> bool: ...
@@ -908,11 +933,11 @@ async def run_plan_runner(
                         await session_store.approve(scope, added_categories)
                         approved_categories |= added_categories
                         agent.set_session_context(session_id, approved_categories)
-                    run_result = await asyncio.to_thread(
-                        agent.resume_task_packet,
-                        resume_checkpoint_id,
-                        packet,
-                        cancellation_token=cancellation_token,
+                    run_result = await _run_owned_packet_thread(
+                        lambda: agent.resume_task_packet(
+                            resume_checkpoint_id, packet, cancellation_token=execution_token
+                        ),
+                        execution_token,
                     )
                     started = True
                 except TaskPacketApprovalPending:
@@ -927,11 +952,11 @@ async def run_plan_runner(
             elif execution.get("status") == "waiting_approval":
                 return False
             else:
-                run_result = await asyncio.to_thread(
-                    agent.run_task_packet,
-                    packet,
-                    run_context,
-                    cancellation_token=cancellation_token,
+                run_result = await _run_owned_packet_thread(
+                    lambda: agent.run_task_packet(
+                        packet, run_context, cancellation_token=execution_token
+                    ),
+                    execution_token,
                 )
                 started = True
 

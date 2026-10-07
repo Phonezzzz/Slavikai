@@ -61,20 +61,20 @@ class ScopedAgentProvider[T]:
         self._retirements: dict[asyncio.Task[None], _AgentEntry[T]] = {}
         self._scheduled_releases: set[asyncio.Task[None]] = set()
         self._retirement_timeout_seconds = retirement_timeout_seconds
-        self._shared_instance: T | None = None
+        self._shared_entry: _AgentEntry[T] | None = None
         self._shared_lock: asyncio.Lock | None = None
         self._closed = False
 
     @classmethod
     def from_instance(cls, agent: T) -> ScopedAgentProvider[T]:
         provider = cls(factory=lambda _scope, _config: agent)
-        provider._shared_instance = agent
+        provider._shared_entry = _AgentEntry(agent)
         provider._shared_lock = asyncio.Lock()
         return provider
 
     @property
     def is_static(self) -> bool:
-        return self._shared_instance is not None
+        return self._shared_entry is not None
 
     async def get_for_current_task(
         self,
@@ -84,8 +84,9 @@ class ScopedAgentProvider[T]:
         """Выдаёт Agent текущей task и удерживает его живым до завершения task."""
         if self._closed:
             raise RuntimeError("Agent provider is closed")
-        if self._shared_instance is not None:
-            return self._shared_instance
+        if self._shared_entry is not None:
+            self._borrow_for_current_task(self._shared_entry)
+            return self._shared_entry.agent
         creation_lock = self._creation_locks.setdefault(scope, asyncio.Lock())
         async with creation_lock:
             if self._closed:
@@ -101,8 +102,9 @@ class ScopedAgentProvider[T]:
         """Borrow the scoped owner for cleanup without model resolution or creation."""
         if self._closed:
             return None
-        if self._shared_instance is not None:
-            return self._shared_instance
+        if self._shared_entry is not None:
+            self._borrow_for_current_task(self._shared_entry)
+            return self._shared_entry.agent
         creation_lock = self._creation_locks.setdefault(scope, asyncio.Lock())
         async with creation_lock:
             if self._closed:
@@ -119,7 +121,7 @@ class ScopedAgentProvider[T]:
         return self._locks.setdefault(scope, asyncio.Lock())
 
     async def release(self, scope: AgentScope) -> None:
-        if self._shared_instance is not None:
+        if self._shared_entry is not None:
             return
         creation_lock = self._creation_locks.setdefault(scope, asyncio.Lock())
         async with creation_lock:
@@ -131,7 +133,7 @@ class ScopedAgentProvider[T]:
 
     def schedule_release(self, scope: AgentScope) -> None:
         """Schedule scope retirement from a synchronous lifecycle callback."""
-        if self._shared_instance is not None or self._closed:
+        if self._shared_entry is not None or self._closed:
             return
         task = asyncio.create_task(
             self.release(scope),
@@ -143,12 +145,12 @@ class ScopedAgentProvider[T]:
     async def apply_to_existing(
         self, callback: Callable[[T], None]
     ) -> tuple[AgentApplyFailure, ...]:
-        if self._shared_instance is not None:
+        if self._shared_entry is not None:
             if self._shared_lock is None:
                 raise RuntimeError("Static agent lock is unavailable")
             async with self._shared_lock:
                 try:
-                    callback(self._shared_instance)
+                    callback(self._shared_entry.agent)
                 except Exception as exc:  # noqa: BLE001
                     return (AgentApplyFailure(scope=None, error=exc),)
             return ()
@@ -175,13 +177,11 @@ class ScopedAgentProvider[T]:
         if self._closed:
             return
         self._closed = True
-        if self._shared_instance is not None:
+        if self._shared_entry is not None:
             if self._shared_lock is None:
                 raise RuntimeError("Static agent lock is unavailable")
-            async with self._shared_lock:
-                self._close_agent(self._shared_instance)
-            self._shared_instance = None
-            return
+            self._schedule_entry_retirement(self._shared_entry, self._shared_lock)
+            self._shared_entry = None
         if self._scheduled_releases:
             await asyncio.gather(*tuple(self._scheduled_releases), return_exceptions=True)
         for scope in list(self._agents):
@@ -193,17 +193,10 @@ class ScopedAgentProvider[T]:
                 timeout=self._retirement_timeout_seconds,
             )
             if pending:
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                closed_entries: set[int] = set()
-                for task in pending:
-                    entry = snapshot[task]
-                    entry_id = id(entry)
-                    if entry_id in closed_entries:
-                        continue
-                    closed_entries.add(entry_id)
-                    self._close_agent(entry.agent)
+                logger.warning(
+                    "Agent shutdown deferred for %s active retirement(s); owners remain retained.",
+                    len(pending),
+                )
 
     def _scheduled_release_done(self, task: asyncio.Task[None]) -> None:
         self._scheduled_releases.discard(task)
@@ -238,12 +231,15 @@ class ScopedAgentProvider[T]:
         scope: AgentScope,
         entry: _AgentEntry[T],
     ) -> None:
+        self._schedule_entry_retirement(entry, self.lock_for(scope))
+
+    def _schedule_entry_retirement(self, entry: _AgentEntry[T], run_lock: asyncio.Lock) -> None:
         current_task = asyncio.current_task()
         if current_task is not None:
             self._return_borrower(entry, current_task)
         retirement = asyncio.create_task(
-            self._retire_entry(entry, self.lock_for(scope)),
-            name=f"retire-agent:{scope.principal_id}:{scope.session_id}",
+            self._retire_entry(entry, run_lock),
+            name="retire-agent",
         )
         self._retirements[retirement] = entry
         retirement.add_done_callback(self._retirement_done)
