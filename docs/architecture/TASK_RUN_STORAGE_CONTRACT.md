@@ -415,7 +415,10 @@ history snapshot, снятого до admission. UIHub под своим lock п
 добавляет user message и возвращает snapshot после штатного pruning общего chat/workspace
 лимита; повторная проверка перед Agent защищает от последующих mutations. History ещё не
 является durable execution checkpoint. Regex web-intent guidance удалена: обычный текстовый
-запрос проходит через основной Agent с typed result, без локального command fallback. Canonical runtime state application получает принятый effective security
+запрос проходит через основной Agent с typed result, без локального command fallback.
+Sync/stream Ask строят model context из переданного request history snapshot, а не
+накопленного short-term projection. Debug command lane `/...` не является model run:
+его локальные ответы не создают admission; принятый Ask key нельзя использовать для команды. Canonical runtime state application получает принятый effective security
 snapshot вместо повторной загрузки новых tools после проверки.
 
 UI admission требует атомарного `require_new=True`: existing admitted run тоже нельзя claim'ить

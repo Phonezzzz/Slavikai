@@ -615,3 +615,66 @@ def test_ask_dispatch_uses_canonical_history_and_runtime(tmp_path, monkeypatch, 
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("command", ["/trace", "/end-session"])
+def test_debug_command_does_not_admit_model_run(tmp_path, monkeypatch, command):  # noqa: ANN001, ANN201
+    monkeypatch.chdir(tmp_path)
+    brain = CountingBrain()
+    agent = _RealStreamingAgent(brain=brain)
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session},
+                json={"content": command},
+            )
+            assert response.status == 200
+            assert brain.calls == 0
+            with sqlite3.connect(client.app["task_run_store"].path) as conn:
+                assert conn.execute("SELECT state FROM task_runs").fetchall() == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_second_ask_model_context_has_no_duplicate_ui_turns(tmp_path, monkeypatch, stream):  # noqa: ANN001, ANN201
+    monkeypatch.chdir(tmp_path)
+    captured = []
+
+    class HistoryBrain(CountingBrain):
+        def generate(self, messages, config=None, tools=None):
+            captured.append(list(messages))
+            return super().generate(messages, config, tools)
+
+    brain = HistoryBrain()
+    agent = _RealStreamingAgent(brain=brain)
+    if not stream:
+        monkeypatch.setattr(agent, "respond_stream", None)
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            for content in ["unique first turn", "unique second turn"]:
+                assert (
+                    await client.post(
+                        "/ui/api/chat/send",
+                        headers={"X-Slavik-Session": session},
+                        json={"content": content},
+                    )
+                ).status == 200
+            model_history = [m.content for m in captured[-1] if m.role == "user"]
+            assert model_history.count("unique first turn") == 1
+            assert model_history.count("unique second turn") == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())

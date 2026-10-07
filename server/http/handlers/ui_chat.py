@@ -786,7 +786,8 @@ async def _handle_ui_send_impl(
                     error_type="invalid_request_error",
                     code="task_run_context_changed",
                 )
-            if mode != "ask" and idempotency_key is not None:
+            command_lane = content_raw.strip().startswith("/")
+            if (mode != "ask" or command_lane) and idempotency_key is not None:
                 if run_store.find_by_request(run_scope, durable_request_key) is not None:
                     await _abort_idempotency()
                     return error_response(
@@ -795,7 +796,7 @@ async def _handle_ui_send_impl(
                         error_type="invalid_request_error",
                         code="idempotency_key_reused",
                     )
-            if mode == "ask":
+            if mode == "ask" and not command_lane:
                 accepted_history = await hub.get_messages(session_id, lane=lane)
                 request_binding: dict[str, JSONValue] = {
                     "content": content_raw,
