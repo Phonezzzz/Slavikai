@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -15,6 +17,7 @@ from core.approval_policy import ApprovalCategory
 from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyStore
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
+from core.task_run_storage import RunConflictError, TaskRunStore
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
 from llm.types import ModelConfig
 from server.http.common.auth import _request_principal_id
@@ -81,6 +84,7 @@ from server.http_api import (
 )
 from server.ui_hub import UIHub
 from shared.models import JSONValue, LLMMessage
+from shared.task_run import RunScope, RunState, TaskRun, TransitionAuthority
 from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
 from tools.workspace_tools import workspace_root_context
 
@@ -373,6 +377,7 @@ async def _handle_ui_send_impl(
     idempotency_fingerprint: str | None = None
     idempotency_active = False
     active_generation: ActiveChatGeneration | None = None
+    admitted_run: TaskRun | None = None
 
     async def _complete_idempotency(payload: dict[str, JSONValue], *, status: int) -> None:
         if (
@@ -744,7 +749,92 @@ async def _handle_ui_send_impl(
             lane=lane,
             attachments=attachments,
         )
+
+        async def admission_context_current() -> bool:
+            current_workflow = await hub.get_session_workflow(session_id)
+            return (
+                _normalize_mode_value(current_workflow.get("mode"), default="ask") == mode
+                and await hub.get_session_model(session_id) == selected_model_metadata
+                and await _workspace_root_for_session(hub, session_id) == session_root
+                and await session_store.get_categories(approval_scope) == approved_categories
+            )
+
+        run_store: TaskRunStore = request.app["task_run_store"]
+        run_scope = RunScope(approval_scope.principal_id, session_id)
+        key_source = json.dumps(
+            [idempotency_endpoint, session_id, idempotency_key or uuid.uuid4().hex]
+        )
+        durable_request_key = hashlib.sha256(key_source.encode()).hexdigest()
         async with agent_lock:
+            if mode == "ask" and not await admission_context_current():
+                await _abort_idempotency()
+                return error_response(
+                    status=409,
+                    message="Контекст запроса изменился до admission.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
+            if mode != "ask" and idempotency_key is not None:
+                if run_store.find_by_request(run_scope, durable_request_key) is not None:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Idempotency-Key уже связан с принятым Ask запросом.",
+                        error_type="invalid_request_error",
+                        code="idempotency_key_reused",
+                    )
+            if mode == "ask":
+                request_binding: dict[str, JSONValue] = {
+                    "content": content_raw,
+                    "attachments": attachments,
+                    "force_canvas": force_canvas,
+                    "web_search": web_search,
+                    "mode": mode,
+                    "model": selected_model,
+                    "workspace_root": str(session_root),
+                    "endpoint": idempotency_endpoint,
+                }
+                try:
+                    admitted_run = run_store.admit(
+                        run_scope,
+                        request_key=durable_request_key,
+                        goal=content_raw if content_raw.strip() else json.dumps(attachments),
+                        mode=mode,
+                        request_fingerprint=fingerprint_json_payload(request_binding),
+                    )
+                except RunConflictError:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Idempotency-Key уже связан с другим принятым запросом.",
+                        error_type="invalid_request_error",
+                        code="idempotency_key_reused",
+                    )
+                if admitted_run.state != RunState.ADMITTED:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Сохранённый run нельзя автоматически выполнить повторно.",
+                        error_type="invalid_request_error",
+                        code="task_run_continuation_unavailable",
+                    )
+                try:
+                    admitted_run = run_store.transition(
+                        run_scope,
+                        admitted_run.task_run_id,
+                        expected_version=admitted_run.version,
+                        state=RunState.RUNNING,
+                        authority=TransitionAuthority.RUNTIME,
+                        reason_code="execution_claimed",
+                    )
+                except RunConflictError:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Run уже передан другому execution owner.",
+                        error_type="invalid_request_error",
+                        code="task_run_continuation_unavailable",
+                    )
             pending_payload = getattr(agent, "last_approval_resume_payload", None)
             if isinstance(pending_payload, dict):
                 pending_identity = pending_payload.get("continuation_id")
@@ -836,7 +926,8 @@ async def _handle_ui_send_impl(
             )
             return response
 
-        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id, lane=lane))
+        dispatch_history = await hub.get_messages(session_id, lane=lane)
+        llm_messages = _ui_messages_to_llm(dispatch_history)
         await _publish_agent_activity(
             hub,
             session_id=session_id,
@@ -854,6 +945,17 @@ async def _handle_ui_send_impl(
         generation_cancelled = False
         set_runtime_workspace_root(session_root)
         async with agent_lock:
+            if admitted_run is not None and (
+                not await admission_context_current()
+                or await hub.get_messages(session_id, lane=lane) != dispatch_history
+            ):
+                await _abort_idempotency()
+                return error_response(
+                    status=409,
+                    message="Контекст принятого запроса изменился до dispatch.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
             previous_trace_id = _normalize_trace_id(
                 getattr(agent, "last_chat_interaction_id", None)
             )
@@ -1208,6 +1310,17 @@ async def _handle_ui_send_impl(
             else:
                 agent_response = agent.respond(llm_messages)
                 response_raw = agent_response.text
+            if admitted_run is not None and agent_response is not None:
+                # Submission is not acceptance or completion; pending approval remains owned.
+                if agent_response.runtime_result is not None:
+                    admitted_run = run_store.transition(
+                        run_scope,
+                        admitted_run.task_run_id,
+                        expected_version=admitted_run.version,
+                        state=RunState.RESULT_SUBMITTED,
+                        authority=TransitionAuthority.RUNTIME,
+                        reason_code="runtime_result_submitted",
+                    )
             drain_consumed_rules = getattr(agent, "drain_consumed_desktop_rule_ids", None)
             if callable(drain_consumed_rules):
                 consumed_raw = drain_consumed_rules()

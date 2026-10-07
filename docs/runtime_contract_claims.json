@@ -304,12 +304,13 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
       "verified_by": [
-        "tests/test_task_run_storage.py"
+        "tests/test_task_run_storage.py",
+        "tests/ui_api/test_task_run_admission.py"
       ],
-      "summary": "Storage-only foundation: scoped durable admission identities, immutable revision/history, transactional versioned transitions and restart reads. Not yet adopted by production runtime; completion/recovery remain target."
+      "summary": "Scoped durable admission identities, immutable revision/history and CAS transitions. UI Ask now admits and fences repeated dispatch after volatile replay loss using structured request fingerprints. Other production entrypoints, approval-resume identity propagation, result capture, acceptance/completion and recovery remain target."
     },
     {
       "id": "runtime.approval.native_continuation",

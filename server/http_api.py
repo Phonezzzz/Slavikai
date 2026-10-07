@@ -19,6 +19,7 @@ from config.tools_config import (
 )
 from core.approval_policy import ApprovalCategory
 from core.desktop_policy import DesktopPolicyStore
+from core.task_run_storage import TaskRunStore
 from server.http.common import (
     chat_payload as _chat_payload,
 )
@@ -508,6 +509,7 @@ def create_app(
     agent: AgentProtocol | None = None,
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
+    task_run_store: TaskRunStore | None = None,
     auth_config: HttpAuthConfig | None = None,
     desktop_policy_store: DesktopPolicyStore | None = None,
 ) -> web.Application:
@@ -517,6 +519,7 @@ def create_app(
         agent=agent,
         max_request_bytes=max_request_bytes,
         ui_storage=ui_storage,
+        task_run_store=task_run_store,
         auth_config=auth_config,
         desktop_policy_store=desktop_policy_store,
     )
