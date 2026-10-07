@@ -518,6 +518,17 @@ def test_desktop_paused_run_owns_lease_until_cleanup(tmp_path, monkeypatch, term
     target.parent.mkdir()
     target.write_text("pending")
     agent = DesktopApprovalAgent(str(target))
+    generate = agent.brain.generate
+
+    def respond_new_turn(messages, config=None, tools=None):
+        if next((m.content for m in reversed(messages) if m.role == "user"), None) == (
+            "найди в интернете погоду"
+        ):
+            agent.brain.owner_threads.append(threading.get_ident())
+            return LLMResult(text="new turn response")
+        return generate(messages, config, tools)
+
+    monkeypatch.setattr(agent.brain, "generate", respond_new_turn)
     closed = threading.Event()
     closes = []
 
@@ -573,7 +584,11 @@ def test_desktop_paused_run_owns_lease_until_cleanup(tmp_path, monkeypatch, term
                 response = await client.post("/ui/api/mode", headers=headers, json={"mode": "ask"})
                 assert response.status == 200
             assert await asyncio.to_thread(closed.wait, 2)
-            assert closes == [agent.brain.owner_threads[0]]
+            assert closes == (
+                agent.brain.owner_threads[:2]
+                if termination == "new_turn"
+                else [agent.brain.owner_threads[0]]
+            )
             assert agent.desktop_runtime.run_coordinator.try_acquire()
             agent.desktop_runtime.run_coordinator.release()
             from core.agent_tools import ChatApprovalUnavailable
@@ -581,7 +596,11 @@ def test_desktop_paused_run_owns_lease_until_cleanup(tmp_path, monkeypatch, term
             with pytest.raises(ChatApprovalUnavailable):
                 agent.resume_chat_approval(identity)
             agent.desktop_runtime.cancel_pending()
-            assert closes == [agent.brain.owner_threads[0]]
+            assert closes == (
+                agent.brain.owner_threads[:2]
+                if termination == "new_turn"
+                else [agent.brain.owner_threads[0]]
+            )
             assert agent.completed == 0 and target.exists()
             if termination == "timeout":
                 response = await client.post(
@@ -706,6 +725,10 @@ def test_desktop_compound_request_retains_exact_once_scopes(tmp_path, monkeypatc
     }
 
     def generate(messages, config=None, tools=None):
+        if next((m.content for m in reversed(messages) if m.role == "user"), None) == (
+            "найди в интернете погоду"
+        ):
+            return LLMResult(text="new turn response")
         if not any(message.role == "tool" for message in messages):
             return LLMResult(
                 text="",

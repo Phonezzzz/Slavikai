@@ -577,9 +577,7 @@ export function useSessionTransport({
       });
       const responsePayload: unknown = await response.json();
       if (!response.ok) {
-        const failure = responsePayload as { error?: { code?: string } };
-        if (['task_run_continuation_unavailable', 'idempotency_key_reused'].includes(failure?.error?.code ?? '') &&
-            window.confirm('Результат предыдущего запроса недоступен. Отбросить его ключ? Следующая отправка будет новым запросом и может повторить выполненную работу.')) {
+        if (window.confirm('Результат предыдущего запроса недоступен. Отбросить его ключ? Следующая отправка будет новым запросом и может повторить выполненную работу.')) {
           acknowledgeClientSend(selectedConversation, pendingSend.key);
           onStatusMessage('Ключ отброшен. Проверьте историю и отправьте запрос заново, если это нужно.');
           return false;

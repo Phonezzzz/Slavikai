@@ -31,7 +31,6 @@ from server.http.common.chat_payload import (
     _normalize_trace_id,
     _parse_ui_chat_attachments,
     _project_agent_response,
-    _request_likely_web_intent,
     _ui_messages_to_llm,
 )
 from server.http.common.idempotency import (
@@ -83,7 +82,7 @@ from server.http_api import (
     _utc_now_iso,
     _workspace_root_for_session,
 )
-from server.ui_hub import UIHub
+from server.ui_hub import MessageHistoryConflictError, UIHub
 from shared.models import JSONValue, LLMMessage
 from shared.task_run import RunScope, RunState, TaskRun, TransitionAuthority
 from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
@@ -883,7 +882,22 @@ async def _handle_ui_send_impl(
                     )
                     desktop_rules = [rule for rule in desktop_rules if rule.source != "once"]
                     await hub.set_session_decision(session_id, None)
-            await hub.append_message(session_id, user_message, lane=lane)
+            if admitted_run is not None:
+                try:
+                    dispatch_history = await hub.append_message_with_history(
+                        session_id, user_message, lane=lane, expected_history=accepted_history
+                    )
+                except MessageHistoryConflictError:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="История принятого запроса изменилась до dispatch.",
+                        error_type="invalid_request_error",
+                        code="task_run_context_changed",
+                    )
+            else:
+                await hub.append_message(session_id, user_message, lane=lane)
+                dispatch_history = await hub.get_messages(session_id, lane=lane)
         user_message_id_raw = user_message.get("message_id")
         user_message_id = (
             user_message_id_raw
@@ -891,85 +905,7 @@ async def _handle_ui_send_impl(
             else None
         )
 
-        if not web_search and not attachments and _request_likely_web_intent(content_raw):
-            guidance_text = (
-                "Для веб-поиска используй команду `/web <запрос>` в чате. "
-                "После этого подтвердите approval, если он потребуется."
-            )
-            chat_stream_id = uuid.uuid4().hex
-            await _publish_chat_stream_from_text(
-                hub,
-                session_id=session_id,
-                stream_id=chat_stream_id,
-                content=guidance_text,
-                lane=lane,
-            )
-            if lane == "chat":
-                await hub.set_session_output(session_id, guidance_text)
-            assistant_message = hub.create_message(
-                role="assistant",
-                content=guidance_text,
-                lane=lane,
-                trace_id=None,
-                parent_user_message_id=user_message_id,
-            )
-            await hub.append_message(session_id, assistant_message, lane=lane)
-            messages = await hub.get_messages(session_id, lane="chat")
-            workspace_messages = await hub.get_messages(session_id, lane="workspace")
-            output_payload = await hub.get_session_output(session_id)
-            files_payload = await hub.get_session_files(session_id)
-            artifacts_payload = (
-                await hub.get_session_artifacts(session_id) if lane == "chat" else []
-            )
-            current_decision = await hub.get_session_decision(session_id)
-            current_model = await hub.get_session_model(session_id) or dict(selected_model)
-            current_workflow = await hub.get_session_workflow(session_id)
-            response_payload_guidance: dict[str, JSONValue] = {
-                "session_id": session_id,
-                "lane": lane,
-                "messages": messages,
-                "workspace_messages": workspace_messages,
-                "output": output_payload,
-                "files": files_payload or [],
-                "artifacts": artifacts_payload or [],
-                "display": {
-                    "target": "chat",
-                    "artifact_id": None,
-                    "forced": force_canvas,
-                },
-                "decision": _normalize_ui_decision(current_decision, session_id=session_id),
-                "selected_model": current_model,
-                "trace_id": None,
-                "approval_request": None,
-                "mwv_report": None,
-                "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
-                "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
-                "active_task": _normalize_task_payload(workflow.get("active_task")),
-                "auto_state": _normalize_auto_state(workflow.get("auto_state")),
-            }
-            await _complete_idempotency(response_payload_guidance, status=200)
-            response = json_response(response_payload_guidance)
-            response.headers[UI_SESSION_HEADER] = session_id
-            await _publish_agent_activity(
-                hub,
-                session_id=session_id,
-                phase="response.ready",
-                detail=lane,
-            )
-            return response
-
-        dispatch_history = await hub.get_messages(session_id, lane=lane)
         llm_messages = _ui_messages_to_llm(dispatch_history)
-        if admitted_run is not None and llm_messages != _ui_messages_to_llm(
-            [*accepted_history, user_message]
-        ):
-            await _abort_idempotency()
-            return error_response(
-                status=409,
-                message="История принятого запроса изменилась до dispatch.",
-                error_type="invalid_request_error",
-                code="task_run_context_changed",
-            )
         await _publish_agent_activity(
             hub,
             session_id=session_id,

@@ -59,7 +59,7 @@ it('sends the stable identity through the actual transport on retry', async () =
   unmount();
 });
 
-it('allows explicit discard after durable conflict without automatic redispatch', async () => {
+it.each(['task_run_continuation_unavailable', 'runtime_context_apply_failed', 'model_config_invalid', 'task_run_context_changed'])('allows explicit discard after %s without automatic redispatch', async (code) => {
   const { act, renderHook } = await import('@testing-library/react');
   const { useSessionTransport } = await import('../use-session-transport');
   vi.stubGlobal('EventSource', class { close() {} });
@@ -67,7 +67,7 @@ it('allows explicit discard after durable conflict without automatic redispatch'
   const keys: (string | null)[] = [];
   const fetch = vi.fn(async (_url: string, options: RequestInit) => {
     keys.push(new Headers(options.headers).get('Idempotency-Key'));
-    return { ok: false, json: async () => ({ error: { code: 'task_run_continuation_unavailable' } }), headers: new Headers() };
+    return { ok: false, json: async () => ({ error: { code } }), headers: new Headers() };
   });
   vi.stubGlobal('fetch', fetch);
   const { result, unmount } = renderHook(() => useSessionTransport({

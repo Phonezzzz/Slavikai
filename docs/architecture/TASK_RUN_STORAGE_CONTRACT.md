@@ -411,8 +411,11 @@ mode, полную execution model config, grants, effective tools/policy, hash 
 Raw credentials не сохраняются в DB или operational logs. Повтор ключа с другим binding отклоняется. Уже принятый
 Ask key также нельзя использовать для dispatch в другом UI режиме. Mode/model/root/grants
 проверяются повторно под lock до admission и dispatch; перед dispatch проверяется неизменность
-history snapshot, снятого до admission, плюс новое user message. History ещё не является durable
-execution checkpoint. Canonical runtime state application получает принятый effective security
+history snapshot, снятого до admission. UIHub под своим lock проверяет исходную историю,
+добавляет user message и возвращает snapshot после штатного pruning общего chat/workspace
+лимита; повторная проверка перед Agent защищает от последующих mutations. History ещё не
+является durable execution checkpoint. Regex web-intent guidance удалена: обычный текстовый
+запрос проходит через основной Agent с typed result, без локального command fallback. Canonical runtime state application получает принятый effective security
 snapshot вместо повторной загрузки новых tools после проверки.
 
 UI admission требует атомарного `require_new=True`: existing admitted run тоже нельзя claim'ить
@@ -447,7 +450,7 @@ Changed payload (включая потерянные transient modifiers) не �
 соответствующую последнюю пару. Уже отсутствующая identity — successful no-op даже после
 restart/lost DELETE response; существующая непоследняя identity возвращает conflict.
 После подтверждённого удаления UI не повторяет deletion на retry send.
-При durable send conflict пользователь может явно отбросить pending key с предупреждением
+После ошибочного HTTP send response пользователь может явно отбросить pending key с предупреждением
 о неопределённом результате; это не dispatch. Новая отправка требует отдельного действия. Message/attachment bytes
 не копируются в этот browser identity cache. Тест actual useSessionTransport проверяет HTTP
 header и повтор после lost response. Test bootstrap использует временные per-app stores;

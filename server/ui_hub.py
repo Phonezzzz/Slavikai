@@ -42,6 +42,10 @@ _UNSET: object = object()
 DEFAULT_LEGACY_PRINCIPAL_ID = "legacy"
 
 
+class MessageHistoryConflictError(RuntimeError):
+    """Accepted lane history changed before the atomic append."""
+
+
 class SessionListItem(TypedDict):
     session_id: str
     title: str
@@ -1316,6 +1320,30 @@ class UIHub:
         *,
         lane: MessageLane = "chat",
     ) -> dict[str, JSONValue]:
+        appended, _ = await self._append_message(session_id, message, lane=lane)
+        return appended
+
+    async def append_message_with_history(
+        self,
+        session_id: str,
+        message: dict[str, JSONValue],
+        *,
+        lane: MessageLane,
+        expected_history: list[dict[str, JSONValue]],
+    ) -> list[dict[str, JSONValue]]:
+        _, history = await self._append_message(
+            session_id, message, lane=lane, expected_history=expected_history
+        )
+        return history
+
+    async def _append_message(
+        self,
+        session_id: str,
+        message: dict[str, JSONValue],
+        *,
+        lane: MessageLane = "chat",
+        expected_history: list[dict[str, JSONValue]] | None = None,
+    ) -> tuple[dict[str, JSONValue], list[dict[str, JSONValue]]]:
         normalized_message = _normalize_message_payload(message)
         normalized_message["lane"] = _normalize_message_lane(lane)
         event: dict[str, JSONValue] | None = None
@@ -1325,12 +1353,18 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
+            if (
+                expected_history is not None
+                and self._messages_for_lane(state.messages, lane=lane) != expected_history
+            ):
+                raise MessageHistoryConflictError("Accepted history changed")
             state.messages.append(normalized_message)
             if (
                 self._max_messages_per_session > 0
                 and len(state.messages) > self._max_messages_per_session
             ):
                 state.messages = state.messages[-self._max_messages_per_session :]
+            history = self._messages_for_lane(state.messages, lane=lane)
             state.updated_at = _utc_iso_now()
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
@@ -1341,9 +1375,9 @@ class UIHub:
             )
             self._append_event_record_locked(state, event)
         if event is None:
-            return dict(normalized_message)
+            return dict(normalized_message), history
         self._publish_to_subscribers(subscribers, event)
-        return dict(normalized_message)
+        return dict(normalized_message), history
 
     async def delete_last_message_pair(
         self,

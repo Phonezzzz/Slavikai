@@ -103,7 +103,6 @@ _parse_ui_chat_attachments = _chat_payload._parse_ui_chat_attachments
 _extract_decision_payload = _chat_payload._extract_decision_payload
 _split_response_and_report = _chat_payload._split_response_and_report
 _normalize_trace_id = _chat_payload._normalize_trace_id
-_request_likely_web_intent = _chat_payload._request_likely_web_intent
 CHAT_STREAM_CHUNK_SIZE = _streaming.CHAT_STREAM_CHUNK_SIZE
 CHAT_STREAM_WARMUP_CHARS = _streaming.CHAT_STREAM_WARMUP_CHARS
 _split_chat_stream_chunks = _streaming._split_chat_stream_chunks

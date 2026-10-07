@@ -488,7 +488,7 @@ def test_admission_snapshot_fences_security_and_early_history_mutation(
     )
     enabled = False
     publish = ui_chat._publish_agent_activity
-    append = UIHub.append_message
+    append = UIHub._append_message
 
     async def change_security(hub, *, session_id, phase, detail):
         if enabled and phase == "context.prepared":
@@ -498,13 +498,13 @@ def test_admission_snapshot_fences_security_and_early_history_mutation(
                 await hub.set_session_policy(session_id, profile="yolo")
         await publish(hub, session_id=session_id, phase=phase, detail=detail)
 
-    async def change_history(hub, session_id, message, *, lane="chat"):
+    async def change_history(hub, session_id, message, *, lane="chat", expected_history=None):
         if enabled and change == "history" and message.get("role") == "user":
             await hub.delete_last_message_pair(session_id, lane=lane)
-        return await append(hub, session_id, message, lane=lane)
+        return await append(hub, session_id, message, lane=lane, expected_history=expected_history)
 
     monkeypatch.setattr(ui_chat, "_publish_agent_activity", change_security)
-    monkeypatch.setattr(UIHub, "append_message", change_history)
+    monkeypatch.setattr(UIHub, "_append_message", change_history)
 
     async def run():
         nonlocal enabled
@@ -559,6 +559,58 @@ def test_accepted_security_application_failure_prevents_dispatch(tmp_path, monke
             assert response.status == 500
             assert (await response.json())["error"]["code"] == "runtime_context_apply_failed"
             assert brain.calls == 0
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scenario", ["full", "mixed", "web"])
+def test_ask_dispatch_uses_canonical_history_and_runtime(tmp_path, monkeypatch, scenario):  # noqa: ANN001, ANN201
+    monkeypatch.chdir(tmp_path)
+    brain = CountingBrain()
+    agent = _RealStreamingAgent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            hub = client.app["ui_hub"]
+            if scenario != "web":
+                for index in range(500):
+                    lane = "workspace" if scenario == "mixed" and index % 2 else "chat"
+                    await hub.append_message(
+                        session,
+                        hub.create_message(role="user", content=f"prior {index}", lane=lane),
+                        lane=lane,
+                    )
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session, "Idempotency-Key": "canonical-ask"},
+                json={
+                    "content": "проверь в интернете курс биткоина" if scenario == "web" else "next"
+                },
+            )
+            assert response.status == 200
+            assert brain.calls > 0
+            payload = await response.json()
+            assert "/web <запрос>" not in payload["messages"][-1]["content"]
+            with sqlite3.connect(client.app["task_run_store"].path) as conn:
+                assert conn.execute("SELECT state FROM task_runs").fetchall() == [
+                    ("result_submitted",)
+                ]
+            if scenario != "web":
+                assert (
+                    len(await hub.get_messages(session, lane="chat"))
+                    + len(await hub.get_messages(session, lane="workspace"))
+                    == 500
+                )
         finally:
             await client.close()
 

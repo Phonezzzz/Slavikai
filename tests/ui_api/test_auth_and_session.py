@@ -902,7 +902,7 @@ def test_ui_project_command_uses_session_runtime_override_over_global_runtime(mo
     asyncio.run(run())
 
 
-def test_ui_chat_send_web_intent_returns_command_guidance() -> None:
+def test_ui_chat_send_web_intent_uses_agent_response() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
@@ -926,8 +926,7 @@ def test_ui_chat_send_web_intent_returns_command_guidance() -> None:
             assert isinstance(last, dict)
             content = last.get("content")
             assert isinstance(content, str)
-            assert "/web <запрос>" in content
-            assert "После этого подтвердите approval" in content
+            assert content == "ok"
         finally:
             await client.close()
 
