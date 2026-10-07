@@ -72,6 +72,7 @@ export type CanvasSendPayload = {
   attachments?: CanvasComposerAttachment[];
   webSearch?: boolean;
   regenerateLast?: boolean;
+  regenerationTargetId?: string;
 };
 
 export async function deliverTranscription(
@@ -610,6 +611,7 @@ export function Canvas({
       content: source.content.trim(),
       attachments: source.attachments ?? [],
       regenerateLast: true,
+      regenerationTargetId: message.messageId,
     });
   };
 

@@ -1350,6 +1350,7 @@ class UIHub:
         session_id: str,
         *,
         lane: MessageLane = "chat",
+        expected_assistant_message_id: str | None = None,
     ) -> list[dict[str, JSONValue]] | None:
         normalized_lane = _normalize_message_lane(lane)
         event: dict[str, JSONValue] | None = None
@@ -1358,6 +1359,11 @@ class UIHub:
             state = self._sessions.get(session_id)
             if state is None:
                 return None
+            if expected_assistant_message_id is not None and not any(
+                message.get("message_id") == expected_assistant_message_id
+                for message in state.messages
+            ):
+                return []
             lane_indices = [
                 index
                 for index, message in enumerate(state.messages)
@@ -1366,6 +1372,12 @@ class UIHub:
             if len(lane_indices) < 2:
                 return []
             user_index, assistant_index = lane_indices[-2:]
+            if (
+                expected_assistant_message_id is not None
+                and state.messages[assistant_index].get("message_id")
+                != expected_assistant_message_id
+            ):
+                raise ValueError("Regeneration target is no longer the last response")
             user_message = state.messages[user_index]
             assistant_message = state.messages[assistant_index]
             if user_message.get("role") != "user" or assistant_message.get("role") != "assistant":

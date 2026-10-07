@@ -56,3 +56,57 @@ it('sends the stable identity through the actual transport on retry', async () =
   expect(new Headers(headers[1]).get('Idempotency-Key')).toBe(first);
   unmount();
 });
+
+it('allows explicit discard after durable conflict without automatic redispatch', async () => {
+  const { act, renderHook } = await import('@testing-library/react');
+  const { useSessionTransport } = await import('../use-session-transport');
+  vi.stubGlobal('EventSource', class { close() {} });
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+  const keys: (string | null)[] = [];
+  const fetch = vi.fn(async (_url: string, options: RequestInit) => {
+    keys.push(new Headers(options.headers).get('Idempotency-Key'));
+    return { ok: false, json: async () => ({ error: { code: 'task_run_continuation_unavailable' } }), headers: new Headers() };
+  });
+  vi.stubGlobal('fetch', fetch);
+  const { result, unmount } = renderHook(() => useSessionTransport({
+    sessionHeader: 'X-Slavik-Session', selectedConversation: 'session', forceCanvasNext: false,
+    consumeForceCanvasNext: vi.fn(), onSessionIdChange: vi.fn(), onStatusMessage: vi.fn(),
+    onStreamWarning: vi.fn(), onRuntimePayload: vi.fn(), onOpenStreamedArtifact: vi.fn(),
+    setArtifactViewerArtifactId: vi.fn(), loadSessions: async () => [],
+  }));
+  await act(async () => { await result.current.handleSendChat({ content: 'same' }); });
+  expect(localStorage.getItem('slavikai:pending-send:session')).not.toBeNull();
+  await act(async () => { await result.current.handleSendChat({ content: 'same' }); });
+  expect(keys[1]).toBe(keys[0]);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(localStorage.getItem('slavikai:pending-send:session')).toBeNull();
+  expect((await prepareClientSend('session', JSON.stringify(['same']))).key).not.toBe(keys[0]);
+  unmount();
+  confirm.mockRestore();
+});
+
+it('retries the same regeneration target after losing the DELETE response', async () => {
+  const { act, renderHook } = await import('@testing-library/react');
+  const { useSessionTransport } = await import('../use-session-transport');
+  vi.stubGlobal('EventSource', class { close() {} });
+  const targets: (string | null)[] = [];
+  let lost = true;
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, options: RequestInit) => {
+    if (options.method === 'DELETE') {
+      targets.push(new Headers(options.headers).get('If-Match'));
+      if (lost) { lost = false; throw new Error('delete response lost'); }
+    }
+    return { ok: true, json: async () => ({ messages: [] }), headers: new Headers() };
+  }));
+  const { result, unmount } = renderHook(() => useSessionTransport({
+    sessionHeader: 'X-Slavik-Session', selectedConversation: 'session', forceCanvasNext: false,
+    consumeForceCanvasNext: vi.fn(), onSessionIdChange: vi.fn(), onStatusMessage: vi.fn(),
+    onStreamWarning: vi.fn(), onRuntimePayload: vi.fn(), onOpenStreamedArtifact: vi.fn(),
+    setArtifactViewerArtifactId: vi.fn(), loadSessions: async () => [],
+  }));
+  const payload = { content: 'same', regenerateLast: true, regenerationTargetId: 'target-response' };
+  await act(async () => { expect(await result.current.handleSendChat(payload)).toBe(false); });
+  await act(async () => { expect(await result.current.handleSendChat(payload)).toBe(true); });
+  expect(targets).toEqual(['target-response', 'target-response']);
+  unmount();
+});

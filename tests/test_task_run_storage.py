@@ -396,3 +396,39 @@ def test_request_lookup_is_scoped_and_checks_history(tmp_path) -> None:
         )
     with pytest.raises(RuntimeError, match="history"):
         store.find_by_request(scope, "request")
+
+
+def _require_new_admission(args):  # noqa: ANN001, ANN202
+    from core.task_run_storage import RunAlreadyAdmittedError
+
+    path, scope, barrier = args
+    barrier.wait(timeout=10)
+    try:
+        return (
+            TaskRunStore(path)
+            .admit(
+                scope,
+                request_key="same",
+                goal="inspect",
+                mode="ask",
+                request_fingerprint="a" * 64,
+                require_new=True,
+            )
+            .task_run_id
+        )
+    except RunAlreadyAdmittedError:
+        return "already_admitted"
+
+
+def test_require_new_admission_has_only_one_owner(tmp_path) -> None:
+    path = tmp_path / "runs.db"
+    TaskRunStore(path)
+    scope = RunScope("alice", "session")
+    with multiprocessing.Manager() as manager:
+        barrier = manager.Barrier(4)
+        with ProcessPoolExecutor(max_workers=4) as workers:
+            outcomes = list(workers.map(_require_new_admission, [(path, scope, barrier)] * 4))
+    assert outcomes.count("already_admitted") == 3
+    run_id = next(result for result in outcomes if result != "already_admitted")
+    assert TaskRunStore(path).get(scope, run_id).state == RunState.ADMITTED
+    assert len(TaskRunStore(path).events(scope, run_id)) == 1

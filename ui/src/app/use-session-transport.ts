@@ -542,15 +542,17 @@ export function useSessionTransport({
     });
     try {
       const pendingSend = await prepareClientSend(
-        selectedConversation, JSON.stringify([requestBody, payload.regenerateLast === true]),
+        selectedConversation, JSON.stringify([requestBody, payload.regenerateLast === true, payload.regenerationTargetId]),
       );
       if (payload.regenerateLast === true && !pendingSend.regenerated) {
+        if (!payload.regenerationTargetId) throw new Error('Отсутствует целевой ответ для повторной генерации.');
         const encodedSessionId = encodeURIComponent(selectedConversation);
         const deleteResponse = await fetch(
           `/ui/api/sessions/${encodedSessionId}/messages/last`,
           {
             method: 'DELETE',
             headers: {
+              'If-Match': payload.regenerationTargetId,
               [sessionHeader]: selectedConversation,
             },
           },
@@ -575,6 +577,13 @@ export function useSessionTransport({
       });
       const responsePayload: unknown = await response.json();
       if (!response.ok) {
+        const failure = responsePayload as { error?: { code?: string } };
+        if (['task_run_continuation_unavailable', 'idempotency_key_reused'].includes(failure?.error?.code ?? '') &&
+            window.confirm('Результат предыдущего запроса недоступен. Отбросить его ключ? Следующая отправка будет новым запросом и может повторить выполненную работу.')) {
+          acknowledgeClientSend(selectedConversation, pendingSend.key);
+          onStatusMessage('Ключ отброшен. Проверьте историю и отправьте запрос заново, если это нужно.');
+          return false;
+        }
         throw new Error(extractErrorMessage(responsePayload, 'Failed to send message.'));
       }
 

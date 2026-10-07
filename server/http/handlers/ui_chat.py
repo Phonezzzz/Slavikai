@@ -17,7 +17,7 @@ from core.approval_policy import ApprovalCategory
 from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyStore
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
-from core.task_run_storage import RunConflictError, TaskRunStore
+from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
 from llm.types import ModelConfig
 from server.http.common.auth import _request_principal_id
@@ -811,9 +811,20 @@ async def _handle_ui_send_impl(
                     admitted_run = run_store.admit(
                         run_scope,
                         request_key=durable_request_key,
-                        goal=content_raw if content_raw.strip() else json.dumps(attachments),
+                        goal=content_raw
+                        if content_raw.strip()
+                        else json.dumps(attachments, ensure_ascii=False),
                         mode=mode,
                         request_fingerprint=fingerprint_json_payload(request_binding),
+                        require_new=True,
+                    )
+                except RunAlreadyAdmittedError:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Повторный dispatch требует сохранённого execution context.",
+                        error_type="invalid_request_error",
+                        code="task_run_continuation_unavailable",
                     )
                 except RunConflictError:
                     await _abort_idempotency()

@@ -23,7 +23,7 @@ Initial task revision — 1. `task_id`, `task_run_id`, `attempt_id` генери
 Admission key unique в principal scope. Повтор exact request возвращает исходный run,
 включая его текущий state; другой goal/mode/session или fingerprint с тем же key отклоняется.
 Fingerprint — обязательный SHA-256 exact structured accepted request; он не заменяет goal.
-Goal ограничен 512 KiB UTF-8; слишком большой request отклоняется до записи, не truncate'ится.
+Goal ограничен 1 MiB UTF-8 (включая JSON валидированных attachments); слишком большой request отклоняется до записи, не truncate'ится.
 Key ограничен 128 символами. Клиентские wire/idempotency contracts определяются в B2.
 
 ## Transactions и состояния
@@ -413,7 +413,9 @@ Ask key также нельзя использовать для dispatch в др
 проверяются повторно под lock до admission и dispatch; перед dispatch проверяется неизменность
 подготовленного history snapshot. History ещё не является durable execution checkpoint.
 
-При потере volatile HTTP replay cache уже running/submitted/recovery/terminal run возвращает
+UI admission требует атомарного `require_new=True`: existing admitted run тоже нельзя claim'ить
+без durable execution context. Проверка проходит внутри transaction, а не предварительным lookup.
+При потере volatile HTTP replay cache любой ранее принятый run возвращает
 `task_run_continuation_unavailable` до вызова Agent; implicit rerun запрещён. Конкурирующий
 CAS claim также не dispatch'ится. DB admission/start fault останавливает request без fallback.
 Существующий HTTP replay остаётся presentation cache и не является lifecycle authority.
@@ -437,7 +439,12 @@ pending approval при дубликате, смена режима и context r
 Штатный UI передаёт устойчивый `Idempotency-Key`. До dispatch browser сохраняет только
 pending request UUID и SHA-256 payload hash; повтор после response loss/reload сохраняет key,
 успешно применённый ответ освобождает key для следующей новой отправки. Explicit regeneration
-после подтверждённого удаления не повторяет deletion на retry send. Message/attachment bytes
+передаёт immutable assistant message identity через `If-Match`; hub под lock удаляет только
+соответствующую последнюю пару. Уже отсутствующая identity — successful no-op даже после
+restart/lost DELETE response; существующая непоследняя identity возвращает conflict.
+После подтверждённого удаления UI не повторяет deletion на retry send.
+При durable send conflict пользователь может явно отбросить pending key с предупреждением
+о неопределённом результате; это не dispatch. Новая отправка требует отдельного действия. Message/attachment bytes
 не копируются в этот browser identity cache. Тест actual useSessionTransport проверяет HTTP
 header и повтор после lost response. Test bootstrap использует временные per-app stores;
 production DB не открывается UI test fixtures.

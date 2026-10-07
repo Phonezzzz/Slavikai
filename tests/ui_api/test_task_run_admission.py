@@ -383,3 +383,89 @@ def test_default_http_test_apps_use_independent_temporary_run_stores(tmp_path): 
             await second.close()
 
     asyncio.run(run())
+
+
+def test_admitted_retry_cannot_claim_after_history_changes(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
+    monkeypatch.chdir(tmp_path)
+    brain = CountingBrain()
+    agent = _RealStreamingAgent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        path = tmp_path / "runs.db"
+        client.app["task_run_store"] = TaskRunStore(path)
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            headers = {"X-Slavik-Session": session, "Idempotency-Key": "unfinished"}
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    "CREATE TRIGGER fail_claim BEFORE INSERT ON run_transitions "
+                    "WHEN NEW.version = 1 BEGIN SELECT RAISE(ABORT, 'fault'); END"
+                )
+            assert (
+                await client.post("/ui/api/chat/send", headers=headers, json={"content": "old"})
+            ).status == 500
+            with sqlite3.connect(path) as conn:
+                conn.execute("DROP TRIGGER fail_claim")
+            assert (
+                await client.post(
+                    "/ui/api/chat/send",
+                    headers={"X-Slavik-Session": session},
+                    json={"content": "new history"},
+                )
+            ).status == 200
+            before = await client.app["ui_hub"].get_messages(session, lane="chat")
+            calls = brain.calls
+            assert calls > 0
+            client.app["idempotency_store"] = IdempotencyStore()
+            response = await client.post(
+                "/ui/api/chat/send", headers=headers, json={"content": "old"}
+            )
+            assert response.status == 409
+            assert brain.calls == calls
+            assert (await response.json())["error"]["code"] == "task_run_continuation_unavailable"
+            assert await client.app["ui_hub"].get_messages(session, lane="chat") == before
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("size,count", [(50000, 1), (80000, 2)])
+def test_unicode_attachment_only_admission(tmp_path, monkeypatch, size, count):  # noqa: ANN001, ANN201
+    import json
+
+    from .fakes import DummyAgent
+
+    monkeypatch.chdir(tmp_path)
+
+    async def run():
+        client = await _create_client(DummyAgent())
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session, "Content-Type": "application/json"},
+                data=json.dumps(
+                    {
+                        "content": "",
+                        "attachments": [
+                            {"name": "paste.txt", "mime": "text/plain", "content": "😀" * size}
+                            for _ in range(count)
+                        ],
+                    },
+                    ensure_ascii=False,
+                ).encode(),
+            )
+            assert response.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(run())

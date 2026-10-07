@@ -15,6 +15,10 @@ class RunConflictError(ValueError):
     pass
 
 
+class RunAlreadyAdmittedError(RunConflictError):
+    pass
+
+
 class TaskRunStore:
     """Transactional admission/transition authority; runtime adoption is a separate slice."""
 
@@ -96,7 +100,14 @@ class TaskRunStore:
         return conn
 
     def admit(
-        self, scope: RunScope, *, request_key: str, goal: str, mode: str, request_fingerprint: str
+        self,
+        scope: RunScope,
+        *,
+        request_key: str,
+        goal: str,
+        mode: str,
+        request_fingerprint: str,
+        require_new: bool = False,
     ) -> TaskRun:
         if len(request_fingerprint) != 64 or any(
             char not in "0123456789abcdef" for char in request_fingerprint
@@ -104,7 +115,7 @@ class TaskRunStore:
             raise ValueError("Invalid accepted request fingerprint")
         if not request_key.strip() or len(request_key) > 128:
             raise ValueError("Invalid admission request key")
-        if not goal.strip() or len(goal.encode("utf-8")) > 512 * 1024:
+        if not goal.strip() or len(goal.encode("utf-8")) > 1024 * 1024:
             raise ValueError("Invalid accepted goal")
         if mode not in {"ask", "plan", "act", "auto", "desktop"}:
             raise ValueError("Invalid execution mode")
@@ -133,7 +144,12 @@ class TaskRunStore:
                 ).fetchone()
                 if row is None:
                     raise RuntimeError("Admission has no run")
-                return self._record(scope, self._owned_row(conn, scope, row["task_run_id"]))
+                record = self._record(scope, self._owned_row(conn, scope, row["task_run_id"]))
+                if require_new:
+                    raise RunAlreadyAdmittedError(
+                        "Admission already exists; context recovery required"
+                    )
+                return record
             task_id, run_id, attempt_id = (str(uuid4()) for _ in range(3))
             now = datetime.now(UTC).isoformat()
             conn.execute(
