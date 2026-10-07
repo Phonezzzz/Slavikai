@@ -71,6 +71,16 @@ class PlanRunnerAgentProtocol(Protocol):
 
     def run_task_packet(self, packet: TaskPacket, context: object) -> MWVRunResult: ...
 
+    def resume_task_packet(
+        self,
+        identity: str,
+        packet: TaskPacket,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> MWVRunResult: ...
+
+    def validate_mwv_approval(self, identity: str, packet: TaskPacket) -> None: ...
+
 
 def normalize_tools_state_payload(
     raw: object,
@@ -553,41 +563,6 @@ def compute_plan_completion_state(plan: dict[str, JSONValue]) -> str:
     return "running"
 
 
-def _task_packet_with_resume_state(
-    packet: TaskPacket,
-    *,
-    step_results: list[dict[str, JSONValue]],
-    changes: list[dict[str, JSONValue]],
-    tool_calls_used: int,
-    diff_size: int,
-) -> TaskPacket:
-    context = dict(packet.context)
-    context["plan_runner_resume"] = {
-        "step_results": step_results,
-        "changes": changes,
-        "tool_calls_used": tool_calls_used,
-        "diff_size": diff_size,
-    }
-    return with_task_packet_hash(
-        TaskPacket(
-            task_id=packet.task_id,
-            session_id=packet.session_id,
-            trace_id=packet.trace_id,
-            goal=packet.goal,
-            packet_revision=packet.packet_revision,
-            messages=list(packet.messages),
-            steps=list(packet.steps),
-            constraints=list(packet.constraints),
-            policy=dict(packet.policy),
-            scope=dict(packet.scope),
-            budgets=dict(packet.budgets),
-            approvals=dict(packet.approvals),
-            verifier=dict(packet.verifier),
-            context=context,
-        )
-    )
-
-
 def _task_execution_payload(
     *,
     packet: TaskPacket,
@@ -705,7 +680,10 @@ async def run_plan_runner(
     ],
     serialize_approval_request_fn: Callable[[object], dict[str, JSONValue] | None],
     utc_now_iso_fn: Callable[[], str],
-) -> None:
+    resume_checkpoint_id: str | None = None,
+    session_categories: set[object] | None = None,
+    cancellation_token: asyncio.Event | None = None,
+) -> bool:
     hub: WorkflowHubProtocol = app["ui_hub"]
     workflow = await hub.get_session_workflow(session_id)
     plan = normalize_plan_payload_fn(workflow.get("active_plan"))
@@ -719,7 +697,7 @@ async def run_plan_runner(
         or task.get("status") != "running"
         or mode != "act"
     ):
-        return
+        return False
 
     task_packet_raw = task.get("task_packet")
     try:
@@ -738,13 +716,13 @@ async def run_plan_runner(
             active_plan=failed_plan,
             active_task=failed_task,
         )
-        return
+        return False
 
     provider = cast(ScopedAgentProvider[PlanRunnerAgentProtocol], app["agent_provider"])
     session_store = app["session_store"]
     principal_id = await hub.get_session_principal_id(session_id)
     if principal_id is None:
-        return
+        return False
     resolver = cast(RuntimeModelResolverProtocol, app["runtime_model_resolver"])
     main_config = await resolver.resolve_main(session_id)
     if main_config is None and not provider.is_static:
@@ -761,7 +739,7 @@ async def run_plan_runner(
             active_plan=failed_plan,
             active_task=failed_task,
         )
-        return
+        return False
     scope = AgentScope(principal_id=principal_id, session_id=session_id)
     agent = await provider.get_for_current_task(scope, main_config)
     agent_lock = provider.lock_for(scope)
@@ -788,17 +766,42 @@ async def run_plan_runner(
         _session_id: str,
     ) -> Path:
         scope_root_raw = packet.scope.get("workspace_root")
-        if isinstance(scope_root_raw, str) and scope_root_raw.strip():
+        if (
+            resume_checkpoint_id is None
+            and isinstance(scope_root_raw, str)
+            and scope_root_raw.strip()
+        ):
             return Path(scope_root_raw)
         session_root_raw = await _hub.get_workspace_root(_session_id)
         if isinstance(session_root_raw, str) and session_root_raw.strip():
             return Path(session_root_raw)
         return Path(".").resolve()
 
-    try:
-        async with agent_lock:
+    async with agent_lock:
+        started = False
+        try:
+            current_workflow = await hub.get_session_workflow(session_id)
+            current_plan = normalize_plan_payload_fn(current_workflow.get("active_plan"))
+            current_task = normalize_task_payload_fn(current_workflow.get("active_task"))
+            if (
+                current_plan is None
+                or current_task is None
+                or current_plan.get("plan_id") != plan_id
+                or current_plan.get("plan_revision") != plan.get("plan_revision")
+                or current_task.get("task_id") != task_id
+                or current_task.get("status") != "running"
+                or normalize_mode_value_fn(current_workflow.get("mode")) != "act"
+                or await resolver.resolve_main(session_id) != main_config
+            ):
+                return False
+            plan, task = current_plan, current_task
+            packet = deserialize_task_packet_payload(task.get("task_packet"))
             reconfigure_models = getattr(agent, "reconfigure_models", None)
-            if main_config is not None and callable(reconfigure_models):
+            if (
+                resume_checkpoint_id is None
+                and main_config is not None
+                and callable(reconfigure_models)
+            ):
                 reconfigure_models(
                     main_config,
                     main_api_key=_resolve_provider_api_key(main_config.provider),
@@ -833,16 +836,123 @@ async def run_plan_runner(
                 approved_categories=sorted(str(item) for item in approved_categories),
                 max_retries=max(0, max_attempts - 1),
             )
-            run_result = await asyncio.to_thread(agent.run_task_packet, packet, run_context)
-    except TaskPacketApprovalPending as exc:
-        approval_payload = serialize_approval_request_fn(exc.request)
-        if approval_payload is None:
+            execution_raw = task.get("execution")
+            execution = execution_raw if isinstance(execution_raw, dict) else {}
+            checkpoint_id = execution.get("checkpoint_id")
+            if resume_checkpoint_id is not None:
+                if (
+                    checkpoint_id != resume_checkpoint_id
+                    or execution.get("status") != "waiting_approval"
+                ):
+                    return False
+                agent.validate_mwv_approval(resume_checkpoint_id, packet)
+                added_categories = (session_categories or set()) - approved_categories
+                try:
+                    if added_categories:
+                        await session_store.approve(scope, added_categories)
+                        approved_categories |= added_categories
+                        agent.set_session_context(session_id, approved_categories)
+                    run_result = await asyncio.to_thread(
+                        agent.resume_task_packet,
+                        resume_checkpoint_id,
+                        packet,
+                        cancellation_token=cancellation_token,
+                    )
+                    started = True
+                except TaskPacketApprovalPending:
+                    started = True
+                    raise
+                finally:
+                    if not started and added_categories:
+                        await session_store.revoke(scope, added_categories)
+                        agent.set_session_context(
+                            session_id, approved_categories - added_categories
+                        )
+            elif execution.get("status") == "waiting_approval":
+                return False
+            else:
+                run_result = await asyncio.to_thread(agent.run_task_packet, packet, run_context)
+                started = True
+
+        except TaskPacketApprovalPending as exc:
+            approval_payload = serialize_approval_request_fn(exc.request)
+            if approval_payload is None:
+                failed_plan = plan_with_status_fn(plan, "failed")
+                failed_task = task_with_status_fn(task, "failed", exc.blocked_step_id)
+                failed_task["execution"] = {
+                    "runner": "mwv_packet_runner",
+                    "status": "failed",
+                    "error": "approval_payload_missing",
+                }
+                await hub.set_session_workflow(
+                    session_id,
+                    mode="act",
+                    active_plan=failed_plan,
+                    active_task=failed_task,
+                )
+                return False
+            plan = _apply_step_results_to_plan(
+                plan,
+                step_results=exc.step_results
+                + [
+                    {
+                        "step_id": exc.blocked_step_id,
+                        "description": next(
+                            (
+                                snapshot.get("description")
+                                for snapshot in exc.step_results
+                                if snapshot.get("step_id") == exc.blocked_step_id
+                            ),
+                            exc.blocked_step_id,
+                        ),
+                        "status": "waiting_approval",
+                        "operation": None,
+                        "result": "Требуется подтверждение",
+                        "tool_calls_used": 0,
+                        "changes": [],
+                    }
+                ],
+                plan_mark_step_fn=plan_mark_step_fn,
+                utc_now_iso_fn=utc_now_iso_fn,
+            )
+            task = task_with_status_fn(task, "running", exc.blocked_step_id)
+            task["execution"] = {
+                "runner": "mwv_packet_runner",
+                "status": "waiting_approval",
+                "blocked_step_id": exc.blocked_step_id,
+                "checkpoint_id": exc.checkpoint_id,
+            }
+            ui_decision = build_ui_approval_decision_fn(
+                approval_payload,
+                session_id,
+                "plan.execute_runner",
+                {
+                    "plan_id": plan_id,
+                    "task_id": task_id,
+                    "plan_revision": plan.get("plan_revision"),
+                    "blocked_step_id": exc.blocked_step_id,
+                    "checkpoint_id": exc.checkpoint_id,
+                },
+                packet.trace_id,
+                decision_workflow_context_fn("act", plan, task),
+            )
+            await hub.set_session_decision(session_id, ui_decision)
+            await hub.set_session_workflow(
+                session_id,
+                mode="act",
+                active_plan=plan,
+                active_task=task,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if resume_checkpoint_id is not None and not started:
+                return False
             failed_plan = plan_with_status_fn(plan, "failed")
-            failed_task = task_with_status_fn(task, "failed", exc.blocked_step_id)
+            failed_task = task_with_status_fn(task, "failed", None)
             failed_task["execution"] = {
                 "runner": "mwv_packet_runner",
                 "status": "failed",
-                "error": "approval_payload_missing",
+                "error": str(exc),
             }
             await hub.set_session_workflow(
                 session_id,
@@ -850,124 +960,45 @@ async def run_plan_runner(
                 active_plan=failed_plan,
                 active_task=failed_task,
             )
-            return
+            return False
+
+        step_results_raw = run_result.work_result.diagnostics.get("step_results")
+        step_results = (
+            [dict(item) for item in step_results_raw if isinstance(item, dict)]
+            if isinstance(step_results_raw, list)
+            else []
+        )
         plan = _apply_step_results_to_plan(
             plan,
-            step_results=exc.step_results
-            + [
-                {
-                    "step_id": exc.blocked_step_id,
-                    "description": next(
-                        (
-                            snapshot.get("description")
-                            for snapshot in exc.step_results
-                            if snapshot.get("step_id") == exc.blocked_step_id
-                        ),
-                        exc.blocked_step_id,
-                    ),
-                    "status": "waiting_approval",
-                    "operation": None,
-                    "result": "Требуется подтверждение",
-                    "tool_calls_used": 0,
-                    "changes": [],
-                }
-            ],
+            step_results=step_results,
             plan_mark_step_fn=plan_mark_step_fn,
             utc_now_iso_fn=utc_now_iso_fn,
         )
-        resumed_packet = _task_packet_with_resume_state(
-            packet,
-            step_results=exc.step_results,
-            changes=exc.changes,
-            tool_calls_used=exc.tool_calls_used,
-            diff_size=exc.diff_size,
+        stop_reason_code_raw = run_result.work_result.diagnostics.get("stop_reason_code")
+        stop_reason_code = stop_reason_code_raw if isinstance(stop_reason_code_raw, str) else None
+        if (
+            run_result.work_result.status == WorkStatus.SUCCESS
+            and run_result.verification_result.status == VerificationStatus.PASSED
+        ):
+            plan = plan_with_status_fn(plan, "completed")
+            task = task_with_status_fn(task, "completed", None)
+        else:
+            plan = plan_with_status_fn(plan, "failed")
+            task = task_with_status_fn(task, "failed", None)
+        task["execution"] = _task_execution_payload(
+            packet=packet,
+            run_result=run_result,
+            step_results=step_results,
+            stop_reason_code=stop_reason_code,
         )
-        task = task_with_status_fn(task, "running", exc.blocked_step_id)
-        task["task_packet"] = serialize_task_packet_payload(resumed_packet)
-        task["execution"] = {
-            "runner": "mwv_packet_runner",
-            "status": "waiting_approval",
-            "blocked_step_id": exc.blocked_step_id,
-            "resume_state": {
-                "step_results": exc.step_results,
-                "changes": exc.changes,
-                "tool_calls_used": exc.tool_calls_used,
-                "diff_size": exc.diff_size,
-            },
-        }
-        ui_decision = build_ui_approval_decision_fn(
-            approval_payload,
-            session_id,
-            "plan.execute_runner",
-            {
-                "plan_id": plan_id,
-                "task_id": task_id,
-                "plan_revision": plan.get("plan_revision"),
-                "blocked_step_id": exc.blocked_step_id,
-                "task_packet": serialize_task_packet_payload(resumed_packet),
-            },
-            packet.trace_id,
-            decision_workflow_context_fn("act", plan, task),
-        )
-        await hub.set_session_decision(session_id, ui_decision)
         await hub.set_session_workflow(
             session_id,
             mode="act",
             active_plan=plan,
             active_task=task,
         )
-        return
-    except Exception as exc:  # noqa: BLE001
-        failed_plan = plan_with_status_fn(plan, "failed")
-        failed_task = task_with_status_fn(task, "failed", None)
-        failed_task["execution"] = {
-            "runner": "mwv_packet_runner",
-            "status": "failed",
-            "error": str(exc),
-        }
-        await hub.set_session_workflow(
-            session_id,
-            mode="act",
-            active_plan=failed_plan,
-            active_task=failed_task,
-        )
-        return
 
-    step_results_raw = run_result.work_result.diagnostics.get("step_results")
-    step_results = (
-        [dict(item) for item in step_results_raw if isinstance(item, dict)]
-        if isinstance(step_results_raw, list)
-        else []
-    )
-    plan = _apply_step_results_to_plan(
-        plan,
-        step_results=step_results,
-        plan_mark_step_fn=plan_mark_step_fn,
-        utc_now_iso_fn=utc_now_iso_fn,
-    )
-    stop_reason_code_raw = run_result.work_result.diagnostics.get("stop_reason_code")
-    stop_reason_code = stop_reason_code_raw if isinstance(stop_reason_code_raw, str) else None
-    if (
-        run_result.work_result.status == WorkStatus.SUCCESS
-        and run_result.verification_result.status == VerificationStatus.PASSED
-    ):
-        plan = plan_with_status_fn(plan, "completed")
-        task = task_with_status_fn(task, "completed", None)
-    else:
-        plan = plan_with_status_fn(plan, "failed")
-        task = task_with_status_fn(task, "failed", None)
-    task["execution"] = _task_execution_payload(
-        packet=packet,
-        run_result=run_result,
-        step_results=step_results,
-        stop_reason_code=stop_reason_code,
-    )
-    await hub.set_session_workflow(
-        session_id,
-        mode="act",
-        active_plan=plan,
-        active_task=task,
-    )
+        return True
 
 
 def utc_now_iso() -> str:

@@ -12,7 +12,7 @@ from config.shell_config import DEFAULT_SHELL_CONFIG_PATH
 from config.tools_config import ToolsConfig, load_tools_config, save_tools_config
 from core.agent_computer import AgentComputerRuntime
 from core.agent_memory import AgentMemoryMixin
-from core.agent_mwv import AgentMWVMixin
+from core.agent_mwv import AgentMWVMixin, MWVWorkerCheckpoint
 from core.agent_routing import AgentRoutingMixin
 from core.agent_tools import AgentToolsMixin, PendingChatApproval
 from core.approval_policy import ApprovalCategory, ApprovalRequest
@@ -314,6 +314,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             "candidate_written_count": 0,
         }
         self.decision_handler = DecisionHandler()
+        self._mwv_checkpoints: dict[str, MWVWorkerCheckpoint] = {}
         self._pending_chat_approval: PendingChatApproval | None = None
         self.last_approval_request: ApprovalRequest | None = None
         self.last_approval_source_endpoint: str | None = None

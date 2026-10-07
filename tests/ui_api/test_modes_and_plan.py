@@ -3,9 +3,7 @@ from __future__ import annotations
 # ruff: noqa: F403,F405
 import pytest
 
-from core.agent_mwv import TaskPacketApprovalPending
 from core.agent_response import AgentResponse
-from core.approval_policy import ApprovalPrompt, ApprovalRequest
 from core.tool_gateway import ToolGateway
 from server.http.common.workflow_runtime import compute_plan_completion_state
 from server.http_api import PLAN_AUDIT_MAX_READ_FILES
@@ -292,39 +290,78 @@ def test_ui_plan_lifecycle_endpoints() -> None:
 
 
 @pytest.mark.behavior
-def test_ui_plan_execute_waiting_approval_then_resume() -> None:
-    class PlanApprovalAgent(DummyAgent):
-        def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
-            if "EXEC_ARBITRARY" not in self._approved_categories:
-                raise TaskPacketApprovalPending(
-                    request=ApprovalRequest(
-                        category="EXEC_ARBITRARY",
-                        required_categories=["EXEC_ARBITRARY"],
-                        prompt=ApprovalPrompt(
-                            what="Разрешить шаг плана.",
-                            why="Нужно выполнить потенциально рискованное действие.",
-                            risk="Может изменить workspace.",
-                            changes=["workspace files"],
-                        ),
-                        tool="workspace_patch",
-                        details={"task_id": packet.task_id},
-                        session_id=self._session_id,
-                    ),
-                    blocked_step_id=packet.steps[0].step_id,
-                    step_results=[],
-                    changes=[],
-                    tool_calls_used=0,
-                    diff_size=0,
-                )
-            return super().run_task_packet(packet, context)
+@pytest.mark.parametrize(
+    "choice,cleanup",
+    [
+        ("approve_once", None),
+        ("approve_session", None),
+        ("approve_session", "claim_fault"),
+        ("approve_once", "changed_root"),
+        ("approve_once", "reject"),
+        ("approve_once", "reset"),
+    ],
+)
+def test_ui_plan_execute_waiting_approval_then_resume(
+    tmp_path, monkeypatch, choice, cleanup
+) -> None:
+    from core.agent import Agent
+    from shared.models import ToolResult
+    from tests.test_agent_response import SimpleBrain
+
+    provider_brain = SimpleBrain("unused")
+
+    class MWVNativeAgent(Agent):
+        brain_builds = 0
+
+        def _build_brain(self):
+            self.brain_builds += 1
+            return provider_brain
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Makefile").write_text("check:\n\t@true\n")
+    agent = MWVNativeAgent(
+        brain=SimpleBrain("unused"),
+        enable_tools={"safe_mode": True},
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    executed = []
+    agent.tool_registry.register(
+        "mwv_network",
+        lambda request: executed.append(request) or ToolResult.success({"output": "observed"}),
+        enabled=True,
+        capability="read",
+        risk_classes=["network"],
+        description="Diagnostic read",
+        parameters_schema={"type": "object"},
+    )
+    # Stub only structured planner/provider; runner/Gateway/verifier are real.
+    agent.compile_plan_steps = lambda goal, audit: [
+        {
+            "step_id": f"step-{index}",
+            "title": "Inspect",
+            "description": "Inspect network",
+            "allowed_tool_kinds": ["mwv_network"],
+            "inputs": {"operation": "mwv_network", "tool_args": {"index": index}},
+            "expected_outputs": [],
+            "acceptance_checks": [],
+            "status": "todo",
+            "evidence": None,
+        }
+        for index in [1, 2]
+    ]
 
     async def run() -> None:
-        client = await _create_client(PlanApprovalAgent())
+        client = await _create_client(agent)
         try:
             status_resp = await client.get("/ui/api/status")
             status_payload = await status_resp.json()
             session_id = status_payload.get("session_id")
             assert isinstance(session_id, str)
+
+            await _select_local_model(client, session_id)
+            await client.server.app["ui_hub"].set_workspace_root(session_id, str(tmp_path))
 
             revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
 
@@ -366,17 +403,95 @@ def test_ui_plan_execute_waiting_approval_then_resume() -> None:
             assert waiting is True
             assert isinstance(decision_id, str)
 
+            builds_before_resume = agent.brain_builds
+            hub = client.server.app["ui_hub"]
+            if cleanup in {"reject", "reset"}:
+                if cleanup == "reject":
+                    response = await client.post(
+                        "/ui/api/decision/respond",
+                        headers={"X-Slavik-Session": session_id},
+                        json={
+                            "session_id": session_id,
+                            "decision_id": decision_id,
+                            "choice": "reject",
+                        },
+                    )
+                else:
+                    response = await client.post(
+                        "/ui/api/runtime/init",
+                        headers={"X-Slavik-Session": session_id},
+                        json={"confirm": True, "force": True},
+                    )
+                assert response.status == 200
+                assert agent._mwv_checkpoints == {}
+                assert executed == []
+                return
+            if cleanup in {"claim_fault", "changed_root"}:
+                from core.agent_mwv import MWVContinuationUnavailable
+                from server.agent_provider import AgentScope
+
+                identity = next(iter(agent._mwv_checkpoints))
+                checkpoint = agent._mwv_checkpoints[identity]
+                store = client.server.app["session_store"]
+                scope = AgentScope(
+                    principal_id=await hub.get_session_principal_id(session_id),
+                    session_id=session_id,
+                )
+                await store.approve(scope, {"SUDO"})
+                prior_categories = await store.get_categories(scope)
+                original_resume = agent.resume_task_packet
+                if cleanup == "claim_fault":
+
+                    def fail_claim(*args, **kwargs):
+                        raise MWVContinuationUnavailable("approval_continuation_not_started")
+
+                    monkeypatch.setattr(agent, "resume_task_packet", fail_claim)
+                else:
+                    changed = tmp_path / "changed-root"
+                    changed.mkdir()
+                    await hub.set_workspace_root(session_id, str(changed))
+                rejected = await client.post(
+                    "/ui/api/decision/respond",
+                    headers={"X-Slavik-Session": session_id},
+                    json={"session_id": session_id, "decision_id": decision_id, "choice": choice},
+                )
+                assert rejected.status == 409
+                assert agent._mwv_checkpoints[identity] is checkpoint
+                assert executed == []
+                assert await store.get_categories(scope) == prior_categories
+                assert (await hub.get_session_decision(session_id))["status"] == "pending"
+                monkeypatch.setattr(agent, "resume_task_packet", original_resume)
+                await hub.set_workspace_root(session_id, str(tmp_path))
+
             approve_resp = await client.post(
                 "/ui/api/decision/respond",
                 headers={"X-Slavik-Session": session_id},
                 json={
                     "session_id": session_id,
                     "decision_id": decision_id,
-                    "choice": "approve_session",
+                    "choice": choice,
                 },
             )
             assert approve_resp.status == 200
 
+            if choice == "approve_once":
+                assert len(executed) == 1
+                next_decision = await client.server.app["ui_hub"].get_session_decision(session_id)
+                assert next_decision["id"] != decision_id
+                assert next_decision["status"] == "pending"
+                next_response = await client.post(
+                    "/ui/api/decision/respond",
+                    headers={"X-Slavik-Session": session_id},
+                    json={
+                        "session_id": session_id,
+                        "decision_id": next_decision["id"],
+                        "choice": "approve_once",
+                    },
+                )
+                assert next_response.status == 200
+            assert [item.args["index"] for item in executed] == [1, 2]
+            assert agent._mwv_checkpoints == {}
+            assert agent.brain_builds == builds_before_resume
             completed = False
             for _ in range(30):
                 await asyncio.sleep(0.02)

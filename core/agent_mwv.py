@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
+import asyncio
 import json
 import shlex
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +41,7 @@ from core.mwv.verifier_runtime import (
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.mwv.worker import WorkerRuntime
 from llm.brain_base import Brain
+from llm.cancellation import cancellation_requested
 from shared.models import (
     JSONValue,
     LLMMessage,
@@ -45,6 +49,7 @@ from shared.models import (
     PlanStepStatus,
     TaskPlan,
     ToolRequest,
+    ToolResult,
     WorkspaceDiffEntry,
 )
 from tools.workspace_tools import WORKSPACE_ROOT, workspace_root_context
@@ -54,6 +59,43 @@ _ACTION_ORIENTED_RISK_FLAGS = frozenset({"code_change", "filesystem", "git", "in
 _NO_OBSERVABLE_ACTION_ERROR = (
     "MWV route требует наблюдаемого действия, но tool calls/diffs отсутствуют."
 )
+
+
+@dataclass(frozen=True)
+class MWVWorkerCheckpoint:
+    packet: TaskPacket
+    context: RunContext
+    request: ApprovalRequest
+    blocked_step_id: str
+    step_results: list[dict[str, JSONValue]]
+    changes: list[dict[str, JSONValue]]
+    tool_calls_used: int
+    diff_size: int
+    observations: tuple[tuple[ToolRequest, ToolResult], ...]
+    principal_id: str
+    mode: str
+    workspace_root: str | None
+    brain: Brain
+    config: object
+
+
+class MWVContinuationUnavailable(ValueError):
+    pass
+
+
+class MWVExecutionCancelled(Exception):
+    pass
+
+
+@dataclass
+class MWVExecutionControl:
+    cancellation_token: asyncio.Event | None = None
+    started: bool = False
+    observations: list[tuple[ToolRequest, ToolResult]] = field(default_factory=list)
+
+    def record(self, request: ToolRequest, result: ToolResult) -> None:
+        self.started = True
+        self.observations.append((deepcopy(request), deepcopy(result)))
 
 
 class TaskPacketApprovalPending(Exception):
@@ -66,6 +108,7 @@ class TaskPacketApprovalPending(Exception):
         changes: list[dict[str, JSONValue]],
         tool_calls_used: int,
         diff_size: int,
+        checkpoint_id: str,
     ) -> None:
         super().__init__("TaskPacket execution requires approval.")
         self.request = request
@@ -74,6 +117,7 @@ class TaskPacketApprovalPending(Exception):
         self.changes = changes
         self.tool_calls_used = tool_calls_used
         self.diff_size = diff_size
+        self.checkpoint_id = checkpoint_id
 
 
 if TYPE_CHECKING:
@@ -128,6 +172,10 @@ class AgentMWVMixin:
         runtime_workspace_root: str | None
         _last_skill_match: SkillMatch | None
         _workspace_diffs: dict[str, WorkspaceDiffEntry]
+        _mwv_checkpoints: dict[str, MWVWorkerCheckpoint]
+        user_id: str
+
+        def _get_main_brain(self) -> Brain: ...
 
         def _inc_metric(self, metric_key: str) -> None: ...
         def _handle_decision_packet(
@@ -403,10 +451,17 @@ class AgentMWVMixin:
             )
         ]
 
-    def _mwv_worker_runner(self, task: TaskPacket, context: RunContext) -> WorkResult:
+    def _mwv_worker_runner(
+        self,
+        task: TaskPacket,
+        context: RunContext,
+        *,
+        checkpoint: MWVWorkerCheckpoint | None = None,
+        execution: MWVExecutionControl | None = None,
+    ) -> WorkResult:
         started = time.monotonic()
         self._reset_workspace_diffs()
-        if not is_task_packet_hash_valid(task):
+        if not is_task_packet_hash_valid(task) or "plan_runner_resume" in task.context:
             return WorkResult(
                 task_id=task.task_id,
                 status=WorkStatus.FAILURE,
@@ -478,7 +533,20 @@ class AgentMWVMixin:
                 root_cause_tag="scope_error",
             )
 
-        resume_state = self._mwv_resume_state(task)
+        resume_state: dict[str, JSONValue] = {}
+        execution = execution or MWVExecutionControl()
+        observations = execution.observations
+        if checkpoint is not None and not observations:
+            observations.extend(checkpoint.observations)
+        if checkpoint is not None:
+            if checkpoint.packet != task or checkpoint.context != context:
+                raise ValueError("mwv_continuation_scope_mismatch")
+            resume_state = {
+                "step_results": deepcopy(checkpoint.step_results),
+                "changes": deepcopy(checkpoint.changes),
+                "tool_calls_used": checkpoint.tool_calls_used,
+                "diff_size": checkpoint.diff_size,
+            }
         prior_step_results_raw = resume_state.get("step_results")
         prior_step_results = (
             [dict(item) for item in prior_step_results_raw if isinstance(item, dict)]
@@ -527,18 +595,32 @@ class AgentMWVMixin:
 
         try:
             with workspace_root_context(workspace_root):
+                observed_result = False
 
                 def _mwv_post_call(
                     request: ToolRequest,
                     result: ToolResult,
                     call_context: object | None,
                 ) -> None:
-                    nonlocal successful_tool_calls
+                    nonlocal successful_tool_calls, observed_result
+                    execution.record(request, result)
+                    observed_result = True
                     self._workspace_diff_post_call(request, result, call_context)
                     if result.ok:
                         successful_tool_calls += 1
 
+                def _mwv_observe(request: ToolRequest, result: ToolResult) -> None:
+                    if not observed_result:
+                        execution.record(request, result)
+
+                def _mwv_pre_call(request: ToolRequest) -> object | None:
+                    captured = self._workspace_diff_pre_call(request)
+                    execution.started = True
+                    return captured
+
                 for step in task.steps:
+                    if cancellation_requested(execution.cancellation_token):
+                        raise MWVExecutionCancelled()
                     if step.step_id in completed_step_ids:
                         continue
                     require_operation = self._mwv_step_requires_operation(
@@ -587,15 +669,25 @@ class AgentMWVMixin:
                         )
                         stop_reason = StopReasonCode.REPLAN_REQUIRED
                         break
+                    observed_result = False
                     try:
                         executed_step = self._execute_mwv_plan_step(
                             plan_step,
                             tool_gateway=self._build_tool_gateway(
-                                pre_call=self._workspace_diff_pre_call,
+                                pre_call=_mwv_pre_call,
                                 post_call=_mwv_post_call,
+                            ),
+                            observe=_mwv_observe,
+                            approval=(
+                                checkpoint.request
+                                if checkpoint is not None
+                                and checkpoint.blocked_step_id == step.step_id
+                                else None
                             ),
                         )
                     except ApprovalRequired as exc:
+                        if cancellation_requested(execution.cancellation_token):
+                            raise MWVExecutionCancelled() from exc
                         step_results.append(
                             self._step_result_snapshot(
                                 step_id=step.step_id,
@@ -616,7 +708,32 @@ class AgentMWVMixin:
                             max(0, diff.added) + max(0, diff.removed)
                             for diff in current_diff_entries
                         )
+                        checkpoint_id = str(uuid.uuid4())
+                        self._mwv_checkpoints[checkpoint_id] = MWVWorkerCheckpoint(
+                            packet=deepcopy(task),
+                            context=deepcopy(context),
+                            request=deepcopy(exc.request),
+                            blocked_step_id=step.step_id,
+                            step_results=deepcopy(
+                                [item for item in step_results if item.get("status") == "done"]
+                            ),
+                            changes=[
+                                self._work_change_to_json(change)
+                                for change in self._merge_work_changes(
+                                    prior_changes, current_changes
+                                )
+                            ],
+                            tool_calls_used=successful_tool_calls,
+                            diff_size=prior_diff_size + current_diff_size,
+                            observations=tuple(observations),
+                            principal_id=self.user_id,
+                            mode=self.runtime_mode,
+                            workspace_root=self.runtime_workspace_root,
+                            brain=self._get_main_brain(),
+                            config=deepcopy(self.main_config),
+                        )
                         raise TaskPacketApprovalPending(
+                            checkpoint_id=checkpoint_id,
                             request=exc.request,
                             blocked_step_id=step.step_id,
                             step_results=[
@@ -730,22 +847,139 @@ class AgentMWVMixin:
         constraints = "\n".join(f"- {item}" for item in task.constraints)
         return f"{task.goal}\nОграничения:\n{constraints}"
 
-    def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
+    def validate_mwv_approval(self, identity: str, packet: TaskPacket) -> None:
+        checkpoint = self._mwv_checkpoints.get(identity)
+        if (
+            checkpoint is None
+            or checkpoint.packet != packet
+            or checkpoint.principal_id != self.user_id
+            or checkpoint.context.session_id != self.session_id
+            or checkpoint.mode != self.runtime_mode
+            or checkpoint.workspace_root != self.runtime_workspace_root
+            or checkpoint.brain is not self._get_main_brain()
+            or checkpoint.config != self.main_config
+        ):
+            raise MWVContinuationUnavailable("approval_continuation_unavailable")
+
+    def cancel_mwv_approval(self, identity: str) -> None:
+        self._mwv_checkpoints.pop(identity, None)
+
+    def resume_task_packet(
+        self,
+        identity: str,
+        packet: TaskPacket,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> MWVRunResult:
+        self.validate_mwv_approval(identity, packet)
+        if cancellation_requested(cancellation_token):
+            raise MWVContinuationUnavailable("approval_continuation_not_started")
+        checkpoint = self._mwv_checkpoints.pop(identity)
+        execution = MWVExecutionControl(
+            cancellation_token=cancellation_token,
+            observations=list(checkpoint.observations),
+        )
+        try:
+            result = self._run_task_packet_frame(
+                checkpoint.packet, checkpoint.context, checkpoint, execution=execution
+            )
+            if not execution.started:
+                raise MWVContinuationUnavailable("approval_continuation_not_started")
+            return result
+        except Exception as exc:
+            if not execution.started:
+                self._mwv_checkpoints[identity] = checkpoint
+                raise MWVContinuationUnavailable("approval_continuation_not_started") from exc
+            raise
+
+    def run_task_packet(
+        self,
+        packet: TaskPacket,
+        context: RunContext,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> MWVRunResult:
+        return self._run_task_packet_frame(
+            packet, context, execution=MWVExecutionControl(cancellation_token=cancellation_token)
+        )
+
+    def _run_task_packet_frame(
+        self,
+        packet: TaskPacket,
+        context: RunContext,
+        checkpoint: MWVWorkerCheckpoint | None = None,
+        *,
+        execution: MWVExecutionControl | None = None,
+    ) -> MWVRunResult:
+        execution = execution or MWVExecutionControl()
         verifier_runtime = _verifier_runtime_cls()()
-        worker = WorkerRuntime(runner=self._mwv_worker_runner)
         manager = _manager_runtime_cls()(task_builder=lambda _messages, _context: packet)
 
         def _worker(task: TaskPacket, run_context: RunContext) -> WorkResult:
-            return worker.run(task, run_context)
+            nonlocal checkpoint
+            resumed = checkpoint
+            checkpoint = None
+            result = self._mwv_worker_runner(
+                task, run_context, checkpoint=resumed, execution=execution
+            )
+            if resumed is not None and not execution.started:
+                raise MWVContinuationUnavailable("approval_continuation_not_started")
+            return result
 
         def _verifier(task: TaskPacket, run_context: RunContext) -> VerificationResult:
-            return verifier_runtime.run(task, run_context)
+            return verifier_runtime.run(
+                task,
+                run_context,
+                cancelled=lambda: cancellation_requested(execution.cancellation_token),
+            )
 
-        return manager.run_flow(packet.messages, context, worker=_worker, verifier=_verifier)
-
-    def _mwv_resume_state(self, task: TaskPacket) -> dict[str, JSONValue]:
-        raw = task.context.get("plan_runner_resume")
-        return dict(raw) if isinstance(raw, dict) else {}
+        try:
+            result = manager.run_flow(
+                packet.messages,
+                context,
+                worker=_worker,
+                verifier=_verifier,
+                initial_attempt=context.attempt,
+            )
+        except TaskPacketApprovalPending:
+            raise
+        except Exception as exc:
+            if not execution.started:
+                raise
+            cancelled = isinstance(exc, MWVExecutionCancelled)
+            result = MWVRunResult(
+                task=packet,
+                work_result=WorkResult(
+                    task_id=packet.task_id,
+                    status=WorkStatus.FAILURE,
+                    summary="MWV execution cancelled" if cancelled else str(exc),
+                    diagnostics={"cancelled": cancelled},
+                    root_cause_tag="cancelled" if cancelled else "runtime_error",
+                ),
+                verification_result=VerificationResult(
+                    status=VerificationStatus.ERROR,
+                    command=[],
+                    exit_code=None,
+                    stdout="",
+                    stderr="",
+                    duration_seconds=0,
+                    error="cancelled" if cancelled else "runtime_error",
+                ),
+                attempt=context.attempt,
+                max_attempts=max(1, context.max_retries + 1),
+                retry_decision=None,
+            )
+        if cancellation_requested(execution.cancellation_token):
+            result = replace(
+                result,
+                work_result=replace(
+                    result.work_result,
+                    status=WorkStatus.FAILURE,
+                    diagnostics={**result.work_result.diagnostics, "cancelled": True},
+                    root_cause_tag="cancelled",
+                ),
+            )
+        return replace(result, tool_observations=tuple(execution.observations))
 
     def _work_change_to_json(self, change: WorkChange) -> dict[str, JSONValue]:
         return {
@@ -948,12 +1182,25 @@ class AgentMWVMixin:
             return None, f"operation '{operation}' не входит в allowed_tool_kinds."
         return operation, None
 
-    def _execute_mwv_plan_step(self, step: PlanStep, tool_gateway: ToolGateway) -> PlanStep:
+    def _execute_mwv_plan_step(
+        self,
+        step: PlanStep,
+        tool_gateway: ToolGateway,
+        *,
+        approval: ApprovalRequest | None = None,
+        observe: Callable[[ToolRequest, ToolResult], None] | None = None,
+    ) -> PlanStep:
         step.status = PlanStepStatus.IN_PROGRESS
         try:
             if step.operation:
                 request = ToolRequest(name=step.operation, args=dict(step.tool_args))
-                result = tool_gateway.call(request)
+                result = (
+                    tool_gateway.call_approved_once(request, approval)
+                    if approval is not None
+                    else tool_gateway.call(request)
+                )
+                if observe is not None:
+                    observe(request, result)
                 if result.ok:
                     step.result = str(result.data.get("output") or result.data)
                     step.status = PlanStepStatus.DONE

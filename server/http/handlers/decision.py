@@ -525,6 +525,63 @@ async def _complete_ui_decision(
                 "resume_started": False,
             }
 
+        if source_endpoint == "plan.execute_runner":
+            workflow = await hub.get_session_workflow(session_id)
+            current_plan = _normalize_plan_payload(workflow.get("active_plan"))
+            current_task = _normalize_task_payload(workflow.get("active_task"))
+            plan_id_raw = resume_payload.get("plan_id")
+            task_id_raw = resume_payload.get("task_id")
+            if current_plan is None or current_task is None:
+                return {
+                    "ok": False,
+                    "error": "plan_state_conflict",
+                    "source_endpoint": source_endpoint,
+                }
+            if (
+                not isinstance(plan_id_raw, str)
+                or not plan_id_raw.strip()
+                or current_plan.get("plan_id") != plan_id_raw
+            ):
+                return {
+                    "ok": False,
+                    "error": "plan_state_conflict",
+                    "source_endpoint": source_endpoint,
+                }
+            if (
+                not isinstance(task_id_raw, str)
+                or not task_id_raw.strip()
+                or current_task.get("task_id") != task_id_raw
+            ):
+                return {
+                    "ok": False,
+                    "error": "task_already_running",
+                    "source_endpoint": source_endpoint,
+                }
+            checkpoint_id = resume_payload.get("checkpoint_id")
+            if not isinstance(checkpoint_id, str) or not checkpoint_id:
+                return {
+                    "ok": False,
+                    "error": "approval_continuation_unavailable",
+                    "resume_started": False,
+                }
+            started = await _run_plan_runner(
+                app=request.app,
+                session_id=session_id,
+                plan_id=plan_id_raw,
+                task_id=task_id_raw,
+                resume_checkpoint_id=checkpoint_id,
+                cancellation_token=request_cancellation,
+                session_categories=set(required_categories)
+                if choice == "approve_session"
+                else None,
+            )
+            return {
+                "ok": started,
+                "source_endpoint": source_endpoint,
+                "error": None if started else "approval_continuation_unavailable",
+                "resume_started": started,
+            }
+
         if desktop_scope is not None and choice in {
             "approve_once",
             "approve_session",
@@ -612,57 +669,6 @@ async def _complete_ui_decision(
                 "ok": True,
                 "source_endpoint": source_endpoint,
                 "data": {"root_path": str(target_root)},
-            }
-
-        if source_endpoint == "plan.execute_runner":
-            workflow = await hub.get_session_workflow(session_id)
-            current_plan = _normalize_plan_payload(workflow.get("active_plan"))
-            current_task = _normalize_task_payload(workflow.get("active_task"))
-            plan_id_raw = resume_payload.get("plan_id")
-            task_id_raw = resume_payload.get("task_id")
-            if current_plan is None or current_task is None:
-                return {
-                    "ok": False,
-                    "error": "plan_state_conflict",
-                    "source_endpoint": source_endpoint,
-                }
-            if (
-                not isinstance(plan_id_raw, str)
-                or not plan_id_raw.strip()
-                or current_plan.get("plan_id") != plan_id_raw
-            ):
-                return {
-                    "ok": False,
-                    "error": "plan_state_conflict",
-                    "source_endpoint": source_endpoint,
-                }
-            if (
-                not isinstance(task_id_raw, str)
-                or not task_id_raw.strip()
-                or current_task.get("task_id") != task_id_raw
-            ):
-                return {
-                    "ok": False,
-                    "error": "task_already_running",
-                    "source_endpoint": source_endpoint,
-                }
-            asyncio.create_task(
-                _run_plan_runner(
-                    app=request.app,
-                    session_id=session_id,
-                    plan_id=plan_id_raw,
-                    task_id=task_id_raw,
-                )
-            )
-            return {
-                "ok": True,
-                "source_endpoint": source_endpoint,
-                "data": {
-                    "plan_id": plan_id_raw,
-                    "task_id": task_id_raw,
-                    "blocked_step_id": resume_payload.get("blocked_step_id"),
-                },
-                "resume_started": True,
             }
 
         if source_endpoint == "project.command":
@@ -1456,6 +1462,12 @@ async def _complete_ui_decision(
         )
         resume_payload_response: dict[str, JSONValue] | None = None
         if source_endpoint == "plan.execute_runner":
+            checkpoint_id = resume_payload.get("checkpoint_id")
+            if isinstance(checkpoint_id, str):
+                agent = await _resolve_agent(request, session_id)
+                if agent is not None:
+                    async with _agent_lock_for_request(request, session_id):
+                        await asyncio.to_thread(agent.cancel_mwv_approval, checkpoint_id)
             await _set_current_plan_step_status(
                 hub=hub,
                 session_id=session_id,
@@ -1697,7 +1709,8 @@ async def _complete_ui_decision(
     if not updated_resolved:
         nested_chat_resume = (
             decision_type == "tool_approval"
-            and current_source_endpoint in {"chat.send", "workspace.send", "chat.tool_continue"}
+            and current_source_endpoint
+            in {"chat.send", "workspace.send", "chat.tool_continue", "plan.execute_runner"}
             and resume.get("ok") is True
         )
         if decision_type == "agent_decision" or nested_chat_resume:

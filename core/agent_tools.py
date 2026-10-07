@@ -84,6 +84,7 @@ _MAX_UX_SUMMARY_CHARS = 220
 
 if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
+    from core.agent_mwv import MWVWorkerCheckpoint
     from core.auto_agent import AutoAgent
     from core.auto_runtime import AutoRunOutcome
     from core.decision.handler import DecisionHandler
@@ -142,6 +143,7 @@ class AgentToolsMixin:
     if TYPE_CHECKING:
         desktop_runtime: DesktopRuntime
         logger: logging.Logger
+        _mwv_checkpoints: dict[str, MWVWorkerCheckpoint]
         _pending_chat_approval: PendingChatApproval | None
         brain: Brain
         tracer: Tracer
@@ -318,6 +320,7 @@ class AgentToolsMixin:
 
     def _reset_approval_state(self, *, cancel_runtime: bool = True) -> None:
         if cancel_runtime:
+            self._mwv_checkpoints.clear()
             self.desktop_runtime.cancel_pending()
             pending = self._pending_chat_approval
             if pending is not None and pending.auto_run_id is not None:

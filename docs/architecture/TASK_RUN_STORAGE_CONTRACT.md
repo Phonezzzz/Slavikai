@@ -320,3 +320,38 @@ Pending Auto `/chat/cancel` также синхронизирует workflow/pro
 approval не оставляет новый checkpoint. Drain verifier pipes после остановки owning group
 ограничен: escaped descendant не удерживает worker бесконечно; при неполном capture диагностика
 явно содержит `verifier pipe capture incomplete`. Это не гарантия полного canonical capture.
+
+
+## Volatile Act packet approval continuation — foundation
+
+`Agent.run_task_packet` при остановке сохраняет Agent-owned `MWVWorkerCheckpoint`:
+исходный packet, context/attempt, exact approval request, выполненный prefix, changes,
+счётчики и доступные typed `ToolRequest/ToolResult` observations. UI получает только
+opaque checkpoint ID и presentation snapshots. `TaskPacket.context.plan_runner_resume`
+отклоняется; HTTP не пересчитывает packet hash ради подстановки выполненных шагов.
+
+Resume проверяет packet, principal/session, mode, root и original brain/config, затем
+single-use claim продолжает worker и Manager с исходным attempt. `approve_once` вызывает
+`ToolGateway.call_approved_once` только для остановленного request; следующий request
+проходит обычную approval проверку. Missing checkpoint/restart возвращает unavailable без
+rerun. До dispatch failure сохраняет checkpoint и pending decision; после исполненного
+request результат сохраняется отдельно от text/diff projection и не повторяется автоматически.
+`MWVRunResult.tool_observations` содержит доступные results, включая failed ToolResult.
+
+HTTP использует existing scoped Agent lock для актуальной workflow/model/security проверки,
+claim, session grant и публикации projection. Незапущенный resume откатывает только новые
+session categories. Original brain на resume не пересоздаётся. Reject/reset/Agent close
+очищают pending checkpoints. Отмена approval request передаётся worker и существующему
+cancellable verifier; выполненный ToolResult сохраняется до следующей cancellation проверки.
+
+Проверки: `tests/test_mwv_native_continuation.py` — настоящий worker/Gateway/Manager/verifier,
+prefix без повторов, отдельные once approvals, original packet, duplicate claim, pre-dispatch
+fault, чужая session, cancellation и post-call projection fault. `tests/ui_api/test_modes_and_plan.py`
+проверяет actual Agent reconfiguration/runtime, once/session approvals, rollback с сохранением
+старого grant, смену root, reject и explicit forced reset.
+
+Это **volatile Act packet runner**, не durable task/run lifecycle или full byte capture.
+Checkpoint не восстанавливается после restart. Existing tool/verifier caps, persisted payloads,
+acceptance authority, full retry history и budget enforcement остаются отдельными foundation
+задачами. Legacy routed MWV и initial background runner cancellation не получают новой
+гарантии через эту approval boundary. TinyJuice readiness не повышается.

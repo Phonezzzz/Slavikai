@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -487,7 +488,10 @@ async def _run_plan_runner(
     session_id: str,
     plan_id: str,
     task_id: str,
-) -> None:
+    resume_checkpoint_id: str | None = None,
+    session_categories: set[object] | None = None,
+    cancellation_token: asyncio.Event | None = None,
+) -> bool:
     def _approval_decision_builder(
         approval_request: dict[str, JSONValue],
         session_id_value: str,
@@ -525,6 +529,9 @@ async def _run_plan_runner(
         session_id=session_id,
         plan_id=plan_id,
         task_id=task_id,
+        resume_checkpoint_id=resume_checkpoint_id,
+        session_categories=session_categories,
+        cancellation_token=cancellation_token,
         normalize_plan_payload_fn=_normalize_plan_payload,
         normalize_task_payload_fn=_normalize_task_payload,
         normalize_mode_value_fn=lambda value: _normalize_mode_value(value, default="ask"),

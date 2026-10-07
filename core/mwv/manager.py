@@ -17,7 +17,7 @@ from core.mwv.models import (
 )
 from core.mwv.routing import MessageLike, RouteDecision, classify_request
 from core.mwv.verifier_summary import summarize_verifier_failure
-from shared.models import JSONValue
+from shared.models import JSONValue, ToolRequest, ToolResult
 
 RouteClassifier = Callable[[Sequence[MessageLike], str, dict[str, JSONValue] | None], RouteDecision]
 TaskBuilder = Callable[[Sequence[MWVMessage], RunContext], TaskPacket]
@@ -34,6 +34,7 @@ class MWVRunResult:
     attempt: int
     max_attempts: int
     retry_decision: RetryDecision | None
+    tool_observations: tuple[tuple[ToolRequest, ToolResult], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -59,10 +60,14 @@ class ManagerRuntime:
         context: RunContext,
         worker: WorkRunner,
         verifier: VerifierRunner,
+        *,
+        initial_attempt: int = 1,
     ) -> MWVRunResult:
         task = self.build_task_packet(messages, context)
         max_attempts = max(1, context.max_retries + 1)
-        attempt = 1
+        attempt = initial_attempt
+        if not 1 <= attempt <= max_attempts:
+            raise ValueError("invalid_mwv_attempt")
         retry_decision: RetryDecision | None = None
         while True:
             attempt_context = replace(context, attempt=attempt)
