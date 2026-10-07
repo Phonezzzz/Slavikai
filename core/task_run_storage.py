@@ -15,6 +15,10 @@ class RunConflictError(ValueError):
     pass
 
 
+class RunAlreadyAdmittedError(RunConflictError):
+    pass
+
+
 class TaskRunStore:
     """Transactional admission/transition authority; runtime adoption is a separate slice."""
 
@@ -29,7 +33,7 @@ class TaskRunStore:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 1:
+            if version == 2:
                 return
             occupied = conn.execute(
                 "SELECT count(*) FROM sqlite_master "
@@ -46,6 +50,7 @@ class TaskRunStore:
                     request_key TEXT NOT NULL,
                     goal TEXT NOT NULL,
                     mode TEXT NOT NULL,
+                    request_fingerprint TEXT NOT NULL,
                     PRIMARY KEY (task_id, revision),
                     UNIQUE (principal_id, request_key)
                 );""",
@@ -86,7 +91,7 @@ class TaskRunStore:
             )
             for statement in statements:
                 conn.execute(statement)
-            conn.execute("PRAGMA user_version = 1")
+            conn.execute("PRAGMA user_version = 2")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -94,10 +99,23 @@ class TaskRunStore:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
-    def admit(self, scope: RunScope, *, request_key: str, goal: str, mode: str) -> TaskRun:
+    def admit(
+        self,
+        scope: RunScope,
+        *,
+        request_key: str,
+        goal: str,
+        mode: str,
+        request_fingerprint: str,
+        require_new: bool = False,
+    ) -> TaskRun:
+        if len(request_fingerprint) != 64 or any(
+            char not in "0123456789abcdef" for char in request_fingerprint
+        ):
+            raise ValueError("Invalid accepted request fingerprint")
         if not request_key.strip() or len(request_key) > 128:
             raise ValueError("Invalid admission request key")
-        if not goal.strip() or len(goal.encode("utf-8")) > 512 * 1024:
+        if not goal.strip() or len(goal.encode("utf-8")) > 1024 * 1024:
             raise ValueError("Invalid accepted goal")
         if mode not in {"ask", "plan", "act", "auto", "desktop"}:
             raise ValueError("Invalid execution mode")
@@ -108,10 +126,16 @@ class TaskRunStore:
                 (scope.principal_id, request_key),
             ).fetchone()
             if existing is not None:
-                if (existing["session_id"], existing["goal"], existing["mode"]) != (
+                if (
+                    existing["session_id"],
+                    existing["goal"],
+                    existing["mode"],
+                    existing["request_fingerprint"],
+                ) != (
                     scope.session_id,
                     goal,
                     mode,
+                    request_fingerprint,
                 ):
                     raise RunConflictError("Admission key already belongs to a different request")
                 row = conn.execute(
@@ -120,12 +144,25 @@ class TaskRunStore:
                 ).fetchone()
                 if row is None:
                     raise RuntimeError("Admission has no run")
-                return self._record(scope, self._owned_row(conn, scope, row["task_run_id"]))
+                record = self._record(scope, self._owned_row(conn, scope, row["task_run_id"]))
+                if require_new:
+                    raise RunAlreadyAdmittedError(
+                        "Admission already exists; context recovery required"
+                    )
+                return record
             task_id, run_id, attempt_id = (str(uuid4()) for _ in range(3))
             now = datetime.now(UTC).isoformat()
             conn.execute(
-                "INSERT INTO task_revisions VALUES (?, 1, ?, ?, ?, ?, ?)",
-                (task_id, scope.principal_id, scope.session_id, request_key, goal, mode),
+                "INSERT INTO task_revisions VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    scope.principal_id,
+                    scope.session_id,
+                    request_key,
+                    goal,
+                    mode,
+                    request_fingerprint,
+                ),
             )
             conn.execute(
                 "INSERT INTO task_runs VALUES (?, ?, 1, ?, ?, 0, ?, NULL)",
@@ -196,6 +233,20 @@ class TaskRunStore:
                 ),
             )
             return self._record(scope, self._owned_row(conn, scope, task_run_id))
+
+    def find_by_request(self, scope: RunScope, request_key: str) -> TaskRun | None:
+        """Read a principal/session-owned admission; absence never authorizes rerun."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN")
+            row = conn.execute(
+                "SELECT r.task_run_id FROM task_runs r JOIN task_revisions t "
+                "ON t.task_id = r.task_id AND t.revision = r.task_revision "
+                "WHERE t.principal_id = ? AND t.session_id = ? AND t.request_key = ?",
+                (scope.principal_id, scope.session_id, request_key),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._record(scope, self._owned_row(conn, scope, row["task_run_id"]))
 
     def get(self, scope: RunScope, task_run_id: str) -> TaskRun:
         with closing(self._connect()) as conn, conn:

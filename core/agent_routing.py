@@ -581,7 +581,7 @@ class AgentRoutingMixin:
         try:
             self.tracer.log("reasoning_start", "Генерация ответа моделью")
             policy_application = self._apply_policies(last_content)
-            messages_with_context = self._build_context_messages(self.short_term, last_content)
+            messages_with_context = self._build_context_messages(messages, last_content)
             messages_with_context = self._append_policy_instructions(
                 messages_with_context,
                 policy_application,
@@ -786,12 +786,11 @@ class AgentRoutingMixin:
         try:
             self.tracer.log("reasoning_start", "Потоковая генерация ответа моделью")
             policy_application = self._apply_policies(last_content)
-            messages_with_context = self._build_context_messages(self.short_term, last_content)
+            messages_with_context = self._build_context_messages(messages, last_content)
             messages_with_context = self._append_policy_instructions(
                 messages_with_context,
                 policy_application,
             )
-            del messages
             web_evidence = self._initial_web_search_evidence()
             messages_with_context, web_evidence = self._prepare_web_search_context(
                 last_content,

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import { PendingSendConflict, acknowledgeClientSend, markClientSendRegenerated, prepareClientSend } from './client-send-request';
+
 import type { Artifact } from './components/artifacts-sidebar';
 import type {
   CanvasComposerAttachment,
@@ -532,14 +534,25 @@ export function useSessionTransport({
     setChatStreamingState(null);
     const forceCanvasForRequest = forceCanvasNext;
     setSending(true);
+    const requestBody = JSON.stringify({
+      content: trimmed,
+      force_canvas: forceCanvasForRequest,
+      attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
+      web_search: payload.webSearch === true ? true : undefined,
+    });
     try {
-      if (payload.regenerateLast === true) {
+      const pendingSend = await prepareClientSend(
+        selectedConversation, JSON.stringify([requestBody, payload.regenerateLast === true, payload.regenerationTargetId]),
+      );
+      if (payload.regenerateLast === true && !pendingSend.regenerated) {
+        if (!payload.regenerationTargetId) throw new Error('Отсутствует целевой ответ для повторной генерации.');
         const encodedSessionId = encodeURIComponent(selectedConversation);
         const deleteResponse = await fetch(
           `/ui/api/sessions/${encodedSessionId}/messages/last`,
           {
             method: 'DELETE',
             headers: {
+              'If-Match': payload.regenerationTargetId,
               [sessionHeader]: selectedConversation,
             },
           },
@@ -550,23 +563,25 @@ export function useSessionTransport({
             extractErrorMessage(deletePayload, 'Failed to remove the previous response.'),
           );
         }
+        markClientSendRegenerated(selectedConversation, pendingSend.key);
         applySessionPayload(deletePayload, { applyDisplay: false });
       }
       const response = await fetch('/ui/api/chat/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Idempotency-Key': pendingSend.key,
           [sessionHeader]: selectedConversation,
         },
-        body: JSON.stringify({
-          content: trimmed,
-          force_canvas: forceCanvasForRequest,
-          attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
-          web_search: payload.webSearch === true ? true : undefined,
-        }),
+        body: requestBody,
       });
       const responsePayload: unknown = await response.json();
       if (!response.ok) {
+        if (window.confirm('Результат предыдущего запроса недоступен. Отбросить его ключ? Следующая отправка будет новым запросом и может повторить выполненную работу.')) {
+          acknowledgeClientSend(selectedConversation, pendingSend.key);
+          onStatusMessage('Ключ отброшен. Проверьте историю и отправьте запрос заново, если это нужно.');
+          return false;
+        }
         throw new Error(extractErrorMessage(responsePayload, 'Failed to send message.'));
       }
 
@@ -590,15 +605,21 @@ export function useSessionTransport({
       if (forceCanvasForRequest) {
         consumeForceCanvasNext();
       }
+      acknowledgeClientSend(selectedConversation, pendingSend.key);
       return true;
     } catch (error) {
+      if (error instanceof PendingSendConflict && window.confirm('Предыдущий запрос мог выполниться. Отбросить его перед новой отправкой? Новая отправка может повторить выполненную работу.')) {
+        acknowledgeClientSend(selectedConversation, error.key);
+        onStatusMessage('Предыдущий запрос отброшен. Отправьте новый запрос отдельным действием.');
+        return false;
+      }
       const message = error instanceof Error ? error.message : 'Failed to send message.';
       onStatusMessage(message);
+      return false;
+    } finally {
       setPendingUserMessage(null);
       setPendingSessionId(null);
       setChatStreamingState(null);
-      return false;
-    } finally {
       setSending(false);
     }
   };

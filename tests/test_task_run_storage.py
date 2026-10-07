@@ -14,7 +14,13 @@ def test_admission_is_durable_scoped_and_idempotent(tmp_path) -> None:
     path = tmp_path / "runs.db"
     scope = RunScope(principal_id="alice", session_id="session-a")
     store = TaskRunStore(path)
-    run = store.admit(scope, request_key="request-1", goal="inspect project", mode="ask")
+    run = store.admit(
+        scope,
+        request_fingerprint="a" * 64,
+        request_key="request-1",
+        goal="inspect project",
+        mode="ask",
+    )
 
     assert run.state == RunState.ADMITTED
     assert run.version == 0
@@ -22,7 +28,16 @@ def test_admission_is_durable_scoped_and_idempotent(tmp_path) -> None:
     assert len({run.task_id, run.task_run_id, run.attempt_id}) == 3
     reopened = TaskRunStore(path)
     assert reopened.get(scope, run.task_run_id) == run
-    assert reopened.admit(scope, request_key="request-1", goal="inspect project", mode="ask") == run
+    assert (
+        reopened.admit(
+            scope,
+            request_fingerprint="a" * 64,
+            request_key="request-1",
+            goal="inspect project",
+            mode="ask",
+        )
+        == run
+    )
     events = reopened.events(scope, run.task_run_id)
     assert len(events) == 1
     assert events[0].version == 0
@@ -33,7 +48,9 @@ def test_transition_is_versioned_and_durable_without_inferred_completion(tmp_pat
     path = tmp_path / "runs.db"
     store = TaskRunStore(path)
     scope = RunScope("alice", "session-a")
-    run = store.admit(scope, request_key="1", goal="inspect", mode="auto")
+    run = store.admit(
+        scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="auto"
+    )
     running = store.transition(
         scope,
         run.task_run_id,
@@ -60,7 +77,9 @@ def test_transition_is_versioned_and_durable_without_inferred_completion(tmp_pat
 def test_materialized_state_without_matching_history_is_rejected(tmp_path) -> None:
     store = TaskRunStore(tmp_path / "runs.db")
     scope = RunScope("alice", "session-a")
-    run = store.admit(scope, request_key="1", goal="inspect", mode="ask")
+    run = store.admit(
+        scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="ask"
+    )
     with sqlite3.connect(store.path) as conn:
         conn.execute(
             "UPDATE task_runs SET state = 'running' WHERE task_run_id = ?", (run.task_run_id,)
@@ -68,14 +87,18 @@ def test_materialized_state_without_matching_history_is_rejected(tmp_path) -> No
     with pytest.raises(RuntimeError, match="history"):
         store.get(scope, run.task_run_id)
     with pytest.raises(RuntimeError, match="history"):
-        store.admit(scope, request_key="1", goal="inspect", mode="ask")
+        store.admit(
+            scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="ask"
+        )
 
 
 @pytest.mark.parametrize("scope", [RunScope("bob", "session-a"), RunScope("alice", "session-b")])
 def test_foreign_scope_cannot_read_history_or_transition(tmp_path, scope) -> None:
     store = TaskRunStore(tmp_path / "runs.db")
     owner = RunScope("alice", "session-a")
-    run = store.admit(owner, request_key="1", goal="inspect", mode="ask")
+    run = store.admit(
+        owner, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="ask"
+    )
     with pytest.raises(LookupError):
         store.get(scope, run.task_run_id)
     with pytest.raises(LookupError):
@@ -100,18 +123,27 @@ def test_foreign_scope_cannot_read_history_or_transition(tmp_path, scope) -> Non
 def test_admission_key_cannot_be_reused_for_another_request(tmp_path, field, value) -> None:
     store = TaskRunStore(tmp_path / "runs.db")
     scope = RunScope("alice", "session-a")
-    run = store.admit(scope, request_key="1", goal="inspect", mode="ask")
+    run = store.admit(
+        scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="ask"
+    )
     args = {"goal": "inspect", "mode": "ask", "session": "session-a"}
     args[field] = value
     with pytest.raises(RunConflictError):
         store.admit(
             RunScope("alice", args["session"]),
+            request_fingerprint="a" * 64,
             request_key="1",
             goal=args["goal"],
             mode=args["mode"],
         )
     assert store.get(scope, run.task_run_id) == run
-    other = store.admit(RunScope("bob", "session-a"), request_key="1", goal="inspect", mode="ask")
+    other = store.admit(
+        RunScope("bob", "session-a"),
+        request_fingerprint="a" * 64,
+        request_key="1",
+        goal="inspect",
+        mode="ask",
+    )
     assert other.task_id != run.task_id
 
 
@@ -119,7 +151,9 @@ def _concurrent_admit(args):
     path, scope, barrier = args
     store = TaskRunStore(path)
     barrier.wait()
-    return store.admit(scope, request_key="1", goal="inspect", mode="ask")
+    return store.admit(
+        scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="ask"
+    )
 
 
 def _concurrent_start(args):
@@ -155,7 +189,9 @@ def test_concurrent_transition_fences_stale_writer(tmp_path) -> None:
     path = tmp_path / "runs.db"
     store = TaskRunStore(path)
     scope = RunScope("alice", "session-a")
-    run = store.admit(scope, request_key="1", goal="inspect", mode="auto")
+    run = store.admit(
+        scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="auto"
+    )
     with multiprocessing.Manager() as manager:
         barrier = manager.Barrier(2)
         with ProcessPoolExecutor(max_workers=2) as pool:
@@ -170,7 +206,9 @@ def test_concurrent_transition_fences_stale_writer(tmp_path) -> None:
 def test_terminal_abort_cannot_be_resurrected(tmp_path) -> None:
     store = TaskRunStore(tmp_path / "runs.db")
     scope = RunScope("alice", "session-a")
-    run = store.admit(scope, request_key="1", goal="inspect", mode="auto")
+    run = store.admit(
+        scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="auto"
+    )
     aborted = store.transition(
         scope,
         run.task_run_id,
@@ -191,13 +229,20 @@ def test_terminal_abort_cannot_be_resurrected(tmp_path) -> None:
                 reason_code="execution_started",
             )
     assert store.get(scope, run.task_run_id) == aborted
-    assert store.admit(scope, request_key="1", goal="inspect", mode="auto") == aborted
+    assert (
+        store.admit(
+            scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="auto"
+        )
+        == aborted
+    )
 
 
 def test_recovery_requires_explicit_authority_and_does_not_resume(tmp_path) -> None:
     store = TaskRunStore(tmp_path / "runs.db")
     scope = RunScope("alice", "session-a")
-    run = store.admit(scope, request_key="1", goal="inspect", mode="auto")
+    run = store.admit(
+        scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="auto"
+    )
     run = store.transition(
         scope,
         run.task_run_id,
@@ -243,7 +288,9 @@ def test_history_write_failure_rolls_back_materialized_state(tmp_path, during_ad
     run = (
         None
         if during_admission
-        else store.admit(scope, request_key="1", goal="inspect", mode="ask")
+        else store.admit(
+            scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="ask"
+        )
     )
     with sqlite3.connect(store.path) as conn:
         conn.execute(
@@ -252,7 +299,9 @@ def test_history_write_failure_rolls_back_materialized_state(tmp_path, during_ad
         )
     with pytest.raises(sqlite3.IntegrityError, match="disk failure"):
         if run is None:
-            store.admit(scope, request_key="1", goal="inspect", mode="ask")
+            store.admit(
+                scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="ask"
+            )
         else:
             store.transition(
                 scope,
@@ -276,7 +325,9 @@ def test_history_write_failure_rolls_back_materialized_state(tmp_path, during_ad
 def test_revision_and_history_are_immutable(tmp_path, table, operation) -> None:
     store = TaskRunStore(tmp_path / "runs.db")
     scope = RunScope("alice", "session-a")
-    run = store.admit(scope, request_key="1", goal="inspect", mode="ask")
+    run = store.admit(
+        scope, request_fingerprint="a" * 64, request_key="1", goal="inspect", mode="ask"
+    )
     statement = (
         f"DELETE FROM {table}"
         if operation == "DELETE"
@@ -315,3 +366,69 @@ def test_unrelated_or_unknown_database_is_not_adopted(tmp_path) -> None:
         conn.execute("PRAGMA user_version = 99")
     with pytest.raises(RuntimeError, match="schema"):
         TaskRunStore(path)
+
+
+def test_request_fingerprint_is_bound_to_admission(tmp_path) -> None:
+    store = TaskRunStore(tmp_path / "runs.db")
+    scope = RunScope("alice", "session")
+    original = store.admit(
+        scope, request_key="request", goal="same text", mode="ask", request_fingerprint="a" * 64
+    )
+    with pytest.raises(RunConflictError):
+        store.admit(
+            scope, request_key="request", goal="same text", mode="ask", request_fingerprint="b" * 64
+        )
+    assert store.get(scope, original.task_run_id) == original
+
+
+def test_request_lookup_is_scoped_and_checks_history(tmp_path) -> None:
+    store = TaskRunStore(tmp_path / "runs.db")
+    scope = RunScope("alice", "session")
+    run = store.admit(
+        scope, request_key="request", goal="inspect", mode="ask", request_fingerprint="a" * 64
+    )
+    assert store.find_by_request(scope, "request") == run
+    assert store.find_by_request(RunScope("bob", "session"), "request") is None
+    assert store.find_by_request(RunScope("alice", "other"), "request") is None
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "UPDATE task_runs SET state = 'running' WHERE task_run_id = ?", (run.task_run_id,)
+        )
+    with pytest.raises(RuntimeError, match="history"):
+        store.find_by_request(scope, "request")
+
+
+def _require_new_admission(args):  # noqa: ANN001, ANN202
+    from core.task_run_storage import RunAlreadyAdmittedError
+
+    path, scope, barrier = args
+    barrier.wait(timeout=10)
+    try:
+        return (
+            TaskRunStore(path)
+            .admit(
+                scope,
+                request_key="same",
+                goal="inspect",
+                mode="ask",
+                request_fingerprint="a" * 64,
+                require_new=True,
+            )
+            .task_run_id
+        )
+    except RunAlreadyAdmittedError:
+        return "already_admitted"
+
+
+def test_require_new_admission_has_only_one_owner(tmp_path) -> None:
+    path = tmp_path / "runs.db"
+    TaskRunStore(path)
+    scope = RunScope("alice", "session")
+    with multiprocessing.Manager() as manager:
+        barrier = manager.Barrier(4)
+        with ProcessPoolExecutor(max_workers=4) as workers:
+            outcomes = list(workers.map(_require_new_admission, [(path, scope, barrier)] * 4))
+    assert outcomes.count("already_admitted") == 3
+    run_id = next(result for result in outcomes if result != "already_admitted")
+    assert TaskRunStore(path).get(scope, run_id).state == RunState.ADMITTED
+    assert len(TaskRunStore(path).events(scope, run_id)) == 1

@@ -19,6 +19,7 @@ from config.http_server_config import (
 from config.model_store import load_model_configs
 from core.desktop_policy import DesktopPolicyStore
 from core.desktop_runtime import DesktopRunCoordinator
+from core.task_run_storage import TaskRunStore
 from llm.types import ModelConfig
 from server import http_api as api
 from server.agent_provider import AgentScope, ScopedAgentProvider
@@ -103,6 +104,7 @@ def create_app(
     agent: AgentProtocol | None = None,
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
+    task_run_store: TaskRunStore | None = None,
     auth_config: HttpAuthConfig | None = None,
     cloudflare_access_verifier: CloudflareAccessVerifier | None = None,
     desktop_policy_store: DesktopPolicyStore | None = None,
@@ -181,6 +183,9 @@ def create_app(
         app["agent_provider"] = ScopedAgentProvider.from_instance(agent)
     app["session_store"] = SessionApprovalStore()
     app["idempotency_store"] = IdempotencyStore()
+    app["task_run_store"] = task_run_store or TaskRunStore(
+        api.PROJECT_ROOT / ".run" / "task_runs.db"
+    )
     app["chat_cancellation_registry"] = ChatCancellationRegistry()
     app["plan_cancellation_registry"] = PlanCancellationRegistry()
     app["terminal_manager"] = TerminalTool()

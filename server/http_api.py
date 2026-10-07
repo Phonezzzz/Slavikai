@@ -19,6 +19,7 @@ from config.tools_config import (
 )
 from core.approval_policy import ApprovalCategory
 from core.desktop_policy import DesktopPolicyStore
+from core.task_run_storage import TaskRunStore
 from server.http.common import (
     chat_payload as _chat_payload,
 )
@@ -102,7 +103,6 @@ _parse_ui_chat_attachments = _chat_payload._parse_ui_chat_attachments
 _extract_decision_payload = _chat_payload._extract_decision_payload
 _split_response_and_report = _chat_payload._split_response_and_report
 _normalize_trace_id = _chat_payload._normalize_trace_id
-_request_likely_web_intent = _chat_payload._request_likely_web_intent
 CHAT_STREAM_CHUNK_SIZE = _streaming.CHAT_STREAM_CHUNK_SIZE
 CHAT_STREAM_WARMUP_CHARS = _streaming.CHAT_STREAM_WARMUP_CHARS
 _split_chat_stream_chunks = _streaming._split_chat_stream_chunks
@@ -363,6 +363,7 @@ async def _apply_agent_runtime_state(
     agent: AgentProtocol,
     hub: UIHub,
     session_id: str,
+    security_snapshot: tuple[dict[str, bool], dict[str, JSONValue]] | None = None,
 ) -> tuple[
     str,
     dict[str, JSONValue] | None,
@@ -373,6 +374,8 @@ async def _apply_agent_runtime_state(
         loader_hub: _workflow_runtime.WorkflowHubProtocol,
         loader_session_id: str,
     ) -> tuple[dict[str, bool], dict[str, JSONValue]]:
+        if security_snapshot is not None:
+            return security_snapshot
         return await _load_effective_session_security(
             hub=cast(UIHub, loader_hub),
             session_id=loader_session_id,
@@ -508,6 +511,7 @@ def create_app(
     agent: AgentProtocol | None = None,
     max_request_bytes: int | None = None,
     ui_storage: UISessionStorage | None = None,
+    task_run_store: TaskRunStore | None = None,
     auth_config: HttpAuthConfig | None = None,
     desktop_policy_store: DesktopPolicyStore | None = None,
 ) -> web.Application:
@@ -517,6 +521,7 @@ def create_app(
         agent=agent,
         max_request_bytes=max_request_bytes,
         ui_storage=ui_storage,
+        task_run_store=task_run_store,
         auth_config=auth_config,
         desktop_policy_store=desktop_policy_store,
     )

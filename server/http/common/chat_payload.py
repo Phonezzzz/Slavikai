@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Final
 
 from aiohttp import web
@@ -15,11 +14,6 @@ from shared.sanitize import safe_json_loads
 MAX_ATTACHMENTS_PER_MESSAGE: Final[int] = 8
 MAX_ATTACHMENT_CHARS: Final[int] = 80_000
 MAX_TOTAL_ATTACHMENTS_CHARS: Final[int] = 160_000
-_CHAT_WEB_INTENT_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(проверь( в интернете)?|поищи|найди в интернете|поиск(ай)? в интернете|"
-    r"search( the)? web|check( in| on)?( the)? internet|look up|google)",
-    re.IGNORECASE,
-)
 
 
 def _extract_session_id(request: web.Request, payload: dict[str, object]) -> str | None:
@@ -204,15 +198,6 @@ def _normalize_trace_id(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
-
-
-def _request_likely_web_intent(user_input: str) -> bool:
-    normalized = user_input.strip()
-    if not normalized:
-        return False
-    if normalized.startswith("/"):
-        return False
-    return bool(_CHAT_WEB_INTENT_PATTERN.search(normalized))
 
 
 def _normalize_json_value(value: object) -> JSONValue:

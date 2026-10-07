@@ -1,7 +1,7 @@
 # Task/run admission store — foundation B1
 
 Статус: storage primitive реализован и проверяется `tests/test_task_run_storage.py`.
-**Production runtime ещё не использует этот store.** Общий lifecycle contract остаётся target;
+**Production UI Ask использует admission/start fencing; остальные paths ещё не подключены.** Общий lifecycle contract остаётся target;
 B1 не означает durable Ask/Auto/MWV execution, continuation или recovery tool.
 
 ## Граница и authority
@@ -12,7 +12,7 @@ B1 не означает durable Ask/Auto/MWV execution, continuation или rec
 а не cache TinyJuice, Memory или UI session storage. Storage location задаётся доверенным
 bootstrap; constructor не является recovery API и не принимает model-selected path.
 
-`admit(scope, request_key, goal, mode)` вызывается только owning runtime после принятия
+`admit(scope, request_key, goal, mode, request_fingerprint)` вызывается только owning runtime после принятия
 запроса. Store сам не принимает user intent, не выбирает tools и не разрешает execution.
 `RunScope` происходит из verified principal/session boundary; он не является пользовательским
 параметром будущего HTTP API. Обладать UUID недостаточно для доступа.
@@ -21,8 +21,9 @@ Initial task revision — 1. `task_id`, `task_run_id`, `attempt_id` генери
 содержимое goal/session/trace не определяет identity. Initial revision сохраняет exact goal
 и execution mode; дальнейшие revision/retry semantics ещё не реализованы.
 Admission key unique в principal scope. Повтор exact request возвращает исходный run,
-включая его текущий state; другой goal/mode/session с тем же key отклоняется.
-Goal ограничен 512 KiB UTF-8; слишком большой request отклоняется до записи, не truncate'ится.
+включая его текущий state; другой goal/mode/session или fingerprint с тем же key отклоняется.
+Fingerprint — обязательный SHA-256 exact structured accepted request; он не заменяет goal.
+Goal ограничен 1 MiB UTF-8 (включая JSON валидированных attachments); слишком большой request отклоняется до записи, не truncate'ится.
 Key ограничен 128 символами. Клиентские wire/idempotency contracts определяются в B2.
 
 ## Transactions и состояния
@@ -63,7 +64,7 @@ Foreign и missing IDs дают одинаковый unavailable error. Reattach
 Session prune не вызывает удаление task/run DB: session attachment не является lifetime.
 
 DB создаётся mode 0600, новый parent directory — 0700; file symlink отклоняется.
-Existing parent directory должен быть доверенным bootstrap directory. Schema version — 1;
+Existing parent directory должен быть доверенным bootstrap directory. Schema version — 2;
 unknown version и unrelated DB отклоняются без migration/compatibility layer.
 Никакие raw tool payloads или secrets не копируются в events; reason — bounded code.
 Accepted goal может содержать sensitive data, поэтому DB подчиняется private storage scope,
@@ -84,7 +85,7 @@ Sync/stream routing явно выбирает `.text` только для сущ
 Проверка `tests/test_auto_runtime.py` выполняет настоящий process через registry/gateway,
 передаёт diagnostics в следующий model request и проверяет typed success/failure outcome.
 
-Это **не** production adoption store или terminal authority; store не получает runtime
+Это **не** terminal authority; ограниченное production admission описано ниже. Store не хранит runtime
 observations. Граница `Agent.respond` / HTTP теперь описана ниже. `resume_auto_run` также пока
 теряет typed outcome; текущий `AutoOrchestrator.resume` повторно запускает goal через
 `run_v1`, вместо восстановления execution continuation. До durable recovery нужно отдельно
@@ -397,3 +398,63 @@ file/diff/tool counters и typed observations. Terminal UI проецирует 
 
 После committed approval сбой event buffer/delivery логируется отдельно и не инвалидирует
 checkpoint: matching state остаётся доступен через UI state API.
+
+
+## Первое production admission: UI Ask
+
+Server bootstrap создаёт отдельный `.run/task_runs.db`, независимо от Memory и UI session
+pruning. UI Ask после validation и root approval, под existing scoped Agent lock, сохраняет
+admission и CAS-переход `admitted -> running` до изменения pending continuation и dispatch.
+Principal/session берутся из authenticated boundary. Key связывает endpoint/session/client key;
+без client key генерируется отдельная request identity. Fingerprint связывает content, attachments,
+mode, полную execution model config, grants, effective tools/policy, hash фактических credentials, root и options.
+Raw credentials не сохраняются в DB или operational logs. Повтор ключа с другим binding отклоняется. Уже принятый
+Ask key также нельзя использовать для dispatch в другом UI режиме. Mode/model/root/grants
+проверяются повторно под lock до admission и dispatch; перед dispatch проверяется неизменность
+history snapshot, снятого до admission. UIHub под своим lock проверяет исходную историю,
+добавляет user message и возвращает snapshot после штатного pruning общего chat/workspace
+лимита; повторная проверка перед Agent защищает от последующих mutations. History ещё не
+является durable execution checkpoint. Regex web-intent guidance удалена: обычный текстовый
+запрос проходит через основной Agent с typed result, без локального command fallback.
+Sync/stream Ask строят model context из переданного request history snapshot, а не
+накопленного short-term projection. Debug command lane `/...` не является model run:
+его локальные ответы не создают admission; принятый Ask key нельзя использовать для команды. Canonical runtime state application получает принятый effective security
+snapshot вместо повторной загрузки новых tools после проверки.
+
+UI admission требует атомарного `require_new=True`: existing admitted run тоже нельзя claim'ить
+без durable execution context. Проверка проходит внутри transaction, а не предварительным lookup.
+При потере volatile HTTP replay cache любой ранее принятый run возвращает
+`task_run_continuation_unavailable` до вызова Agent; implicit rerun запрещён. Конкурирующий
+CAS claim также не dispatch'ится. DB admission/start fault останавливает request без fallback.
+Существующий HTTP replay остаётся presentation cache и не является lifecycle authority.
+
+Доступный typed Agent result переводит run в `result_submitted` до text projection.
+Это не acceptance/completion и не durable result capture. При fault/cancellation до submission
+run может остаться running/unresolved; автоматической recovery или повторного исполнения нет.
+Initial Ask approval сохраняет run, но последующий native approval resume ещё не связан с
+этим lifecycle store. `/v1`, project, Auto, Desktop и Act admission остаются непокрытыми.
+Task terminal acceptance/final, evidence references, recovery controller, full capture,
+retention/GC и user-visible run inspection остаются обязательными следующими срезами.
+
+Schema v1 storage primitive не имел production consumers; v2 требует request fingerprint.
+Existing v1 DB отклоняется, без implicit migration/delete. Тесты нового production пути:
+`tests/ui_api/test_task_run_admission.py` — actual Agent, reopen SQLite/RAM replay loss,
+changed structured binding, admission/claim storage faults и запрет нового model invocation.
+Также проверяются fresh app/Agent с теми же SQLite stores и actual Gateway call, сохранение
+pending approval при дубликате, смена режима и context race до admission/dispatch.
+Это app reconstruction, не crash/OS process recovery или общий runtime lifecycle guarantee.
+
+Штатный UI передаёт устойчивый `Idempotency-Key`. До dispatch browser сохраняет только
+pending request UUID и SHA-256 payload hash; повтор после response loss/reload сохраняет key.
+Changed payload (включая потерянные transient modifiers) не заменяет неопределённый key:
+до новой отправки требуется explicit discard.
+успешно применённый ответ освобождает key для следующей новой отправки. Explicit regeneration
+передаёт immutable assistant message identity через `If-Match`; hub под lock удаляет только
+соответствующую последнюю пару. Уже отсутствующая identity — successful no-op даже после
+restart/lost DELETE response; существующая непоследняя identity возвращает conflict.
+После подтверждённого удаления UI не повторяет deletion на retry send.
+После ошибочного HTTP send response пользователь может явно отбросить pending key с предупреждением
+о неопределённом результате; это не dispatch. Новая отправка требует отдельного действия. Message/attachment bytes
+не копируются в этот browser identity cache. Тест actual useSessionTransport проверяет HTTP
+header и повтор после lost response. Test bootstrap использует временные per-app stores;
+production DB не открывается UI test fixtures.

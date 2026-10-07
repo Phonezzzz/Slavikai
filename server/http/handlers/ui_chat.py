@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Literal
 
 from aiohttp import web
@@ -15,6 +17,7 @@ from core.approval_policy import ApprovalCategory
 from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyStore
 from core.mwv.routing import classify_request
 from core.skills.index import SkillIndex
+from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
 from llm.types import ModelConfig
 from server.http.common.auth import _request_principal_id
@@ -28,7 +31,6 @@ from server.http.common.chat_payload import (
     _normalize_trace_id,
     _parse_ui_chat_attachments,
     _project_agent_response,
-    _request_likely_web_intent,
     _ui_messages_to_llm,
 )
 from server.http.common.idempotency import (
@@ -51,6 +53,7 @@ from server.http_api import (
     _decision_workflow_context,
     _extract_files_from_tool_calls,
     _extract_named_files_from_output,
+    _load_effective_session_security,
     _model_not_selected_response,
     _normalize_auto_state,
     _normalize_mode_value,
@@ -79,8 +82,9 @@ from server.http_api import (
     _utc_now_iso,
     _workspace_root_for_session,
 )
-from server.ui_hub import UIHub
+from server.ui_hub import MessageHistoryConflictError, UIHub
 from shared.models import JSONValue, LLMMessage
+from shared.task_run import RunScope, RunState, TaskRun, TransitionAuthority
 from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
 from tools.workspace_tools import workspace_root_context
 
@@ -373,6 +377,7 @@ async def _handle_ui_send_impl(
     idempotency_fingerprint: str | None = None
     idempotency_active = False
     active_generation: ActiveChatGeneration | None = None
+    admitted_run: TaskRun | None = None
 
     async def _complete_idempotency(payload: dict[str, JSONValue], *, status: int) -> None:
         if (
@@ -744,7 +749,124 @@ async def _handle_ui_send_impl(
             lane=lane,
             attachments=attachments,
         )
+
+        execution_model_config = _inception_runtime_config_for_lane(selected_main_config, lane)
+        if web_search:
+            execution_model_config = replace(execution_model_config, web_search_enabled=True)
+        execution_api_key = _resolve_provider_api_key(selected_model["provider"])
+        execution_security = await _load_effective_session_security(hub=hub, session_id=session_id)
+        accepted_history: list[dict[str, JSONValue]] = []
+
+        async def admission_context_current() -> bool:
+            current_workflow = await hub.get_session_workflow(session_id)
+            return (
+                _normalize_mode_value(current_workflow.get("mode"), default="ask") == mode
+                and await hub.get_session_model(session_id) == selected_model_metadata
+                and await _workspace_root_for_session(hub, session_id) == session_root
+                and await session_store.get_categories(approval_scope) == approved_categories
+                and await request.app["runtime_model_resolver"].resolve_main(session_id)
+                == selected_main_config
+                and _resolve_provider_api_key(selected_model["provider"]) == execution_api_key
+                and await _load_effective_session_security(hub=hub, session_id=session_id)
+                == execution_security
+            )
+
+        run_store: TaskRunStore = request.app["task_run_store"]
+        run_scope = RunScope(approval_scope.principal_id, session_id)
+        key_source = json.dumps(
+            [idempotency_endpoint, session_id, idempotency_key or uuid.uuid4().hex]
+        )
+        durable_request_key = hashlib.sha256(key_source.encode()).hexdigest()
         async with agent_lock:
+            if mode == "ask" and not await admission_context_current():
+                await _abort_idempotency()
+                return error_response(
+                    status=409,
+                    message="Контекст запроса изменился до admission.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
+            command_lane = content_raw.strip().startswith("/")
+            if (mode != "ask" or command_lane) and idempotency_key is not None:
+                if run_store.find_by_request(run_scope, durable_request_key) is not None:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Idempotency-Key уже связан с принятым Ask запросом.",
+                        error_type="invalid_request_error",
+                        code="idempotency_key_reused",
+                    )
+            if mode == "ask" and not command_lane:
+                accepted_history = await hub.get_messages(session_id, lane=lane)
+                request_binding: dict[str, JSONValue] = {
+                    "content": content_raw,
+                    "attachments": attachments,
+                    "force_canvas": force_canvas,
+                    "web_search": web_search,
+                    "mode": mode,
+                    "model": selected_model,
+                    "execution_config": asdict(execution_model_config),
+                    "approved_categories": sorted(approved_categories),
+                    "effective_tools": execution_security[0],
+                    "effective_policy": execution_security[1],
+                    "credential_hash": hashlib.sha256(
+                        (execution_api_key or "").encode()
+                    ).hexdigest(),
+                    "workspace_root": str(session_root),
+                    "endpoint": idempotency_endpoint,
+                }
+                try:
+                    admitted_run = run_store.admit(
+                        run_scope,
+                        request_key=durable_request_key,
+                        goal=content_raw
+                        if content_raw.strip()
+                        else json.dumps(attachments, ensure_ascii=False),
+                        mode=mode,
+                        request_fingerprint=fingerprint_json_payload(request_binding),
+                        require_new=True,
+                    )
+                except RunAlreadyAdmittedError:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Повторный dispatch требует сохранённого execution context.",
+                        error_type="invalid_request_error",
+                        code="task_run_continuation_unavailable",
+                    )
+                except RunConflictError:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Idempotency-Key уже связан с другим принятым запросом.",
+                        error_type="invalid_request_error",
+                        code="idempotency_key_reused",
+                    )
+                if admitted_run.state != RunState.ADMITTED:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Сохранённый run нельзя автоматически выполнить повторно.",
+                        error_type="invalid_request_error",
+                        code="task_run_continuation_unavailable",
+                    )
+                try:
+                    admitted_run = run_store.transition(
+                        run_scope,
+                        admitted_run.task_run_id,
+                        expected_version=admitted_run.version,
+                        state=RunState.RUNNING,
+                        authority=TransitionAuthority.RUNTIME,
+                        reason_code="execution_claimed",
+                    )
+                except RunConflictError:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="Run уже передан другому execution owner.",
+                        error_type="invalid_request_error",
+                        code="task_run_continuation_unavailable",
+                    )
             pending_payload = getattr(agent, "last_approval_resume_payload", None)
             if isinstance(pending_payload, dict):
                 pending_identity = pending_payload.get("continuation_id")
@@ -761,7 +883,22 @@ async def _handle_ui_send_impl(
                     )
                     desktop_rules = [rule for rule in desktop_rules if rule.source != "once"]
                     await hub.set_session_decision(session_id, None)
-            await hub.append_message(session_id, user_message, lane=lane)
+            if admitted_run is not None:
+                try:
+                    dispatch_history = await hub.append_message_with_history(
+                        session_id, user_message, lane=lane, expected_history=accepted_history
+                    )
+                except MessageHistoryConflictError:
+                    await _abort_idempotency()
+                    return error_response(
+                        status=409,
+                        message="История принятого запроса изменилась до dispatch.",
+                        error_type="invalid_request_error",
+                        code="task_run_context_changed",
+                    )
+            else:
+                await hub.append_message(session_id, user_message, lane=lane)
+                dispatch_history = await hub.get_messages(session_id, lane=lane)
         user_message_id_raw = user_message.get("message_id")
         user_message_id = (
             user_message_id_raw
@@ -769,74 +906,7 @@ async def _handle_ui_send_impl(
             else None
         )
 
-        if not web_search and not attachments and _request_likely_web_intent(content_raw):
-            guidance_text = (
-                "Для веб-поиска используй команду `/web <запрос>` в чате. "
-                "После этого подтвердите approval, если он потребуется."
-            )
-            chat_stream_id = uuid.uuid4().hex
-            await _publish_chat_stream_from_text(
-                hub,
-                session_id=session_id,
-                stream_id=chat_stream_id,
-                content=guidance_text,
-                lane=lane,
-            )
-            if lane == "chat":
-                await hub.set_session_output(session_id, guidance_text)
-            assistant_message = hub.create_message(
-                role="assistant",
-                content=guidance_text,
-                lane=lane,
-                trace_id=None,
-                parent_user_message_id=user_message_id,
-            )
-            await hub.append_message(session_id, assistant_message, lane=lane)
-            messages = await hub.get_messages(session_id, lane="chat")
-            workspace_messages = await hub.get_messages(session_id, lane="workspace")
-            output_payload = await hub.get_session_output(session_id)
-            files_payload = await hub.get_session_files(session_id)
-            artifacts_payload = (
-                await hub.get_session_artifacts(session_id) if lane == "chat" else []
-            )
-            current_decision = await hub.get_session_decision(session_id)
-            current_model = await hub.get_session_model(session_id) or dict(selected_model)
-            current_workflow = await hub.get_session_workflow(session_id)
-            response_payload_guidance: dict[str, JSONValue] = {
-                "session_id": session_id,
-                "lane": lane,
-                "messages": messages,
-                "workspace_messages": workspace_messages,
-                "output": output_payload,
-                "files": files_payload or [],
-                "artifacts": artifacts_payload or [],
-                "display": {
-                    "target": "chat",
-                    "artifact_id": None,
-                    "forced": force_canvas,
-                },
-                "decision": _normalize_ui_decision(current_decision, session_id=session_id),
-                "selected_model": current_model,
-                "trace_id": None,
-                "approval_request": None,
-                "mwv_report": None,
-                "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
-                "active_plan": _normalize_plan_payload(workflow.get("active_plan")),
-                "active_task": _normalize_task_payload(workflow.get("active_task")),
-                "auto_state": _normalize_auto_state(workflow.get("auto_state")),
-            }
-            await _complete_idempotency(response_payload_guidance, status=200)
-            response = json_response(response_payload_guidance)
-            response.headers[UI_SESSION_HEADER] = session_id
-            await _publish_agent_activity(
-                hub,
-                session_id=session_id,
-                phase="response.ready",
-                detail=lane,
-            )
-            return response
-
-        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id, lane=lane))
+        llm_messages = _ui_messages_to_llm(dispatch_history)
         await _publish_agent_activity(
             hub,
             session_id=session_id,
@@ -854,15 +924,24 @@ async def _handle_ui_send_impl(
         generation_cancelled = False
         set_runtime_workspace_root(session_root)
         async with agent_lock:
+            if admitted_run is not None and (
+                not await admission_context_current()
+                or await hub.get_messages(session_id, lane=lane) != dispatch_history
+            ):
+                await _abort_idempotency()
+                return error_response(
+                    status=409,
+                    message="Контекст принятого запроса изменился до dispatch.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
             previous_trace_id = _normalize_trace_id(
                 getattr(agent, "last_chat_interaction_id", None)
             )
             try:
-                model_config = _inception_runtime_config_for_lane(selected_main_config, lane)
-                if web_search:
-                    model_config = replace(model_config, web_search_enabled=True)
-                api_key = _resolve_provider_api_key(selected_model["provider"])
-                agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
+                agent.reconfigure_models(
+                    execution_model_config, main_api_key=execution_api_key, persist=False
+                )
             except Exception as exc:  # noqa: BLE001
                 error_payload: dict[str, JSONValue] = {
                     "error": {
@@ -881,7 +960,12 @@ async def _handle_ui_send_impl(
                     code="model_config_invalid",
                 )
             try:
-                await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                await _apply_agent_runtime_state(
+                    agent=agent,
+                    hub=hub,
+                    session_id=session_id,
+                    security_snapshot=execution_security if admitted_run is not None else None,
+                )
                 agent.set_session_context(session_id, approved_categories)
                 set_desktop_policy_context = getattr(agent, "set_desktop_policy_context", None)
                 clear_desktop_policy_context = getattr(agent, "clear_desktop_policy_context", None)
@@ -904,13 +988,15 @@ async def _handle_ui_send_impl(
                         "error": str(exc),
                     },
                 )
-                if mode == "desktop":
+                if mode == "desktop" or admitted_run is not None:
                     set_runtime_workspace_root(None)
                     error_payload = {
                         "error": {
-                            "message": "Desktop policy context could not be applied.",
+                            "message": "Принятый runtime context не удалось применить.",
                             "type": "configuration_error",
-                            "code": "desktop_policy_context_failed",
+                            "code": "desktop_policy_context_failed"
+                            if mode == "desktop"
+                            else "runtime_context_apply_failed",
                             "trace_id": None,
                             "details": {},
                         }
@@ -918,9 +1004,11 @@ async def _handle_ui_send_impl(
                     await _complete_idempotency(error_payload, status=500)
                     return error_response(
                         status=500,
-                        message="Desktop policy context could not be applied.",
+                        message="Принятый runtime context не удалось применить.",
                         error_type="configuration_error",
-                        code="desktop_policy_context_failed",
+                        code="desktop_policy_context_failed"
+                        if mode == "desktop"
+                        else "runtime_context_apply_failed",
                     )
             await _publish_agent_activity(
                 hub,
@@ -928,6 +1016,17 @@ async def _handle_ui_send_impl(
                 phase="agent.respond.start",
                 detail=lane,
             )
+            if admitted_run is not None and (
+                not await admission_context_current()
+                or await hub.get_messages(session_id, lane=lane) != dispatch_history
+            ):
+                await _abort_idempotency()
+                return error_response(
+                    status=409,
+                    message="Контекст принятого запроса изменился перед вызовом Agent.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
             response_raw: str
             agent_response: AgentResponse | None = None
             respond_stream_method = getattr(agent, "respond_stream", None)
@@ -1208,6 +1307,17 @@ async def _handle_ui_send_impl(
             else:
                 agent_response = agent.respond(llm_messages)
                 response_raw = agent_response.text
+            if admitted_run is not None and agent_response is not None:
+                # Submission is not acceptance or completion; pending approval remains owned.
+                if agent_response.runtime_result is not None:
+                    admitted_run = run_store.transition(
+                        run_scope,
+                        admitted_run.task_run_id,
+                        expected_version=admitted_run.version,
+                        state=RunState.RESULT_SUBMITTED,
+                        authority=TransitionAuthority.RUNTIME,
+                        reason_code="runtime_result_submitted",
+                    )
             drain_consumed_rules = getattr(agent, "drain_consumed_desktop_rule_ids", None)
             if callable(drain_consumed_rules):
                 consumed_raw = drain_consumed_rules()

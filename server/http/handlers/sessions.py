@@ -629,7 +629,18 @@ async def handle_ui_session_messages_last_delete(request: web.Request) -> web.Re
     ownership_error = await _ensure_session_owned(request, hub, session_id)
     if ownership_error is not None:
         return ownership_error
-    removed = await hub.delete_last_message_pair(session_id, lane="chat")
+    expected_id = request.headers.get("If-Match")
+    try:
+        removed = await hub.delete_last_message_pair(
+            session_id, lane="chat", expected_assistant_message_id=expected_id
+        )
+    except ValueError:
+        return error_response(
+            status=409,
+            message="Целевая пара сообщений уже не последняя.",
+            error_type="invalid_request_error",
+            code="regeneration_target_changed",
+        )
     if removed is None:
         return error_response(
             status=404,
@@ -637,7 +648,7 @@ async def handle_ui_session_messages_last_delete(request: web.Request) -> web.Re
             error_type="invalid_request_error",
             code="session_not_found",
         )
-    if not removed:
+    if not removed and expected_id is None:
         return error_response(
             status=409,
             message="Последняя пара user+assistant не найдена.",
