@@ -370,13 +370,19 @@ retry packet/context. Продолжение использует owned retry re
 Waiting workflow и decision публикуются одной записью UI storage; при ошибке записи
 UIHub откатывает in-memory state, runner удаляет новый checkpoint и публикует failure.
 Reject заимствует существующий scoped owner без model resolution/reconfiguration.
+Terminal workflow и rejected decision фиксируются одной atomic записью с проверкой
+текущих decision identity/status; checkpoint удаляется только после commit. Storage fault
+оставляет прежний waiting state и checkpoint доступными для повторного явного решения.
 
 Initial и resumed packet runner регистрируют matching `(principal, session, task_id)`
 cancellation token до ожидания Agent lock. Plan cancel сигнализирует token до lock,
 затем изменяет только matching всё ещё active task/plan; terminal result не переписывается.
 Отмена cooperative: завершённый текущий ToolResult сохраняется, следующие calls останавливаются,
 VerifierRuntime прекращает собственный process group. Уже совершённые tool side effects
-не откатываются. HTTP registry является volatile control handle, не lifecycle authority.
+не откатываются. Отмена до первого dispatch, включая ожидание Agent lock,
+проецируется как cancelled. Timeout ожидания runner при shutdown логируется;
+остальные cleanup callbacks продолжаются. HTTP registry является volatile control handle,
+не lifecycle authority.
 
 После committed approval сбой event buffer/delivery логируется отдельно и не инвалидирует
 checkpoint: matching state остаётся доступен через UI state API.

@@ -46,12 +46,16 @@ class PlanCancellationRegistry:
         execution.token.set()
         return True
 
-    async def shutdown(self) -> None:
+    async def shutdown(self) -> tuple[str, ...]:
         self._closed = True
         executions = tuple(self._active.values())
         for execution in executions:
             execution.token.set()
         if executions:
-            await asyncio.wait_for(
-                asyncio.gather(*(item.finished.wait() for item in executions)), timeout=10
-            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(item.finished.wait() for item in executions)), timeout=10
+                )
+            except TimeoutError:
+                return ("Timed out waiting for active plan executions to stop.",)
+        return ()

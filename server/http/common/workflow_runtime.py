@@ -10,7 +10,7 @@ from typing import Literal, Protocol, cast
 
 from aiohttp import web
 
-from core.agent_mwv import TaskPacketApprovalPending
+from core.agent_mwv import MWVExecutionCancelled, TaskPacketApprovalPending
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import (
     MWVMessage,
@@ -57,7 +57,9 @@ class WorkflowHubProtocol(Protocol):
         active_plan: dict[str, JSONValue],
         active_task: dict[str, JSONValue],
         decision: dict[str, JSONValue],
-    ) -> None: ...
+        expected_decision_id: str | None = None,
+        expected_decision_status: str | None = None,
+    ) -> bool: ...
 
     async def get_workspace_root(self, session_id: str) -> str | None: ...
 
@@ -801,6 +803,23 @@ async def run_plan_runner(
     async with registry.running(scope, task_id, cancellation_token) as execution_token, agent_lock:
         cancellation_token = execution_token
         started = False
+
+        async def publish_cancelled(
+            owned_plan: dict[str, JSONValue], owned_task: dict[str, JSONValue]
+        ) -> None:
+            cancelled_plan = plan_with_status_fn(owned_plan, "cancelled")
+            cancelled_task = task_with_status_fn(owned_task, "cancelled", None)
+            cancelled_task["execution"] = {
+                "runner": "mwv_packet_runner",
+                "status": "cancelled",
+                "cancelled": True,
+            }
+            await hub.set_session_workflow(
+                session_id, mode="act", active_plan=cancelled_plan, active_task=cancelled_task
+            )
+            if resume_checkpoint_id is not None:
+                agent.cancel_mwv_approval(resume_checkpoint_id)
+
         try:
             current_workflow = await hub.get_session_workflow(session_id)
             current_plan = normalize_plan_payload_fn(current_workflow.get("active_plan"))
@@ -816,6 +835,9 @@ async def run_plan_runner(
             ):
                 return False
             plan, task = current_plan, current_task
+            if execution_token.is_set():
+                await publish_cancelled(plan, task)
+                return True
             if await resolver.resolve_main(session_id) != main_config:
                 if resume_checkpoint_id is None:
                     failed_plan = plan_with_status_fn(plan, "failed")
@@ -1000,6 +1022,9 @@ async def run_plan_runner(
                     )
                 except Exception:  # noqa: BLE001
                     logging.getLogger(__name__).exception("MWV approval failure publication failed")
+            return True
+        except MWVExecutionCancelled:
+            await publish_cancelled(plan, task)
             return True
         except Exception as exc:  # noqa: BLE001
             if resume_checkpoint_id is not None and not started:

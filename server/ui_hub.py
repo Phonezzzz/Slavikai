@@ -1439,11 +1439,21 @@ class UIHub:
         active_plan: dict[str, JSONValue],
         active_task: dict[str, JSONValue],
         decision: dict[str, JSONValue],
-    ) -> None:
+        expected_decision_id: str | None = None,
+        expected_decision_status: str | None = None,
+    ) -> bool:
         async with self._lock:
             previous = self._sessions.get(session_id)
             if previous is None:
                 raise ValueError("session_not_found")
+            if expected_decision_id is not None:
+                current = previous.decision_packet
+                if (
+                    current is None
+                    or current.get("id") != expected_decision_id
+                    or current.get("status") != expected_decision_status
+                ):
+                    return False
             next_state = replace(
                 previous,
                 mode=self._normalize_mode(mode),
@@ -1485,6 +1495,7 @@ class UIHub:
                 self._publish_to_subscribers(subscribers, event)
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).exception("Committed approval event delivery failed")
+        return True
 
     async def set_session_decision(
         self,

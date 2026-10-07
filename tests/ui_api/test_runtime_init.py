@@ -157,3 +157,50 @@ def test_ui_runtime_init_blocks_running_task_without_force() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_plan_shutdown_timeout_allows_later_cleanup(monkeypatch, caplog) -> None:
+    from server.agent_provider import AgentScope
+
+    async def run() -> None:
+        original_wait_for = asyncio.wait_for
+        later_cleanup = []
+
+        async def timeout_plan_wait(awaitable, *, timeout):
+            if timeout == 10:
+                awaitable.cancel()
+                try:
+                    await awaitable
+                except asyncio.CancelledError:
+                    pass
+                raise TimeoutError
+            return await original_wait_for(awaitable, timeout=timeout)
+
+        async def observe_cleanup(app):
+            later_cleanup.append(True)
+
+        # Signal is frozen after app setup; register before freezing via a standalone app.
+        from server.http.app import create_app
+
+        other_app = create_app(
+            agent=DummyAgent(),
+            auth_config=HttpAuthConfig(
+                api_token=TEST_API_TOKEN, allow_unauth_local=False, browser_auth_mode="token"
+            ),
+            ui_storage=InMemoryUISessionStorage(),
+        )
+        registry = other_app["plan_cancellation_registry"]
+        other_app.on_cleanup.append(observe_cleanup)
+        other_app.freeze()
+        try:
+            async with registry.running(AgentScope("owner", "session"), "task", None) as token:
+                monkeypatch.setattr(asyncio, "wait_for", timeout_plan_wait)
+                await other_app.cleanup()
+                assert token.is_set()
+                assert later_cleanup == [True]
+                assert other_app["agent_provider"]._closed
+                assert "Timed out" in caplog.text
+        finally:
+            monkeypatch.setattr(asyncio, "wait_for", original_wait_for)
+
+    asyncio.run(run())

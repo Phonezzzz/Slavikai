@@ -299,6 +299,7 @@ def test_ui_plan_lifecycle_endpoints() -> None:
         ("approve_once", "changed_root"),
         ("approve_once", "reject"),
         ("approve_once", "reject_no_model"),
+        ("approve_once", "reject_storage_fault"),
         ("approve_once", "reset"),
         ("approve_once", "cancel"),
         ("approve_session", "projection_fault"),
@@ -308,6 +309,8 @@ def test_ui_plan_lifecycle_endpoints() -> None:
         ("approve_once", "resume_approval_publication_fault"),
         ("approve_session", "active_cancel"),
         ("approve_session", "initial_active_cancel"),
+        ("approve_once", "queued_cancel"),
+        ("approve_once", "initial_pre_dispatch_cancel"),
         ("approve_once", "approval_event_fault"),
     ],
 )
@@ -396,6 +399,32 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 monkeypatch.setattr(resolver, "resolve_main", observe_resolve)
                 await lock.acquire()
 
+            if cleanup == "queued_cancel":
+                from server.agent_provider import AgentScope
+
+                hub = client.server.app["ui_hub"]
+                scope = AgentScope(await hub.get_session_principal_id(session_id), session_id)
+                lock = client.server.app["agent_provider"].lock_for(scope)
+                await lock.acquire()
+                registry = client.server.app["plan_cancellation_registry"]
+                original_cancel = registry.request_cancel
+
+                def cancel_queued_and_release(cancel_scope, task_id):
+                    assert original_cancel(cancel_scope, task_id)
+                    lock.release()
+                    return True
+
+                monkeypatch.setattr(registry, "request_cancel", cancel_queued_and_release)
+
+            if cleanup == "initial_pre_dispatch_cancel":
+                original_run = agent.run_task_packet
+
+                def cancel_before_dispatch(packet, context, *, cancellation_token):
+                    cancellation_token.set()
+                    return original_run(packet, context, cancellation_token=cancellation_token)
+
+                monkeypatch.setattr(agent, "run_task_packet", cancel_before_dispatch)
+
             if cleanup == "approval_publication_fault":
                 hub = client.server.app["ui_hub"]
                 original_save = hub._storage.save_session
@@ -467,6 +496,36 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 json={"plan_revision": revision},
             )
             assert execute_resp.status == 200
+
+            if cleanup == "initial_pre_dispatch_cancel":
+                hub = client.server.app["ui_hub"]
+                for _ in range(50):
+                    state = await hub.get_session_workflow(session_id)
+                    if state["active_task"]["status"] != "running":
+                        break
+                    await asyncio.sleep(0.01)
+                assert state["active_task"]["status"] == "cancelled"
+                assert executed == []
+                assert agent._mwv_checkpoints == {}
+                return
+
+            if cleanup == "queued_cancel":
+                # Wait for registration before signalling, while its Agent lock is held.
+                for _ in range(50):
+                    if scope in registry._active:
+                        break
+                    await asyncio.sleep(0.01)
+                assert scope in registry._active
+                cancelled = await client.post(
+                    "/ui/api/plan/cancel", headers={"X-Slavik-Session": session_id}
+                )
+                assert cancelled.status == 200
+                state = await hub.get_session_workflow(session_id)
+                assert state["active_plan"]["status"] == "cancelled"
+                assert state["active_task"]["status"] == "cancelled"
+                assert executed == []
+                assert agent._mwv_checkpoints == {}
+                return
 
             if cleanup == "initial_model_conflict":
                 await asyncio.wait_for(resolved.wait(), timeout=1)
@@ -550,6 +609,62 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert failed_events == [True]
             builds_before_resume = agent.brain_builds
             hub = client.server.app["ui_hub"]
+            if cleanup == "reject_storage_fault":
+                before_workflow = await hub.get_session_workflow(session_id)
+                before_decision = await hub.get_session_decision(session_id)
+                before_checkpoints = dict(agent._mwv_checkpoints)
+                assert not await hub.set_session_workflow_and_decision(
+                    session_id,
+                    mode="act",
+                    active_plan=before_workflow["active_plan"],
+                    active_task=before_workflow["active_task"],
+                    decision=before_decision,
+                    expected_decision_id="foreign-decision",
+                    expected_decision_status="pending",
+                )
+                assert not await hub.set_session_workflow_and_decision(
+                    session_id,
+                    mode="act",
+                    active_plan=before_workflow["active_plan"],
+                    active_task=before_workflow["active_task"],
+                    decision=before_decision,
+                    expected_decision_id=decision_id,
+                    expected_decision_status="executing",
+                )
+                assert await hub.get_session_workflow(session_id) == before_workflow
+                assert await hub.get_session_decision(session_id) == before_decision
+                original_save = hub._storage.save_session
+
+                def fail_rejected_save(state):
+                    if state.decision and state.decision.get("status") == "rejected":
+                        raise RuntimeError("reject storage fault")
+                    return original_save(state)
+
+                monkeypatch.setattr(hub._storage, "save_session", fail_rejected_save)
+                response = await client.post(
+                    "/ui/api/decision/respond",
+                    headers={"X-Slavik-Session": session_id},
+                    json={"session_id": session_id, "decision_id": decision_id, "choice": "reject"},
+                )
+                assert response.status == 500
+                assert await hub.get_session_workflow(session_id) == before_workflow
+                assert await hub.get_session_decision(session_id) == before_decision
+                assert agent._mwv_checkpoints == before_checkpoints
+                assert executed == []
+                monkeypatch.setattr(hub._storage, "save_session", original_save)
+                response = await client.post(
+                    "/ui/api/decision/respond",
+                    headers={"X-Slavik-Session": session_id},
+                    json={"session_id": session_id, "decision_id": decision_id, "choice": "reject"},
+                )
+                assert response.status == 200
+                state = await hub.get_session_workflow(session_id)
+                assert state["active_task"]["status"] == "failed"
+                assert (await hub.get_session_decision(session_id))["status"] == "rejected"
+                assert agent._mwv_checkpoints == {}
+                assert executed == []
+                return
+
             if cleanup == "reject_no_model":
                 from server.http.handlers import decision as decision_handler
 

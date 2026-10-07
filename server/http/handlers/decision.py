@@ -56,6 +56,7 @@ from server.http_api import (
     _normalize_ui_decision,
     _parse_github_import_args,
     _plan_apply_edit_operation,
+    _plan_mark_step,
     _plan_revision_value,
     _plan_with_status,
     _resolve_agent,
@@ -1426,12 +1427,52 @@ async def _complete_ui_decision(
                     scope=rejected_scope,
                 )
         rejected = _decision_with_status(current_decision, status="rejected", resolved=True)
-        updated, latest = await hub.transition_session_decision(
-            session_id,
-            expected_id=decision_id,
-            expected_status="pending",
-            next_decision=rejected,
-        )
+        if source_endpoint == "plan.execute_runner":
+            provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+            agent = await provider.get_existing_for_current_task(_agent_scope(request, session_id))
+            async with agent_lock:
+                workflow_before = await hub.get_session_workflow(session_id)
+                plan_before = _normalize_plan_payload(workflow_before.get("active_plan"))
+                task_before = _normalize_task_payload(workflow_before.get("active_task"))
+                if plan_before is None or task_before is None:
+                    return _decision_mismatch_response(
+                        expected_id=decision_id,
+                        actual_decision=_normalize_ui_decision(
+                            await hub.get_session_decision(session_id), session_id=session_id
+                        ),
+                    )
+                step_id = task_before.get("current_step_id")
+                if isinstance(step_id, str) and step_id.strip():
+                    plan_before = _plan_mark_step(plan_before, step_id=step_id, status="failed")
+                plan_before = _plan_with_status(plan_before, status="failed")
+                task_before = _task_with_status(task_before, status="failed", current_step_id=None)
+                execution_raw = task_before.get("execution")
+                execution = dict(execution_raw) if isinstance(execution_raw, dict) else {}
+                execution["status"] = "failed"
+                execution["stop_reason_code"] = "APPROVAL_REQUIRED"
+                execution["rejected_step_id"] = resume_payload.get("blocked_step_id")
+                task_before["execution"] = execution
+                updated = await hub.set_session_workflow_and_decision(
+                    session_id,
+                    mode="act",
+                    active_plan=plan_before,
+                    active_task=task_before,
+                    decision=rejected,
+                    expected_decision_id=decision_id,
+                    expected_decision_status="pending",
+                )
+                # Checkpoint remains resumable if the atomic storage commit fails.
+                checkpoint_id = resume_payload.get("checkpoint_id")
+                if updated and agent is not None and isinstance(checkpoint_id, str):
+                    await asyncio.to_thread(agent.cancel_mwv_approval, checkpoint_id)
+                latest = await hub.get_session_decision(session_id)
+        else:
+            updated, latest = await hub.transition_session_decision(
+                session_id,
+                expected_id=decision_id,
+                expected_status="pending",
+                next_decision=rejected,
+            )
         normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
         if not updated:
             return _decision_mismatch_response(
@@ -1462,46 +1503,6 @@ async def _complete_ui_decision(
             resolved_status_raw if isinstance(resolved_status_raw, str) else "rejected"
         )
         resume_payload_response: dict[str, JSONValue] | None = None
-        if source_endpoint == "plan.execute_runner":
-            checkpoint_id = resume_payload.get("checkpoint_id")
-            if isinstance(checkpoint_id, str):
-                provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
-                agent = await provider.get_existing_for_current_task(
-                    _agent_scope(request, session_id)
-                )
-                if agent is not None:
-                    async with _agent_lock_for_request(request, session_id):
-                        await asyncio.to_thread(agent.cancel_mwv_approval, checkpoint_id)
-            await _set_current_plan_step_status(
-                hub=hub,
-                session_id=session_id,
-                status="failed",
-            )
-            workflow_before = await hub.get_session_workflow(session_id)
-            plan_before = _normalize_plan_payload(workflow_before.get("active_plan"))
-            task_before = _normalize_task_payload(workflow_before.get("active_task"))
-            blocked_step_id_raw = resume_payload.get("blocked_step_id")
-            blocked_step_id = (
-                blocked_step_id_raw.strip()
-                if isinstance(blocked_step_id_raw, str) and blocked_step_id_raw.strip()
-                else None
-            )
-            if plan_before is not None:
-                plan_before = _plan_with_status(plan_before, status="failed")
-            if task_before is not None:
-                task_before = _task_with_status(task_before, status="failed", current_step_id=None)
-                execution_raw = task_before.get("execution")
-                execution = dict(execution_raw) if isinstance(execution_raw, dict) else {}
-                execution["status"] = "failed"
-                execution["stop_reason_code"] = "APPROVAL_REQUIRED"
-                execution["rejected_step_id"] = blocked_step_id
-                task_before["execution"] = execution
-            await hub.set_session_workflow(
-                session_id,
-                mode="act",
-                active_plan=plan_before,
-                active_task=task_before,
-            )
         if source_endpoint == "auto.run":
             run_id_raw = resume_payload.get("run_id")
             run_id = (

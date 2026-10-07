@@ -83,7 +83,9 @@ async def _close_chat_generations(app: web.Application) -> None:
 
 async def _close_plan_executions(app: web.Application) -> None:
     registry: PlanCancellationRegistry = app["plan_cancellation_registry"]
-    await registry.shutdown()
+    errors = await registry.shutdown()
+    for error in errors:
+        logger.warning("Plan cancellation cleanup failed: %s", error)
 
 
 async def _close_embedding_downloads(app: web.Application) -> None:
