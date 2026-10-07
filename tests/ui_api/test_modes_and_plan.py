@@ -298,11 +298,17 @@ def test_ui_plan_lifecycle_endpoints() -> None:
         ("approve_session", "claim_fault"),
         ("approve_once", "changed_root"),
         ("approve_once", "reject"),
+        ("approve_once", "reject_no_model"),
         ("approve_once", "reset"),
         ("approve_once", "cancel"),
         ("approve_session", "projection_fault"),
         ("approve_session", "publication_fault"),
         ("approve_once", "initial_model_conflict"),
+        ("approve_once", "approval_publication_fault"),
+        ("approve_once", "resume_approval_publication_fault"),
+        ("approve_session", "active_cancel"),
+        ("approve_session", "initial_active_cancel"),
+        ("approve_once", "approval_event_fault"),
     ],
 )
 def test_ui_plan_execute_waiting_approval_then_resume(
@@ -390,6 +396,71 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 monkeypatch.setattr(resolver, "resolve_main", observe_resolve)
                 await lock.acquire()
 
+            if cleanup == "approval_publication_fault":
+                hub = client.server.app["ui_hub"]
+                original_save = hub._storage.save_session
+                failed_publication = []
+
+                def fail_approval_save(state):
+                    if state.decision is not None and not failed_publication:
+                        failed_publication.append(True)
+                        raise RuntimeError("approval storage fault")
+                    return original_save(state)
+
+                monkeypatch.setattr(hub._storage, "save_session", fail_approval_save)
+
+            if cleanup == "initial_active_cancel":
+                import threading
+
+                from server.agent_provider import AgentScope
+
+                hub = client.server.app["ui_hub"]
+                scope = AgentScope(
+                    principal_id=await hub.get_session_principal_id(session_id),
+                    session_id=session_id,
+                )
+                await client.server.app["session_store"].approve(scope, {"NETWORK_RISK"})
+                entered, release = threading.Event(), threading.Event()
+
+                def blocked_initial_tool(request):
+                    executed.append(request)
+                    entered.set()
+                    assert release.wait(timeout=2)
+                    return ToolResult.success({"output": "initial result"})
+
+                agent.tool_registry.register(
+                    "mwv_network",
+                    blocked_initial_tool,
+                    enabled=True,
+                    capability="read",
+                    risk_classes=["network"],
+                    description="Diagnostic read",
+                    parameters_schema={"type": "object"},
+                )
+                registry = client.server.app["plan_cancellation_registry"]
+                original_cancel = registry.request_cancel
+
+                def cancel_initial_and_release(scope, task_id):
+                    cancelled = original_cancel(scope, task_id)
+                    assert cancelled
+                    release.set()
+                    return cancelled
+
+                monkeypatch.setattr(registry, "request_cancel", cancel_initial_and_release)
+
+            if cleanup == "approval_event_fault":
+                hub = client.server.app["ui_hub"]
+                original_publish = hub._publish_to_subscribers
+                failed_events = []
+
+                def fail_event(subscribers, event):
+                    if event.get("type") == "decision.packet" and not failed_events:
+                        failed_events.append(True)
+                        raise RuntimeError("event delivery fault")
+                    return original_publish(subscribers, event)
+
+                monkeypatch.setattr(hub, "_publish_to_subscribers", fail_event)
+
             execute_resp = await client.post(
                 "/ui/api/plan/execute",
                 headers={"X-Slavik-Session": session_id},
@@ -413,6 +484,34 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert state["active_task"]["status"] == "failed"
                 assert state["active_plan"]["status"] == "failed"
                 assert executed == []
+                assert agent._mwv_checkpoints == {}
+                return
+
+            if cleanup == "approval_publication_fault":
+                for _ in range(30):
+                    state = await hub.get_session_workflow(session_id)
+                    if state["active_task"]["status"] == "failed":
+                        break
+                    await asyncio.sleep(0.02)
+                assert failed_publication == [True]
+                assert state["active_task"]["status"] == "failed"
+                assert await hub.get_session_decision(session_id) is None
+                assert agent._mwv_checkpoints == {}
+                assert executed == []
+                return
+
+            if cleanup == "initial_active_cancel":
+                assert await asyncio.to_thread(entered.wait, 1)
+                cancelled = await client.post(
+                    "/ui/api/plan/cancel",
+                    headers={"X-Slavik-Session": session_id},
+                )
+                assert cancelled.status == 200
+                assert (await hub.get_session_workflow(session_id))["active_task"][
+                    "status"
+                ] == "cancelled"
+                assert len(executed) == 1
+                assert len(agent.last_mwv_result.tool_observations) == 1
                 assert agent._mwv_checkpoints == {}
                 return
 
@@ -447,10 +546,19 @@ def test_ui_plan_execute_waiting_approval_then_resume(
             assert waiting is True
             assert isinstance(decision_id, str)
 
+            if cleanup == "approval_event_fault":
+                assert failed_events == [True]
             builds_before_resume = agent.brain_builds
             hub = client.server.app["ui_hub"]
-            if cleanup in {"reject", "reset", "cancel"}:
-                if cleanup == "reject":
+            if cleanup == "reject_no_model":
+                from server.http.handlers import decision as decision_handler
+
+                async def forbidden_resolution(*args, **kwargs):
+                    raise AssertionError("cleanup must borrow existing owner")
+
+                monkeypatch.setattr(decision_handler, "_resolve_agent", forbidden_resolution)
+            if cleanup in {"reject", "reject_no_model", "reset", "cancel"}:
+                if cleanup in {"reject", "reject_no_model"}:
                     response = await client.post(
                         "/ui/api/decision/respond",
                         headers={"X-Slavik-Session": session_id},
@@ -531,6 +639,84 @@ def test_ui_plan_execute_waiting_approval_then_resume(
 
                 monkeypatch.setattr(hub, "set_session_workflow", fail_terminal_publish)
 
+            if cleanup == "resume_approval_publication_fault":
+                original_save = hub._storage.save_session
+                failed_publication = []
+
+                def fail_new_approval_save(state):
+                    if (
+                        state.decision is not None
+                        and state.decision["id"] != decision_id
+                        and not failed_publication
+                    ):
+                        failed_publication.append(True)
+                        raise RuntimeError("resumed approval storage fault")
+                    return original_save(state)
+
+                monkeypatch.setattr(hub._storage, "save_session", fail_new_approval_save)
+
+            if cleanup == "active_cancel":
+                import threading
+
+                from server.agent_provider import AgentScope
+
+                entered, release = threading.Event(), threading.Event()
+
+                def blocked_tool(request):
+                    executed.append(request)
+                    entered.set()
+                    assert release.wait(timeout=2)
+                    return ToolResult.success({"output": "completed during cancellation"})
+
+                agent.tool_registry.register(
+                    "mwv_network",
+                    blocked_tool,
+                    enabled=True,
+                    capability="read",
+                    risk_classes=["network"],
+                    description="Diagnostic read",
+                    parameters_schema={"type": "object"},
+                )
+                registry = client.server.app["plan_cancellation_registry"]
+                original_cancel = registry.request_cancel
+
+                def cancel_and_release(scope, task_id):
+                    cancelled = original_cancel(scope, task_id)
+                    assert cancelled
+                    release.set()
+                    return cancelled
+
+                monkeypatch.setattr(registry, "request_cancel", cancel_and_release)
+                approval = asyncio.create_task(
+                    client.post(
+                        "/ui/api/decision/respond",
+                        headers={"X-Slavik-Session": session_id},
+                        json={
+                            "session_id": session_id,
+                            "decision_id": decision_id,
+                            "choice": choice,
+                        },
+                    )
+                )
+                assert await asyncio.to_thread(entered.wait, 1)
+                assert (
+                    original_cancel(AgentScope("foreign", session_id), active_task["task_id"])
+                    is False
+                )
+                cancelled = await client.post(
+                    "/ui/api/plan/cancel",
+                    headers={"X-Slavik-Session": session_id},
+                )
+                assert cancelled.status == 200
+                assert (await approval).status == 200
+                state = await hub.get_session_workflow(session_id)
+                assert state["active_task"]["status"] == "cancelled"
+                assert len(executed) == 1
+                assert len(agent.last_mwv_result.tool_observations) == 1
+                assert agent._mwv_checkpoints == {}
+                assert (await hub.get_session_decision(session_id))["status"] == "resolved"
+                return
+
             approve_resp = await client.post(
                 "/ui/api/decision/respond",
                 headers={"X-Slavik-Session": session_id},
@@ -541,6 +727,16 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 },
             )
             assert approve_resp.status == 200
+
+            if cleanup == "resume_approval_publication_fault":
+                assert failed_publication == [True]
+                assert len(executed) == 1
+                assert agent._mwv_checkpoints == {}
+                assert (await hub.get_session_decision(session_id))["status"] == "resolved"
+                assert (await hub.get_session_workflow(session_id))["active_task"][
+                    "status"
+                ] == "failed"
+                return
 
             if choice == "approve_once":
                 assert len(executed) == 1
@@ -585,6 +781,13 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                     completed = True
                     break
             assert completed is True
+            before_cancel = await hub.get_session_workflow(session_id)
+            response = await client.post(
+                "/ui/api/plan/cancel",
+                headers={"X-Slavik-Session": session_id},
+            )
+            assert response.status == 200
+            assert await hub.get_session_workflow(session_id) == before_cancel
         finally:
             await client.close()
 

@@ -112,7 +112,9 @@ class DummyAgent:
             }
         ]
 
-    def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
+    def run_task_packet(
+        self, packet: TaskPacket, context: RunContext, *, cancellation_token=None
+    ) -> MWVRunResult:
         del context
         step_results = []
         for step in packet.steps:

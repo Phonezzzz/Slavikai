@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import uuid
 from collections import deque
 from collections.abc import Callable, Collection, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Literal, TypedDict, cast
 
@@ -1429,6 +1430,61 @@ class UIHub:
             self._append_event_record_locked(state, hydrated)
             subscribers = list(state.subscribers.values())
         self._publish_to_subscribers(subscribers, hydrated)
+
+    async def set_session_workflow_and_decision(
+        self,
+        session_id: str,
+        *,
+        mode: str,
+        active_plan: dict[str, JSONValue],
+        active_task: dict[str, JSONValue],
+        decision: dict[str, JSONValue],
+    ) -> None:
+        async with self._lock:
+            previous = self._sessions.get(session_id)
+            if previous is None:
+                raise ValueError("session_not_found")
+            next_state = replace(
+                previous,
+                mode=self._normalize_mode(mode),
+                active_plan=dict(active_plan),
+                active_task=dict(active_task),
+                decision_packet=dict(decision),
+                last_decision_id=str(decision["id"]),
+                updated_at=_utc_iso_now(),
+            )
+            events = [
+                self._build_event(
+                    "decision.packet", {"session_id": session_id, "decision": decision}
+                ),
+                self._build_event(
+                    "session.workflow",
+                    {
+                        "session_id": session_id,
+                        "mode": next_state.mode,
+                        "active_plan": active_plan,
+                        "active_task": active_task,
+                        "auto_state": next_state.auto_state,
+                    },
+                ),
+            ]
+            self._sessions[session_id] = next_state
+            try:
+                self._persist_session_locked(session_id)
+            except Exception:
+                self._sessions[session_id] = previous
+                raise
+            subscribers = list(next_state.subscribers.values())
+            try:
+                for event in events:
+                    self._append_event_record_locked(next_state, event)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("Committed approval event buffering failed")
+        for event in events:
+            try:
+                self._publish_to_subscribers(subscribers, event)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("Committed approval event delivery failed")
 
     async def set_session_decision(
         self,

@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 
 from aiohttp import web
 
@@ -16,6 +16,7 @@ from core.desktop_policy import (
     DesktopPolicyStore,
     RuleSource,
 )
+from server.agent_provider import ScopedAgentProvider
 from server.http.common.auth import _request_principal_id, _require_owner
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
@@ -1464,7 +1465,10 @@ async def _complete_ui_decision(
         if source_endpoint == "plan.execute_runner":
             checkpoint_id = resume_payload.get("checkpoint_id")
             if isinstance(checkpoint_id, str):
-                agent = await _resolve_agent(request, session_id)
+                provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+                agent = await provider.get_existing_for_current_task(
+                    _agent_scope(request, session_id)
+                )
                 if agent is not None:
                     async with _agent_lock_for_request(request, session_id):
                         await asyncio.to_thread(agent.cancel_mwv_approval, checkpoint_id)

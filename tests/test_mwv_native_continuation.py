@@ -229,3 +229,88 @@ def test_owned_worker_checkpoint_preserves_prefix_and_exact_once(
         assert agent.approved_categories == set()
     finally:
         agent.close()
+
+
+@pytest.mark.parametrize("retry_fault", [False, True])
+def test_retry_checkpoint_uses_owned_revision_and_fault_attempt(tmp_path, monkeypatch, retry_fault):
+    from dataclasses import replace
+
+    agent = Agent(
+        brain=SimpleBrain("unused"),
+        enable_tools={"safe_mode": True},
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    agent.set_session_context("session-1", set())
+    agent.apply_runtime_workspace_root(str(tmp_path))
+    agent.set_runtime_state(
+        mode="act", active_plan=None, active_task=None, enforce_plan_guard=False
+    )
+    (tmp_path / "Makefile").write_text("check:\n\t@test -e verified || (touch verified; false)\n")
+    calls = []
+    agent.tool_registry.register(
+        "retry_probe",
+        lambda request: calls.append(request) or ToolResult.success({"output": "ok"}),
+        enabled=True,
+        capability="read",
+        risk_classes=["network"],
+        description="Probe",
+        parameters_schema={"type": "object"},
+    )
+    packet = with_task_packet_hash(
+        TaskPacket(
+            task_id="task-1",
+            session_id="session-1",
+            trace_id="trace-1",
+            goal="inspect",
+            scope={"workspace_root": str(tmp_path)},
+            budgets={"max_attempts": 2},
+            verifier={"command": ["make", "check"]},
+            steps=[
+                TaskStepContract(
+                    step_id="probe",
+                    title="Probe",
+                    description="Probe",
+                    allowed_tool_kinds=["retry_probe"],
+                    inputs={"operation": "retry_probe", "tool_args": {}},
+                )
+            ],
+        )
+    )
+    context = RunContext(
+        session_id="session-1",
+        trace_id="trace-1",
+        workspace_root=str(tmp_path),
+        safe_mode=True,
+        max_retries=1,
+    )
+    try:
+        with pytest.raises(TaskPacketApprovalPending) as first:
+            agent.run_task_packet(packet, context)
+        with pytest.raises(TaskPacketApprovalPending) as second:
+            agent.resume_task_packet(first.value.checkpoint_id, packet)
+        checkpoint = agent._mwv_checkpoints[second.value.checkpoint_id]
+        assert checkpoint.context.attempt == 2
+        assert checkpoint.packet.packet_revision == 2
+        assert len(calls) == 1
+        tampered = with_task_packet_hash(replace(packet, goal="different"))
+        with pytest.raises(ValueError, match="unavailable"):
+            agent.resume_task_packet(second.value.checkpoint_id, tampered)
+        if retry_fault:
+
+            def post_fault(request, result, context):
+                raise RuntimeError("retry projection fault")
+
+            monkeypatch.setattr(agent, "_workspace_diff_post_call", post_fault)
+        result = agent.resume_task_packet(second.value.checkpoint_id, packet)
+        assert result.attempt == 2
+        assert result.task == checkpoint.packet
+        assert len(calls) == 2
+        assert len(result.tool_observations) == 2
+        assert result.work_result.status == (
+            WorkStatus.FAILURE if retry_fault else WorkStatus.SUCCESS
+        )
+        assert agent._mwv_checkpoints == {}
+    finally:
+        agent.close()

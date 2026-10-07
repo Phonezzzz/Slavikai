@@ -353,8 +353,8 @@ fault, чужая session, cancellation и post-call projection fault. `tests/ui
 Это **volatile Act packet runner**, не durable task/run lifecycle или full byte capture.
 Checkpoint не восстанавливается после restart. Existing tool/verifier caps, persisted payloads,
 acceptance authority, full retry history и budget enforcement остаются отдельными foundation
-задачами. Legacy routed MWV и initial background runner cancellation не получают новой
-гарантии через эту approval boundary. TinyJuice readiness не повышается.
+задачами. Legacy routed MWV не получает новой гарантии через эту approval boundary.
+TinyJuice readiness не повышается.
 
 При завершении Act packet frame scoped Agent удерживает последний typed
 `MWVRunResult` в `last_mwv_result` до следующего terminal result или уничтожения Agent.
@@ -363,3 +363,20 @@ acceptance authority, full retry history и budget enforcement остаются 
 `tool_observations` остаются в этом результате. Ошибка публикации логируется;
 при недоступном UI storage сохранение terminal projection не гарантируется.
 Отмена waiting plan инвалидирует его checkpoint и approval под scoped Agent lock.
+
+Checkpoint хранит исходный packet для exact lineage validation и отдельный фактический
+retry packet/context. Продолжение использует owned retry revision; exceptional settlement
+сохраняет фактически активные attempt/revision. Изменённый исходный packet отклоняется.
+Waiting workflow и decision публикуются одной записью UI storage; при ошибке записи
+UIHub откатывает in-memory state, runner удаляет новый checkpoint и публикует failure.
+Reject заимствует существующий scoped owner без model resolution/reconfiguration.
+
+Initial и resumed packet runner регистрируют matching `(principal, session, task_id)`
+cancellation token до ожидания Agent lock. Plan cancel сигнализирует token до lock,
+затем изменяет только matching всё ещё active task/plan; terminal result не переписывается.
+Отмена cooperative: завершённый текущий ToolResult сохраняется, следующие calls останавливаются,
+VerifierRuntime прекращает собственный process group. Уже совершённые tool side effects
+не откатываются. HTTP registry является volatile control handle, не lifecycle authority.
+
+После committed approval сбой event buffer/delivery логируется отдельно и не инвалидирует
+checkpoint: matching state остаётся доступен через UI state API.

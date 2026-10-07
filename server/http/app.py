@@ -26,6 +26,7 @@ from server.embedding_download import EmbeddingDownloadManager
 from server.http.common.auth import _legacy_owner_principal_aliases, _owner_principal_id
 from server.http.common.chat_cancellation import ChatCancellationRegistry
 from server.http.common.idempotency import IdempotencyStore
+from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.request_identity import (
     CloudflareAccessJWTVerifier,
     CloudflareAccessVerifier,
@@ -78,6 +79,11 @@ async def _close_chat_generations(app: web.Application) -> None:
     errors = await registry.shutdown()
     for error in errors:
         logger.warning("Chat cancellation cleanup failed: %s", error)
+
+
+async def _close_plan_executions(app: web.Application) -> None:
+    registry: PlanCancellationRegistry = app["plan_cancellation_registry"]
+    await registry.shutdown()
 
 
 async def _close_embedding_downloads(app: web.Application) -> None:
@@ -174,6 +180,7 @@ def create_app(
     app["session_store"] = SessionApprovalStore()
     app["idempotency_store"] = IdempotencyStore()
     app["chat_cancellation_registry"] = ChatCancellationRegistry()
+    app["plan_cancellation_registry"] = PlanCancellationRegistry()
     app["terminal_manager"] = TerminalTool()
     app["embedding_download_manager"] = EmbeddingDownloadManager()
     resolved_ui_storage = ui_storage or SQLiteUISessionStorage(
@@ -188,6 +195,7 @@ def create_app(
             AgentScope(principal_id=principal_id, session_id=session_id)
         ),
     )
+    app.on_cleanup.append(_close_plan_executions)
     app.on_cleanup.append(_close_chat_generations)
     app.on_cleanup.append(_close_terminal_manager)
     app.on_cleanup.append(_close_embedding_downloads)

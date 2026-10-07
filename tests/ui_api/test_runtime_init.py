@@ -128,7 +128,9 @@ def test_ui_runtime_init_preserves_session_history() -> None:
 
 def test_ui_runtime_init_blocks_running_task_without_force() -> None:
     class SlowTaskAgent(DummyAgent):
-        def run_task_packet(self, packet: TaskPacket, context: RunContext) -> MWVRunResult:
+        def run_task_packet(
+            self, packet: TaskPacket, context: RunContext, *, cancellation_token=None
+        ) -> MWVRunResult:
             time.sleep(0.2)
             return super().run_task_packet(packet, context)
 

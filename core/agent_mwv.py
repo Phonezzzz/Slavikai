@@ -63,6 +63,7 @@ _NO_OBSERVABLE_ACTION_ERROR = (
 
 @dataclass(frozen=True)
 class MWVWorkerCheckpoint:
+    origin_packet: TaskPacket
     packet: TaskPacket
     context: RunContext
     request: ApprovalRequest
@@ -89,6 +90,7 @@ class MWVExecutionCancelled(Exception):
 
 @dataclass
 class MWVExecutionControl:
+    origin_packet: TaskPacket | None = None
     cancellation_token: asyncio.Event | None = None
     started: bool = False
     observations: list[tuple[ToolRequest, ToolResult]] = field(default_factory=list)
@@ -711,6 +713,7 @@ class AgentMWVMixin:
                         )
                         checkpoint_id = str(uuid.uuid4())
                         self._mwv_checkpoints[checkpoint_id] = MWVWorkerCheckpoint(
+                            origin_packet=deepcopy(execution.origin_packet or task),
                             packet=deepcopy(task),
                             context=deepcopy(context),
                             request=deepcopy(exc.request),
@@ -852,7 +855,7 @@ class AgentMWVMixin:
         checkpoint = self._mwv_checkpoints.get(identity)
         if (
             checkpoint is None
-            or checkpoint.packet != packet
+            or checkpoint.origin_packet != packet
             or checkpoint.principal_id != self.user_id
             or checkpoint.context.session_id != self.session_id
             or checkpoint.mode != self.runtime_mode
@@ -877,6 +880,7 @@ class AgentMWVMixin:
             raise MWVContinuationUnavailable("approval_continuation_not_started")
         checkpoint = self._mwv_checkpoints.pop(identity)
         execution = MWVExecutionControl(
+            origin_packet=checkpoint.origin_packet,
             cancellation_token=cancellation_token,
             observations=list(checkpoint.observations),
         )
@@ -913,11 +917,14 @@ class AgentMWVMixin:
         execution: MWVExecutionControl | None = None,
     ) -> MWVRunResult:
         execution = execution or MWVExecutionControl()
+        execution.origin_packet = execution.origin_packet or packet
+        active_task, active_context = packet, context
         verifier_runtime = _verifier_runtime_cls()()
         manager = _manager_runtime_cls()(task_builder=lambda _messages, _context: packet)
 
         def _worker(task: TaskPacket, run_context: RunContext) -> WorkResult:
-            nonlocal checkpoint
+            nonlocal checkpoint, active_task, active_context
+            active_task, active_context = task, run_context
             resumed = checkpoint
             checkpoint = None
             result = self._mwv_worker_runner(
@@ -928,6 +935,8 @@ class AgentMWVMixin:
             return result
 
         def _verifier(task: TaskPacket, run_context: RunContext) -> VerificationResult:
+            nonlocal active_task, active_context
+            active_task, active_context = task, run_context
             return verifier_runtime.run(
                 task,
                 run_context,
@@ -949,9 +958,9 @@ class AgentMWVMixin:
                 raise
             cancelled = isinstance(exc, MWVExecutionCancelled)
             result = MWVRunResult(
-                task=packet,
+                task=active_task,
                 work_result=WorkResult(
-                    task_id=packet.task_id,
+                    task_id=active_task.task_id,
                     status=WorkStatus.FAILURE,
                     summary="MWV execution cancelled" if cancelled else str(exc),
                     diagnostics={"cancelled": cancelled},
@@ -966,7 +975,7 @@ class AgentMWVMixin:
                     duration_seconds=0,
                     error="cancelled" if cancelled else "runtime_error",
                 ),
-                attempt=context.attempt,
+                attempt=active_context.attempt,
                 max_attempts=max(1, context.max_retries + 1),
                 retry_decision=None,
             )

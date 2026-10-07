@@ -23,6 +23,7 @@ from core.mwv.models import (
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from llm.types import ModelConfig
 from server.agent_provider import AgentScope, ScopedAgentProvider
+from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.ui_settings import _resolve_provider_api_key
 from shared.models import JSONValue
 
@@ -48,6 +49,16 @@ class WorkflowHubProtocol(Protocol):
         session_id: str,
         decision: dict[str, JSONValue] | None,
     ) -> dict[str, JSONValue] | None: ...
+    async def set_session_workflow_and_decision(
+        self,
+        session_id: str,
+        *,
+        mode: str,
+        active_plan: dict[str, JSONValue],
+        active_task: dict[str, JSONValue],
+        decision: dict[str, JSONValue],
+    ) -> None: ...
+
     async def get_workspace_root(self, session_id: str) -> str | None: ...
 
     async def set_session_workflow(
@@ -70,7 +81,13 @@ class PlanRunnerAgentProtocol(Protocol):
 
     def set_session_context(self, session_id: str, approved_categories: set[object]) -> None: ...
 
-    def run_task_packet(self, packet: TaskPacket, context: object) -> MWVRunResult: ...
+    def run_task_packet(
+        self,
+        packet: TaskPacket,
+        context: object,
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> MWVRunResult: ...
 
     def resume_task_packet(
         self,
@@ -81,6 +98,8 @@ class PlanRunnerAgentProtocol(Protocol):
     ) -> MWVRunResult: ...
 
     def validate_mwv_approval(self, identity: str, packet: TaskPacket) -> None: ...
+
+    def cancel_mwv_approval(self, identity: str) -> None: ...
 
 
 def normalize_tools_state_payload(
@@ -778,7 +797,9 @@ async def run_plan_runner(
             return Path(session_root_raw)
         return Path(".").resolve()
 
-    async with agent_lock:
+    registry: PlanCancellationRegistry = app["plan_cancellation_registry"]
+    async with registry.running(scope, task_id, cancellation_token) as execution_token, agent_lock:
+        cancellation_token = execution_token
         started = False
         try:
             current_workflow = await hub.get_session_workflow(session_id)
@@ -884,78 +905,101 @@ async def run_plan_runner(
             elif execution.get("status") == "waiting_approval":
                 return False
             else:
-                run_result = await asyncio.to_thread(agent.run_task_packet, packet, run_context)
+                run_result = await asyncio.to_thread(
+                    agent.run_task_packet,
+                    packet,
+                    run_context,
+                    cancellation_token=cancellation_token,
+                )
                 started = True
 
         except TaskPacketApprovalPending as exc:
-            approval_payload = serialize_approval_request_fn(exc.request)
-            if approval_payload is None:
-                failed_plan = plan_with_status_fn(plan, "failed")
-                failed_task = task_with_status_fn(task, "failed", exc.blocked_step_id)
+            try:
+                approval_payload = serialize_approval_request_fn(exc.request)
+                if approval_payload is None:
+                    agent.cancel_mwv_approval(exc.checkpoint_id)
+                    failed_plan = plan_with_status_fn(plan, "failed")
+                    failed_task = task_with_status_fn(task, "failed", exc.blocked_step_id)
+                    failed_task["execution"] = {
+                        "runner": "mwv_packet_runner",
+                        "status": "failed",
+                        "error": "approval_payload_missing",
+                    }
+                    await hub.set_session_workflow(
+                        session_id,
+                        mode="act",
+                        active_plan=failed_plan,
+                        active_task=failed_task,
+                    )
+                    return True
+                plan = _apply_step_results_to_plan(
+                    plan,
+                    step_results=exc.step_results
+                    + [
+                        {
+                            "step_id": exc.blocked_step_id,
+                            "description": next(
+                                (
+                                    snapshot.get("description")
+                                    for snapshot in exc.step_results
+                                    if snapshot.get("step_id") == exc.blocked_step_id
+                                ),
+                                exc.blocked_step_id,
+                            ),
+                            "status": "waiting_approval",
+                            "operation": None,
+                            "result": "Требуется подтверждение",
+                            "tool_calls_used": 0,
+                            "changes": [],
+                        }
+                    ],
+                    plan_mark_step_fn=plan_mark_step_fn,
+                    utc_now_iso_fn=utc_now_iso_fn,
+                )
+                task = task_with_status_fn(task, "running", exc.blocked_step_id)
+                task["execution"] = {
+                    "runner": "mwv_packet_runner",
+                    "status": "waiting_approval",
+                    "blocked_step_id": exc.blocked_step_id,
+                    "checkpoint_id": exc.checkpoint_id,
+                }
+                ui_decision = build_ui_approval_decision_fn(
+                    approval_payload,
+                    session_id,
+                    "plan.execute_runner",
+                    {
+                        "plan_id": plan_id,
+                        "task_id": task_id,
+                        "plan_revision": plan.get("plan_revision"),
+                        "blocked_step_id": exc.blocked_step_id,
+                        "checkpoint_id": exc.checkpoint_id,
+                    },
+                    packet.trace_id,
+                    decision_workflow_context_fn("act", plan, task),
+                )
+                await hub.set_session_workflow_and_decision(
+                    session_id,
+                    mode="act",
+                    active_plan=plan,
+                    active_task=task,
+                    decision=ui_decision,
+                )
+            except Exception:  # noqa: BLE001
+                agent.cancel_mwv_approval(exc.checkpoint_id)
+                logging.getLogger(__name__).exception("MWV approval publication failed")
+                failed_plan = dict(plan, status="failed")
+                failed_task = dict(task, status="failed", current_step_id=None)
                 failed_task["execution"] = {
                     "runner": "mwv_packet_runner",
                     "status": "failed",
-                    "error": "approval_payload_missing",
+                    "error": "approval_publication_failed",
                 }
-                await hub.set_session_workflow(
-                    session_id,
-                    mode="act",
-                    active_plan=failed_plan,
-                    active_task=failed_task,
-                )
-                return False
-            plan = _apply_step_results_to_plan(
-                plan,
-                step_results=exc.step_results
-                + [
-                    {
-                        "step_id": exc.blocked_step_id,
-                        "description": next(
-                            (
-                                snapshot.get("description")
-                                for snapshot in exc.step_results
-                                if snapshot.get("step_id") == exc.blocked_step_id
-                            ),
-                            exc.blocked_step_id,
-                        ),
-                        "status": "waiting_approval",
-                        "operation": None,
-                        "result": "Требуется подтверждение",
-                        "tool_calls_used": 0,
-                        "changes": [],
-                    }
-                ],
-                plan_mark_step_fn=plan_mark_step_fn,
-                utc_now_iso_fn=utc_now_iso_fn,
-            )
-            task = task_with_status_fn(task, "running", exc.blocked_step_id)
-            task["execution"] = {
-                "runner": "mwv_packet_runner",
-                "status": "waiting_approval",
-                "blocked_step_id": exc.blocked_step_id,
-                "checkpoint_id": exc.checkpoint_id,
-            }
-            ui_decision = build_ui_approval_decision_fn(
-                approval_payload,
-                session_id,
-                "plan.execute_runner",
-                {
-                    "plan_id": plan_id,
-                    "task_id": task_id,
-                    "plan_revision": plan.get("plan_revision"),
-                    "blocked_step_id": exc.blocked_step_id,
-                    "checkpoint_id": exc.checkpoint_id,
-                },
-                packet.trace_id,
-                decision_workflow_context_fn("act", plan, task),
-            )
-            await hub.set_session_decision(session_id, ui_decision)
-            await hub.set_session_workflow(
-                session_id,
-                mode="act",
-                active_plan=plan,
-                active_task=task,
-            )
+                try:
+                    await hub.set_session_workflow(
+                        session_id, active_plan=failed_plan, active_task=failed_task
+                    )
+                except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).exception("MWV approval failure publication failed")
             return True
         except Exception as exc:  # noqa: BLE001
             if resume_checkpoint_id is not None and not started:
@@ -992,7 +1036,10 @@ async def run_plan_runner(
             stop_reason_code = (
                 stop_reason_code_raw if isinstance(stop_reason_code_raw, str) else None
             )
-            if (
+            if run_result.work_result.diagnostics.get("cancelled") is True:
+                plan = plan_with_status_fn(plan, "cancelled")
+                task = task_with_status_fn(task, "cancelled", None)
+            elif (
                 run_result.work_result.status == WorkStatus.SUCCESS
                 and run_result.verification_result.status == VerificationStatus.PASSED
             ):

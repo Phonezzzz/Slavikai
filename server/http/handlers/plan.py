@@ -15,6 +15,7 @@ from server.http.common.idempotency import (
     normalize_idempotency_key,
 )
 from server.http.common.mode_transitions import build_mode_transitions
+from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
 from server.http_api import (
@@ -686,12 +687,42 @@ async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
         return session_error
     if session_id is None:
         return _session_forbidden_response()
+    snapshot = await hub.get_session_workflow(session_id)
+    requested_plan = _normalize_plan_payload(snapshot.get("active_plan"))
+    requested_plan_id = requested_plan.get("plan_id") if requested_plan is not None else None
+    requested_task = _normalize_task_payload(snapshot.get("active_task"))
+    requested_task_id = requested_task.get("task_id") if requested_task is not None else None
+    registry: PlanCancellationRegistry = request.app["plan_cancellation_registry"]
+    if isinstance(requested_task_id, str):
+        registry.request_cancel(_agent_scope(request, session_id), requested_task_id)
     provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
     agent = await provider.get_existing_for_current_task(_agent_scope(request, session_id))
     async with _agent_lock_for_request(request, session_id):
         workflow = await hub.get_session_workflow(session_id)
         plan = _normalize_plan_payload(workflow.get("active_plan"))
         task = _normalize_task_payload(workflow.get("active_task"))
+        if (
+            plan is None
+            or plan.get("plan_id") != requested_plan_id
+            or plan.get("status") in {"completed", "failed", "cancelled"}
+            or (task is None and requested_task_id is not None)
+            or (
+                task is not None
+                and (task.get("task_id") != requested_task_id or task.get("status") != "running")
+            )
+        ):
+            response = json_response(
+                {
+                    "ok": True,
+                    "session_id": session_id,
+                    "mode": _normalize_mode_value(workflow.get("mode"), default="ask"),
+                    "active_plan": plan,
+                    "active_task": task,
+                    "mode_transitions": _mode_transitions_payload(workflow),
+                }
+            )
+            response.headers[UI_SESSION_HEADER] = session_id
+            return response
         decision = await hub.get_session_decision(session_id)
         execution = task.get("execution") if task is not None else None
         checkpoint_id = execution.get("checkpoint_id") if isinstance(execution, dict) else None
