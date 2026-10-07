@@ -750,6 +750,11 @@ async def _handle_ui_send_impl(
                 pending_identity = pending_payload.get("continuation_id")
                 if isinstance(pending_identity, str):
                     await asyncio.to_thread(agent.cancel_chat_approval, pending_identity)
+                    if pending_payload.get("execution_mode") == "auto":
+                        auto_state = _normalize_auto_state(getattr(agent, "last_auto_state", None))
+                        if auto_state is not None:
+                            await hub.set_session_workflow(session_id, auto_state=auto_state)
+                        await _drain_auto_progress(hub=hub, session_id=session_id, agent=agent)
                     await session_store.remove_desktop_rules(
                         approval_scope,
                         {rule.rule_id for rule in desktop_rules if rule.source == "once"},

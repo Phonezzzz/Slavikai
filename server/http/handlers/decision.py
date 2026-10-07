@@ -26,7 +26,11 @@ from server.http.common.workspace_git import (
     git_unstage,
     parse_git_operation_paths,
 )
-from server.http.handlers.ui_chat import handle_ui_approval_continue, handle_ui_send_resume
+from server.http.handlers.ui_chat import (
+    _drain_auto_progress,
+    handle_ui_approval_continue,
+    handle_ui_send_resume,
+)
 from server.http_api import (
     MAX_CONTENT_CHARS,
     UI_DECISION_RESPONSES,
@@ -1440,6 +1444,7 @@ async def _complete_ui_decision(
                             )
                             if auto_state is not None:
                                 await hub.set_session_workflow(session_id, auto_state=auto_state)
+                            await _drain_auto_progress(hub=hub, session_id=session_id, agent=agent)
         normalized = (
             normalized_latest
             if normalized_latest is not None

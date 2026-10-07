@@ -52,6 +52,7 @@ class AutoNativeAgent(Agent):
         "chat_cancel",
         "nested_cancel",
         "security_writer",
+        "new_message",
     ],
 )
 def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monkeypatch, cleanup):
@@ -104,6 +105,20 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
             assert decision["context"]["resume_payload"]["execution_mode"] == "auto"
             assert executed == [{"index": 0}]
             original_run = agent.last_auto_state["run_id"]
+            if cleanup == "new_message":
+                await client.server.app["ui_hub"].set_session_workflow(session, mode="ask")
+                response = await client.post(
+                    "/ui/api/chat/send",
+                    headers=headers,
+                    json={"session_id": session, "content": "найди в интернете погоду"},
+                )
+                assert response.status == 200, await response.json()
+                workflow = await client.server.app["ui_hub"].get_session_workflow(session)
+                assert workflow["auto_state"]["status"] == "cancelled"
+                assert agent.drain_auto_progress_events() == []
+                assert original_run not in agent.auto_agent.orchestrator._paused_runs
+                assert executed == [{"index": 0}]
+                return
             if cleanup == "nested_cancel":
                 from core.approval_policy import ApprovalRequired
                 from core.tool_gateway import ToolGateway
@@ -283,6 +298,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                     assert rejected_payload["auto_state"]["status"] == "cancelled"
                     workflow = await client.server.app["ui_hub"].get_session_workflow(session)
                     assert workflow["auto_state"]["status"] == "cancelled"
+                    assert agent.drain_auto_progress_events() == []
                 with pytest.raises(ChatApprovalUnavailable):
                     agent.validate_chat_approval(identity)
                 assert original_run not in agent.auto_agent.orchestrator._paused_runs
