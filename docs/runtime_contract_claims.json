@@ -316,7 +316,7 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 4,
+      "version": 5,
       "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
       "verified_by": [
         "tests/test_tool_loop.py",
@@ -328,7 +328,7 @@
         "tests/ui_api/test_stream_and_events.py",
         "tests/ui_api/test_desktop_mode.py"
       ],
-      "summary": "Native Ask/Desktop/Auto approval continues the captured exact tool call and original history without user replay. Desktop retains a bounded host lease and thread-affine resources until resume or cleanup. Single-use state is principal/session-owned and volatile; missing/expired checkpoints fail closed. Local web search uses this same native loop; admission snapshots, HTTP cancellation settlement, original Ask finalization, compound once-scopes and UI history projection are covered. Auto preserves its original run frame, plan, start time and budgets; legacy auto.run replay is rejected. Act packet runner now owns a volatile exact-request checkpoint preserving original packet, prefix, available typed tool observations and attempt; UI snapshots cannot claim completed execution. Once approval uses Gateway exact scope, pre-dispatch faults preserve pending state, and HTTP session grants roll back if resume did not start. Durable continuation, full canonical capture and payload storage remain target."
+      "summary": "Native Ask/Desktop/Auto approval continues the captured exact tool call and original history without user replay. Desktop retains a bounded host lease and thread-affine resources until resume or cleanup. Single-use state is principal/session-owned and volatile; missing/expired checkpoints fail closed. Local web search uses this same native loop; admission snapshots, HTTP cancellation settlement, original Ask finalization, compound once-scopes and UI history projection are covered. Auto preserves its original run frame, plan, start time and budgets; legacy auto.run replay is rejected. Act packet runner now owns a volatile exact-request checkpoint preserving original packet, prefix, available typed tool observations and attempt; UI snapshots cannot claim completed execution. Once approval uses Gateway exact scope, pre-dispatch faults preserve pending state, and HTTP session grants roll back if resume did not start. Durable continuation, full canonical capture and payload storage remain target. Plan cancel clears the owned checkpoint and decision under the scoped lock; terminal projection faults retain the last typed MWV result and settle the consumed decision. Initial pre-dispatch model conflict ends the owned task without dispatch."
     },
     {
       "id": "runtime.agent.request_local_response",

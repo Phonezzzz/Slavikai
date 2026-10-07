@@ -355,3 +355,11 @@ Checkpoint не восстанавливается после restart. Existing 
 acceptance authority, full retry history и budget enforcement остаются отдельными foundation
 задачами. Legacy routed MWV и initial background runner cancellation не получают новой
 гарантии через эту approval boundary. TinyJuice readiness не повышается.
+
+При завершении Act packet frame scoped Agent удерживает последний typed
+`MWVRunResult` в `last_mwv_result` до следующего terminal result или уничтожения Agent.
+Это ограниченный volatile handoff, а не durable history или retention store.
+Ошибка terminal UI projection не возвращает consumed approval в pending; доступные
+`tool_observations` остаются в этом результате. Ошибка публикации логируется;
+при недоступном UI storage сохранение terminal projection не гарантируется.
+Отмена waiting plan инвалидирует его checkpoint и approval под scoped Agent lock.

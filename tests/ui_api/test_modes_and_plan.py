@@ -299,6 +299,10 @@ def test_ui_plan_lifecycle_endpoints() -> None:
         ("approve_once", "changed_root"),
         ("approve_once", "reject"),
         ("approve_once", "reset"),
+        ("approve_once", "cancel"),
+        ("approve_session", "projection_fault"),
+        ("approve_session", "publication_fault"),
+        ("approve_once", "initial_model_conflict"),
     ],
 )
 def test_ui_plan_execute_waiting_approval_then_resume(
@@ -365,12 +369,52 @@ def test_ui_plan_execute_waiting_approval_then_resume(
 
             revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
 
+            if cleanup == "initial_model_conflict":
+                from server.agent_provider import AgentScope
+
+                hub = client.server.app["ui_hub"]
+                scope = AgentScope(
+                    principal_id=await hub.get_session_principal_id(session_id),
+                    session_id=session_id,
+                )
+                lock = client.server.app["agent_provider"].lock_for(scope)
+                resolver = client.server.app["runtime_model_resolver"]
+                original_resolve = resolver.resolve_main
+                resolved = asyncio.Event()
+
+                async def observe_resolve(scope_session):
+                    result = await original_resolve(scope_session)
+                    resolved.set()
+                    return result
+
+                monkeypatch.setattr(resolver, "resolve_main", observe_resolve)
+                await lock.acquire()
+
             execute_resp = await client.post(
                 "/ui/api/plan/execute",
                 headers={"X-Slavik-Session": session_id},
                 json={"plan_revision": revision},
             )
             assert execute_resp.status == 200
+
+            if cleanup == "initial_model_conflict":
+                await asyncio.wait_for(resolved.wait(), timeout=1)
+
+                async def missing_model(scope_session):
+                    return None
+
+                monkeypatch.setattr(resolver, "resolve_main", missing_model)
+                lock.release()
+                for _ in range(30):
+                    state = await hub.get_session_workflow(session_id)
+                    if state["active_task"]["status"] == "failed":
+                        break
+                    await asyncio.sleep(0.02)
+                assert state["active_task"]["status"] == "failed"
+                assert state["active_plan"]["status"] == "failed"
+                assert executed == []
+                assert agent._mwv_checkpoints == {}
+                return
 
             waiting = False
             decision_id = None
@@ -405,7 +449,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
 
             builds_before_resume = agent.brain_builds
             hub = client.server.app["ui_hub"]
-            if cleanup in {"reject", "reset"}:
+            if cleanup in {"reject", "reset", "cancel"}:
                 if cleanup == "reject":
                     response = await client.post(
                         "/ui/api/decision/respond",
@@ -416,6 +460,12 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                             "choice": "reject",
                         },
                     )
+                elif cleanup == "cancel":
+                    response = await client.post(
+                        "/ui/api/plan/cancel",
+                        headers={"X-Slavik-Session": session_id},
+                    )
+                    assert await hub.get_session_decision(session_id) is None
                 else:
                     response = await client.post(
                         "/ui/api/runtime/init",
@@ -463,6 +513,24 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 monkeypatch.setattr(agent, "resume_task_packet", original_resume)
                 await hub.set_workspace_root(session_id, str(tmp_path))
 
+            if cleanup == "projection_fault":
+                from server.http.common import workflow_runtime
+
+                def fail_projection(**kwargs):
+                    raise RuntimeError("projection fault")
+
+                monkeypatch.setattr(workflow_runtime, "_task_execution_payload", fail_projection)
+            elif cleanup == "publication_fault":
+                original_publish = hub.set_session_workflow
+
+                async def fail_terminal_publish(*args, **kwargs):
+                    task = kwargs.get("active_task")
+                    if isinstance(task, dict) and task.get("status") in {"completed", "failed"}:
+                        raise RuntimeError("publication fault")
+                    return await original_publish(*args, **kwargs)
+
+                monkeypatch.setattr(hub, "set_session_workflow", fail_terminal_publish)
+
             approve_resp = await client.post(
                 "/ui/api/decision/respond",
                 headers={"X-Slavik-Session": session_id},
@@ -492,6 +560,13 @@ def test_ui_plan_execute_waiting_approval_then_resume(
             assert [item.args["index"] for item in executed] == [1, 2]
             assert agent._mwv_checkpoints == {}
             assert agent.brain_builds == builds_before_resume
+            if cleanup in {"projection_fault", "publication_fault"}:
+                assert (await hub.get_session_decision(session_id))["status"] == "resolved"
+                result = agent.last_mwv_result
+                assert result is not None
+                assert len(result.tool_observations) == 2
+                assert result.task.task_id == active_task["task_packet"]["task_id"]
+                return
             completed = False
             for _ in range(30):
                 await asyncio.sleep(0.02)

@@ -25,7 +25,7 @@ from core.decision.models import DecisionPacket
 from core.desktop_policy import DesktopPolicyRuntime, DesktopPolicyStore
 from core.desktop_runtime import DesktopExecutionControl, DesktopRunCoordinator, DesktopRuntime
 from core.desktop_security import DesktopPathSecurity
-from core.mwv.manager import ManagerRuntime
+from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.plan_compiler import compile_structured_plan_steps
 from core.rule_engine import RuleEngine
@@ -315,6 +315,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         }
         self.decision_handler = DecisionHandler()
         self._mwv_checkpoints: dict[str, MWVWorkerCheckpoint] = {}
+        self.last_mwv_result: MWVRunResult | None = None
         self._pending_chat_approval: PendingChatApproval | None = None
         self.last_approval_request: ApprovalRequest | None = None
         self.last_approval_source_endpoint: str | None = None

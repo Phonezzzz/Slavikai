@@ -97,6 +97,22 @@ class ScopedAgentProvider[T]:
             self._borrow_for_current_task(entry)
             return entry.agent
 
+    async def get_existing_for_current_task(self, scope: AgentScope) -> T | None:
+        """Borrow the scoped owner for cleanup without model resolution or creation."""
+        if self._closed:
+            return None
+        if self._shared_instance is not None:
+            return self._shared_instance
+        creation_lock = self._creation_locks.setdefault(scope, asyncio.Lock())
+        async with creation_lock:
+            if self._closed:
+                return None
+            entry = self._agents.get(scope)
+            if entry is None:
+                return None
+            self._borrow_for_current_task(entry)
+            return entry.agent
+
     def lock_for(self, scope: AgentScope) -> asyncio.Lock:
         if self._shared_lock is not None:
             return self._shared_lock

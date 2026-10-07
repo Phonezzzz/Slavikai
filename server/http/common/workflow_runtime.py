@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
@@ -791,10 +792,22 @@ async def run_plan_runner(
                 or current_task.get("task_id") != task_id
                 or current_task.get("status") != "running"
                 or normalize_mode_value_fn(current_workflow.get("mode")) != "act"
-                or await resolver.resolve_main(session_id) != main_config
             ):
                 return False
             plan, task = current_plan, current_task
+            if await resolver.resolve_main(session_id) != main_config:
+                if resume_checkpoint_id is None:
+                    failed_plan = plan_with_status_fn(plan, "failed")
+                    failed_task = task_with_status_fn(task, "failed", None)
+                    failed_task["execution"] = {
+                        "runner": "mwv_packet_runner",
+                        "status": "failed",
+                        "error": "model_configuration_changed",
+                    }
+                    await hub.set_session_workflow(
+                        session_id, active_plan=failed_plan, active_task=failed_task
+                    )
+                return False
             packet = deserialize_task_packet_payload(task.get("task_packet"))
             reconfigure_models = getattr(agent, "reconfigure_models", None)
             if (
@@ -962,41 +975,62 @@ async def run_plan_runner(
             )
             return False
 
-        step_results_raw = run_result.work_result.diagnostics.get("step_results")
-        step_results = (
-            [dict(item) for item in step_results_raw if isinstance(item, dict)]
-            if isinstance(step_results_raw, list)
-            else []
-        )
-        plan = _apply_step_results_to_plan(
-            plan,
-            step_results=step_results,
-            plan_mark_step_fn=plan_mark_step_fn,
-            utc_now_iso_fn=utc_now_iso_fn,
-        )
-        stop_reason_code_raw = run_result.work_result.diagnostics.get("stop_reason_code")
-        stop_reason_code = stop_reason_code_raw if isinstance(stop_reason_code_raw, str) else None
-        if (
-            run_result.work_result.status == WorkStatus.SUCCESS
-            and run_result.verification_result.status == VerificationStatus.PASSED
-        ):
-            plan = plan_with_status_fn(plan, "completed")
-            task = task_with_status_fn(task, "completed", None)
-        else:
-            plan = plan_with_status_fn(plan, "failed")
-            task = task_with_status_fn(task, "failed", None)
-        task["execution"] = _task_execution_payload(
-            packet=packet,
-            run_result=run_result,
-            step_results=step_results,
-            stop_reason_code=stop_reason_code,
-        )
-        await hub.set_session_workflow(
-            session_id,
-            mode="act",
-            active_plan=plan,
-            active_task=task,
-        )
+        try:
+            step_results_raw = run_result.work_result.diagnostics.get("step_results")
+            step_results = (
+                [dict(item) for item in step_results_raw if isinstance(item, dict)]
+                if isinstance(step_results_raw, list)
+                else []
+            )
+            plan = _apply_step_results_to_plan(
+                plan,
+                step_results=step_results,
+                plan_mark_step_fn=plan_mark_step_fn,
+                utc_now_iso_fn=utc_now_iso_fn,
+            )
+            stop_reason_code_raw = run_result.work_result.diagnostics.get("stop_reason_code")
+            stop_reason_code = (
+                stop_reason_code_raw if isinstance(stop_reason_code_raw, str) else None
+            )
+            if (
+                run_result.work_result.status == WorkStatus.SUCCESS
+                and run_result.verification_result.status == VerificationStatus.PASSED
+            ):
+                plan = plan_with_status_fn(plan, "completed")
+                task = task_with_status_fn(task, "completed", None)
+            else:
+                plan = plan_with_status_fn(plan, "failed")
+                task = task_with_status_fn(task, "failed", None)
+            task["execution"] = _task_execution_payload(
+                packet=packet,
+                run_result=run_result,
+                step_results=step_results,
+                stop_reason_code=stop_reason_code,
+            )
+            await hub.set_session_workflow(
+                session_id,
+                mode="act",
+                active_plan=plan,
+                active_task=task,
+            )
+        except Exception:  # noqa: BLE001
+            # Execution is already settled in the owning Agent. Projection cannot
+            # make its consumed approval pending again or discard typed evidence.
+            logging.getLogger(__name__).exception("MWV terminal projection failed")
+            failed_plan = dict(plan, status="failed")
+            failed_task = dict(task, status="failed", current_step_id=None)
+            failed_task["execution"] = {
+                "runner": "mwv_packet_runner",
+                "status": "failed",
+                "error": "terminal_projection_failed",
+                "task_id": packet.task_id,
+            }
+            try:
+                await hub.set_session_workflow(
+                    session_id, active_plan=failed_plan, active_task=failed_task
+                )
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("MWV terminal publication failed")
 
         return True
 

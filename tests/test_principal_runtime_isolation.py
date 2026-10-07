@@ -64,6 +64,50 @@ def test_principal_storage_keeps_owner_legacy_paths_and_hashes_members(tmp_path:
     assert member != owner
 
 
+def test_existing_agent_cleanup_borrow_preserves_owner_without_creation() -> None:
+    async def run() -> None:
+        created = []
+
+        class Owner:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        def factory(scope, config):
+            owner = Owner()
+            created.append(owner)
+            return owner
+
+        provider = ScopedAgentProvider(factory=factory)
+        scope = AgentScope("principal", "session")
+        assert await provider.get_existing_for_current_task(scope) is None
+        assert created == []
+        owner = await provider.get_for_current_task(scope, None)
+        borrowed = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def cleanup() -> None:
+            assert await provider.get_existing_for_current_task(scope) is owner
+            borrowed.set()
+            await finish.wait()
+            assert owner.closed is False
+
+        task = asyncio.create_task(cleanup())
+        await borrowed.wait()
+        await provider.release(scope)
+        assert owner.closed is False
+        assert await provider.get_existing_for_current_task(scope) is None
+        assert len(created) == 1
+        finish.set()
+        await task
+        await provider.close()
+        assert owner.closed is True
+        assert await provider.get_existing_for_current_task(scope) is None
+
+    asyncio.run(run())
+
+
 def test_scoped_provider_owns_distinct_agents_and_locks() -> None:
     async def _run() -> None:
         created: list[AgentScope] = []

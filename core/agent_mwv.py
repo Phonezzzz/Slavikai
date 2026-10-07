@@ -172,6 +172,7 @@ class AgentMWVMixin:
         runtime_workspace_root: str | None
         _last_skill_match: SkillMatch | None
         _workspace_diffs: dict[str, WorkspaceDiffEntry]
+        last_mwv_result: MWVRunResult | None
         _mwv_checkpoints: dict[str, MWVWorkerCheckpoint]
         user_id: str
 
@@ -979,7 +980,9 @@ class AgentMWVMixin:
                     root_cause_tag="cancelled",
                 ),
             )
-        return replace(result, tool_observations=tuple(execution.observations))
+        result = replace(result, tool_observations=tuple(execution.observations))
+        self.last_mwv_result = result
+        return result
 
     def _work_change_to_json(self, change: WorkChange) -> dict[str, JSONValue]:
         return {

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import cast
 
 from aiohttp import web
 
 from core.mwv.verifier_runtime import canonical_check_command, has_canonical_repo_verifier
 from core.plan_compiler import PlanCompilationError
+from server.agent_provider import ScopedAgentProvider
 from server.http.common.idempotency import (
     IdempotencyStore,
     fingerprint_json_payload,
@@ -14,6 +16,7 @@ from server.http.common.idempotency import (
 )
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import AgentProtocol
 from server.http_api import (
     UI_SESSION_HEADER,
     _agent_lock_for_request,
@@ -683,14 +686,29 @@ async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
         return session_error
     if session_id is None:
         return _session_forbidden_response()
-    workflow = await hub.get_session_workflow(session_id)
-    plan = _normalize_plan_payload(workflow.get("active_plan"))
-    task = _normalize_task_payload(workflow.get("active_task"))
-    if plan is not None:
-        plan = _plan_with_status(plan, status="cancelled")
-    if task is not None:
-        task = _task_with_status(task, status="cancelled", current_step_id=None)
-    await hub.set_session_workflow(session_id, active_plan=plan, active_task=task)
+    provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+    agent = await provider.get_existing_for_current_task(_agent_scope(request, session_id))
+    async with _agent_lock_for_request(request, session_id):
+        workflow = await hub.get_session_workflow(session_id)
+        plan = _normalize_plan_payload(workflow.get("active_plan"))
+        task = _normalize_task_payload(workflow.get("active_task"))
+        decision = await hub.get_session_decision(session_id)
+        execution = task.get("execution") if task is not None else None
+        checkpoint_id = execution.get("checkpoint_id") if isinstance(execution, dict) else None
+        if isinstance(checkpoint_id, str) and agent is not None:
+            agent.cancel_mwv_approval(checkpoint_id)
+        if isinstance(decision, dict):
+            context = decision.get("context")
+            if (
+                isinstance(context, dict)
+                and context.get("source_endpoint") == "plan.execute_runner"
+            ):
+                await hub.set_session_decision(session_id, None)
+        if plan is not None:
+            plan = _plan_with_status(plan, status="cancelled")
+        if task is not None:
+            task = _task_with_status(task, status="cancelled", current_step_id=None)
+        await hub.set_session_workflow(session_id, active_plan=plan, active_task=task)
     updated = await hub.get_session_workflow(session_id)
     response = json_response(
         {
