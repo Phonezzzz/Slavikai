@@ -6,7 +6,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Literal
 
 from aiohttp import web
@@ -750,6 +750,11 @@ async def _handle_ui_send_impl(
             attachments=attachments,
         )
 
+        execution_model_config = _inception_runtime_config_for_lane(selected_main_config, lane)
+        if web_search:
+            execution_model_config = replace(execution_model_config, web_search_enabled=True)
+        execution_api_key = _resolve_provider_api_key(selected_model["provider"])
+
         async def admission_context_current() -> bool:
             current_workflow = await hub.get_session_workflow(session_id)
             return (
@@ -757,6 +762,9 @@ async def _handle_ui_send_impl(
                 and await hub.get_session_model(session_id) == selected_model_metadata
                 and await _workspace_root_for_session(hub, session_id) == session_root
                 and await session_store.get_categories(approval_scope) == approved_categories
+                and await request.app["runtime_model_resolver"].resolve_main(session_id)
+                == selected_main_config
+                and _resolve_provider_api_key(selected_model["provider"]) == execution_api_key
             )
 
         run_store: TaskRunStore = request.app["task_run_store"]
@@ -791,6 +799,11 @@ async def _handle_ui_send_impl(
                     "web_search": web_search,
                     "mode": mode,
                     "model": selected_model,
+                    "execution_config": asdict(execution_model_config),
+                    "approved_categories": sorted(approved_categories),
+                    "credential_hash": hashlib.sha256(
+                        (execution_api_key or "").encode()
+                    ).hexdigest(),
                     "workspace_root": str(session_root),
                     "endpoint": idempotency_endpoint,
                 }
@@ -960,11 +973,9 @@ async def _handle_ui_send_impl(
                 getattr(agent, "last_chat_interaction_id", None)
             )
             try:
-                model_config = _inception_runtime_config_for_lane(selected_main_config, lane)
-                if web_search:
-                    model_config = replace(model_config, web_search_enabled=True)
-                api_key = _resolve_provider_api_key(selected_model["provider"])
-                agent.reconfigure_models(model_config, main_api_key=api_key, persist=False)
+                agent.reconfigure_models(
+                    execution_model_config, main_api_key=execution_api_key, persist=False
+                )
             except Exception as exc:  # noqa: BLE001
                 error_payload: dict[str, JSONValue] = {
                     "error": {

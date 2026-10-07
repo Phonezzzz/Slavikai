@@ -407,7 +407,8 @@ pruning. UI Ask после validation и root approval, под existing scoped A
 admission и CAS-переход `admitted -> running` до изменения pending continuation и dispatch.
 Principal/session берутся из authenticated boundary. Key связывает endpoint/session/client key;
 без client key генерируется отдельная request identity. Fingerprint связывает content, attachments,
-mode, model, root и options. Повтор ключа с другим binding отклоняется. Уже принятый
+mode, полную execution model config, grants, hash фактических credentials, root и options.
+Raw credentials не сохраняются в DB или operational logs. Повтор ключа с другим binding отклоняется. Уже принятый
 Ask key также нельзя использовать для dispatch в другом UI режиме. Mode/model/root/grants
 проверяются повторно под lock до admission и dispatch; перед dispatch проверяется неизменность
 подготовленного history snapshot. History ещё не является durable execution checkpoint.
@@ -432,3 +433,11 @@ changed structured binding, admission/claim storage faults и запрет но�
 Также проверяются fresh app/Agent с теми же SQLite stores и actual Gateway call, сохранение
 pending approval при дубликате, смена режима и context race до admission/dispatch.
 Это app reconstruction, не crash/OS process recovery или общий runtime lifecycle guarantee.
+
+Штатный UI передаёт устойчивый `Idempotency-Key`. До dispatch browser сохраняет только
+pending request UUID и SHA-256 payload hash; повтор после response loss/reload сохраняет key,
+успешно применённый ответ освобождает key для следующей новой отправки. Explicit regeneration
+после подтверждённого удаления не повторяет deletion на retry send. Message/attachment bytes
+не копируются в этот browser identity cache. Тест actual useSessionTransport проверяет HTTP
+header и повтор после lost response. Test bootstrap использует временные per-app stores;
+production DB не открывается UI test fixtures.

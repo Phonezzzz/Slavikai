@@ -298,3 +298,88 @@ def test_context_change_before_admission_or_dispatch_prevents_model_call(
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["grants", "upstream"])
+def test_admitted_claim_retry_rejects_changed_execution_context(tmp_path, monkeypatch, change):  # noqa: ANN001, ANN201
+    from dataclasses import replace
+
+    from server.agent_provider import AgentScope
+    from server.http.handlers import ui_chat
+
+    monkeypatch.chdir(tmp_path)
+    brain = CountingBrain()
+    agent = _RealStreamingAgent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    original = ui_chat._resolve_agent_for_ui_session
+    changed = False
+
+    async def resolve(request, session_id):
+        owner, config = await original(request, session_id)
+        if changed and change == "upstream":
+            config = replace(config, base_url="http://different-upstream.invalid")
+            await request.app["runtime_model_state"].set_session_override(session_id, config)
+        return owner, config
+
+    monkeypatch.setattr(ui_chat, "_resolve_agent_for_ui_session", resolve)
+
+    async def run():
+        nonlocal changed
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        path = tmp_path / "runs.db"
+        client.app["task_run_store"] = TaskRunStore(path)
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            headers = {"X-Slavik-Session": session, "Idempotency-Key": "claim-context"}
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    "CREATE TRIGGER fail_claim BEFORE INSERT ON run_transitions "
+                    "WHEN NEW.version = 1 BEGIN SELECT RAISE(ABORT, 'claim fault'); END"
+                )
+            assert (
+                await client.post("/ui/api/chat/send", headers=headers, json={"content": "hi"})
+            ).status == 500
+            assert brain.calls == 0
+            with sqlite3.connect(path) as conn:
+                conn.execute("DROP TRIGGER fail_claim")
+                principal = conn.execute("SELECT principal_id FROM task_revisions").fetchone()[0]
+            changed = True
+            if change == "grants":
+                await client.app["session_store"].approve(
+                    AgentScope(principal, session), {"NETWORK_RISK"}
+                )
+            client.app["idempotency_store"] = IdempotencyStore()
+            repeated = await client.post(
+                "/ui/api/chat/send", headers=headers, json={"content": "hi"}
+            )
+            assert repeated.status == 409
+            assert (await repeated.json())["error"]["code"] == "idempotency_key_reused"
+            assert brain.calls == 0
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_default_http_test_apps_use_independent_temporary_run_stores(tmp_path):  # noqa: ANN001, ANN201
+    from .fakes import DummyAgent
+
+    async def run():
+        first = await _create_client(DummyAgent())
+        second = await _create_client(DummyAgent())
+        try:
+            first_path = first.app["task_run_store"].path
+            second_path = second.app["task_run_store"].path
+            assert first_path.is_relative_to(tmp_path)
+            assert second_path.is_relative_to(tmp_path)
+            assert first_path != second_path
+        finally:
+            await first.close()
+            await second.close()
+
+    asyncio.run(run())

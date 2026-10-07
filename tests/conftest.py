@@ -67,3 +67,19 @@ def _close_sqlite_stores(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for conn in connections:
         conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_http_task_run_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.task_run_storage import TaskRunStore
+    from server.http import app as http_app
+
+    counter = 0
+
+    def isolated_store(_path: Path) -> TaskRunStore:
+        nonlocal counter
+        counter += 1
+        return TaskRunStore(tmp_path / "http-runs" / f"app-{counter}.db")
+
+    # Default bootstrap dependencies are test-owned; explicit injected stores retain their path.
+    monkeypatch.setattr(http_app, "TaskRunStore", isolated_store)
