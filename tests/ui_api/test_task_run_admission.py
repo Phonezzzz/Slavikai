@@ -469,3 +469,97 @@ def test_unicode_attachment_only_admission(tmp_path, monkeypatch, size, count): 
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["tools", "policy", "history"])
+def test_admission_snapshot_fences_security_and_early_history_mutation(
+    tmp_path, monkeypatch, change
+):  # noqa: ANN001, ANN201
+    from server.http.handlers import ui_chat
+    from server.ui_hub import UIHub
+
+    monkeypatch.chdir(tmp_path)
+    brain = CountingBrain()
+    agent = _RealStreamingAgent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+    enabled = False
+    publish = ui_chat._publish_agent_activity
+    append = UIHub.append_message
+
+    async def change_security(hub, *, session_id, phase, detail):
+        if enabled and phase == "context.prepared":
+            if change == "tools":
+                await hub.set_session_tools_state(session_id, tools_state={"web": False})
+            elif change == "policy":
+                await hub.set_session_policy(session_id, profile="yolo")
+        await publish(hub, session_id=session_id, phase=phase, detail=detail)
+
+    async def change_history(hub, session_id, message, *, lane="chat"):
+        if enabled and change == "history" and message.get("role") == "user":
+            await hub.delete_last_message_pair(session_id, lane=lane)
+        return await append(hub, session_id, message, lane=lane)
+
+    monkeypatch.setattr(ui_chat, "_publish_agent_activity", change_security)
+    monkeypatch.setattr(UIHub, "append_message", change_history)
+
+    async def run():
+        nonlocal enabled
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            await client.app["ui_hub"].set_session_tools_state(session, tools_state={"web": True})
+            headers = {"X-Slavik-Session": session}
+            assert (
+                await client.post("/ui/api/chat/send", headers=headers, json={"content": "before"})
+            ).status == 200
+            calls = brain.calls
+            enabled = True
+            response = await client.post(
+                "/ui/api/chat/send", headers=headers, json={"content": "next"}
+            )
+            assert response.status == 409
+            assert (await response.json())["error"]["code"] == "task_run_context_changed"
+            assert brain.calls == calls
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_accepted_security_application_failure_prevents_dispatch(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
+    from server.http.handlers import ui_chat
+
+    monkeypatch.chdir(tmp_path)
+    brain = CountingBrain()
+    agent = _RealStreamingAgent(
+        brain=brain,
+        memory_companion_db_path=str(tmp_path / "companion.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+
+    async def fail_application(**kwargs):
+        raise RuntimeError("security application fault")
+
+    monkeypatch.setattr(ui_chat, "_apply_agent_runtime_state", fail_application)
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            response = await client.post(
+                "/ui/api/chat/send", headers={"X-Slavik-Session": session}, json={"content": "hi"}
+            )
+            assert response.status == 500
+            assert (await response.json())["error"]["code"] == "runtime_context_apply_failed"
+            assert brain.calls == 0
+        finally:
+            await client.close()
+
+    asyncio.run(run())

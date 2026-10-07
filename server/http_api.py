@@ -364,6 +364,7 @@ async def _apply_agent_runtime_state(
     agent: AgentProtocol,
     hub: UIHub,
     session_id: str,
+    security_snapshot: tuple[dict[str, bool], dict[str, JSONValue]] | None = None,
 ) -> tuple[
     str,
     dict[str, JSONValue] | None,
@@ -374,6 +375,8 @@ async def _apply_agent_runtime_state(
         loader_hub: _workflow_runtime.WorkflowHubProtocol,
         loader_session_id: str,
     ) -> tuple[dict[str, bool], dict[str, JSONValue]]:
+        if security_snapshot is not None:
+            return security_snapshot
         return await _load_effective_session_security(
             hub=cast(UIHub, loader_hub),
             session_id=loader_session_id,

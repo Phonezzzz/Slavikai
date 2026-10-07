@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { acknowledgeClientSend, markClientSendRegenerated, prepareClientSend } from './client-send-request';
+import { PendingSendConflict, acknowledgeClientSend, markClientSendRegenerated, prepareClientSend } from './client-send-request';
 
 import type { Artifact } from './components/artifacts-sidebar';
 import type {
@@ -610,13 +610,18 @@ export function useSessionTransport({
       acknowledgeClientSend(selectedConversation, pendingSend.key);
       return true;
     } catch (error) {
+      if (error instanceof PendingSendConflict && window.confirm('Предыдущий запрос мог выполниться. Отбросить его перед новой отправкой? Новая отправка может повторить выполненную работу.')) {
+        acknowledgeClientSend(selectedConversation, error.key);
+        onStatusMessage('Предыдущий запрос отброшен. Отправьте новый запрос отдельным действием.');
+        return false;
+      }
       const message = error instanceof Error ? error.message : 'Failed to send message.';
       onStatusMessage(message);
+      return false;
+    } finally {
       setPendingUserMessage(null);
       setPendingSessionId(null);
       setChatStreamingState(null);
-      return false;
-    } finally {
       setSending(false);
     }
   };

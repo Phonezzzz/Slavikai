@@ -54,6 +54,7 @@ from server.http_api import (
     _decision_workflow_context,
     _extract_files_from_tool_calls,
     _extract_named_files_from_output,
+    _load_effective_session_security,
     _model_not_selected_response,
     _normalize_auto_state,
     _normalize_mode_value,
@@ -754,6 +755,8 @@ async def _handle_ui_send_impl(
         if web_search:
             execution_model_config = replace(execution_model_config, web_search_enabled=True)
         execution_api_key = _resolve_provider_api_key(selected_model["provider"])
+        execution_security = await _load_effective_session_security(hub=hub, session_id=session_id)
+        accepted_history: list[dict[str, JSONValue]] = []
 
         async def admission_context_current() -> bool:
             current_workflow = await hub.get_session_workflow(session_id)
@@ -765,6 +768,8 @@ async def _handle_ui_send_impl(
                 and await request.app["runtime_model_resolver"].resolve_main(session_id)
                 == selected_main_config
                 and _resolve_provider_api_key(selected_model["provider"]) == execution_api_key
+                and await _load_effective_session_security(hub=hub, session_id=session_id)
+                == execution_security
             )
 
         run_store: TaskRunStore = request.app["task_run_store"]
@@ -792,6 +797,7 @@ async def _handle_ui_send_impl(
                         code="idempotency_key_reused",
                     )
             if mode == "ask":
+                accepted_history = await hub.get_messages(session_id, lane=lane)
                 request_binding: dict[str, JSONValue] = {
                     "content": content_raw,
                     "attachments": attachments,
@@ -801,6 +807,8 @@ async def _handle_ui_send_impl(
                     "model": selected_model,
                     "execution_config": asdict(execution_model_config),
                     "approved_categories": sorted(approved_categories),
+                    "effective_tools": execution_security[0],
+                    "effective_policy": execution_security[1],
                     "credential_hash": hashlib.sha256(
                         (execution_api_key or "").encode()
                     ).hexdigest(),
@@ -952,6 +960,16 @@ async def _handle_ui_send_impl(
 
         dispatch_history = await hub.get_messages(session_id, lane=lane)
         llm_messages = _ui_messages_to_llm(dispatch_history)
+        if admitted_run is not None and llm_messages != _ui_messages_to_llm(
+            [*accepted_history, user_message]
+        ):
+            await _abort_idempotency()
+            return error_response(
+                status=409,
+                message="История принятого запроса изменилась до dispatch.",
+                error_type="invalid_request_error",
+                code="task_run_context_changed",
+            )
         await _publish_agent_activity(
             hub,
             session_id=session_id,
@@ -1005,7 +1023,12 @@ async def _handle_ui_send_impl(
                     code="model_config_invalid",
                 )
             try:
-                await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+                await _apply_agent_runtime_state(
+                    agent=agent,
+                    hub=hub,
+                    session_id=session_id,
+                    security_snapshot=execution_security if admitted_run is not None else None,
+                )
                 agent.set_session_context(session_id, approved_categories)
                 set_desktop_policy_context = getattr(agent, "set_desktop_policy_context", None)
                 clear_desktop_policy_context = getattr(agent, "clear_desktop_policy_context", None)
@@ -1028,13 +1051,15 @@ async def _handle_ui_send_impl(
                         "error": str(exc),
                     },
                 )
-                if mode == "desktop":
+                if mode == "desktop" or admitted_run is not None:
                     set_runtime_workspace_root(None)
                     error_payload = {
                         "error": {
-                            "message": "Desktop policy context could not be applied.",
+                            "message": "Принятый runtime context не удалось применить.",
                             "type": "configuration_error",
-                            "code": "desktop_policy_context_failed",
+                            "code": "desktop_policy_context_failed"
+                            if mode == "desktop"
+                            else "runtime_context_apply_failed",
                             "trace_id": None,
                             "details": {},
                         }
@@ -1042,9 +1067,11 @@ async def _handle_ui_send_impl(
                     await _complete_idempotency(error_payload, status=500)
                     return error_response(
                         status=500,
-                        message="Desktop policy context could not be applied.",
+                        message="Принятый runtime context не удалось применить.",
                         error_type="configuration_error",
-                        code="desktop_policy_context_failed",
+                        code="desktop_policy_context_failed"
+                        if mode == "desktop"
+                        else "runtime_context_apply_failed",
                     )
             await _publish_agent_activity(
                 hub,
@@ -1052,6 +1079,17 @@ async def _handle_ui_send_impl(
                 phase="agent.respond.start",
                 detail=lane,
             )
+            if admitted_run is not None and (
+                not await admission_context_current()
+                or await hub.get_messages(session_id, lane=lane) != dispatch_history
+            ):
+                await _abort_idempotency()
+                return error_response(
+                    status=409,
+                    message="Контекст принятого запроса изменился перед вызовом Agent.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
             response_raw: str
             agent_response: AgentResponse | None = None
             respond_stream_method = getattr(agent, "respond_stream", None)

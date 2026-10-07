@@ -407,11 +407,13 @@ pruning. UI Ask после validation и root approval, под existing scoped A
 admission и CAS-переход `admitted -> running` до изменения pending continuation и dispatch.
 Principal/session берутся из authenticated boundary. Key связывает endpoint/session/client key;
 без client key генерируется отдельная request identity. Fingerprint связывает content, attachments,
-mode, полную execution model config, grants, hash фактических credentials, root и options.
+mode, полную execution model config, grants, effective tools/policy, hash фактических credentials, root и options.
 Raw credentials не сохраняются в DB или operational logs. Повтор ключа с другим binding отклоняется. Уже принятый
 Ask key также нельзя использовать для dispatch в другом UI режиме. Mode/model/root/grants
 проверяются повторно под lock до admission и dispatch; перед dispatch проверяется неизменность
-подготовленного history snapshot. History ещё не является durable execution checkpoint.
+history snapshot, снятого до admission, плюс новое user message. History ещё не является durable
+execution checkpoint. Canonical runtime state application получает принятый effective security
+snapshot вместо повторной загрузки новых tools после проверки.
 
 UI admission требует атомарного `require_new=True`: existing admitted run тоже нельзя claim'ить
 без durable execution context. Проверка проходит внутри transaction, а не предварительным lookup.
@@ -437,7 +439,9 @@ pending approval при дубликате, смена режима и context r
 Это app reconstruction, не crash/OS process recovery или общий runtime lifecycle guarantee.
 
 Штатный UI передаёт устойчивый `Idempotency-Key`. До dispatch browser сохраняет только
-pending request UUID и SHA-256 payload hash; повтор после response loss/reload сохраняет key,
+pending request UUID и SHA-256 payload hash; повтор после response loss/reload сохраняет key.
+Changed payload (включая потерянные transient modifiers) не заменяет неопределённый key:
+до новой отправки требуется explicit discard.
 успешно применённый ответ освобождает key для следующей новой отправки. Explicit regeneration
 передаёт immutable assistant message identity через `If-Match`; hub под lock удаляет только
 соответствующую последнюю пару. Уже отсутствующая identity — successful no-op даже после

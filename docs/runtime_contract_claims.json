@@ -304,7 +304,7 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 4,
+      "version": 5,
       "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
       "verified_by": [
         "tests/test_task_run_storage.py",
@@ -312,7 +312,7 @@
         "tests/ui_api/test_error_recovery.py",
         "ui/src/app/__tests__/client-send-request.test.ts"
       ],
-      "summary": "Scoped durable admission identities, immutable revision/history and CAS transitions. UI Ask now admits and fences repeated dispatch after volatile replay loss using structured request fingerprints bound to grants and full execution config. Existing admitted runs cannot be reclaimed without durable execution context. The native UI persists a pending client key/hash across lost acknowledgement and reload, allows explicit discard without dispatch, and targets regeneration deletion by immutable message identity; tests inject isolated app stores. Other production entrypoints, approval-resume identity propagation, result capture, acceptance/completion and recovery remain target."
+      "summary": "Scoped durable admission identities, immutable revision/history and CAS transitions. UI Ask now admits and fences repeated dispatch after volatile replay loss using structured request fingerprints bound to grants, effective tools/policy and full execution config, with pre-admission history checked before dispatch. Existing admitted runs cannot be reclaimed without durable execution context. The native UI persists a pending client key/hash across lost acknowledgement and reload, requires explicit discard before replacing an uncertain payload and allows discard without dispatch, and targets regeneration deletion by immutable message identity; tests inject isolated app stores. Other production entrypoints, approval-resume identity propagation, result capture, acceptance/completion and recovery remain target."
     },
     {
       "id": "runtime.approval.native_continuation",

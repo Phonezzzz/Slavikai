@@ -27,6 +27,8 @@ it('isolates sessions and intentional replacement, and fences late acknowledgeme
   const first = await prepareClientSend('a', 'first');
   const other = await prepareClientSend('b', 'first');
   expect(other.key).not.toBe(first.key);
+  await expect(prepareClientSend('a', 'changed')).rejects.toThrow('Предыдущий запрос');
+  acknowledgeClientSend('a', first.key);
   const replacement = await prepareClientSend('a', 'changed');
   acknowledgeClientSend('a', first.key);
   expect((await prepareClientSend('a', 'changed')).key).toBe(replacement.key);
@@ -109,4 +111,43 @@ it('retries the same regeneration target after losing the DELETE response', asyn
   await act(async () => { expect(await result.current.handleSendChat(payload)).toBe(true); });
   expect(targets).toEqual(['target-response', 'target-response']);
   unmount();
+});
+
+it('fences changed transient modifiers after reload until explicit discard', async () => {
+  const first = await prepareClientSend('session', JSON.stringify({ content: 'same', force_canvas: true, web_search: true }));
+  vi.resetModules();
+  const reloaded = await import('../client-send-request');
+  await expect(reloaded.prepareClientSend('session', JSON.stringify({ content: 'same', force_canvas: false }))).rejects.toThrow('Предыдущий запрос');
+  expect(JSON.parse(localStorage.getItem('slavikai:pending-send:session')!).key).toBe(first.key);
+  reloaded.acknowledgeClientSend('session', first.key);
+  expect((await reloaded.prepareClientSend('session', JSON.stringify({ content: 'same', force_canvas: false }))).key).not.toBe(first.key);
+});
+
+it('does not dispatch changed modifier payload after transport reload without discard', async () => {
+  const { act, renderHook } = await import('@testing-library/react');
+  const { useSessionTransport } = await import('../use-session-transport');
+  vi.stubGlobal('EventSource', class { close() {} });
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+  const fetch = vi.fn(async () => { throw new Error('response lost'); });
+  vi.stubGlobal('fetch', fetch);
+  const options = {
+    sessionHeader: 'X-Slavik-Session', selectedConversation: 'session', forceCanvasNext: true,
+    consumeForceCanvasNext: vi.fn(), onSessionIdChange: vi.fn(), onStatusMessage: vi.fn(),
+    onStreamWarning: vi.fn(), onRuntimePayload: vi.fn(), onOpenStreamedArtifact: vi.fn(),
+    setArtifactViewerArtifactId: vi.fn(), loadSessions: async () => [],
+  };
+  const original = renderHook(() => useSessionTransport(options));
+  await act(async () => { await original.result.current.handleSendChat({ content: 'same', webSearch: true }); });
+  original.unmount();
+  const pending = localStorage.getItem('slavikai:pending-send:session');
+  const reloaded = renderHook(() => useSessionTransport({ ...options, forceCanvasNext: false }));
+  await act(async () => { await reloaded.result.current.handleSendChat({ content: 'same' }); });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(localStorage.getItem('slavikai:pending-send:session')).toBe(pending);
+  await act(async () => { await reloaded.result.current.handleSendChat({ content: 'same' }); });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(localStorage.getItem('slavikai:pending-send:session')).toBeNull();
+  expect(reloaded.result.current.pendingUserMessage).toBeNull();
+  reloaded.unmount();
+  confirm.mockRestore();
 });

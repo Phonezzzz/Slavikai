@@ -1,3 +1,7 @@
+export class PendingSendConflict extends Error {
+  constructor(public readonly key: string) { super("Предыдущий запрос ещё не подтверждён. Для новой отправки сначала отбросьте его явно."); }
+}
+
 type PendingSend = {
   key: string;
   fingerprint: string;
@@ -22,6 +26,7 @@ export async function prepareClientSend(sessionId: string, body: string): Promis
   const fingerprint = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
   const existing = readPending(sessionId);
   if (existing?.fingerprint === fingerprint) return existing;
+  if (existing) throw new PendingSendConflict(existing.key);
   const pending = { key: crypto.randomUUID(), fingerprint, regenerated: false };
   // Persist only identity/hash before dispatch; no message or attachment bytes.
   localStorage.setItem(storageKey(sessionId), JSON.stringify(pending));
