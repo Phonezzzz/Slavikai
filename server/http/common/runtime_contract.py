@@ -25,6 +25,7 @@ from server.http.common.ui_settings import (
 )
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
+from shared.task_run import TaskRun
 
 
 class SessionApprovalStore:
@@ -129,6 +130,8 @@ class AgentProtocol(Protocol):
 
     def respond(self, messages: list[LLMMessage]) -> AgentResponse: ...
 
+    def bind_chat_approval_run(self, identity: str, run: TaskRun) -> None: ...
+    def chat_approval_run(self, identity: str) -> TaskRun | None: ...
     def validate_chat_approval(self, identity: str) -> None: ...
     def cancel_chat_approval(self, identity: str) -> None: ...
 

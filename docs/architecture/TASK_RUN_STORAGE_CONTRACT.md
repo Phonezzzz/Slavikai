@@ -431,8 +431,13 @@ CAS claim также не dispatch'ится. DB admission/start fault остан
 Доступный typed Agent result переводит run в `result_submitted` до text projection.
 Это не acceptance/completion и не durable result capture. При fault/cancellation до submission
 run может остаться running/unresolved; автоматической recovery или повторного исполнения нет.
-Initial Ask approval сохраняет run, но последующий native approval resume ещё не связан с
-этим lifecycle store. `/v1`, project, Auto, Desktop и Act admission остаются непокрытыми.
+Initial UI Ask approval сохраняет immutable TaskRun binding в принадлежащем Agent native
+checkpoint. Перед resume owning HTTP runtime проверяет exact principal/session, state/version
+и запись store до category grant/tool dispatch; отсутствующий, foreign или stale run даёт unavailable.
+Следующее approval переносит тот же binding. Typed result после resume переводит исходный run
+в `result_submitted` до UI/text projection, без нового admission. Это volatile checkpoint binding,
+не durable continuation/recovery и не terminal acceptance. Store submission fault после tool effect
+оставляет run unresolved; single-use checkpoint не разрешает implicit повтор execution. `/v1`, project, Auto, Desktop и Act admission остаются непокрытыми.
 Task terminal acceptance/final, evidence references, recovery controller, full capture,
 retention/GC и user-visible run inspection остаются обязательными следующими срезами.
 

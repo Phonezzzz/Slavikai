@@ -73,6 +73,7 @@ from shared.models import (
 )
 from shared.policy_models import PolicyAction, PolicyRule, PolicyScope
 from shared.sandbox import normalize_sandbox_path
+from shared.task_run import TaskRun
 from tools.workspace_tools import MAX_FILE_BYTES, WORKSPACE_ROOT
 
 SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
@@ -133,6 +134,7 @@ class PendingChatApproval:
     session_id: str | None
     mode: str
     auto_run_id: str | None = None
+    task_run: TaskRun | None = None
     desktop_once_rules: tuple[DesktopApprovalRule, ...] = ()
     policy_application: PolicyApplication | None = None
     web_evidence: WebSearchEvidence | None = None
@@ -428,6 +430,22 @@ class AgentToolsMixin:
             "execution_mode": self.runtime_mode,
         }
 
+    def bind_chat_approval_run(self, identity: str, run: TaskRun) -> None:
+        self.validate_chat_approval(identity)
+        pending = self._pending_chat_approval
+        assert pending is not None
+        if pending.mode != "ask" or run.scope.session_id != pending.session_id:
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        if pending.task_run is not None and pending.task_run != run:
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        self._pending_chat_approval = replace(pending, task_run=run)
+
+    def chat_approval_run(self, identity: str) -> TaskRun | None:
+        self.validate_chat_approval(identity)
+        pending = self._pending_chat_approval
+        assert pending is not None
+        return pending.task_run
+
     def validate_chat_approval(self, identity: str) -> None:
         pending = self._pending_chat_approval
         if (
@@ -541,6 +559,7 @@ class AgentToolsMixin:
             if next_pending is not None:
                 self._pending_chat_approval = replace(
                     next_pending,
+                    task_run=pending.task_run,
                     policy_application=pending.policy_application,
                     web_evidence=pending.web_evidence,
                     record_in_history=pending.record_in_history,

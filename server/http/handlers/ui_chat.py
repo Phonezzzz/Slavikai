@@ -1307,6 +1307,15 @@ async def _handle_ui_send_impl(
             else:
                 agent_response = agent.respond(llm_messages)
                 response_raw = agent_response.text
+            if (
+                admitted_run is not None
+                and getattr(agent, "last_approval_source_endpoint", None) == "chat.tool_continue"
+            ):
+                pending_payload = agent.last_approval_resume_payload
+                if isinstance(pending_payload, dict):
+                    identity = pending_payload.get("continuation_id")
+                    if isinstance(identity, str):
+                        agent.bind_chat_approval_run(identity, admitted_run)
             if admitted_run is not None and agent_response is not None:
                 # Submission is not acceptance or completion; pending approval remains owned.
                 if agent_response.runtime_result is not None:
@@ -1967,6 +1976,21 @@ async def handle_ui_approval_continue(
                 agent.validate_chat_approval(identity)
             except ChatApprovalUnavailable as exc:
                 return not_started(str(exc))
+            accepted_run: TaskRun | None = None
+            run_store: TaskRunStore = request.app["task_run_store"]
+            run_scope = RunScope(scope.principal_id, session_id)
+            if mode == "ask":
+                try:
+                    accepted_run = agent.chat_approval_run(identity)
+                    if (
+                        accepted_run is None
+                        or accepted_run.scope != run_scope
+                        or accepted_run.state != RunState.RUNNING
+                        or run_store.get(run_scope, accepted_run.task_run_id) != accepted_run
+                    ):
+                        return not_started("approval_continuation_unavailable")
+                except (ChatApprovalUnavailable, LookupError):
+                    return not_started("approval_continuation_unavailable")
             if mode == "desktop":
                 principal_id = _request_principal_id(request)
                 if principal_id is None or desktop_scope is None:
@@ -2039,6 +2063,15 @@ async def handle_ui_approval_continue(
                     if auto_state is not None:
                         await hub.set_session_workflow(session_id, auto_state=auto_state)
                     await _drain_auto_progress(hub=hub, session_id=session_id, agent=agent)
+                if accepted_run is not None and response.runtime_result is not None:
+                    run_store.transition(
+                        run_scope,
+                        accepted_run.task_run_id,
+                        expected_version=accepted_run.version,
+                        state=RunState.RESULT_SUBMITTED,
+                        authority=TransitionAuthority.RUNTIME,
+                        reason_code="approval_result_submitted",
+                    )
                 text, report = _project_agent_response(response)
                 approval = _serialize_approval_request(agent.last_approval_request)
                 next_decision: dict[str, JSONValue] | None = None

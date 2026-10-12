@@ -678,3 +678,128 @@ def test_second_ask_model_context_has_no_duplicate_ui_turns(tmp_path, monkeypatc
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("stale", [False, True, "foreign", "nested"])
+def test_native_approval_submits_original_run_or_fences_stale_owner(tmp_path, monkeypatch, stale):  # noqa: ANN001, ANN201
+    from llm.types import LLMResult, ToolCall
+    from shared.models import ToolResult
+    from shared.task_run import RunScope, RunState, TransitionAuthority
+
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    class ApprovalBrain(CountingBrain):
+        supports_native_tools = True
+        supports_streaming_tools = True
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            if not any(m.role == "tool" for m in messages):
+                return LLMResult(
+                    text="",
+                    tool_calls=(
+                        [
+                            ToolCall(id="original", name="lookup", arguments={}),
+                            ToolCall(id="next", name="lookup", arguments={}),
+                        ]
+                        if stale == "nested"
+                        else [ToolCall(id="original", name="lookup", arguments={})]
+                    ),
+                )
+            return LLMResult(text="observed")
+
+    brain = ApprovalBrain()
+    agent = _RealStreamingAgent(brain=brain, enable_tools={"safe_mode": True})
+
+    def execute(request):
+        calls.append(request)
+        return ToolResult(ok=True, data={"value": "read"})
+
+    agent.tool_registry.register(
+        "lookup",
+        execute,
+        capability="read",
+        description="Read lookup",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+        risk_classes=["network"],
+    )
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            headers = {"X-Slavik-Session": session}
+            response = await client.post(
+                "/ui/api/chat/send", headers=headers, json={"content": "lookup"}
+            )
+            assert response.status == 200
+            decision = (await response.json())["decision"]
+            store = client.app["task_run_store"]
+            with sqlite3.connect(store.path) as conn:
+                run_id = conn.execute("SELECT task_run_id FROM task_runs").fetchone()[0]
+            principal = await client.app["ui_hub"].get_session_principal_id(session)
+            scope = RunScope(principal, session)
+            accepted = store.get(scope, run_id)
+            if stale is True:
+                store.transition(
+                    scope,
+                    run_id,
+                    expected_version=accepted.version,
+                    state=RunState.ABORTED,
+                    authority=TransitionAuthority.USER,
+                    reason_code="explicit_abort",
+                )
+            if stale == "foreign":
+                from dataclasses import replace
+
+                pending = agent._pending_chat_approval
+                assert pending is not None and pending.task_run is not None
+                agent._pending_chat_approval = replace(
+                    pending,
+                    task_run=replace(
+                        pending.task_run, scope=RunScope("foreign-principal", session)
+                    ),
+                )
+            fenced = stale is True or stale == "foreign"
+            resumed = await client.post(
+                "/ui/api/decision/respond",
+                headers=headers,
+                json={
+                    "session_id": session,
+                    "decision_id": decision["id"],
+                    "choice": "approve_once" if stale == "nested" else "approve_session",
+                },
+            )
+            assert resumed.status == (409 if fenced else 200)
+            if stale == "nested":
+                assert len(calls) == 1
+                next_decision = (await resumed.json())["decision"]
+                assert next_decision["id"] != decision["id"]
+                assert agent._pending_chat_approval.task_run == accepted
+                resumed = await client.post(
+                    "/ui/api/decision/respond",
+                    headers=headers,
+                    json={
+                        "session_id": session,
+                        "decision_id": next_decision["id"],
+                        "choice": "approve_session",
+                    },
+                )
+                assert resumed.status == 200
+            assert len(calls) == (0 if fenced else 2 if stale == "nested" else 1)
+            assert store.get(scope, run_id).state == (
+                RunState.ABORTED
+                if stale is True
+                else RunState.RUNNING
+                if fenced
+                else RunState.RESULT_SUBMITTED
+            )
+            with sqlite3.connect(store.path) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
