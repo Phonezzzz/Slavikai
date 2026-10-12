@@ -438,6 +438,9 @@ checkpoint. Перед resume owning HTTP runtime проверяет exact princ
 в `result_submitted` до UI/text projection, без нового admission. Это volatile checkpoint binding,
 не durable continuation/recovery и не terminal acceptance. Store submission fault после tool effect
 оставляет run unresolved; single-use checkpoint не разрешает implicit повтор execution. `/v1`, project, Auto, Desktop и Act admission остаются непокрытыми.
+Для `/v1` session grants читаются и применяются только под owning Agent lock перед
+dispatch; ошибка context installation останавливает запрос без вызова Agent. Это prerequisite
+для будущего admission, а не реализация TaskRun для `/v1`.
 Task terminal acceptance/final, evidence references, recovery controller, full capture,
 retention/GC и user-visible run inspection остаются обязательными следующими срезами.
 

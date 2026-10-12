@@ -1154,3 +1154,69 @@ def test_control_plane_requires_admin_token(monkeypatch, tmp_path) -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("fault", [False, True])
+@pytest.mark.parametrize("hold", [False, True])
+def test_api_session_context_is_owned_and_fail_closed(monkeypatch, tmp_path, fault, hold):  # noqa: ANN001, ANN201
+    from server.http.handlers import chat
+
+    trace_path = tmp_path / "trace.log"
+    agent = DummyAgent(trace_path)
+    context_calls = []
+    dispatch_calls = []
+    set_context = agent.set_session_context
+    respond = agent.respond
+
+    def install_context(session_id, categories):
+        context_calls.append((session_id, categories))
+        if fault:
+            raise RuntimeError("context installation failed")
+        set_context(session_id, categories)
+
+    def dispatch(messages):
+        dispatch_calls.append(messages)
+        return respond(messages)
+
+    monkeypatch.setattr(agent, "set_session_context", install_context)
+    monkeypatch.setattr(agent, "respond", dispatch)
+
+    async def run():
+        client = await _create_client(agent, trace_path, monkeypatch)
+        lock = asyncio.Lock()
+        entered = asyncio.Event()
+        scopes = []
+
+        def owned_lock(request, session_id):
+            scopes.append(chat._agent_scope(request, session_id))
+            entered.set()
+            return lock
+
+        monkeypatch.setattr(chat, "_agent_lock_for_request", owned_lock)
+        if hold:
+            await lock.acquire()
+        pending = asyncio.create_task(
+            client.post(
+                "/v1/chat/completions",
+                json={"model": "slavik", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            if hold:
+                assert context_calls == []
+                assert dispatch_calls == []
+                await client.app["session_store"].approve(scopes[0], {"NETWORK_RISK"})
+                lock.release()
+            response = await pending
+            assert response.status == (500 if fault else 200)
+            assert len(context_calls) == 1
+            assert context_calls[0][1] == ({"NETWORK_RISK"} if hold else set())
+            assert len(dispatch_calls) == (0 if fault else 1)
+        finally:
+            if lock.locked():
+                lock.release()
+            await pending
+            await client.close()
+
+    asyncio.run(run())

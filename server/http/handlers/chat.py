@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import time
 import uuid
 
@@ -22,8 +21,6 @@ from server.http_api import (
     _resolve_agent_for_base_http,
 )
 from shared.models import JSONValue
-
-logger = logging.getLogger("SlavikAI.HttpAPI")
 
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
@@ -135,20 +132,6 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             },
         )
 
-    approved_categories = await session_store.get_categories(scope)
-    try:
-        agent.set_session_context(session_id, approved_categories)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to set session context",
-            exc_info=True,
-            extra={
-                "session_id": session_id,
-                "approved_categories": sorted(approved_categories),
-                "error": str(exc),
-            },
-        )
-
     if parsed.stream:
         return error_response(
             status=400,
@@ -170,6 +153,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     mwv_report: dict[str, JSONValue] | None = None
     try:
         async with agent_lock:
+            approved_categories = await session_store.get_categories(scope)
+            agent.set_session_context(session_id, approved_categories)
             previous_trace_id = agent.last_chat_interaction_id
             previous_decision_packet = getattr(agent, "last_decision_packet", None)
             if runtime_mode in {"ask", "auto"}:
