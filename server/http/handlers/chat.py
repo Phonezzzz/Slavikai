@@ -1,26 +1,41 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
+from dataclasses import asdict
+from typing import cast
 
 from aiohttp import web
 
+from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
+from server.agent_provider import ScopedAgentProvider
 from server.http.common.auth import _request_principal_id
 from server.http.common.chat_payload import (
     _project_agent_response,
 )
+from server.http.common.idempotency import fingerprint_json_payload, normalize_idempotency_key
 from server.http.common.proxy_model import PUBLIC_PROXY_MODEL_ID
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import (
+    AgentProtocol,
+    RuntimeModelResolverProtocol,
+    _require_custom_provider_owner,
+)
 from server.http_api import (
     TOOL_PIPELINE_ENABLED,
     _agent_lock_for_request,
     _agent_scope,
-    _apply_agent_runtime_state,
+    _load_effective_session_security,
     _model_not_selected_response,
     _parse_chat_request,
-    _resolve_agent_for_base_http,
+    _resolve_provider_api_key,
+    _workspace_root_for_session,
 )
 from shared.models import JSONValue
+from shared.task_run import RunScope, RunState, TaskRun, TransitionAuthority
+from tools.workspace_tools import workspace_root_context
 
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
@@ -86,38 +101,6 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     runtime_session_id = session_id
     runtime_mode = parsed.runtime_mode
 
-    if runtime_mode in {"ask", "auto"} and explicit_session_id is not None:
-        principal_id = _request_principal_id(request)
-        if principal_id is None:
-            return error_response(
-                status=401,
-                message="Unauthorized.",
-                error_type="invalid_request_error",
-                code="unauthorized",
-            )
-        try:
-            await hub.get_or_create_session(explicit_session_id, principal_id=principal_id)
-        except PermissionError:
-            return error_response(
-                status=403,
-                message="Session access forbidden.",
-                error_type="invalid_request_error",
-                code="session_forbidden",
-            )
-
-    try:
-        agent = await _resolve_agent_for_base_http(request, explicit_session_id)
-    except PermissionError:
-        return error_response(
-            status=403,
-            message="Owner access required for custom provider.",
-            error_type="invalid_request_error",
-            code="owner_required",
-        )
-    if agent is None:
-        return _model_not_selected_response()
-    agent_lock = _agent_lock_for_request(request, explicit_session_id)
-
     if runtime_mode in {"plan", "act"}:
         return error_response(
             status=400,
@@ -127,7 +110,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             details={
                 "next_steps": [
                     "Используйте UI workflow endpoints: /ui/api/plan/* и /ui/api/mode.",
-                    "Для /v1 доступен opt-in runtime_mode=ask|auto.",
+                    "Для /v1 доступен Ask по умолчанию или явный runtime_mode=auto.",
                 ],
             },
         )
@@ -148,54 +131,170 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             code="tool_calling_not_supported",
         )
 
+    if explicit_session_id is not None:
+        principal_id = _request_principal_id(request)
+        if principal_id is None:
+            return error_response(
+                status=401,
+                message="Unauthorized.",
+                error_type="invalid_request_error",
+                code="unauthorized",
+            )
+        try:
+            await hub.get_or_create_session(explicit_session_id, principal_id=principal_id)
+        except PermissionError:
+            return error_response(
+                status=403,
+                message="Session access forbidden.",
+                error_type="invalid_request_error",
+                code="session_forbidden",
+            )
+
+    agent_lock = _agent_lock_for_request(request, explicit_session_id)
+
+    client_key = normalize_idempotency_key(request.headers.get("Idempotency-Key"))
+    durable_key = hashlib.sha256(
+        json.dumps(["/v1/chat/completions", session_id, client_key or uuid.uuid4().hex]).encode()
+    ).hexdigest()
+    run_store: TaskRunStore = request.app["task_run_store"]
+    run_scope = RunScope(scope.principal_id, session_id)
+    command_lane = parsed.messages[-1].content.strip().startswith("/")
+    admitted_run: TaskRun | None = None
     trace_id: str | None = None
     decision_type: str | None = None
     mwv_report: dict[str, JSONValue] | None = None
     try:
         async with agent_lock:
+            if (runtime_mode != "ask" or command_lane) and client_key is not None:
+                if run_store.find_by_request(run_scope, durable_key) is not None:
+                    return error_response(
+                        status=409,
+                        message="Ключ уже связан с принятым Ask.",
+                        error_type="invalid_request_error",
+                        code="idempotency_key_reused",
+                    )
             approved_categories = await session_store.get_categories(scope)
-            agent.set_session_context(session_id, approved_categories)
+            resolver = cast(RuntimeModelResolverProtocol, request.app["runtime_model_resolver"])
+            execution_config = await resolver.resolve_main(explicit_session_id)
+            if execution_config is None:
+                return _model_not_selected_response()
+            try:
+                _require_custom_provider_owner(request, execution_config.provider, execution_config)
+            except PermissionError:
+                return error_response(
+                    status=403,
+                    message="Owner access required for custom provider.",
+                    error_type="invalid_request_error",
+                    code="owner_required",
+                )
+            execution_key = _resolve_provider_api_key(execution_config.provider)
+            security_snapshot = await _load_effective_session_security(
+                hub=hub, session_id=session_id
+            )
+            accepted_root = await _workspace_root_for_session(hub, session_id)
+
+            async def context_current() -> bool:
+                return (
+                    await resolver.resolve_main(explicit_session_id) == execution_config
+                    and await session_store.get_categories(scope) == approved_categories
+                    and await _load_effective_session_security(hub=hub, session_id=session_id)
+                    == security_snapshot
+                    and await _workspace_root_for_session(hub, session_id) == accepted_root
+                    and _resolve_provider_api_key(execution_config.provider) == execution_key
+                )
+
+            if runtime_mode == "ask" and not command_lane:
+                if not await context_current():
+                    return error_response(
+                        status=409,
+                        message="Контекст запроса изменился до dispatch.",
+                        error_type="invalid_request_error",
+                        code="task_run_context_changed",
+                    )
+                binding: dict[str, JSONValue] = {
+                    "request": payload,
+                    "runtime_mode": runtime_mode,
+                    "execution_config": asdict(execution_config),
+                    "credential_hash": hashlib.sha256((execution_key or "").encode()).hexdigest(),
+                    "approved_categories": sorted(approved_categories),
+                    "security": [security_snapshot[0], security_snapshot[1]],
+                    "workspace_root": str(accepted_root),
+                }
+                try:
+                    admitted_run = run_store.admit(
+                        run_scope,
+                        request_key=durable_key,
+                        goal=parsed.messages[-1].content
+                        if parsed.messages[-1].content.strip()
+                        else json.dumps(
+                            payload["messages"][-1], ensure_ascii=False, separators=(",", ":")
+                        ),
+                        mode="ask",
+                        request_fingerprint=fingerprint_json_payload(binding),
+                        require_new=True,
+                    )
+                except RunAlreadyAdmittedError:
+                    return error_response(
+                        status=409,
+                        message="Принятый run нельзя повторно выполнить без continuation.",
+                        error_type="invalid_request_error",
+                        code="task_run_continuation_unavailable",
+                    )
+                except RunConflictError:
+                    return error_response(
+                        status=409,
+                        message="Ключ связан с другим принятым запросом.",
+                        error_type="invalid_request_error",
+                        code="idempotency_key_reused",
+                    )
+                admitted_run = run_store.transition(
+                    run_scope,
+                    admitted_run.task_run_id,
+                    expected_version=admitted_run.version,
+                    state=RunState.RUNNING,
+                    authority=TransitionAuthority.RUNTIME,
+                    reason_code="api_runtime_started",
+                )
+            provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+            agent = await provider.get_for_current_task(scope, execution_config)
             previous_trace_id = agent.last_chat_interaction_id
             previous_decision_packet = getattr(agent, "last_decision_packet", None)
-            if runtime_mode in {"ask", "auto"}:
-                if explicit_session_id is not None:
-                    await _apply_agent_runtime_state(
-                        agent=agent,
-                        hub=hub,
-                        session_id=runtime_session_id,
+            agent.set_session_context(session_id, approved_categories)
+            agent.reconfigure_models(execution_config, main_api_key=execution_key, persist=False)
+            agent.apply_runtime_tools_enabled(security_snapshot[0])
+            agent.apply_runtime_workspace_root(str(accepted_root))
+            agent.set_runtime_state(
+                mode=runtime_mode,
+                active_plan=None,
+                active_task=None,
+                auto_state=None,
+                enforce_plan_guard=False,
+            )
+            if not await context_current():
+                return error_response(
+                    status=409,
+                    message="Контекст запроса изменился до dispatch.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
+            with workspace_root_context(accepted_root):
+                agent_response = agent.respond(parsed.messages)
+            if admitted_run is not None:
+                if getattr(agent, "last_approval_source_endpoint", None) == "chat.tool_continue":
+                    pending = agent.last_approval_resume_payload
+                    if isinstance(pending, dict) and isinstance(
+                        pending.get("continuation_id"), str
+                    ):
+                        agent.bind_chat_approval_run(str(pending["continuation_id"]), admitted_run)
+                if agent_response.runtime_result is not None:
+                    run_store.transition(
+                        run_scope,
+                        admitted_run.task_run_id,
+                        expected_version=admitted_run.version,
+                        state=RunState.RESULT_SUBMITTED,
+                        authority=TransitionAuthority.RUNTIME,
+                        reason_code="api_result_submitted",
                     )
-                runtime_setter = getattr(agent, "set_runtime_state", None)
-                if callable(runtime_setter):
-                    active_plan_raw = (
-                        getattr(agent, "runtime_active_plan", None)
-                        if explicit_session_id is not None
-                        else None
-                    )
-                    active_task_raw = (
-                        getattr(agent, "runtime_active_task", None)
-                        if explicit_session_id is not None
-                        else None
-                    )
-                    auto_state_raw = (
-                        getattr(agent, "runtime_auto_state", None)
-                        if explicit_session_id is not None
-                        else None
-                    )
-                    active_plan = (
-                        dict(active_plan_raw) if isinstance(active_plan_raw, dict) else None
-                    )
-                    active_task = (
-                        dict(active_task_raw) if isinstance(active_task_raw, dict) else None
-                    )
-                    auto_state = dict(auto_state_raw) if isinstance(auto_state_raw, dict) else None
-                    runtime_setter(
-                        mode=runtime_mode,
-                        active_plan=active_plan,
-                        active_task=active_task,
-                        auto_state=auto_state,
-                        enforce_plan_guard=False,
-                    )
-            agent_response = agent.respond(parsed.messages)
             response_text, mwv_report = _project_agent_response(agent_response)
             trace_id = agent.last_chat_interaction_id
             if trace_id == previous_trace_id:
@@ -270,9 +369,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     }
     if mwv_report is not None:
         slavik_meta["mwv_report"] = mwv_report
-    if runtime_mode in {"ask", "auto"}:
-        slavik_meta["runtime_mode"] = runtime_mode
-        slavik_meta["runtime_session_id"] = runtime_session_id
+    slavik_meta["runtime_mode"] = runtime_mode
+    slavik_meta["runtime_session_id"] = runtime_session_id
 
     response_payload: dict[str, JSONValue] = {
         "id": f"chatcmpl-{uuid.uuid4().hex}",

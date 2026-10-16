@@ -437,10 +437,29 @@ checkpoint. Перед resume owning HTTP runtime проверяет exact princ
 Следующее approval переносит тот же binding. Typed result после resume переводит исходный run
 в `result_submitted` до UI/text projection, без нового admission. Это volatile checkpoint binding,
 не durable continuation/recovery и не terminal acceptance. Store submission fault после tool effect
-оставляет run unresolved; single-use checkpoint не разрешает implicit повтор execution. `/v1`, project, Auto, Desktop и Act admission остаются непокрытыми.
+оставляет run unresolved; single-use checkpoint не разрешает implicit повтор execution. Project, Auto, Desktop и Act admission остаются непокрытыми.
 Для `/v1` session grants читаются и применяются только под owning Agent lock перед
-dispatch; ошибка context installation останавливает запрос без вызова Agent. Это prerequisite
-для будущего admission, а не реализация TaskRun для `/v1`.
+dispatch; ошибка context installation останавливает запрос без вызова Agent.
+`/v1/chat/completions` теперь использует Ask по умолчанию, а не наследует прежний Agent mode.
+Default и explicit Ask имеют один admission/start/submission path. Fingerprint связывает весь
+wire request (включая history), применённый ModelConfig/credential hash, grants, effective tools/policy
+и workspace root. Context сверяется перед admission и после применения к Actor перед dispatch; root закрепляется
+на dispatch. Admission/claim выполняются до borrow/reconfiguration/context mutation Actor,
+поэтому отказ повтора не меняет режим и checkpoint последующего run. API больше не вызывает
+старый resolver, который перенастраивал Actor до owning admission.
+API без выбранного runtime ModelConfig возвращает `model_not_selected`, даже если bootstrap
+передал готовый Agent; исполнения с неявной прошлой конфигурацией больше нет.
+`Idempotency-Key` нормализуется общим HTTP helper и namespaces по endpoint/session;
+повтор любого committed admission возвращает 409 без повторного model/tool call, даже после
+reconstruction приложения. Изменённый binding даёт `idempotency_key_reused`, совпавший —
+`task_run_continuation_unavailable`. Без ключа каждая отправка — отдельный run.
+Model result переводит тот же run в `result_submitted` до presentation. Debug `/...` не создаёт
+model run, принятый Ask key нельзя использовать для команды или Auto. Старый API branch без
+runtime setter/default mode удалён; API требует canonical runtime interface. UI workflow mode,
+active_plan/task/auto_state больше не применяются к API execution: режим задаётся только request,
+permissions/root — принятым snapshot через typed Agent setters. Повтор не сбрасывает native checkpoint. Native Ask approval
+сохраняет owned run binding, но публичного `/v1` confirmation/recovery API этот срез не добавляет.
+Auto admission, result byte capture, terminal acceptance и durable recovery остаются target.
 Task terminal acceptance/final, evidence references, recovery controller, full capture,
 retention/GC и user-visible run inspection остаются обязательными следующими срезами.
 

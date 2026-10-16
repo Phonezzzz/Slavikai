@@ -39,7 +39,7 @@ class ChatRequest:
     messages: list[LLMMessage]
     stream: bool
     session_id: str | None
-    runtime_mode: str | None
+    runtime_mode: str
     runtime_session_id: str | None
     sampling_warnings: list[str]
     tool_calling_present: bool
@@ -131,7 +131,7 @@ def _parse_chat_request(payload: dict[str, object]) -> tuple[ChatRequest | None,
 
     meta_raw = payload.get("slavik_meta")
     session_id: str | None = None
-    runtime_mode: str | None = None
+    runtime_mode = "ask"
     runtime_session_id: str | None = None
     if meta_raw is not None:
         if not isinstance(meta_raw, dict):

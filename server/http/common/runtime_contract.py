@@ -128,6 +128,16 @@ class AgentProtocol(Protocol):
         persist: bool = True,
     ) -> None: ...
 
+    def set_runtime_state(
+        self,
+        *,
+        mode: str,
+        active_plan: dict[str, JSONValue] | None,
+        active_task: dict[str, JSONValue] | None,
+        auto_state: dict[str, JSONValue] | None = None,
+        enforce_plan_guard: bool,
+    ) -> None: ...
+
     def respond(self, messages: list[LLMMessage]) -> AgentResponse: ...
 
     def bind_chat_approval_run(self, identity: str, run: TaskRun) -> None: ...

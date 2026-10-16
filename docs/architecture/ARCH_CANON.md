@@ -43,7 +43,7 @@
   `core/agent_routing.py`, часть `classify_request(...)`, runtime/API/UI `lane` markers
   и legacy UI endpoints ещё существуют как совместимость и не считаются целевой
   архитектурой.
-- **`/v1/chat/completions` rollout**: поддерживает только `ask|auto` как opt-in;
+- **`/v1/chat/completions` rollout**: поддерживает `ask` по умолчанию и явный `auto`;
   `plan|act` через `/v1` отклоняются и должны идти через UI workflow.
 - **UI workflow**: endpoints `/ui/api/plan/*` и mode transitions допустимы только если
   соблюдают этот канон: Plan использует только read-only inspection через `ToolGateway`,
@@ -295,10 +295,9 @@ API:
   target реального host и использует `DesktopPathSecurity` + scoped Desktop policy вместо
   workspace sandbox; это исключение не распространяется на Chat или Agent.
 
-## 7) Rollout `/v1` (совместимость)
+## 7) Runtime `/v1`
 
-- Если `slavik_meta.runtime_mode` отсутствует -> legacy поведение без изменений.
-- `slavik_meta.runtime_mode=ask|auto` -> opt-in в новый runtime router.
+- Без `slavik_meta.runtime_mode` используется `ask`; явные `ask|auto` выбирают тот же основной runtime. Наследование режима от прошлого request удалено.
 - `slavik_meta.runtime_mode=plan|act` -> `invalid_request_error` + `next_steps` на UI workflow.
 
 ## 8) Legacy debt boundary

@@ -176,6 +176,7 @@ async def _create_client(agent: DummyAgent, trace_path: Path, monkeypatch) -> Te
     server = TestServer(app)
     client = TestClient(server, headers=TEST_AUTH_HEADERS)
     await client.start_server()
+    await _set_runtime_global_main(client, ModelConfig(provider="ollama", model="test"))
     return client
 
 
@@ -302,9 +303,9 @@ def test_chat_completions_returns_meta(monkeypatch, tmp_path) -> None:
             assert isinstance(meta.get("trace_id"), str)
             assert isinstance(meta.get("session_id"), str)
             assert meta.get("safe_mode") is True
-            assert meta.get("runtime_mode") is None
-            assert meta.get("runtime_session_id") is None
-            assert not agent.runtime_state_calls
+            assert meta.get("runtime_mode") == "ask"
+            assert meta.get("runtime_session_id") == "__principal__"
+            assert agent.runtime_state_calls
         finally:
             await client.close()
 
@@ -350,7 +351,7 @@ def test_chat_completions_rejects_non_proxy_model_before_agent_resolution(
     asyncio.run(run())
 
 
-def test_chat_completions_runtime_mode_ask_opt_in(monkeypatch, tmp_path) -> None:
+def test_chat_completions_explicit_ask(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
 
@@ -424,7 +425,7 @@ def test_chat_completions_returns_memory_preview_without_stale_trace(monkeypatch
     asyncio.run(run())
 
 
-def test_chat_completions_runtime_mode_auto_opt_in(monkeypatch, tmp_path) -> None:
+def test_chat_completions_explicit_auto(monkeypatch, tmp_path) -> None:
     trace_path = tmp_path / "trace.log"
     agent = DummyAgent(trace_path)
 
@@ -702,12 +703,13 @@ def test_chat_completions_uses_runtime_global_main_config_for_scoped_default_age
         def log(self, event_type: str, message: str, meta=None) -> None:
             del event_type, message, meta
 
-    class RuntimeAgent:
+    class RuntimeAgent(DummyAgent):
         def __init__(
             self,
             main_config: ModelConfig | None = None,
             **_kwargs: object,
         ) -> None:
+            super().__init__(trace_path)
             self.main_config = main_config
             captured_main_configs.append(main_config)
             self.brain = object()

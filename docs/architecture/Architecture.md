@@ -218,9 +218,9 @@ conversational endpoint и существующий LLM/tool loop, но публ
 
 ### slavik_meta.runtime_mode contract (для /v1/chat/completions)
 
-- `runtime_mode=ask|auto` — поддерживаемый opt-in.
+- `runtime_mode=ask|auto` — поддерживаемые режимы; Ask используется по умолчанию.
 - `runtime_mode=plan|act` — `invalid_request_error` (использовать UI workflow).
-- без `runtime_mode` — legacy-поведение текущего runtime.
+- Без `runtime_mode` выполняется Ask через тот же admission path; старое наследование режима Agent удалено.
 
 Это не конфликтует с `ARCH_CANON`: `plan|act` являются целевыми runtime-ролями, но не доступны
 как `/v1/chat/completions` opt-in.

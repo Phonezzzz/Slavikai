@@ -60,6 +60,14 @@ class DummyAgent:
         self._approved_categories: set[str] = set()
         self.tools_enabled: dict[str, bool] = {}
 
+    def set_runtime_state(
+        self, *, mode, active_plan=None, active_task=None, auto_state=None, enforce_plan_guard=False
+    ):
+        self.runtime_mode = mode
+        self.runtime_active_plan = active_plan
+        self.runtime_active_task = active_task
+        self.runtime_auto_state = auto_state
+
     def set_session_context(self, session_id: str | None, approved_categories: set[str]) -> None:
         self._session_id = session_id
         self._approved_categories = set(approved_categories)
