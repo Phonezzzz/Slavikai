@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from dataclasses import asdict
+from pathlib import Path
 from typing import cast
 
 from aiohttp import web
@@ -25,8 +26,10 @@ from server.http.common.runtime_contract import (
 )
 from server.http_api import (
     TOOL_PIPELINE_ENABLED,
+    WORKSPACE_ROOT,
     _agent_lock_for_request,
     _agent_scope,
+    _build_effective_tools_state,
     _load_effective_session_security,
     _model_not_selected_response,
     _parse_chat_request,
@@ -188,18 +191,26 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                     code="owner_required",
                 )
             execution_key = _resolve_provider_api_key(execution_config.provider)
-            security_snapshot = await _load_effective_session_security(
-                hub=hub, session_id=session_id
-            )
-            accepted_root = await _workspace_root_for_session(hub, session_id)
+
+            async def request_context() -> tuple[
+                tuple[dict[str, bool], dict[str, JSONValue]], Path
+            ]:
+                if explicit_session_id is None:
+                    tools = _build_effective_tools_state(session_override=None)
+                    tools["safe_mode"] = True
+                    return (tools, {"profile": "sandbox"}), WORKSPACE_ROOT
+                return (
+                    await _load_effective_session_security(hub=hub, session_id=session_id),
+                    await _workspace_root_for_session(hub, session_id),
+                )
+
+            security_snapshot, accepted_root = await request_context()
 
             async def context_current() -> bool:
                 return (
                     await resolver.resolve_main(explicit_session_id) == execution_config
                     and await session_store.get_categories(scope) == approved_categories
-                    and await _load_effective_session_security(hub=hub, session_id=session_id)
-                    == security_snapshot
-                    and await _workspace_root_for_session(hub, session_id) == accepted_root
+                    and await request_context() == (security_snapshot, accepted_root)
                     and _resolve_provider_api_key(execution_config.provider) == execution_key
                 )
 

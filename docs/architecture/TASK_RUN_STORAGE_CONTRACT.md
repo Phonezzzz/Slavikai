@@ -441,7 +441,8 @@ checkpoint. Перед resume owning HTTP runtime проверяет exact princ
 Для `/v1` session grants читаются и применяются только под owning Agent lock перед
 dispatch; ошибка context installation останавливает запрос без вызова Agent.
 `/v1/chat/completions` теперь использует Ask по умолчанию, а не наследует прежний Agent mode.
-Default и explicit Ask имеют один admission/start/submission path. Fingerprint связывает весь
+Default и explicit Ask имеют один admission/start/submission path.
+Без explicit session id API не читает UIHub session: tools берутся из global settings, policy — sandbox, root — canonical workspace. `__principal__` обозначает только scoped runtime/store identity и не используется как UI session lookup. Explicit session требует ownership до чтения context. Fingerprint связывает весь
 wire request (включая history), применённый ModelConfig/credential hash, grants, effective tools/policy
 и workspace root. Context сверяется перед admission и после применения к Actor перед dispatch; root закрепляется
 на dispatch. Admission/claim выполняются до borrow/reconfiguration/context mutation Actor,

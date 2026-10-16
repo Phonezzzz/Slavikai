@@ -433,3 +433,44 @@ def test_old_api_retry_does_not_change_later_execution_mode(tmp_path, monkeypatc
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_api_implicit_scope_does_not_read_foreign_ui_context(tmp_path, monkeypatch, explicit):  # noqa: ANN001, ANN201
+    from server import http_api as api
+
+    monkeypatch.chdir(tmp_path)
+    agent = _RealStreamingAgent(brain=CountingBrain())
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            hub = client.app["ui_hub"]
+            await hub.get_or_create_session("__principal__", principal_id="foreign-browser")
+            await hub.set_workspace_root("__principal__", str(tmp_path))
+            await hub.set_session_policy("__principal__", profile="yolo")
+            await hub.set_session_tools_state("__principal__", tools_state={"web": True})
+            headers = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+            if explicit:
+                headers["X-Slavik-Session"] = "__principal__"
+            response = await client.post(
+                "/v1/chat/completions",
+                headers=headers,
+                json={"model": "slavik", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            if explicit:
+                assert response.status == 403
+                assert agent.brain.calls == 0
+            else:
+                assert response.status == 200
+                assert agent.runtime_workspace_root == str(api.WORKSPACE_ROOT)
+                assert agent.tools_enabled["safe_mode"] is True
+                assert (
+                    agent.tools_enabled["web"]
+                    == api._build_effective_tools_state(session_override=None)["web"]
+                )
+                assert await hub.get_session_principal_id("__principal__") == "foreign-browser"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
