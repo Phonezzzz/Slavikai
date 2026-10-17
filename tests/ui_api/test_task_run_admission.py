@@ -698,7 +698,7 @@ def test_second_ask_model_context_has_no_duplicate_ui_turns(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("mode", ["ask", "auto"])
-@pytest.mark.parametrize("stale", [False, True, "foreign", "nested"])
+@pytest.mark.parametrize("stale", [False, True, "foreign", "nested", "policy", "tools"])
 def test_native_approval_submits_original_run_or_fences_stale_owner(
     tmp_path, monkeypatch, stale, mode
 ):  # noqa: ANN001, ANN201
@@ -764,6 +764,7 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(
             principal = await client.app["ui_hub"].get_session_principal_id(session)
             scope = RunScope(principal, session)
             accepted = store.get(scope, run_id)
+            accepted_tools = dict(agent.tools_enabled)
             if stale is True:
                 store.transition(
                     scope,
@@ -784,7 +785,18 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(
                         pending.task_run, scope=RunScope("foreign-principal", session)
                     ),
                 )
-            fenced = stale is True or stale == "foreign"
+            if stale == "policy":
+                await client.app["ui_hub"].set_session_policy(session, profile="yolo")
+            if stale == "tools":
+                from server import http_api as api
+
+                security = await api._load_effective_session_security(
+                    hub=client.app["ui_hub"], session_id=session
+                )
+                await client.app["ui_hub"].set_session_tools_state(
+                    session, tools_state={"web": not security[0]["web"]}
+                )
+            fenced = stale is True or stale in {"foreign", "policy", "tools"}
             resumed = await client.post(
                 "/ui/api/decision/respond",
                 headers=headers,
@@ -795,6 +807,14 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(
                 },
             )
             assert resumed.status == (409 if fenced else 200)
+            if stale in {"policy", "tools"}:
+                assert agent.tools_enabled == accepted_tools
+                from server.agent_provider import AgentScope
+
+                assert (
+                    await client.app["session_store"].get_categories(AgentScope(principal, session))
+                    == set()
+                )
             if stale == "nested":
                 assert len(calls) == 1
                 next_decision = (await resumed.json())["decision"]
@@ -916,6 +936,50 @@ def test_auto_root_approval_preserves_original_request_identity(
             assert brain.calls == calls and len(executions) == 1
             with sqlite3.connect(client.app["task_run_store"].path) as conn:
                 assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("changed", ["mode", "model"])
+def test_root_approval_rejects_changed_execution_context(tmp_path, monkeypatch, changed):  # noqa: ANN001, ANN201
+    monkeypatch.chdir(tmp_path)
+    brain = CountingBrain()
+    brain.supports_native_tools = True
+    agent = _RealStreamingAgent(brain=brain)
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            hub = client.app["ui_hub"]
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            await hub.set_session_workflow(session, mode="auto")
+            headers = {"X-Slavik-Session": session}
+            first = await client.post(
+                "/ui/api/chat/send", headers=headers, json={"content": "исправь тесты"}
+            )
+            assert first.status == 202
+            decision = (await first.json())["decision"]
+            root = await hub.get_workspace_root(session)
+            if changed == "mode":
+                await hub.set_session_workflow(session, mode="ask")
+            else:
+                await hub.set_session_model(session, provider="ollama", model_id="different")
+            confirmed = await client.post(
+                "/ui/api/decision/respond",
+                headers=headers,
+                json={
+                    "session_id": session,
+                    "decision_id": decision["id"],
+                    "choice": "approve_once",
+                },
+            )
+            assert confirmed.status == 409
+            assert brain.calls == 0
+            assert await hub.get_workspace_root(session) == root
+            assert (await hub.get_session_decision(session))["status"] == "pending"
         finally:
             await client.close()
 

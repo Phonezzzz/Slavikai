@@ -135,6 +135,7 @@ class PendingChatApproval:
     mode: str
     auto_run_id: str | None = None
     task_run: TaskRun | None = None
+    security_fingerprint: str | None = None
     desktop_once_rules: tuple[DesktopApprovalRule, ...] = ()
     policy_application: PolicyApplication | None = None
     web_evidence: WebSearchEvidence | None = None
@@ -430,7 +431,9 @@ class AgentToolsMixin:
             "execution_mode": self.runtime_mode,
         }
 
-    def bind_chat_approval_run(self, identity: str, run: TaskRun) -> None:
+    def bind_chat_approval_run(
+        self, identity: str, run: TaskRun, *, security_fingerprint: str
+    ) -> None:
         self.validate_chat_approval(identity)
         pending = self._pending_chat_approval
         assert pending is not None
@@ -438,7 +441,18 @@ class AgentToolsMixin:
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
         if pending.task_run is not None and pending.task_run != run:
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
-        self._pending_chat_approval = replace(pending, task_run=run)
+        if pending.security_fingerprint not in {None, security_fingerprint}:
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+        self._pending_chat_approval = replace(
+            pending, task_run=run, security_fingerprint=security_fingerprint
+        )
+
+    def validate_chat_approval_security(self, identity: str, security_fingerprint: str) -> None:
+        self.validate_chat_approval(identity)
+        pending = self._pending_chat_approval
+        assert pending is not None
+        if pending.security_fingerprint != security_fingerprint:
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
 
     def chat_approval_run(self, identity: str) -> TaskRun | None:
         self.validate_chat_approval(identity)
@@ -560,6 +574,7 @@ class AgentToolsMixin:
                 self._pending_chat_approval = replace(
                     next_pending,
                     task_run=pending.task_run,
+                    security_fingerprint=pending.security_fingerprint,
                     policy_application=pending.policy_application,
                     web_evidence=pending.web_evidence,
                     record_in_history=pending.record_in_history,

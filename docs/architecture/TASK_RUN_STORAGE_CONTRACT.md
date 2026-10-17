@@ -506,3 +506,10 @@ Auto root approval сохраняет исходную durable request identity 
 send; source request сохраняет web_search. Missing/corrupt identity завершает confirm ошибкой
 `task_run_continuation_unavailable` до изменения root/decision и dispatch, без генерации нового ключа.
 Root approval не является выполнением TaskRun и не разрешает replay уже принятого request.
+
+Root confirm сверяет сохранённые mode/model snapshots под owning Agent lock до изменения root
+и decision; resumed admission повторно требует тот же mode/model context. Native Ask/Auto
+checkpoint хранит immutable fingerprint принятого effective tools/policy snapshot. HTTP resume
+сверяет его до применения runtime state, выдачи grants и вызова continuation; применяет только
+проверенный snapshot. Nested approval переносит тот же fingerprint вместе с TaskRun binding.
+Изменение session tools/policy требует нового явного run, а не расширяет права старого.

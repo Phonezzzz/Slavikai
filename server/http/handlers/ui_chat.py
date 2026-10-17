@@ -363,6 +363,7 @@ async def _handle_ui_send_impl(
     bypass_root_gate: bool = False,
     idempotency_enabled: bool = True,
     durable_request_key: str | None = None,
+    root_context: tuple[str, dict[str, str]] | None = None,
 ) -> web.Response:
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
@@ -599,6 +600,13 @@ async def _handle_ui_send_impl(
         selected_model = _selected_model_snapshot(selected_main_config)
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
+        if root_context is not None and (mode, selected_model) != root_context:
+            return error_response(
+                status=409,
+                message="Контекст root approval изменился.",
+                error_type="invalid_request_error",
+                code="task_run_context_changed",
+            )
         active_plan = _normalize_plan_payload(workflow.get("active_plan"))
         active_task = _normalize_task_payload(workflow.get("active_task"))
         auto_state = _normalize_auto_state(workflow.get("auto_state"))
@@ -1317,7 +1325,13 @@ async def _handle_ui_send_impl(
                 if isinstance(pending_payload, dict):
                     identity = pending_payload.get("continuation_id")
                     if isinstance(identity, str):
-                        agent.bind_chat_approval_run(identity, admitted_run)
+                        agent.bind_chat_approval_run(
+                            identity,
+                            admitted_run,
+                            security_fingerprint=fingerprint_json_payload(
+                                {"tools": execution_security[0], "policy": execution_security[1]}
+                            ),
+                        )
             if admitted_run is not None and agent_response is not None:
                 # Submission is not acceptance or completion; pending approval remains owned.
                 if agent_response.runtime_result is not None:
@@ -1893,6 +1907,7 @@ async def handle_ui_send_resume(
     lane: MessageLane,
     bypass_root_gate: bool,
     durable_request_key: str | None = None,
+    root_context: tuple[str, dict[str, str]] | None = None,
 ) -> web.Response:
     return await _handle_ui_send_impl(
         request,
@@ -1901,6 +1916,7 @@ async def handle_ui_send_resume(
         bypass_root_gate=bypass_root_gate,
         idempotency_enabled=False,
         durable_request_key=durable_request_key,
+        root_context=root_context,
     )
 
 
@@ -1975,7 +1991,23 @@ async def handle_ui_approval_continue(
                 or (request_cancellation is not None and request_cancellation.is_set())
             ):
                 return not_started("approval_continuation_unavailable")
-            await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
+            resume_security = None
+            if mode in {"ask", "auto"}:
+                resume_security = await _load_effective_session_security(
+                    hub=hub, session_id=session_id
+                )
+                try:
+                    agent.validate_chat_approval_security(
+                        identity,
+                        fingerprint_json_payload(
+                            {"tools": resume_security[0], "policy": resume_security[1]}
+                        ),
+                    )
+                except ChatApprovalUnavailable as exc:
+                    return not_started(str(exc))
+            await _apply_agent_runtime_state(
+                agent=agent, hub=hub, session_id=session_id, security_snapshot=resume_security
+            )
             try:
                 agent.validate_chat_approval(identity)
             except ChatApprovalUnavailable as exc:

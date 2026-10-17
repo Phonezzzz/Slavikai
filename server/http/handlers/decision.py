@@ -1301,6 +1301,24 @@ async def _complete_ui_decision(
                 error_type="invalid_request_error",
                 code="task_run_continuation_unavailable",
             )
+        saved_mode = resume_payload.get("mode")
+        saved_model_raw = resume_payload.get("selected_model_snapshot")
+        if (
+            not isinstance(saved_mode, str)
+            or not isinstance(saved_model_raw, dict)
+            or not isinstance(saved_model_raw.get("provider"), str)
+            or not isinstance(saved_model_raw.get("model"), str)
+        ):
+            return error_response(
+                status=409,
+                message="Контекст root approval недоступен.",
+                error_type="invalid_request_error",
+                code="task_run_continuation_unavailable",
+            )
+        saved_model = {
+            "provider": str(saved_model_raw["provider"]),
+            "model": str(saved_model_raw["model"]),
+        }
         root_raw = resume_payload.get("root_path")
         if not isinstance(root_raw, str) or not root_raw.strip():
             return error_response(
@@ -1330,15 +1348,23 @@ async def _complete_ui_decision(
                 code="invalid_request_error",
             )
         async with _agent_lock_for_request(request, session_id):
+            workflow_now = await hub.get_session_workflow(session_id)
+            model_now = await hub.get_session_model(session_id)
+            if workflow_now.get("mode") != saved_mode or model_now != saved_model:
+                return error_response(
+                    status=409,
+                    message="Контекст root approval изменился.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
             await hub.set_workspace_root(session_id, str(root_candidate))
-
-        resolved = _decision_with_status(current_decision, status="resolved", resolved=True)
-        updated, latest = await hub.transition_session_decision(
-            session_id,
-            expected_id=decision_id,
-            expected_status="pending",
-            next_decision=resolved,
-        )
+            resolved = _decision_with_status(current_decision, status="resolved", resolved=True)
+            updated, latest = await hub.transition_session_decision(
+                session_id,
+                expected_id=decision_id,
+                expected_status="pending",
+                next_decision=resolved,
+            )
         normalized_latest = _normalize_ui_decision(latest, session_id=session_id)
         if not updated:
             return _decision_mismatch_response(
@@ -1360,6 +1386,7 @@ async def _complete_ui_decision(
             lane=resume_lane,
             bypass_root_gate=True,
             durable_request_key=durable_request_key,
+            root_context=(saved_mode, saved_model),
         )
         resume_data: dict[str, JSONValue] | None = None
         resume_ok = resumed_response.status < 400

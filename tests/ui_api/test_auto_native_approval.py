@@ -255,11 +255,15 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                         "choice": "approve_once",
                     },
                 )
-                assert accepted.status == 200
-                assert agent.tools_enabled["web"] is False
+                assert accepted.status == 409
+                assert agent.tools_enabled["web"] is True
                 assert executed == [{"index": 0}]
                 paused = agent.auto_agent.orchestrator._paused_runs[original_run]
-                assert paused.continuation.executed[-1].result.ok is False
+                assert len(paused.continuation.executed) == 1
+                assert paused.continuation.executed[0].result.ok is True
+                assert brain.initial_requests == 1
+                current = await client.server.app["ui_hub"].get_session_decision(session)
+                assert current["status"] == "pending"
                 return
             if cleanup == "claim_race":
                 identity = decision["context"]["resume_payload"]["continuation_id"]

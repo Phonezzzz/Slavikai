@@ -296,7 +296,13 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                     if isinstance(pending, dict) and isinstance(
                         pending.get("continuation_id"), str
                     ):
-                        agent.bind_chat_approval_run(str(pending["continuation_id"]), admitted_run)
+                        agent.bind_chat_approval_run(
+                            str(pending["continuation_id"]),
+                            admitted_run,
+                            security_fingerprint=fingerprint_json_payload(
+                                {"tools": security_snapshot[0], "policy": security_snapshot[1]}
+                            ),
+                        )
                 if agent_response.runtime_result is not None:
                     run_store.transition(
                         run_scope,
