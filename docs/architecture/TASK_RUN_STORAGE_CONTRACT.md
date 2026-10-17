@@ -500,3 +500,9 @@ HTTP resume сверяет точный RunScope и текущую state/version
 переходит в result_submitted исходного run до presentation. Это не terminal acceptance,
 полный durable execution context или restart recovery. API Auto/прочие entrypoints и capture
 остаются отдельными обязательными срезами.
+
+Auto root approval сохраняет исходную durable request identity ещё до admission и передаёт её
+из сохранённого checkpoint при confirm. HTTP decision request не заменяет identity исходного
+send; source request сохраняет web_search. Missing/corrupt identity завершает confirm ошибкой
+`task_run_continuation_unavailable` до изменения root/decision и dispatch, без генерации нового ключа.
+Root approval не является выполнением TaskRun и не разрешает replay уже принятого request.

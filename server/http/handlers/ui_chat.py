@@ -362,6 +362,7 @@ async def _handle_ui_send_impl(
     lane: MessageLane,
     bypass_root_gate: bool = False,
     idempotency_enabled: bool = True,
+    durable_request_key: str | None = None,
 ) -> web.Response:
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
@@ -564,6 +565,10 @@ async def _handle_ui_send_impl(
                     code="idempotency_in_progress",
                 )
             idempotency_active = True
+        key_source = json.dumps(
+            [idempotency_endpoint, session_id, idempotency_key or uuid.uuid4().hex]
+        )
+        durable_request_key = durable_request_key or hashlib.sha256(key_source.encode()).hexdigest()
         selected_model_metadata = await hub.get_session_model(session_id)
         try:
             await _sync_session_runtime_override(request, session_id, selected_model_metadata)
@@ -645,6 +650,7 @@ async def _handle_ui_send_impl(
                 resume_payload={
                     "root_path": str(session_root),
                     "mode": mode,
+                    "durable_request_key": durable_request_key,
                     "source_request": {
                         "content": content_raw,
                         "force_canvas": force_canvas,
@@ -773,10 +779,6 @@ async def _handle_ui_send_impl(
 
         run_store: TaskRunStore = request.app["task_run_store"]
         run_scope = RunScope(approval_scope.principal_id, session_id)
-        key_source = json.dumps(
-            [idempotency_endpoint, session_id, idempotency_key or uuid.uuid4().hex]
-        )
-        durable_request_key = hashlib.sha256(key_source.encode()).hexdigest()
         async with agent_lock:
             if mode in {"ask", "auto"} and not await admission_context_current():
                 await _abort_idempotency()
@@ -1890,6 +1892,7 @@ async def handle_ui_send_resume(
     payload: dict[str, JSONValue],
     lane: MessageLane,
     bypass_root_gate: bool,
+    durable_request_key: str | None = None,
 ) -> web.Response:
     return await _handle_ui_send_impl(
         request,
@@ -1897,6 +1900,7 @@ async def handle_ui_send_resume(
         lane=lane,
         bypass_root_gate=bypass_root_gate,
         idempotency_enabled=False,
+        durable_request_key=durable_request_key,
     )
 
 

@@ -824,3 +824,99 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("missing_identity", [False, True])
+@pytest.mark.parametrize("web_search", [False, True])
+def test_auto_root_approval_preserves_original_request_identity(
+    tmp_path, monkeypatch, web_search, missing_identity
+):  # noqa: ANN001, ANN201
+    from llm.types import LLMResult, ToolCall
+    from shared.models import ToolResult
+
+    monkeypatch.chdir(tmp_path)
+    executions = []
+
+    class RootBrain(CountingBrain):
+        supports_native_tools = True
+        supports_streaming_tools = True
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            if not any(m.role == "tool" for m in messages):
+                return LLMResult(
+                    text="", tool_calls=[ToolCall(id="original", name="lookup", arguments={})]
+                )
+            return LLMResult(text="observed")
+
+    brain = RootBrain()
+    agent = _RealStreamingAgent(brain=brain)
+
+    def execute(request):
+        executions.append(request)
+        return ToolResult(ok=True, data={"value": "observed"})
+
+    agent.tool_registry.register(
+        "lookup",
+        execute,
+        capability="read",
+        description="Read lookup",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            await client.app["ui_hub"].set_session_workflow(session, mode="auto")
+            headers = {"X-Slavik-Session": session, "Idempotency-Key": "root-original"}
+            payload = {"content": "исправь тесты и обнови файл", "web_search": web_search}
+            first = await client.post("/ui/api/chat/send", headers=headers, json=payload)
+            assert first.status == 202
+            decision = (await first.json())["decision"]
+            if missing_identity:
+                decision["context"]["resume_payload"].pop("durable_request_key")
+                await client.app["ui_hub"].set_session_decision(session, decision)
+            approved = await client.post(
+                "/ui/api/decision/respond",
+                headers={"X-Slavik-Session": session},
+                json={
+                    "session_id": session,
+                    "decision_id": decision["id"],
+                    "choice": "approve_once",
+                },
+            )
+            if missing_identity:
+                assert approved.status == 409
+                assert brain.calls == 0 and executions == []
+                return
+            assert approved.status == 200
+            assert (await approved.json())["resume"]["ok"] is True
+            assert len(executions) == 1
+            calls = brain.calls
+            client.app["idempotency_store"] = IdempotencyStore()
+            client.app["task_run_store"] = TaskRunStore(client.app["task_run_store"].path)
+            repeated = await client.post("/ui/api/chat/send", headers=headers, json=payload)
+            if repeated.status == 202:
+                decision = (await repeated.json())["decision"]
+                approved = await client.post(
+                    "/ui/api/decision/respond",
+                    headers={"X-Slavik-Session": session},
+                    json={
+                        "session_id": session,
+                        "decision_id": decision["id"],
+                        "choice": "approve_once",
+                    },
+                )
+                assert (await approved.json())["resume"]["ok"] is False
+            else:
+                assert repeated.status == 409
+            assert brain.calls == calls and len(executions) == 1
+            with sqlite3.connect(client.app["task_run_store"].path) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())

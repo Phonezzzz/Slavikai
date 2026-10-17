@@ -1289,6 +1289,18 @@ async def _complete_ui_decision(
         context = context_raw if isinstance(context_raw, dict) else {}
         resume_payload_raw = context.get("resume_payload")
         resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+        durable_request_key = resume_payload.get("durable_request_key")
+        if (
+            not isinstance(durable_request_key, str)
+            or len(durable_request_key) != 64
+            or any(char not in "0123456789abcdef" for char in durable_request_key)
+        ):
+            return error_response(
+                status=409,
+                message="Исходная identity root checkpoint недоступна.",
+                error_type="invalid_request_error",
+                code="task_run_continuation_unavailable",
+            )
         root_raw = resume_payload.get("root_path")
         if not isinstance(root_raw, str) or not root_raw.strip():
             return error_response(
@@ -1336,6 +1348,7 @@ async def _complete_ui_decision(
 
         resume_request_payload: dict[str, JSONValue] = {
             "content": source_request_raw.get("content"),
+            "web_search": source_request_raw.get("web_search"),
             "force_canvas": source_request_raw.get("force_canvas"),
             "lane": _normalize_message_lane(source_request_raw.get("lane")),
             "attachments": source_request_raw.get("attachments"),
@@ -1346,6 +1359,7 @@ async def _complete_ui_decision(
             payload=resume_request_payload,
             lane=resume_lane,
             bypass_root_gate=True,
+            durable_request_key=durable_request_key,
         )
         resume_data: dict[str, JSONValue] | None = None
         resume_ok = resumed_response.status < 400
