@@ -437,7 +437,7 @@ checkpoint. Перед resume owning HTTP runtime проверяет exact princ
 Следующее approval переносит тот же binding. Typed result после resume переводит исходный run
 в `result_submitted` до UI/text projection, без нового admission. Это volatile checkpoint binding,
 не durable continuation/recovery и не terminal acceptance. Store submission fault после tool effect
-оставляет run unresolved; single-use checkpoint не разрешает implicit повтор execution. Project, `/v1` Auto, Desktop и Act admission остаются непокрытыми.
+оставляет run unresolved; single-use checkpoint не разрешает implicit повтор execution. Project, Desktop и Act admission остаются непокрытыми.
 Для `/v1` session grants читаются и применяются только под owning Agent lock перед
 dispatch; ошибка context installation останавливает запрос без вызова Agent.
 `/v1/chat/completions` теперь использует Ask по умолчанию, а не наследует прежний Agent mode.
@@ -460,7 +460,7 @@ runtime setter/default mode удалён; API требует canonical runtime i
 active_plan/task/auto_state больше не применяются к API execution: режим задаётся только request,
 permissions/root — принятым snapshot через typed Agent setters. Повтор не сбрасывает native checkpoint. Native Ask approval
 сохраняет owned run binding, но публичного `/v1` confirmation/recovery API этот срез не добавляет.
-`/v1` Auto admission, result byte capture, terminal acceptance и durable recovery остаются target.
+Result byte capture, terminal acceptance и durable recovery остаются target.
 Task terminal acceptance/final, evidence references, recovery controller, full capture,
 retention/GC и user-visible run inspection остаются обязательными следующими срезами.
 
@@ -498,7 +498,7 @@ owned Auto frame/continuation; никаких UI state replay или новог�
 HTTP resume сверяет точный RunScope и текущую state/version до добавления permissions
 и вызова native resume. Следующее approval переносит тот же binding; typed final result
 переходит в result_submitted исходного run до presentation. Это не terminal acceptance,
-полный durable execution context или restart recovery. API Auto/прочие entrypoints и capture
+полный durable execution context или restart recovery. Прочие entrypoints и capture
 остаются отдельными обязательными срезами.
 
 Auto root approval сохраняет исходную durable request identity ещё до admission и передаёт её
@@ -513,3 +513,14 @@ checkpoint хранит immutable fingerprint принятого effective tools
 сверяет его до применения runtime state, выдачи grants и вызова continuation; применяет только
 проверенный snapshot. Nested approval переносит тот же fingerprint вместе с TaskRun binding.
 Изменение session tools/policy требует нового явного run, а не расширяет права старого.
+
+## API Auto admission
+
+Явный `/v1` Auto использует тот же admission/CAS/submission path, что default/explicit Ask.
+Mode входит в immutable binding: повтор после reconstruction и смена режима с тем же
+ключом не вызывают модель/tools заново. Storage fault останавливает dispatch.
+Native Auto checkpoint получает исходный scoped TaskRun и принятый security/grants snapshot;
+повтор HTTP-запроса сохраняет существующий checkpoint. Публичного API resume endpoint,
+канонического capture, terminal acceptance или restart recovery этот срез не добавляет.
+Проверка: `tests/ui_api/test_api_task_run_admission.py` — реальные Agent/ToolGateway,
+повтор с reopen store/app, storage faults и security context races для Ask/Auto.

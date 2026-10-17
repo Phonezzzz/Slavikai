@@ -168,11 +168,11 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     mwv_report: dict[str, JSONValue] | None = None
     try:
         async with agent_lock:
-            if (runtime_mode != "ask" or command_lane) and client_key is not None:
+            if command_lane and client_key is not None:
                 if run_store.find_by_request(run_scope, durable_key) is not None:
                     return error_response(
                         status=409,
-                        message="Ключ уже связан с принятым Ask.",
+                        message="Ключ уже связан с принятым run.",
                         error_type="invalid_request_error",
                         code="idempotency_key_reused",
                     )
@@ -214,7 +214,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                     and _resolve_provider_api_key(execution_config.provider) == execution_key
                 )
 
-            if runtime_mode == "ask" and not command_lane:
+            if not command_lane:
                 if not await context_current():
                     return error_response(
                         status=409,
@@ -240,7 +240,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                         else json.dumps(
                             payload["messages"][-1], ensure_ascii=False, separators=(",", ":")
                         ),
-                        mode="ask",
+                        mode=runtime_mode,
                         request_fingerprint=fingerprint_json_payload(binding),
                         require_new=True,
                     )

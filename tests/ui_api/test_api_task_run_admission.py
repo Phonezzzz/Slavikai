@@ -23,13 +23,14 @@ async def _create_client(agent):  # noqa: ANN001, ANN202
 
 
 @pytest.mark.parametrize("scoped", [False, True])
-@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("explicit", [False, "ask", "auto"])
 @pytest.mark.parametrize("changed", [False, True])
 def test_api_ask_durable_identity_prevents_repeat_dispatch(
     tmp_path, monkeypatch, changed, explicit, scoped
 ):  # noqa: ANN001, ANN201
     monkeypatch.chdir(tmp_path)
     brain = CountingBrain()
+    brain.supports_native_tools = True
     agent = _RealStreamingAgent(brain=brain)
 
     async def run():
@@ -45,7 +46,7 @@ def test_api_ask_durable_identity_prevents_repeat_dispatch(
             payload = {
                 "model": "slavik",
                 "messages": [{"role": "user", "content": "hi"}],
-                "slavik_meta": {"runtime_mode": "ask"},
+                "slavik_meta": {"runtime_mode": explicit},
             }
             if not scoped:
                 headers.pop("X-Slavik-Session")
@@ -55,7 +56,7 @@ def test_api_ask_durable_identity_prevents_repeat_dispatch(
             assert (
                 await client.post("/v1/chat/completions", headers=headers, json=payload)
             ).status == 200
-            assert agent.runtime_mode == "ask"
+            assert agent.runtime_mode == (explicit or "ask")
             calls = brain.calls
             assert calls > 0
             store = client.app["task_run_store"]
@@ -78,8 +79,9 @@ def test_api_ask_durable_identity_prevents_repeat_dispatch(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("mode", ["ask", "auto"])
 @pytest.mark.parametrize("fault", ["admission", "claim"])
-def test_api_ask_admission_fault_prevents_model_call(tmp_path, monkeypatch, fault):  # noqa: ANN001, ANN201
+def test_api_ask_admission_fault_prevents_model_call(tmp_path, monkeypatch, fault, mode):  # noqa: ANN001, ANN201
     monkeypatch.chdir(tmp_path)
     brain = CountingBrain()
     agent = _RealStreamingAgent(brain=brain)
@@ -102,7 +104,7 @@ def test_api_ask_admission_fault_prevents_model_call(tmp_path, monkeypatch, faul
                 json={
                     "model": "slavik",
                     "messages": [{"role": "user", "content": "hi"}],
-                    "slavik_meta": {"runtime_mode": "ask"},
+                    "slavik_meta": {"runtime_mode": mode},
                 },
             )
             assert response.status == 500
@@ -113,8 +115,9 @@ def test_api_ask_admission_fault_prevents_model_call(tmp_path, monkeypatch, faul
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("mode", ["ask", "auto"])
 @pytest.mark.parametrize("change", ["tools", "policy", "grants"])
-def test_api_context_change_before_admission_is_fenced(tmp_path, monkeypatch, change):  # noqa: ANN001, ANN201
+def test_api_context_change_before_admission_is_fenced(tmp_path, monkeypatch, change, mode):  # noqa: ANN001, ANN201
     from server.http.handlers import chat
 
     monkeypatch.chdir(tmp_path)
@@ -156,7 +159,11 @@ def test_api_context_change_before_admission_is_fenced(tmp_path, monkeypatch, ch
             response = await client.post(
                 "/v1/chat/completions",
                 headers={"Authorization": f"Bearer {TEST_API_TOKEN}", "X-Slavik-Session": session},
-                json={"model": "slavik", "messages": [{"role": "user", "content": "hi"}]},
+                json={
+                    "model": "slavik",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "slavik_meta": {"runtime_mode": mode},
+                },
             )
             assert response.status == 409
             assert (await response.json())["error"]["code"] == "task_run_context_changed"
@@ -170,7 +177,8 @@ def test_api_context_change_before_admission_is_fenced(tmp_path, monkeypatch, ch
     asyncio.run(run())
 
 
-def test_api_reconstructed_app_does_not_repeat_gateway_dispatch(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
+@pytest.mark.parametrize("mode", ["ask", "auto"])
+def test_api_reconstructed_app_does_not_repeat_gateway_dispatch(tmp_path, monkeypatch, mode):  # noqa: ANN001, ANN201
     from llm.types import LLMResult, ToolCall
     from shared.models import ToolResult
 
@@ -219,7 +227,11 @@ def test_api_reconstructed_app_does_not_repeat_gateway_dispatch(tmp_path, monkey
                 "X-Slavik-Session": session,
                 "Idempotency-Key": "gateway-request",
             }
-            payload = {"model": "slavik", "messages": [{"role": "user", "content": "read"}]}
+            payload = {
+                "model": "slavik",
+                "messages": [{"role": "user", "content": "read"}],
+                "slavik_meta": {"runtime_mode": mode},
+            }
             assert (
                 await first.post("/v1/chat/completions", headers=headers, json=payload)
             ).status == 200
@@ -341,7 +353,8 @@ def test_api_does_not_dispatch_injected_agent_without_selected_model(tmp_path, m
     asyncio.run(run())
 
 
-def test_api_retry_preserves_checkpoint_without_applying_ui_mode(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
+@pytest.mark.parametrize("mode", ["ask", "auto"])
+def test_api_retry_preserves_checkpoint_without_applying_ui_mode(tmp_path, monkeypatch, mode):  # noqa: ANN001, ANN201
     from llm.types import LLMResult, ToolCall
     from shared.models import ToolResult
 
@@ -385,7 +398,11 @@ def test_api_retry_preserves_checkpoint_without_applying_ui_mode(tmp_path, monke
                 "X-Slavik-Session": session,
                 "Idempotency-Key": "paused-api",
             }
-            payload = {"model": "slavik", "messages": [{"role": "user", "content": "lookup"}]}
+            payload = {
+                "model": "slavik",
+                "messages": [{"role": "user", "content": "lookup"}],
+                "slavik_meta": {"runtime_mode": mode},
+            }
             assert (
                 await client.post("/v1/chat/completions", headers=headers, json=payload)
             ).status == 400
@@ -395,7 +412,7 @@ def test_api_retry_preserves_checkpoint_without_applying_ui_mode(tmp_path, monke
                 await client.post("/v1/chat/completions", headers=headers, json=payload)
             ).status == 409
             assert agent._pending_chat_approval is pending
-            assert agent.runtime_mode == "ask"
+            assert agent.runtime_mode == mode
             assert brain.calls == 1 and executions == []
         finally:
             await client.close()
