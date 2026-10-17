@@ -736,6 +736,8 @@ export function Settings({
     EMPTY_PROVIDER_DIRTY,
   );
   const [ttsBackend, setTtsBackend] = useState<TtsBackendSettings>(DEFAULT_TTS_BACKEND);
+  const [credentialDiagnosticsLoading, setCredentialDiagnosticsLoading] = useState(false);
+  const [credentialDiagnosticsError, setCredentialDiagnosticsError] = useState<string | null>(null);
   const [providerRuntime, setProviderRuntime] = useState<ProviderRuntimeByModel>(DEFAULT_PROVIDER_RUNTIME);
   const [providerRuntimeLoading, setProviderRuntimeLoading] = useState(false);
   const [providerRuntimeError, setProviderRuntimeError] = useState<string | null>(null);
@@ -778,6 +780,7 @@ export function Settings({
   const onboardingEpoch = useRef(0);
   const providerInstancesRevision = useRef(0);
   const settingsRequest = useRef<AbortController | null>(null);
+  const credentialDiagnosticsRequest = useRef<AbortController | null>(null);
   const providerRuntimeRequest = useRef<AbortController | null>(null);
   const embeddingStatusRequest = useRef<AbortController | null>(null);
 
@@ -786,6 +789,9 @@ export function Settings({
   useFocusTrap(isOpen, modalRef);
 
   const applyParsedSettings = (parsed: ParsedSettings, providerRevisionAtRequestStart: number): void => {
+    credentialDiagnosticsRequest.current?.abort();
+    setCredentialDiagnosticsLoading(false);
+    setCredentialDiagnosticsError(null);
     setProviders(parsed.providers);
     setProviderInstances((current) => {
       if (providerInstancesRevision.current === providerRevisionAtRequestStart) {
@@ -815,8 +821,10 @@ export function Settings({
     setDefaultModelOptions(parsed.defaultModelId ? [parsed.defaultModelId] : []);
   };
 
-  const refreshEmbeddingRuntime = async (): Promise<void> => {
-    if (embeddingStatusRequest.current && !embeddingStatusRequest.current.signal.aborted) {
+  const refreshEmbeddingRuntime = async (restart = false): Promise<void> => {
+    if (restart) {
+      embeddingStatusRequest.current?.abort();
+    } else if (embeddingStatusRequest.current && !embeddingStatusRequest.current.signal.aborted) {
       return;
     }
     const controller = new AbortController();
@@ -842,7 +850,38 @@ export function Settings({
     }
   };
 
+  const loadCredentialDiagnostics = async (): Promise<void> => {
+    credentialDiagnosticsRequest.current?.abort();
+    const controller = new AbortController();
+    credentialDiagnosticsRequest.current = controller;
+    setCredentialDiagnosticsLoading(true);
+    setCredentialDiagnosticsError(null);
+    try {
+      const response = await fetch('/ui/api/settings', { signal: controller.signal });
+      const payload: unknown = await response.json();
+      if (controller.signal.aborted) return;
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to refresh credential diagnostics.'));
+      }
+      const parsed = parseSettingsPayload(payload);
+      // Recheck refreshes read-only metadata without applying editable preferences.
+      setTtsBackend(parsed.ttsBackend);
+      setProviders(parsed.providers);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setCredentialDiagnosticsError(error instanceof Error ? error.message : 'Failed to refresh credential diagnostics.');
+    } finally {
+      if (!controller.signal.aborted) {
+        credentialDiagnosticsRequest.current = null;
+        setCredentialDiagnosticsLoading(false);
+      }
+    }
+  };
+
   const loadSettings = async (): Promise<void> => {
+    credentialDiagnosticsRequest.current?.abort();
+    setCredentialDiagnosticsLoading(false);
+    setCredentialDiagnosticsError(null);
     settingsRequest.current?.abort();
     const controller = new AbortController();
     settingsRequest.current = controller;
@@ -915,6 +954,7 @@ export function Settings({
     void refreshEmbeddingRuntime();
     return () => {
       settingsRequest.current?.abort();
+      credentialDiagnosticsRequest.current?.abort();
       providerRuntimeRequest.current?.abort();
       embeddingStatusRequest.current?.abort();
     };
@@ -2025,7 +2065,8 @@ export function Settings({
                             type="button"
                             onClick={() => {
                               void loadProviderDiagnostics();
-                              void refreshEmbeddingRuntime();
+                              void loadCredentialDiagnostics();
+                              void refreshEmbeddingRuntime(true);
                             }}
                             className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800"
                           >
@@ -2047,9 +2088,9 @@ export function Settings({
                             </span>
                             <div className="flex items-center gap-2">
                               <StatusBadge
-                                tone={ttsBackend.backend_ready ? 'success' : 'waiting'}
+                                tone={credentialDiagnosticsLoading ? 'neutral' : credentialDiagnosticsError ? 'error' : ttsBackend.backend_ready ? 'success' : 'waiting'}
                               >
-                                {ttsBackend.backend_ready ? 'ready' : 'not ready'}
+                                {credentialDiagnosticsLoading ? 'checking' : credentialDiagnosticsError ? 'check failed' : ttsBackend.backend_ready ? 'ready' : 'not ready'}
                               </StatusBadge>
                               <StatusBadge tone={ttsBackend.api_key_set ? 'success' : 'waiting'}>
                                 {ttsBackend.api_key_set ? 'key set' : 'key missing'}
@@ -2057,6 +2098,7 @@ export function Settings({
                             </div>
                           </div>
                           <div className="mt-2 space-y-1 text-xs text-zinc-500">
+                            {credentialDiagnosticsError ? <div>Credential check: {credentialDiagnosticsError}</div> : null}
                             <div className="break-all">Endpoint: {ttsBackend.endpoint}</div>
                             <div>
                               Model: <span className="font-mono text-zinc-300">{ttsBackend.model}</span>

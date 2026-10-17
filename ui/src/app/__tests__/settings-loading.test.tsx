@@ -75,7 +75,7 @@ describe('Settings loading isolation', () => {
     expect(screen.queryByText('Loading settings...')).toBeNull();
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
     await act(async () => { probe.resolve(json({ providers: [{ provider: 'deepseek', models: ['m1', 'm2'], error: null }] })); });
-    expect(settingsGets).toBe(1);
+    expect(settingsGets).toBe(2);
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('unsaved draft');
     fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
     await screen.findByText('2 models');
@@ -242,6 +242,120 @@ describe('Settings loading isolation', () => {
     await act(async () => { oldBody.resolve({ error: { message: 'Old embedding check failed' } }); });
     expect(screen.getByText('fresh-model is available locally.')).toBeTruthy();
     expect(screen.queryByText(/Old embedding check failed/)).toBeNull();
+  });
+
+  it('restarts a hanging embedding status on explicit Recheck and ignores its late body', async () => {
+    const oldBody = deferred<unknown>();
+    const signals: AbortSignal[] = [];
+    let checks = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) return json(settings());
+      if (url === MODELS_URL) return json({ providers: [] });
+      if (url === EMBEDDINGS_URL) {
+        checks += 1;
+        if (init?.signal) signals.push(init.signal);
+        if (checks === 1) {
+          const response = json({});
+          vi.spyOn(response, 'json').mockReturnValue(oldBody.promise);
+          return response;
+        }
+        return json({ model: 'rechecked-model', state: 'ready' });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('keep draft during retry');
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    await screen.findByText('rechecked-model is available locally.');
+    expect(signals[0]?.aborted).toBe(true);
+    await act(async () => { oldBody.resolve({ model: 'stale-model', state: 'missing' }); });
+    expect(screen.getByText('rechecked-model is available locally.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('keep draft during retry');
+  });
+
+  it('refreshes credential diagnostics without applying remote preferences or waiting for model probes', async () => {
+    let gets = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === SETTINGS_URL) {
+        gets += 1;
+        return json({ settings: {
+          ...settings('remote instructions').settings,
+          audio: { tts: { api_key_set: gets > 1, backend_ready: gets > 1 } },
+        } });
+      }
+      if (url === EMBEDDINGS_URL || url === MODELS_URL) return new Promise<Response>(() => {});
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('local unsaved instructions');
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    expect(screen.getByText('not ready')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await screen.findByText('ready');
+    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('local unsaved instructions');
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
+  });
+
+  it.each([200, 503])('ignores a stale credential check after reopening (status=%s)', async (status) => {
+    const oldBody = deferred<unknown>();
+    let gets = 0;
+    let oldSignal: AbortSignal | null | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        gets += 1;
+        if (gets === 2) {
+          oldSignal = init?.signal;
+          const response = json({}, status);
+          vi.spyOn(response, 'json').mockReturnValue(oldBody.promise);
+          return response;
+        }
+        return json({ settings: {
+          ...settings().settings,
+          audio: { tts: { api_key_set: gets > 2, backend_ready: gets > 2 } },
+        } });
+      }
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      if (url === MODELS_URL) return json({ providers: [] });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await vi.waitFor(() => expect(gets).toBe(2));
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByText('ready');
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => { oldBody.resolve(status === 200 ? settings() : { error: { message: 'Stale credential failure' } }); });
+    expect(screen.getByText('ready')).toBeTruthy();
+    expect(screen.queryByText(/Stale credential failure/)).toBeNull();
+  });
+
+  it('keeps credential refresh errors local to diagnostics', async () => {
+    let gets = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === SETTINGS_URL) {
+        gets += 1;
+        return gets === 1 ? json(settings()) : json({ error: { message: 'Snapshot offline' } }, 503);
+      }
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      if (url === MODELS_URL) return json({ providers: [] });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('preserve after credential failure');
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await screen.findByText('Credential check: Snapshot offline');
+    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    expect(screen.queryByText(/Snapshot offline/)).toBeNull();
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('preserve after credential failure');
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
   });
 
   it('does not hide a settings failure behind an indefinitely pending embedding status', async () => {
