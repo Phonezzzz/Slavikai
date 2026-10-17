@@ -14,7 +14,7 @@ from core.skills.models import SkillEntry
 from core.tool_gateway import ToolGateway
 from core.tool_loop import ExecutedToolCall
 from llm.types import LLMResult, ToolCall, ToolSpec
-from shared.auto_models import AutoPlan, AutoRunStatus, AutoShard
+from shared.auto_models import AutoRunStatus
 from shared.models import LLMMessage, ToolResult
 from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import RunCodeTool, workspace_root_context
@@ -283,16 +283,6 @@ class _CapturingVerifierRuntime:
         )
 
 
-def _completed_result(shard_id: str, coder_id: str) -> auto_runtime.CoderResult:
-    return auto_runtime.CoderResult(
-        coder_id=coder_id,
-        shard_id=shard_id,
-        status="completed",
-        bundle=auto_runtime.PatchBundle(status="ok", changed_paths=[]),
-        error=None,
-    )
-
-
 def _skill_resolution() -> SkillResolution:
     supporting = SkillEntry(
         id="codebase-design",
@@ -559,55 +549,6 @@ def test_auto_runtime_rejects_provider_without_native_tools(tmp_path) -> None:
     assert isinstance(agent.last_auto_state, dict)
     assert agent.last_auto_state.get("error_code") == "native_tools_required"
     assert "DeepSeek" in outcome.next_steps[0]
-
-
-def test_auto_runtime_conflict_detection() -> None:
-    plan = AutoPlan(
-        plan_id="plan-1",
-        goal="goal",
-        shards=[
-            AutoShard(shard_id="a", goal="a", path_scope=["src/a.py"]),
-            AutoShard(shard_id="b", goal="b", path_scope=["src/a.py"]),
-        ],
-    )
-    left = auto_runtime.CoderResult(
-        coder_id="coder-1",
-        shard_id="a",
-        status="completed",
-        bundle=auto_runtime.PatchBundle(status="ok", changed_paths=["src/a.py"]),
-        error=None,
-    )
-    right = auto_runtime.CoderResult(
-        coder_id="coder-2",
-        shard_id="b",
-        status="completed",
-        bundle=auto_runtime.PatchBundle(status="ok", changed_paths=["src/a.py"]),
-        error=None,
-    )
-
-    conflict = auto_runtime._detect_conflict([left, right], plan)
-    assert conflict is not None
-    assert conflict[2] == ["src/a.py"]
-
-
-def test_auto_runtime_extracts_missing_paths() -> None:
-    failed = auto_runtime.CoderResult(
-        coder_id="coder-1",
-        shard_id="s1",
-        status="failed",
-        bundle=auto_runtime.PatchBundle(
-            status="failed",
-            diagnostics=[
-                "Файл не найден: /tmp/project/AGENTS.md",
-                "File not found: /tmp/project/docs/README.md",
-                "other error",
-            ],
-        ),
-        error="failed",
-    )
-
-    missing = auto_runtime._extract_missing_paths([failed])
-    assert missing == ["/tmp/project/AGENTS.md", "/tmp/project/docs/README.md"]
 
 
 def test_auto_orchestrator_has_no_legacy_run_entrypoint() -> None:

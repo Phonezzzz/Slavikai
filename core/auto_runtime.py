@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,9 +34,6 @@ from core.tool_loop import (
 )
 from llm.brain_base import Brain
 from shared.auto_models import (
-    AUTO_CODER_POOL_DEFAULT,
-    AUTO_CODER_POOL_MAX,
-    AUTO_CODER_POOL_MIN,
     AutoPlan,
     AutoRunStatus,
     AutoShard,
@@ -51,7 +47,6 @@ if TYPE_CHECKING:
     from core.agent import Agent
 
 
-AUTO_CODER_POOL_ENV = "AUTO_CODER_POOL_SIZE"
 AUTO_MAX_RUNTIME_SECONDS_ENV = "AUTO_MAX_RUNTIME_SECONDS"
 AUTO_MAX_TOOL_CALLS_ENV = "AUTO_MAX_TOOL_CALLS"
 AUTO_MAX_FILES_TOUCHED_ENV = "AUTO_MAX_FILES_TOUCHED"
@@ -62,40 +57,12 @@ AUTO_DEFAULT_MAX_TOOL_CALLS = 80
 AUTO_DEFAULT_MAX_FILES_TOUCHED = 120
 AUTO_DEFAULT_MAX_LLM_TOKENS = 120_000
 AUTO_DEFAULT_MAX_RETRIES = 0
-AUTO_DEFAULT_ACCEPTANCE_CHECKS = [
-    "Изменения применены без конфликтов",
-    "Проверки завершены успешно",
-]
 AUTO_V1_SYSTEM_PROMPT = (
     "You are running Auto v1. Decide from the user's request whether workspace action is "
     "actually required. For conversation or information that needs no action, answer directly "
     "without tool calls. For every workspace action, use native tool calls and never invent "
     "filesystem results. Stop with a concise final answer after any tools finish."
 )
-
-
-@dataclass(frozen=True)
-class PatchOperation:
-    op: str
-    path: str
-    content: bytes | None = None
-
-
-@dataclass(frozen=True)
-class PatchBundle:
-    operations: list[PatchOperation] = field(default_factory=list)
-    changed_paths: list[str] = field(default_factory=list)
-    diagnostics: list[str] = field(default_factory=list)
-    status: str = "ok"
-
-
-@dataclass(frozen=True)
-class CoderResult:
-    coder_id: str
-    shard_id: str
-    status: str
-    bundle: PatchBundle
-    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -774,17 +741,6 @@ def _verification_state(verification: VerificationResult) -> dict[str, JSONValue
     }
 
 
-def _resolve_pool_size() -> int:
-    raw = os.getenv(AUTO_CODER_POOL_ENV, "").strip()
-    if not raw:
-        return AUTO_CODER_POOL_DEFAULT
-    try:
-        value = int(raw)
-    except ValueError:
-        return AUTO_CODER_POOL_DEFAULT
-    return max(AUTO_CODER_POOL_MIN, min(AUTO_CODER_POOL_MAX, value))
-
-
 def _env_int(name: str, default: int, *, min_value: int = 0) -> int:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -873,258 +829,6 @@ def _budget_stop_outcome(
 def _skill_state(state: dict[str, JSONValue]) -> dict[str, JSONValue] | None:
     raw = state.get("skill")
     return dict(raw) if isinstance(raw, dict) else None
-
-
-def _fallback_shard(goal: str) -> AutoShard:
-    return AutoShard(
-        shard_id="shard-1",
-        goal=goal,
-        path_scope=["."],
-        depends_on=[],
-        acceptance_checks=list(AUTO_DEFAULT_ACCEPTANCE_CHECKS),
-    )
-
-
-def _parse_auto_plan_payload(payload: object, *, goal: str) -> AutoPlan | None:
-    if not isinstance(payload, dict):
-        return None
-    plan_id_raw = payload.get("plan_id")
-    shards_raw = payload.get("shards")
-    plan_id = plan_id_raw.strip() if isinstance(plan_id_raw, str) and plan_id_raw.strip() else ""
-    if not plan_id:
-        return None
-    if not isinstance(shards_raw, list):
-        return None
-    shards: list[AutoShard] = []
-    for index, item in enumerate(shards_raw, start=1):
-        if not isinstance(item, dict):
-            continue
-        shard_id_raw = item.get("shard_id")
-        shard_goal_raw = item.get("goal")
-        shard_id = (
-            shard_id_raw.strip()
-            if isinstance(shard_id_raw, str) and shard_id_raw.strip()
-            else f"shard-{index}"
-        )
-        shard_goal = shard_goal_raw.strip() if isinstance(shard_goal_raw, str) else ""
-        if not shard_goal:
-            shard_goal = goal
-        path_scope = _string_list(item.get("path_scope")) or ["."]
-        depends_on = _string_list(item.get("depends_on"))
-        acceptance = _string_list(item.get("acceptance_checks")) or list(
-            AUTO_DEFAULT_ACCEPTANCE_CHECKS
-        )
-        shards.append(
-            AutoShard(
-                shard_id=shard_id,
-                goal=shard_goal,
-                path_scope=path_scope,
-                depends_on=depends_on,
-                acceptance_checks=acceptance,
-            )
-        )
-    if not shards:
-        shards = [_fallback_shard(goal)]
-    plan_goal_raw = payload.get("goal")
-    plan_goal = (
-        plan_goal_raw.strip() if isinstance(plan_goal_raw, str) and plan_goal_raw.strip() else goal
-    )
-    return AutoPlan(plan_id=plan_id, goal=plan_goal, shards=shards)
-
-
-def _plan_from_payload(payload: dict[str, JSONValue], *, goal: str) -> AutoPlan:
-    parsed = _parse_auto_plan_payload(payload, goal=goal)
-    if parsed is not None:
-        return parsed
-    return AutoPlan(
-        plan_id=f"plan-{uuid.uuid4().hex}",
-        goal=goal,
-        shards=[_fallback_shard(goal)],
-    )
-
-
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    output: list[str] = []
-    for item in value:
-        if isinstance(item, str):
-            cleaned = item.strip()
-            if cleaned:
-                output.append(cleaned)
-    return output
-
-
-def _snapshot_workspace(root: Path) -> dict[str, bytes]:
-    snapshot: dict[str, bytes] = {}
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root)
-        parts = relative.parts
-        if not parts:
-            continue
-        if parts[0] == ".auto" or ".git" in parts:
-            continue
-        snapshot[relative.as_posix()] = path.read_bytes()
-    return snapshot
-
-
-def _build_patch_bundle(before: dict[str, bytes], after: dict[str, bytes]) -> PatchBundle:
-    paths = sorted(set(before.keys()) | set(after.keys()))
-    operations: list[PatchOperation] = []
-    changed_paths: list[str] = []
-    for path in paths:
-        before_value = before.get(path)
-        after_value = after.get(path)
-        if before_value is None and after_value is not None:
-            operations.append(PatchOperation(op="create", path=path, content=after_value))
-            changed_paths.append(path)
-            continue
-        if before_value is not None and after_value is None:
-            operations.append(PatchOperation(op="delete", path=path, content=None))
-            changed_paths.append(path)
-            continue
-        if before_value != after_value and after_value is not None:
-            operations.append(PatchOperation(op="update", path=path, content=after_value))
-            changed_paths.append(path)
-    return PatchBundle(
-        operations=operations,
-        changed_paths=changed_paths,
-        diagnostics=[],
-        status="ok",
-    )
-
-
-def _topological_order(plan: AutoPlan) -> list[AutoShard]:
-    shards = {item.shard_id: item for item in plan.shards}
-    indegree: dict[str, int] = {item.shard_id: 0 for item in plan.shards}
-    graph: dict[str, list[str]] = {item.shard_id: [] for item in plan.shards}
-    for item in plan.shards:
-        for dep in item.depends_on:
-            if dep not in shards:
-                continue
-            graph[dep].append(item.shard_id)
-            indegree[item.shard_id] += 1
-
-    queue: list[str] = [shard_id for shard_id, value in indegree.items() if value == 0]
-    ordered: list[AutoShard] = []
-    while queue:
-        current = queue.pop(0)
-        ordered.append(shards[current])
-        for neighbor in graph[current]:
-            indegree[neighbor] -= 1
-            if indegree[neighbor] == 0:
-                queue.append(neighbor)
-
-    if len(ordered) != len(plan.shards):
-        raise ValueError("auto_plan_cycle_detected")
-    return ordered
-
-
-def _depends_on(
-    *,
-    left: str,
-    right: str,
-    depends_map: dict[str, set[str]],
-) -> bool:
-    pending = [left]
-    seen: set[str] = set()
-    while pending:
-        current = pending.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        deps = depends_map.get(current, set())
-        if right in deps:
-            return True
-        pending.extend(deps)
-    return False
-
-
-def _detect_conflict(
-    coder_results: list[CoderResult],
-    plan: AutoPlan,
-) -> tuple[CoderResult, CoderResult, list[str]] | None:
-    depends_map = {item.shard_id: set(item.depends_on) for item in plan.shards}
-    for left_index, left in enumerate(coder_results):
-        left_paths = set(left.bundle.changed_paths)
-        if not left_paths:
-            continue
-        for right in coder_results[left_index + 1 :]:
-            right_paths = set(right.bundle.changed_paths)
-            if not right_paths:
-                continue
-            overlap = sorted(left_paths & right_paths)
-            if not overlap:
-                continue
-            if _depends_on(left=left.shard_id, right=right.shard_id, depends_map=depends_map):
-                continue
-            if _depends_on(left=right.shard_id, right=left.shard_id, depends_map=depends_map):
-                continue
-            return left, right, overlap
-    return None
-
-
-def _update_coder_state(
-    state: dict[str, JSONValue],
-    coder_id: str,
-    *,
-    status: str,
-    changed_paths: list[str] | None = None,
-    diagnostics: list[str] | None = None,
-) -> None:
-    coders_raw = state.get("coders")
-    if not isinstance(coders_raw, list):
-        return
-    for item in coders_raw:
-        if not isinstance(item, dict):
-            continue
-        item_coder_id = item.get("coder_id")
-        if item_coder_id != coder_id:
-            continue
-        item["status"] = status
-        if changed_paths is not None:
-            item["changed_paths"] = list(changed_paths)
-        if diagnostics is not None:
-            item["diagnostics"] = list(diagnostics)
-        return
-
-
-_MISSING_FILE_PATTERN = re.compile(r"(?:Файл не найден|File not found):\s*(.+)")
-_MISSING_TARGET_PATH_PATTERNS = (
-    re.compile(r"не\s+указан\s+путь\s+к\s+файлу\s+workspace\s+для\s+записи", re.IGNORECASE),
-    re.compile(r"workspace[_\s-]?write.*(path|путь)", re.IGNORECASE),
-    re.compile(r"missing[_\s-]?target[_\s-]?path", re.IGNORECASE),
-    re.compile(r"(target[_\s-]?path|путь).*(required|не\s+указан)", re.IGNORECASE),
-)
-
-
-def _extract_missing_paths(results: list[CoderResult]) -> list[str]:
-    paths: set[str] = set()
-    for item in results:
-        diagnostics = item.bundle.diagnostics
-        for diag in diagnostics:
-            if not isinstance(diag, str):
-                continue
-            match = _MISSING_FILE_PATTERN.search(diag)
-            if not match:
-                continue
-            raw_path = match.group(1).strip()
-            if raw_path:
-                paths.add(raw_path)
-    return sorted(paths)
-
-
-def _is_missing_target_path_error(error: str) -> bool:
-    if not error.strip():
-        return False
-    return any(pattern.search(error) for pattern in _MISSING_TARGET_PATH_PATTERNS)
-
-
-def _auto_plan_summary(plan: AutoPlan) -> str:
-    shard_count = len(plan.shards)
-    return f"План разбит на {shard_count} shard(ов)."
 
 
 def _verifier_reason(verification: VerificationResult) -> str:
