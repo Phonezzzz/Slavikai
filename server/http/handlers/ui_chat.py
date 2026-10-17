@@ -778,7 +778,7 @@ async def _handle_ui_send_impl(
         )
         durable_request_key = hashlib.sha256(key_source.encode()).hexdigest()
         async with agent_lock:
-            if mode == "ask" and not await admission_context_current():
+            if mode in {"ask", "auto"} and not await admission_context_current():
                 await _abort_idempotency()
                 return error_response(
                     status=409,
@@ -787,16 +787,16 @@ async def _handle_ui_send_impl(
                     code="task_run_context_changed",
                 )
             command_lane = content_raw.strip().startswith("/")
-            if (mode != "ask" or command_lane) and idempotency_key is not None:
+            if (mode not in {"ask", "auto"} or command_lane) and idempotency_key is not None:
                 if run_store.find_by_request(run_scope, durable_request_key) is not None:
                     await _abort_idempotency()
                     return error_response(
                         status=409,
-                        message="Idempotency-Key уже связан с принятым Ask запросом.",
+                        message="Idempotency-Key уже связан с принятым run.",
                         error_type="invalid_request_error",
                         code="idempotency_key_reused",
                     )
-            if mode == "ask" and not command_lane:
+            if mode in {"ask", "auto"} and not command_lane:
                 accepted_history = await hub.get_messages(session_id, lane=lane)
                 request_binding: dict[str, JSONValue] = {
                     "content": content_raw,
@@ -1979,7 +1979,7 @@ async def handle_ui_approval_continue(
             accepted_run: TaskRun | None = None
             run_store: TaskRunStore = request.app["task_run_store"]
             run_scope = RunScope(scope.principal_id, session_id)
-            if mode == "ask":
+            if mode in {"ask", "auto"}:
                 try:
                     accepted_run = agent.chat_approval_run(identity)
                     if (

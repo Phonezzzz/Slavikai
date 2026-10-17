@@ -434,7 +434,7 @@ class AgentToolsMixin:
         self.validate_chat_approval(identity)
         pending = self._pending_chat_approval
         assert pending is not None
-        if pending.mode != "ask" or run.scope.session_id != pending.session_id:
+        if pending.mode not in {"ask", "auto"} or run.scope.session_id != pending.session_id:
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
         if pending.task_run is not None and pending.task_run != run:
             raise ChatApprovalUnavailable("approval_continuation_unavailable")

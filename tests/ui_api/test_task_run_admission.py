@@ -21,14 +21,18 @@ class CountingBrain(_RealAgentStreamingBrain):
         return super().generate(messages, config, tools)
 
 
-@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("mode", ["ask", "auto"])
+@pytest.mark.parametrize("changed", [False, True, "mode"])
 def test_durable_admission_fences_dispatch_after_volatile_replay_is_lost(
     tmp_path,
     monkeypatch,
     changed,
+    mode,
 ) -> None:  # noqa: ANN001
     monkeypatch.chdir(tmp_path)
     brain = CountingBrain()
+    brain.supports_native_tools = True
+    brain.supports_streaming_tools = True
     agent = _RealStreamingAgent(
         brain=brain,
         memory_companion_db_path=str(tmp_path / "companion.db"),
@@ -44,6 +48,7 @@ def test_durable_admission_fences_dispatch_after_volatile_replay_is_lost(
         try:
             session = (await (await client.get("/ui/api/status")).json())["session_id"]
             await _select_local_model(client, session)
+            await client.app["ui_hub"].set_session_workflow(session, mode=mode)
             headers = {"X-Slavik-Session": session, "Idempotency-Key": "accepted-request"}
             first = await client.post("/ui/api/chat/send", headers=headers, json={"content": "hi"})
             assert first.status == 200
@@ -52,10 +57,16 @@ def test_durable_admission_fences_dispatch_after_volatile_replay_is_lost(
             # Reopen the real SQLite store; discard only the volatile HTTP replay cache.
             client.app["task_run_store"] = TaskRunStore(path)
             client.app["idempotency_store"] = IdempotencyStore()
+            if changed == "mode":
+                await client.app["ui_hub"].set_session_workflow(
+                    session, mode="auto" if mode == "ask" else "ask"
+                )
             repeated = await client.post(
                 "/ui/api/chat/send",
                 headers=headers,
-                json={"content": "hi", "web_search": True} if changed else {"content": "hi"},
+                json={"content": "hi", "web_search": True}
+                if changed is True
+                else {"content": "hi"},
             )
             assert repeated.status == 409
             assert (await repeated.json())["error"]["code"] == (
@@ -68,8 +79,11 @@ def test_durable_admission_fences_dispatch_after_volatile_replay_is_lost(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("mode", ["ask", "auto"])
 @pytest.mark.parametrize("fault", ["admission", "claim"])
-def test_durable_admission_storage_fault_prevents_agent_dispatch(tmp_path, monkeypatch, fault):  # noqa: ANN001, ANN201
+def test_durable_admission_storage_fault_prevents_agent_dispatch(
+    tmp_path, monkeypatch, fault, mode
+):  # noqa: ANN001, ANN201
     monkeypatch.chdir(tmp_path)
     brain = CountingBrain()
     agent = _RealStreamingAgent(
@@ -86,6 +100,7 @@ def test_durable_admission_storage_fault_prevents_agent_dispatch(tmp_path, monke
         try:
             session = (await (await client.get("/ui/api/status")).json())["session_id"]
             await _select_local_model(client, session)
+            await client.app["ui_hub"].set_session_workflow(session, mode=mode)
             with sqlite3.connect(path) as conn:
                 condition = "NEW.version = 0" if fault == "admission" else "NEW.version = 1"
                 conn.execute(
@@ -106,8 +121,9 @@ def test_durable_admission_storage_fault_prevents_agent_dispatch(tmp_path, monke
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("mode", ["ask", "auto"])
 @pytest.mark.parametrize("pending", [False, True])
-def test_fresh_app_cannot_repeat_committed_ask_tool_dispatch(tmp_path, monkeypatch, pending):  # noqa: ANN001, ANN201
+def test_fresh_app_cannot_repeat_committed_ask_tool_dispatch(tmp_path, monkeypatch, pending, mode):  # noqa: ANN001, ANN201
     from aiohttp.test_utils import TestClient, TestServer
 
     from config.http_server_config import HttpAuthConfig
@@ -175,6 +191,7 @@ def test_fresh_app_cannot_repeat_committed_ask_tool_dispatch(tmp_path, monkeypat
         try:
             session = (await (await first.get("/ui/api/status")).json())["session_id"]
             await _select_local_model(first, session)
+            await first.app["ui_hub"].set_session_workflow(session, mode=mode)
             headers = {"X-Slavik-Session": session, "Idempotency-Key": "lookup-request"}
             response = await first.post(
                 "/ui/api/chat/send", headers=headers, json={"content": "lookup"}
@@ -680,8 +697,11 @@ def test_second_ask_model_context_has_no_duplicate_ui_turns(tmp_path, monkeypatc
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("mode", ["ask", "auto"])
 @pytest.mark.parametrize("stale", [False, True, "foreign", "nested"])
-def test_native_approval_submits_original_run_or_fences_stale_owner(tmp_path, monkeypatch, stale):  # noqa: ANN001, ANN201
+def test_native_approval_submits_original_run_or_fences_stale_owner(
+    tmp_path, monkeypatch, stale, mode
+):  # noqa: ANN001, ANN201
     from llm.types import LLMResult, ToolCall
     from shared.models import ToolResult
     from shared.task_run import RunScope, RunState, TransitionAuthority
@@ -731,6 +751,7 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(tmp_path, mo
         try:
             session = (await (await client.get("/ui/api/status")).json())["session_id"]
             await _select_local_model(client, session)
+            await client.app["ui_hub"].set_session_workflow(session, mode=mode)
             headers = {"X-Slavik-Session": session}
             response = await client.post(
                 "/ui/api/chat/send", headers=headers, json={"content": "lookup"}

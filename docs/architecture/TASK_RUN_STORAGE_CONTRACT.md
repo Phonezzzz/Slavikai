@@ -437,7 +437,7 @@ checkpoint. Перед resume owning HTTP runtime проверяет exact princ
 Следующее approval переносит тот же binding. Typed result после resume переводит исходный run
 в `result_submitted` до UI/text projection, без нового admission. Это volatile checkpoint binding,
 не durable continuation/recovery и не terminal acceptance. Store submission fault после tool effect
-оставляет run unresolved; single-use checkpoint не разрешает implicit повтор execution. Project, Auto, Desktop и Act admission остаются непокрытыми.
+оставляет run unresolved; single-use checkpoint не разрешает implicit повтор execution. Project, `/v1` Auto, Desktop и Act admission остаются непокрытыми.
 Для `/v1` session grants читаются и применяются только под owning Agent lock перед
 dispatch; ошибка context installation останавливает запрос без вызова Agent.
 `/v1/chat/completions` теперь использует Ask по умолчанию, а не наследует прежний Agent mode.
@@ -460,7 +460,7 @@ runtime setter/default mode удалён; API требует canonical runtime i
 active_plan/task/auto_state больше не применяются к API execution: режим задаётся только request,
 permissions/root — принятым snapshot через typed Agent setters. Повтор не сбрасывает native checkpoint. Native Ask approval
 сохраняет owned run binding, но публичного `/v1` confirmation/recovery API этот срез не добавляет.
-Auto admission, result byte capture, terminal acceptance и durable recovery остаются target.
+`/v1` Auto admission, result byte capture, terminal acceptance и durable recovery остаются target.
 Task terminal acceptance/final, evidence references, recovery controller, full capture,
 retention/GC и user-visible run inspection остаются обязательными следующими срезами.
 
@@ -486,3 +486,17 @@ restart/lost DELETE response; существующая непоследняя id
 не копируются в этот browser identity cache. Тест actual useSessionTransport проверяет HTTP
 header и повтор после lost response. Test bootstrap использует временные per-app stores;
 production DB не открывается UI test fixtures.
+
+## UI Auto admission и native run binding
+
+`/ui/api/chat/send` в режиме Auto использует тот же scoped admission/CAS и принятый
+request/config/security/history fence, что и Ask. Debug command lane не создаёт model run.
+Повтор committed request после RAM loss/reconstruction не исполняется заново; смена режима
+не позволяет повторно использовать тот же ключ. Storage fault до claim останавливает dispatch.
+Native Auto checkpoint сохраняет исходный TaskRun binding рядом с уже существующим
+owned Auto frame/continuation; никаких UI state replay или нового Auto run при confirm.
+HTTP resume сверяет точный RunScope и текущую state/version до добавления permissions
+и вызова native resume. Следующее approval переносит тот же binding; typed final result
+переходит в result_submitted исходного run до presentation. Это не terminal acceptance,
+полный durable execution context или restart recovery. API Auto/прочие entrypoints и capture
+остаются отдельными обязательными срезами.
