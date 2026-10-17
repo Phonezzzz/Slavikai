@@ -521,6 +521,90 @@ describe('Settings loading isolation', () => {
     expect(strictCalls).toBe(0);
   });
 
+  it.each(['none', 'text', 'button', 'switch'])('reconciles a pre-write reopened snapshot while preserving edits (%s)', async (edit) => {
+    const pendingPost = deferred<Response>();
+    let committed = false;
+    let posts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') { posts += 1; return pendingPost.promise; }
+        return json(settings(committed ? 'committed instructions' : 'before write'));
+      }
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('committed instructions');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await vi.waitFor(() => expect(posts).toBe(1));
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    const input = await screen.findByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' });
+    expect(input.value).toBe('before write');
+    if (edit === 'text') fireEvent.change(input, { target: { value: 'new unsaved draft' } });
+    if (edit === 'button') fireEvent.click(screen.getByRole('button', { name: /Professional/ }));
+    if (edit === 'switch') {
+      fireEvent.click(screen.getByRole('button', { name: 'Composer' }));
+      fireEvent.click(screen.getByRole('switch', { name: 'Convert long paste to file' }));
+    }
+    await act(async () => {
+      committed = true;
+      pendingPost.resolve(json(settings('committed instructions')));
+    });
+    if (edit === 'none') {
+      await screen.findByDisplayValue('committed instructions');
+      expect(screen.queryByText(/Your draft was kept/)).toBeNull();
+    } else {
+      await screen.findByText(/Your draft was kept/);
+      if (edit === 'switch') {
+        expect(screen.getByRole('switch', { name: 'Convert long paste to file' }).getAttribute('aria-checked')).toBe('false');
+        fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+      }
+      expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value)
+        .toBe(edit === 'text' ? 'new unsaved draft' : 'before write');
+    }
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
+  });
+
+  it.each([false, true])('preserves provider diagnostics across a preference-only save (already completed=%s)', async (completed) => {
+    const body = deferred<unknown>();
+    const signals: AbortSignal[] = [];
+    const posts: Array<Record<string, unknown>> = [];
+    let probes = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') posts.push(JSON.parse(String(init.body)));
+        return json(settings());
+      }
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      if (url === MODELS_URL) {
+        probes += 1;
+        if (init?.signal) signals.push(init.signal);
+        const response = json({});
+        vi.spyOn(response, 'json').mockReturnValue(body.promise);
+        return response;
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('preference-only change');
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await vi.waitFor(() => expect(probes).toBe(1));
+    const result = { providers: [{ provider: 'deepseek', models: ['one', 'two'] }] };
+    if (completed) {
+      await act(async () => { body.resolve(result); });
+      await screen.findByText('2 models');
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('Global settings saved.');
+    expect(posts[0]).not.toHaveProperty('providers');
+    expect(signals[0]?.aborted).toBe(false);
+    if (!completed) await act(async () => { body.resolve(result); });
+    await screen.findByText('2 models');
+    expect(probes).toBe(1);
+  });
+
   it('does not hide a settings failure behind an indefinitely pending embedding status', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === SETTINGS_URL) return json({ error: { message: 'Cannot load preferences' } }, 500);

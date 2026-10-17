@@ -784,19 +784,22 @@ export function Settings({
   const providerRuntimeRequest = useRef<AbortController | null>(null);
   const embeddingStatusRequest = useRef<AbortController | null>(null);
   const pendingSettingsWrites = useRef(new Set<Promise<void>>());
+  const formEdits = useRef(0);
 
   const presetIsCustom = !THRESHOLD_PRESETS.includes(longPasteThresholdChars);
 
   useFocusTrap(isOpen, modalRef);
 
-  const invalidateDiagnostics = (): void => {
-    credentialDiagnosticsRequest.current?.abort();
-    setCredentialDiagnosticsLoading(false);
-    setCredentialDiagnosticsError(null);
-    providerRuntimeRequest.current?.abort();
-    setProviderRuntime({ ...DEFAULT_PROVIDER_RUNTIME });
-    setProviderRuntimeLoading(false);
-    setProviderRuntimeError(null);
+  const invalidateDiagnostics = (credentialsChanged = true): void => {
+    if (credentialsChanged) {
+      credentialDiagnosticsRequest.current?.abort();
+      setCredentialDiagnosticsLoading(false);
+      setCredentialDiagnosticsError(null);
+      providerRuntimeRequest.current?.abort();
+      setProviderRuntime({ ...DEFAULT_PROVIDER_RUNTIME });
+      setProviderRuntimeLoading(false);
+      setProviderRuntimeError(null);
+    }
     embeddingStatusRequest.current?.abort();
     setEmbeddingRuntimeLoading(false);
     setEmbeddingRuntimeError(null);
@@ -867,10 +870,10 @@ export function Settings({
     }
   };
 
-  const beginSettingsWrite = (): (() => void) => {
+  const beginSettingsWrite = (credentialsChanged: boolean): (() => void) => {
     // Cancel observations of the previous configuration before starting a write.
     // A later Recheck waits for all owned writes, then probes the committed state.
-    invalidateDiagnostics();
+    invalidateDiagnostics(credentialsChanged);
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => { finish = resolve; });
     pendingSettingsWrites.current.add(pending);
@@ -917,12 +920,10 @@ export function Settings({
     const controller = new AbortController();
     settingsRequest.current = controller;
     const providerRevisionAtRequestStart = providerInstancesRevision.current;
+    const writesBeforeSnapshot = [...pendingSettingsWrites.current];
     setLoading(true);
     setStatus(null);
     void refreshEmbeddingRuntime();
-    if (pendingSettingsWrites.current.size > 0) {
-      void loadCredentialDiagnostics();
-    }
     try {
       const settingsResponse = await fetch('/ui/api/settings', { signal: controller.signal });
       const settingsPayload: unknown = await settingsResponse.json();
@@ -931,6 +932,27 @@ export function Settings({
         throw new Error(extractErrorMessage(settingsPayload, 'Failed to load settings.'));
       }
       applyParsedSettings(parseSettingsPayload(settingsPayload), providerRevisionAtRequestStart);
+      setLoading(false);
+      if (writesBeforeSnapshot.length > 0) {
+        // Show the current snapshot immediately, then reconcile the completed write.
+        // Preserve a draft created while waiting rather than silently replacing it.
+        const editsAtSnapshot = formEdits.current;
+        await Promise.all(writesBeforeSnapshot);
+        if (controller.signal.aborted) return;
+        const refreshedResponse = await fetch('/ui/api/settings', { signal: controller.signal });
+        const refreshedPayload: unknown = await refreshedResponse.json();
+        if (controller.signal.aborted) return;
+        if (!refreshedResponse.ok) {
+          throw new Error(extractErrorMessage(refreshedPayload, 'Failed to refresh saved settings.'));
+        }
+        const refreshed = parseSettingsPayload(refreshedPayload);
+        if (formEdits.current === editsAtSnapshot) {
+          applyParsedSettings(refreshed, providerRevisionAtRequestStart);
+        } else {
+          applyCredentialSnapshot(refreshed);
+          setStatus('Settings changed on the server. Your draft was kept; Refresh loads the saved settings.');
+        }
+      }
     } catch (error) {
       if (controller.signal.aborted) return;
       setStatus(error instanceof Error ? error.message : 'Failed to load settings.');
@@ -1030,7 +1052,7 @@ export function Settings({
     try {
       if (isApiKeyProvider(defaultModelProvider) && providerDirty[defaultModelProvider]) {
         const apiKey = apiKeys[defaultModelProvider].trim();
-        finishWrite = beginSettingsWrite();
+        finishWrite = beginSettingsWrite(true);
         const saveKeyResponse = await fetch('/ui/api/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1214,7 +1236,7 @@ export function Settings({
     const epoch = onboardingEpoch.current;
     setSaving(true);
     setStatus(null);
-    const finishWrite = beginSettingsWrite();
+    let finishWrite: (() => void) | undefined;
     try {
       const providersPayload: Record<string, { api_key: string } | null> = {};
       let hasProviderChanges = false;
@@ -1256,6 +1278,7 @@ export function Settings({
       if (hasProviderChanges) {
         payload.providers = providersPayload;
       }
+      finishWrite = beginSettingsWrite(hasProviderChanges);
       const response = await fetch('/ui/api/settings', {
         method: 'POST',
         headers: {
@@ -1276,7 +1299,7 @@ export function Settings({
       const message = error instanceof Error ? error.message : 'Failed to save settings.';
       setStatus(message);
     } finally {
-      finishWrite();
+      finishWrite?.();
       setSaving(false);
     }
   };
@@ -1401,6 +1424,12 @@ export function Settings({
             role="dialog"
             aria-modal="true"
             aria-label="Settings"
+            onChangeCapture={() => { formEdits.current += 1; }}
+            onClickCapture={(event) => {
+              if (event.target instanceof Element && event.target.closest('[data-edits-settings], [role="switch"]')) {
+                formEdits.current += 1;
+              }
+            }}
           >
             <div className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl shadow-black/60">
               <div className="flex items-center justify-between gap-4 border-b border-zinc-800 px-5 py-4">
@@ -1535,6 +1564,7 @@ export function Settings({
                                 {provider.api_key_stored ? (
                                   <button
                                     type="button"
+                                    data-edits-settings
                                     onClick={() => {
                                       setApiKeys((current) => ({
                                         ...current,
@@ -1675,6 +1705,7 @@ export function Settings({
                           </label>
                           <button
                             type="button"
+                            data-edits-settings
                             onClick={() => { void handleLoadDefaultModels(); }}
                             disabled={defaultModelsLoading}
                             className="self-end rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
@@ -1701,6 +1732,7 @@ export function Settings({
                             <button
                               key={option.value}
                               type="button"
+                              data-edits-settings
                               onClick={() => setTone(option.value)}
                               className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors ${
                                 tone === option.value
@@ -1777,6 +1809,7 @@ export function Settings({
                             <button
                               key={option.value}
                               type="button"
+                              data-edits-settings
                               onClick={() => setAppearanceTheme(option.value)}
                               className={`rounded px-3 py-1.5 text-[13px] transition-colors ${
                                 appearanceTheme === option.value
@@ -1823,6 +1856,7 @@ export function Settings({
                                 <button
                                   key={preset}
                                   type="button"
+                                  data-edits-settings
                                   onClick={() => setLongPasteThresholdChars(preset)}
                                   className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
                                     longPasteThresholdChars === preset
@@ -1926,6 +1960,7 @@ export function Settings({
                             <button
                               key={provider}
                               type="button"
+                              data-edits-settings
                               onClick={() => setEmbeddingsProvider(provider)}
                               className={`rounded px-3 py-1.5 text-[13px] transition-colors ${
                                 embeddingsProvider === provider
