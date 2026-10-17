@@ -874,6 +874,9 @@ export function Settings({
     // Cancel observations of the previous configuration before starting a write.
     // A later Recheck waits for all owned writes, then probes the committed state.
     invalidateDiagnostics(credentialsChanged);
+    settingsRequest.current?.abort();
+    settingsRequest.current = null;
+    setLoading(false);
     let finish!: () => void;
     const pending = new Promise<void>((resolve) => { finish = resolve; });
     pendingSettingsWrites.current.add(pending);

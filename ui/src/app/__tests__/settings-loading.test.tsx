@@ -605,6 +605,56 @@ describe('Settings loading isolation', () => {
     expect(probes).toBe(1);
   });
 
+  it('invalidates an old reconciliation GET when a newer write starts', async () => {
+    const firstPost = deferred<Response>();
+    const oldBody = deferred<unknown>();
+    const readSignals: AbortSignal[] = [];
+    let gets = 0;
+    let posts = 0;
+    const snapshot = (ready: boolean) => ({ settings: {
+      ...settings().settings,
+      audio: { tts: { api_key_set: ready, backend_ready: ready } },
+    } });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') {
+          posts += 1;
+          return posts === 1 ? firstPost.promise : json(snapshot(true));
+        }
+        gets += 1;
+        if (init?.signal) readSignals.push(init.signal);
+        if (gets === 3) {
+          const response = json({});
+          vi.spyOn(response, 'json').mockReturnValue(oldBody.promise);
+          return response;
+        }
+        return json(snapshot(false));
+      }
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'first-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    await vi.waitFor(() => expect(posts).toBe(1));
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByLabelText('OpenAI API key');
+    await act(async () => { firstPost.resolve(json(snapshot(false))); });
+    await vi.waitFor(() => expect(gets).toBe(3));
+    fireEvent.change(screen.getByLabelText('OpenAI API key'), { target: { value: 'new-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('Global settings saved.');
+    expect(readSignals[2]?.aborted).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    await screen.findByText('ready');
+    await act(async () => { oldBody.resolve(snapshot(false)); });
+    expect(screen.getByText('ready')).toBeTruthy();
+    expect(screen.queryByText(/Your draft was kept/)).toBeNull();
+  });
+
   it('does not hide a settings failure behind an indefinitely pending embedding status', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === SETTINGS_URL) return json({ error: { message: 'Cannot load preferences' } }, 500);
