@@ -160,7 +160,9 @@ describe('Settings loading isolation', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.waitFor(() => expect(gets).toBe(2));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.waitFor(() => expect(gets).toBe(3));
     await act(async () => { first.resolve(json(settings('stale refresh'))); });
     expect(screen.getByText('Loading settings...')).toBeTruthy();
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(true);
@@ -401,6 +403,122 @@ describe('Settings loading isolation', () => {
     expect(screen.queryByText('3 models')).toBeNull();
     expect(screen.queryByText(/Old credential failed/)).toBeNull();
     expect(screen.queryAllByText('checking')).toHaveLength(0);
+  });
+
+  it.each([
+    ['Save changes', 200], ['Save changes', 503], ['Load models', 200], ['Load models', 503],
+  ] as const)('keeps a new Recheck across delayed %s JSON (status=%s)', async (action, status) => {
+    const saveBody = deferred<unknown>();
+    const probeSignals: AbortSignal[] = [];
+    let posts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') {
+          posts += 1;
+          const response = json({}, status);
+          vi.spyOn(response, 'json').mockReturnValue(saveBody.promise);
+          return response;
+        }
+        return json(settings());
+      }
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      if (url === '/ui/api/models?provider=deepseek&strict=1') {
+        return json({ providers: [{ provider: 'deepseek', models: ['new-model'] }] });
+      }
+      if (url === MODELS_URL) {
+        if (init?.signal) probeSignals.push(init.signal);
+        return json({ providers: [{ provider: 'deepseek', models: ['new1', 'new2'] }] });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement-test-key' } });
+    fireEvent.click(screen.getByRole('button', { name: action }));
+    await vi.waitFor(() => expect(posts).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(probeSignals).toHaveLength(0);
+    expect(screen.getAllByText('checking').length).toBeGreaterThan(0);
+    await act(async () => { saveBody.resolve(status === 200 ? settings() : { error: { message: 'Key save failed' } }); });
+    await screen.findByText('2 models');
+    expect(probeSignals).toHaveLength(1);
+    expect(probeSignals[0]?.aborted).toBe(false);
+  });
+
+  it('rechecks the committed embedding model and ignores the previous model status', async () => {
+    const oldBody = deferred<unknown>();
+    const signals: AbortSignal[] = [];
+    let model = 'old-model';
+    let checks = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') {
+          model = JSON.parse(String(init.body)).memory.embeddings.local_model;
+        }
+        return json({ settings: { ...settings().settings, memory: { embeddings: { provider: 'local', local_model: model } } } });
+      }
+      if (url === EMBEDDINGS_URL) {
+        checks += 1;
+        if (init?.signal) signals.push(init.signal);
+        if (checks === 1) {
+          const response = json({});
+          vi.spyOn(response, 'json').mockReturnValue(oldBody.promise);
+          return response;
+        }
+        return json({ model, state: 'ready' });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.change(screen.getByDisplayValue('old-model'), { target: { value: 'new-model' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('new-model is available locally.');
+    expect(signals[0]?.aborted).toBe(true);
+    await act(async () => { oldBody.resolve({ model: 'old-model', state: 'ready' }); });
+    expect(screen.getByText('new-model is available locally.')).toBeTruthy();
+    expect(screen.queryByText('old-model is available locally.')).toBeNull();
+  });
+
+  it.each(['Save changes', 'Load models'])('reopens the form during %s without applying the old write response', async (action) => {
+    const oldBody = deferred<unknown>();
+    let posts = 0;
+    let strictCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') {
+          posts += 1;
+          const response = json({});
+          vi.spyOn(response, 'json').mockReturnValue(oldBody.promise);
+          return response;
+        }
+        return json(settings('reopened server value'));
+      }
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      if (url === '/ui/api/models?provider=deepseek&strict=1') {
+        strictCalls += 1;
+        return json({ providers: [{ provider: 'deepseek', models: ['obsolete-model'] }] });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'test-key' } });
+    fireEvent.click(screen.getByRole('button', { name: action }));
+    await vi.waitFor(() => expect(posts).toBe(1));
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    await editInstructions('reopened unsaved draft');
+    await act(async () => { oldBody.resolve(settings('stale saved snapshot')); });
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('reopened unsaved draft');
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
+    expect(strictCalls).toBe(0);
   });
 
   it('does not hide a settings failure behind an indefinitely pending embedding status', async () => {

@@ -783,20 +783,26 @@ export function Settings({
   const credentialDiagnosticsRequest = useRef<AbortController | null>(null);
   const providerRuntimeRequest = useRef<AbortController | null>(null);
   const embeddingStatusRequest = useRef<AbortController | null>(null);
+  const pendingSettingsWrites = useRef(new Set<Promise<void>>());
 
   const presetIsCustom = !THRESHOLD_PRESETS.includes(longPasteThresholdChars);
 
   useFocusTrap(isOpen, modalRef);
 
-  const applyCredentialSnapshot = (parsed: ParsedSettings): void => {
+  const invalidateDiagnostics = (): void => {
     credentialDiagnosticsRequest.current?.abort();
     setCredentialDiagnosticsLoading(false);
     setCredentialDiagnosticsError(null);
-    // A fresh credential snapshot invalidates catalogs checked with older keys.
     providerRuntimeRequest.current?.abort();
     setProviderRuntime({ ...DEFAULT_PROVIDER_RUNTIME });
     setProviderRuntimeLoading(false);
     setProviderRuntimeError(null);
+    embeddingStatusRequest.current?.abort();
+    setEmbeddingRuntimeLoading(false);
+    setEmbeddingRuntimeError(null);
+  };
+
+  const applyCredentialSnapshot = (parsed: ParsedSettings): void => {
     setProviders(parsed.providers);
     setTtsBackend(parsed.ttsBackend);
   };
@@ -841,6 +847,8 @@ export function Settings({
     setEmbeddingRuntimeLoading(true);
     setEmbeddingRuntimeError(null);
     try {
+      await Promise.all([...pendingSettingsWrites.current]);
+      if (controller.signal.aborted) return;
       const response = await fetch('/ui/api/embeddings/status', { signal: controller.signal });
       const payload: unknown = await response.json();
       if (controller.signal.aborted) return;
@@ -859,6 +867,20 @@ export function Settings({
     }
   };
 
+  const beginSettingsWrite = (): (() => void) => {
+    // Cancel observations of the previous configuration before starting a write.
+    // A later Recheck waits for all owned writes, then probes the committed state.
+    invalidateDiagnostics();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    pendingSettingsWrites.current.add(pending);
+    void refreshEmbeddingRuntime();
+    return () => {
+      pendingSettingsWrites.current.delete(pending);
+      finish();
+    };
+  };
+
   const loadCredentialDiagnostics = async (): Promise<void> => {
     credentialDiagnosticsRequest.current?.abort();
     const controller = new AbortController();
@@ -866,6 +888,8 @@ export function Settings({
     setCredentialDiagnosticsLoading(true);
     setCredentialDiagnosticsError(null);
     try {
+      await Promise.all([...pendingSettingsWrites.current]);
+      if (controller.signal.aborted) return;
       const response = await fetch('/ui/api/settings', { signal: controller.signal });
       const payload: unknown = await response.json();
       if (controller.signal.aborted) return;
@@ -888,15 +912,17 @@ export function Settings({
   };
 
   const loadSettings = async (): Promise<void> => {
-    credentialDiagnosticsRequest.current?.abort();
-    setCredentialDiagnosticsLoading(false);
-    setCredentialDiagnosticsError(null);
+    invalidateDiagnostics();
     settingsRequest.current?.abort();
     const controller = new AbortController();
     settingsRequest.current = controller;
     const providerRevisionAtRequestStart = providerInstancesRevision.current;
     setLoading(true);
     setStatus(null);
+    void refreshEmbeddingRuntime();
+    if (pendingSettingsWrites.current.size > 0) {
+      void loadCredentialDiagnostics();
+    }
     try {
       const settingsResponse = await fetch('/ui/api/settings', { signal: controller.signal });
       const settingsPayload: unknown = await settingsResponse.json();
@@ -923,6 +949,8 @@ export function Settings({
     setProviderRuntimeLoading(true);
     setProviderRuntimeError(null);
     try {
+      await Promise.all([...pendingSettingsWrites.current]);
+      if (controller.signal.aborted) return;
       const providerRuntimeResponse = await fetch('/ui/api/models?skip_custom_probe=1', {
         signal: controller.signal,
       });
@@ -960,7 +988,6 @@ export function Settings({
     setProviderRuntimeLoading(false);
     setProviderRuntimeError(null);
     void loadSettings();
-    void refreshEmbeddingRuntime();
     return () => {
       settingsRequest.current?.abort();
       credentialDiagnosticsRequest.current?.abort();
@@ -998,9 +1025,12 @@ export function Settings({
     }
     setDefaultModelsLoading(true);
     setStatus(null);
+    const epoch = onboardingEpoch.current;
+    let finishWrite: (() => void) | undefined;
     try {
       if (isApiKeyProvider(defaultModelProvider) && providerDirty[defaultModelProvider]) {
         const apiKey = apiKeys[defaultModelProvider].trim();
+        finishWrite = beginSettingsWrite();
         const saveKeyResponse = await fetch('/ui/api/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1011,6 +1041,7 @@ export function Settings({
           }),
         });
         const saveKeyPayload: unknown = await saveKeyResponse.json();
+        if (epoch !== onboardingEpoch.current) return;
         if (!saveKeyResponse.ok) {
           throw new Error(extractErrorMessage(saveKeyPayload, `Failed to save ${defaultModelProvider} key.`));
         }
@@ -1018,10 +1049,15 @@ export function Settings({
         applyCredentialSnapshot(parsed);
         setApiKeys((current) => ({ ...current, [defaultModelProvider]: '' }));
         setProviderDirty((current) => ({ ...current, [defaultModelProvider]: false }));
+        finishWrite();
+        finishWrite = undefined;
       }
+      await Promise.all([...pendingSettingsWrites.current]);
+      if (epoch !== onboardingEpoch.current) return;
       const params = new URLSearchParams({ provider: defaultModelProvider, strict: '1' });
       const response = await fetch(`/ui/api/models?${params.toString()}`);
       const payload: unknown = await response.json();
+      if (epoch !== onboardingEpoch.current) return;
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, `Failed to load ${defaultModelProvider} models.`));
       }
@@ -1043,9 +1079,11 @@ export function Settings({
         ? errorRaw
         : models.length > 0 ? `Loaded ${models.length} ${defaultModelProvider} models.` : 'No models returned.');
     } catch (error) {
+      if (epoch !== onboardingEpoch.current) return;
       setDefaultModelOptions(defaultModelId ? [defaultModelId] : []);
       setStatus(error instanceof Error ? error.message : 'Failed to load provider models.');
     } finally {
+      finishWrite?.();
       setDefaultModelsLoading(false);
     }
   };
@@ -1173,8 +1211,10 @@ export function Settings({
       return;
     }
     const providerRevisionAtRequestStart = providerInstancesRevision.current;
+    const epoch = onboardingEpoch.current;
     setSaving(true);
     setStatus(null);
+    const finishWrite = beginSettingsWrite();
     try {
       const providersPayload: Record<string, { api_key: string } | null> = {};
       let hasProviderChanges = false;
@@ -1227,13 +1267,16 @@ export function Settings({
       if (!response.ok) {
         throw new Error(extractErrorMessage(body, 'Failed to save settings.'));
       }
+      onSaved?.();
+      if (epoch !== onboardingEpoch.current) return;
       applyParsedSettings(parseSettingsPayload(body), providerRevisionAtRequestStart);
       setStatus('Global settings saved.');
-      onSaved?.();
     } catch (error) {
+      if (epoch !== onboardingEpoch.current) return;
       const message = error instanceof Error ? error.message : 'Failed to save settings.';
       setStatus(message);
     } finally {
+      finishWrite();
       setSaving(false);
     }
   };
