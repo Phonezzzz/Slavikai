@@ -358,6 +358,51 @@ describe('Settings loading isolation', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
   });
 
+  it.each([
+    ['Save changes', 200], ['Save changes', 503], ['Load models', 200], ['Load models', 503],
+  ] as const)('invalidates old provider checks after key save via %s (status=%s)', async (action, status) => {
+    const oldBody = deferred<unknown>();
+    const signals: AbortSignal[] = [];
+    const posts: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') posts.push(JSON.parse(String(init.body)));
+        return json(settings());
+      }
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      if (url === '/ui/api/models?provider=deepseek&strict=1') {
+        return json({ providers: [{ provider: 'deepseek', models: ['new-model'] }] });
+      }
+      if (url === MODELS_URL) {
+        if (init?.signal) signals.push(init.signal);
+        const response = json({}, status);
+        vi.spyOn(response, 'json').mockReturnValue(oldBody.promise);
+        return response;
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement-test-key' } });
+    fireEvent.click(screen.getByRole('button', { name: action }));
+    await screen.findByText(action === 'Save changes' ? 'Global settings saved.' : 'Loaded 1 deepseek models.');
+    expect(posts[0]?.providers).toEqual({ deepseek: { api_key: 'replacement-test-key' } });
+    expect(signals[0]?.aborted).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    await act(async () => {
+      oldBody.resolve(status === 200
+        ? { providers: [{ provider: 'deepseek', models: ['old1', 'old2', 'old3'] }] }
+        : { error: { message: 'Old credential failed' } });
+    });
+    expect(screen.queryByText('3 models')).toBeNull();
+    expect(screen.queryByText(/Old credential failed/)).toBeNull();
+    expect(screen.queryAllByText('checking')).toHaveLength(0);
+  });
+
   it('does not hide a settings failure behind an indefinitely pending embedding status', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === SETTINGS_URL) return json({ error: { message: 'Cannot load preferences' } }, 500);

@@ -788,11 +788,21 @@ export function Settings({
 
   useFocusTrap(isOpen, modalRef);
 
-  const applyParsedSettings = (parsed: ParsedSettings, providerRevisionAtRequestStart: number): void => {
+  const applyCredentialSnapshot = (parsed: ParsedSettings): void => {
     credentialDiagnosticsRequest.current?.abort();
     setCredentialDiagnosticsLoading(false);
     setCredentialDiagnosticsError(null);
+    // A fresh credential snapshot invalidates catalogs checked with older keys.
+    providerRuntimeRequest.current?.abort();
+    setProviderRuntime({ ...DEFAULT_PROVIDER_RUNTIME });
+    setProviderRuntimeLoading(false);
+    setProviderRuntimeError(null);
     setProviders(parsed.providers);
+    setTtsBackend(parsed.ttsBackend);
+  };
+
+  const applyParsedSettings = (parsed: ParsedSettings, providerRevisionAtRequestStart: number): void => {
+    applyCredentialSnapshot(parsed);
     setProviderInstances((current) => {
       if (providerInstancesRevision.current === providerRevisionAtRequestStart) {
         return parsed.providerInstances;
@@ -804,7 +814,6 @@ export function Settings({
     });
     setApiKeys({ ...EMPTY_API_KEYS });
     setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
-    setTtsBackend(parsed.ttsBackend);
     setTone(parsed.tone);
     setSystemPrompt(parsed.systemPrompt);
     setAppearanceTheme(parsed.appearanceTheme);
@@ -1006,7 +1015,7 @@ export function Settings({
           throw new Error(extractErrorMessage(saveKeyPayload, `Failed to save ${defaultModelProvider} key.`));
         }
         const parsed = parseSettingsPayload(saveKeyPayload);
-        setProviders(parsed.providers);
+        applyCredentialSnapshot(parsed);
         setApiKeys((current) => ({ ...current, [defaultModelProvider]: '' }));
         setProviderDirty((current) => ({ ...current, [defaultModelProvider]: false }));
       }
