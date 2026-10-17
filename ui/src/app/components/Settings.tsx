@@ -762,6 +762,8 @@ export function Settings({
     state: 'missing',
     error: null,
   });
+  const [embeddingRuntimeLoading, setEmbeddingRuntimeLoading] = useState(false);
+  const [embeddingRuntimeError, setEmbeddingRuntimeError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -775,6 +777,9 @@ export function Settings({
   const modalRef = useRef<HTMLDivElement | null>(null);
   const onboardingEpoch = useRef(0);
   const providerInstancesRevision = useRef(0);
+  const settingsRequest = useRef<AbortController | null>(null);
+  const providerRuntimeRequest = useRef<AbortController | null>(null);
+  const embeddingStatusRequest = useRef<AbortController | null>(null);
 
   const presetIsCustom = !THRESHOLD_PRESETS.includes(longPasteThresholdChars);
 
@@ -811,55 +816,83 @@ export function Settings({
   };
 
   const refreshEmbeddingRuntime = async (): Promise<void> => {
-    const response = await fetch('/ui/api/embeddings/status');
-    const payload: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(payload, 'Failed to load embedding model status.'));
+    if (embeddingStatusRequest.current && !embeddingStatusRequest.current.signal.aborted) {
+      return;
     }
-    setEmbeddingRuntime(parseEmbeddingRuntime(payload));
+    const controller = new AbortController();
+    embeddingStatusRequest.current = controller;
+    setEmbeddingRuntimeLoading(true);
+    setEmbeddingRuntimeError(null);
+    try {
+      const response = await fetch('/ui/api/embeddings/status', { signal: controller.signal });
+      const payload: unknown = await response.json();
+      if (controller.signal.aborted) return;
+      if (!response.ok) {
+        throw new Error(extractErrorMessage(payload, 'Failed to load embedding model status.'));
+      }
+      setEmbeddingRuntime(parseEmbeddingRuntime(payload));
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setEmbeddingRuntimeError(error instanceof Error ? error.message : 'Failed to load embedding model status.');
+    } finally {
+      if (!controller.signal.aborted) {
+        embeddingStatusRequest.current = null;
+        setEmbeddingRuntimeLoading(false);
+      }
+    }
   };
 
   const loadSettings = async (): Promise<void> => {
+    settingsRequest.current?.abort();
+    const controller = new AbortController();
+    settingsRequest.current = controller;
     const providerRevisionAtRequestStart = providerInstancesRevision.current;
     setLoading(true);
     setStatus(null);
-    setProviderRuntimeLoading(true);
-    setProviderRuntimeError(null);
     try {
-      const [settingsResponse, providerRuntimeResponse, embeddingResponse] = await Promise.all([
-        fetch('/ui/api/settings'),
-        // Skip live probes of saved custom endpoints on initial load: one
-        // unreachable custom endpoint would stall Settings open by ~20s.
-        // Built-in provider diagnostics are still probed; explicit custom
-        // discovery goes through /ui/api/models?provider=custom-...
-        fetch('/ui/api/models?skip_custom_probe=1'),
-        fetch('/ui/api/embeddings/status'),
-      ]);
+      const settingsResponse = await fetch('/ui/api/settings', { signal: controller.signal });
       const settingsPayload: unknown = await settingsResponse.json();
+      if (controller.signal.aborted) return;
       if (!settingsResponse.ok) {
         throw new Error(extractErrorMessage(settingsPayload, 'Failed to load settings.'));
       }
       applyParsedSettings(parseSettingsPayload(settingsPayload), providerRevisionAtRequestStart);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setStatus(error instanceof Error ? error.message : 'Failed to load settings.');
+    } finally {
+      if (!controller.signal.aborted) {
+        settingsRequest.current = null;
+        setLoading(false);
+      }
+    }
+  };
 
+  const loadProviderDiagnostics = async (): Promise<void> => {
+    providerRuntimeRequest.current?.abort();
+    const controller = new AbortController();
+    providerRuntimeRequest.current = controller;
+    setProviderRuntimeLoading(true);
+    setProviderRuntimeError(null);
+    try {
+      const providerRuntimeResponse = await fetch('/ui/api/models?skip_custom_probe=1', {
+        signal: controller.signal,
+      });
       const providerRuntimePayload: unknown = await providerRuntimeResponse.json();
+      if (controller.signal.aborted) return;
       if (!providerRuntimeResponse.ok) {
         throw new Error(extractErrorMessage(providerRuntimePayload, 'Failed to load provider diagnostics.'));
       }
       setProviderRuntime(parseProviderRuntimePayload(providerRuntimePayload));
-
-      const embeddingPayload: unknown = await embeddingResponse.json();
-      if (!embeddingResponse.ok) {
-        throw new Error(extractErrorMessage(embeddingPayload, 'Failed to load embedding model status.'));
-      }
-      setEmbeddingRuntime(parseEmbeddingRuntime(embeddingPayload));
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load settings.';
+      if (controller.signal.aborted) return;
       setProviderRuntime({ ...DEFAULT_PROVIDER_RUNTIME });
-      setProviderRuntimeError(message);
-      setStatus(message);
+      setProviderRuntimeError(error instanceof Error ? error.message : 'Failed to load provider diagnostics.');
     } finally {
-      setProviderRuntimeLoading(false);
-      setLoading(false);
+      if (!controller.signal.aborted) {
+        providerRuntimeRequest.current = null;
+        setProviderRuntimeLoading(false);
+      }
     }
   };
 
@@ -875,7 +908,16 @@ export function Settings({
       setNewProviderProbeStatus(null);
       return;
     }
+    setProviderRuntime({ ...DEFAULT_PROVIDER_RUNTIME });
+    setProviderRuntimeLoading(false);
+    setProviderRuntimeError(null);
     void loadSettings();
+    void refreshEmbeddingRuntime();
+    return () => {
+      settingsRequest.current?.abort();
+      providerRuntimeRequest.current?.abort();
+      embeddingStatusRequest.current?.abort();
+    };
   }, [isOpen]);
 
   useEffect(() => {
@@ -896,9 +938,7 @@ export function Settings({
       return undefined;
     }
     const timer = window.setInterval(() => {
-      void refreshEmbeddingRuntime().catch((error: unknown) => {
-        setStatus(error instanceof Error ? error.message : 'Failed to refresh embedding model status.');
-      });
+      void refreshEmbeddingRuntime();
     }, 1500);
     return () => window.clearInterval(timer);
   }, [embeddingRuntime.state, isOpen]);
@@ -1057,6 +1097,9 @@ export function Settings({
   };
 
   const handleDownloadEmbeddings = async (): Promise<void> => {
+    embeddingStatusRequest.current?.abort();
+    setEmbeddingRuntimeLoading(false);
+    setEmbeddingRuntimeError(null);
     setStatus(null);
     try {
       const response = await fetch('/ui/api/embeddings/download', {
@@ -1821,24 +1864,31 @@ export function Settings({
                             <Row
                               label="Model files"
                               description={
-                                embeddingRuntime.error
-                                  ? embeddingRuntime.error
-                                  : embeddingRuntime.state === 'ready'
+                                embeddingRuntimeError || embeddingRuntime.error ||
+                                  (embeddingRuntime.state === 'ready'
                                     ? `${embeddingRuntime.model} is available locally.`
-                                    : 'Save the model name first, then download it once.'
+                                    : 'Save the model name first, then download it once.')
                               }
                             >
                               <StatusBadge
                                 tone={
-                                  embeddingRuntime.state === 'ready'
-                                    ? 'success'
-                                    : embeddingRuntime.state === 'error' ||
-                                        embeddingRuntime.state === 'package_missing'
+                                  embeddingRuntimeLoading
+                                    ? 'neutral'
+                                    : embeddingRuntimeError
                                       ? 'error'
-                                      : 'waiting'
+                                      : embeddingRuntime.state === 'ready'
+                                        ? 'success'
+                                        : embeddingRuntime.state === 'error' ||
+                                            embeddingRuntime.state === 'package_missing'
+                                          ? 'error'
+                                          : 'waiting'
                                 }
                               >
-                                {embeddingRuntime.state.replace('_', ' ')}
+                                {embeddingRuntimeLoading
+                                  ? 'checking'
+                                  : embeddingRuntimeError
+                                    ? 'error'
+                                    : embeddingRuntime.state.replace('_', ' ')}
                               </StatusBadge>
                               <button
                                 type="button"
@@ -1974,7 +2024,8 @@ export function Settings({
                           <button
                             type="button"
                             onClick={() => {
-                              void loadSettings();
+                              void loadProviderDiagnostics();
+                              void refreshEmbeddingRuntime();
                             }}
                             className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800"
                           >

@@ -343,7 +343,7 @@ describe('generic provider onboarding', () => {
     expect(screen.getAllByText('Old')).toHaveLength(1);
   });
 
-  it('loads initial diagnostics from /ui/api/models?skip_custom_probe=1', async () => {
+  it('loads diagnostics explicitly from /ui/api/models?skip_custom_probe=1', async () => {
     const requestedUrls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       requestedUrls.push(url);
@@ -362,13 +362,13 @@ describe('generic provider onboarding', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
-    // Wait for the initial load to finish (onboarding form is gated on it).
     await screen.findByRole('textbox', { name: 'Provider display name' });
-    // Initial Settings load requested exactly the skip_custom_probe diagnostics URL...
+    expect(requestedUrls).not.toContain('/ui/api/models?skip_custom_probe=1');
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await screen.findByText('2 models');
     expect(requestedUrls).toContain('/ui/api/models?skip_custom_probe=1');
     expect(requestedUrls).not.toContain('/ui/api/models');
-    // ...and consumed its response instead of falling into the loadSettings
-    // catch path (any unexpected fetch would surface as an "Unexpected URL" status).
     expect(screen.queryByText(/Unexpected URL/)).toBeNull();
   });
 });
