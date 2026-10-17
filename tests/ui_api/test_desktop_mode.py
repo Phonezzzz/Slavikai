@@ -107,10 +107,6 @@ class DesktopApprovalAgent(Agent):
             },
         )
 
-    def reconfigure_models(self, main_config, main_api_key=None, *, persist=True):
-        # Only the external provider is stubbed; the execution mechanism is production.
-        pass
-
     def set_desktop_policy_context(self, rules, principal_id="legacy"):
         self.desktop_rule_snapshots.append(list(rules))
         super().set_desktop_policy_context(rules, principal_id)

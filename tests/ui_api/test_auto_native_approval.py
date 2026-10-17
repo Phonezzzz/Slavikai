@@ -35,9 +35,7 @@ class AutoBatchBrain(Brain):
 
 
 class AutoNativeAgent(Agent):
-    def reconfigure_models(self, main_config, main_api_key=None, *, persist=True):
-        # Stub только внешнего provider; runtime, Gateway и verifier настоящие.
-        pass
+    pass
 
 
 @pytest.mark.parametrize(
@@ -232,7 +230,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                     },
                 )
                 assert rejected.status == 409
-                assert agent.approved_categories == {"SUDO"}
+                assert agent.approved_categories == set()
                 store = client.server.app["session_store"]
                 for scope in store._approved:
                     assert await original_categories(scope) == {"SUDO"}

@@ -698,7 +698,7 @@ def test_second_ask_model_context_has_no_duplicate_ui_turns(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("mode", ["ask", "auto"])
-@pytest.mark.parametrize("stale", [False, True, "foreign", "nested", "policy", "tools"])
+@pytest.mark.parametrize("stale", [False, True, "foreign", "nested", "policy", "tools", "grants"])
 def test_native_approval_submits_original_run_or_fences_stale_owner(
     tmp_path, monkeypatch, stale, mode
 ):  # noqa: ANN001, ANN201
@@ -796,7 +796,11 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(
                 await client.app["ui_hub"].set_session_tools_state(
                     session, tools_state={"web": not security[0]["web"]}
                 )
-            fenced = stale is True or stale in {"foreign", "policy", "tools"}
+            if stale == "grants":
+                from server.agent_provider import AgentScope
+
+                await client.app["session_store"].approve(AgentScope(principal, session), {"SUDO"})
+            fenced = stale is True or stale in {"foreign", "policy", "tools", "grants"}
             resumed = await client.post(
                 "/ui/api/decision/respond",
                 headers=headers,
@@ -942,7 +946,7 @@ def test_auto_root_approval_preserves_original_request_identity(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("changed", ["mode", "model"])
+@pytest.mark.parametrize("changed", ["mode", "model", "policy", "tools", "grants"])
 def test_root_approval_rejects_changed_execution_context(tmp_path, monkeypatch, changed):  # noqa: ANN001, ANN201
     monkeypatch.chdir(tmp_path)
     brain = CountingBrain()
@@ -965,8 +969,22 @@ def test_root_approval_rejects_changed_execution_context(tmp_path, monkeypatch, 
             root = await hub.get_workspace_root(session)
             if changed == "mode":
                 await hub.set_session_workflow(session, mode="ask")
-            else:
+            elif changed == "model":
                 await hub.set_session_model(session, provider="ollama", model_id="different")
+            elif changed == "policy":
+                await hub.set_session_policy(session, profile="yolo")
+            elif changed == "tools":
+                from server import http_api as api
+
+                security = await api._load_effective_session_security(hub=hub, session_id=session)
+                await hub.set_session_tools_state(
+                    session, tools_state={"web": not security[0]["web"]}
+                )
+            else:
+                from server.agent_provider import AgentScope
+
+                principal = await hub.get_session_principal_id(session)
+                await client.app["session_store"].approve(AgentScope(principal, session), {"SUDO"})
             confirmed = await client.post(
                 "/ui/api/decision/respond",
                 headers=headers,
@@ -980,6 +998,95 @@ def test_root_approval_rejects_changed_execution_context(tmp_path, monkeypatch, 
             assert brain.calls == 0
             assert await hub.get_workspace_root(session) == root
             assert (await hub.get_session_decision(session))["status"] == "pending"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_auto_local_memory_response_submits_typed_result(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
+    monkeypatch.chdir(tmp_path)
+    agent = _RealStreamingAgent(brain=CountingBrain())
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            await client.app["ui_hub"].set_session_workflow(session, mode="auto")
+            sent = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": session},
+                json={"content": "запомни: я люблю чай"},
+            )
+            assert sent.status == 200
+            with sqlite3.connect(client.app["task_run_store"].path) as conn:
+                assert conn.execute("SELECT state FROM task_runs").fetchall() == [
+                    ("result_submitted",)
+                ]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_native_approval_keeps_production_brain_instance(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
+    from core.agent import Agent
+    from llm.types import LLMResult, ModelConfig, ToolCall
+    from shared.models import ToolResult
+
+    monkeypatch.chdir(tmp_path)
+
+    class ProductionBrain(CountingBrain):
+        supports_native_tools = True
+        supports_streaming_tools = True
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            if not any(m.role == "tool" for m in messages):
+                return LLMResult(
+                    text="", tool_calls=[ToolCall(id="original", name="lookup", arguments={})]
+                )
+            return LLMResult(text="observed")
+
+    monkeypatch.setattr("core.agent.create_brain", lambda *args, **kwargs: ProductionBrain())
+    agent = Agent(main_config=ModelConfig(provider="ollama", model="test"))
+    executions = []
+    agent.tool_registry.register(
+        "lookup",
+        lambda request: executions.append(request) or ToolResult.success({}),
+        capability="read",
+        risk_classes=["network"],
+        description="lookup",
+        parameters_schema={"type": "object"},
+        chat_exposed=True,
+    )
+
+    async def run():
+        client = await _create_client(agent)  # type: ignore[arg-type]
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            await client.app["ui_hub"].set_session_workflow(session, mode="auto")
+            headers = {"X-Slavik-Session": session}
+            sent = await client.post(
+                "/ui/api/chat/send", headers=headers, json={"content": "lookup"}
+            )
+            assert sent.status == 200
+            decision = (await sent.json())["decision"]
+            original = agent.brain
+            confirmed = await client.post(
+                "/ui/api/decision/respond",
+                headers=headers,
+                json={
+                    "session_id": session,
+                    "decision_id": decision["id"],
+                    "choice": "approve_once",
+                },
+            )
+            assert confirmed.status == 200
+            assert agent.brain is original
+            assert len(executions) == 1
         finally:
             await client.close()
 

@@ -6,7 +6,13 @@ import json
 from collections.abc import Callable, Generator, Iterator
 from typing import TYPE_CHECKING, Literal
 
-from core.agent_response import AgentResponse, ResponseFailure, ResponseProduced
+from core.agent_response import (
+    AgentResponse,
+    LocalResponseOutcome,
+    ResponseFailure,
+    ResponseProduced,
+    RuntimeResult,
+)
 from core.approval_policy import ApprovalRequired
 from core.decision.handler import DecisionContext
 from core.decision.memory_save import build_memory_save_packet
@@ -41,7 +47,7 @@ if TYPE_CHECKING:
 
 
 def _text_response_events(
-    text: str, *, runtime_result: AutoRunOutcome | None = None
+    text: str, *, runtime_result: RuntimeResult | None = None
 ) -> Iterator[StreamEvent]:
     if text:
         yield TextDelta(text=text)
@@ -263,13 +269,14 @@ class AgentRoutingMixin:
                             build_memory_save_packet(preview),
                             raw_input=last_content,
                             record_in_history=record_in_history,
-                        )
+                        ),
+                        runtime_result=LocalResponseOutcome("memory"),
                     )
                 response = "Не удалось выделить изменения для Memory."
                 self._log_chat_interaction(raw_input=last_content, response_text=response)
                 if record_in_history:
                     self._append_short_term([LLMMessage(role="assistant", content=response)])
-                return AgentResponse(response)
+                return AgentResponse(response, runtime_result=LocalResponseOutcome("memory"))
 
             if runtime_mode == "ask":
                 return self._run_chat_response(messages, last_content, record_in_history)
@@ -280,7 +287,9 @@ class AgentRoutingMixin:
                     self._log_chat_interaction(raw_input=last_content, response_text=response)
                     if record_in_history:
                         self._append_short_term([LLMMessage(role="assistant", content=response)])
-                    return AgentResponse(response)
+                    return AgentResponse(
+                        response, runtime_result=LocalResponseOutcome("skill_blocked")
+                    )
                 decision_packet = self.decision_handler.evaluate(
                     DecisionContext(
                         user_input=last_content,
@@ -295,7 +304,8 @@ class AgentRoutingMixin:
                             decision_packet,
                             raw_input=last_content,
                             record_in_history=record_in_history,
-                        )
+                        ),
+                        runtime_result=LocalResponseOutcome("decision_required"),
                     )
                 outcome = self.handle_auto_command(
                     last_content,
@@ -425,7 +435,9 @@ class AgentRoutingMixin:
                     if record_in_history:
                         self._append_short_term([LLMMessage(role="assistant", content=response)])
                 self.last_stream_response_raw = response
-                yield from _text_response_events(response)
+                yield from _text_response_events(
+                    response, runtime_result=LocalResponseOutcome("memory")
+                )
                 return
 
             if runtime_mode == "ask":
@@ -441,7 +453,9 @@ class AgentRoutingMixin:
                 if skill_decision and skill_decision.status == "deprecated":
                     response = self._format_skill_block(skill_decision)
                     self.last_stream_response_raw = response
-                    yield from _text_response_events(response)
+                    yield from _text_response_events(
+                        response, runtime_result=LocalResponseOutcome("skill_blocked")
+                    )
                     return
                 decision_packet = self.decision_handler.evaluate(
                     DecisionContext(
@@ -458,7 +472,9 @@ class AgentRoutingMixin:
                         record_in_history=record_in_history,
                     )
                     self.last_stream_response_raw = response
-                    yield from _text_response_events(response)
+                    yield from _text_response_events(
+                        response, runtime_result=LocalResponseOutcome("decision_required")
+                    )
                     return
                 outcome = self.handle_auto_command(
                     last_content,

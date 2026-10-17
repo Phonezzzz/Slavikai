@@ -7,7 +7,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import asdict, replace
-from typing import Literal
+from typing import Literal, cast
 
 from aiohttp import web
 
@@ -20,6 +20,7 @@ from core.skills.index import SkillIndex
 from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
 from llm.types import ModelConfig
+from server.agent_provider import ScopedAgentProvider
 from server.http.common.auth import _request_principal_id
 from server.http.common.chat_cancellation import (
     ActiveChatGeneration,
@@ -39,6 +40,11 @@ from server.http.common.idempotency import (
     normalize_idempotency_key,
 )
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import (
+    AgentProtocol,
+    RuntimeModelResolverProtocol,
+    _require_custom_provider_owner,
+)
 from server.http.common.ui_runtime import _decision_with_status
 from server.http_api import (
     MAX_CONTENT_CHARS,
@@ -363,7 +369,7 @@ async def _handle_ui_send_impl(
     bypass_root_gate: bool = False,
     idempotency_enabled: bool = True,
     durable_request_key: str | None = None,
-    root_context: tuple[str, dict[str, str]] | None = None,
+    root_context: tuple[str, dict[str, str], str] | None = None,
 ) -> web.Response:
     session_store = request.app["session_store"]
     hub: UIHub = request.app["ui_hub"]
@@ -600,7 +606,7 @@ async def _handle_ui_send_impl(
         selected_model = _selected_model_snapshot(selected_main_config)
         workflow = await hub.get_session_workflow(session_id)
         mode = _normalize_mode_value(workflow.get("mode"), default="ask")
-        if root_context is not None and (mode, selected_model) != root_context:
+        if root_context is not None and (mode, selected_model) != root_context[:2]:
             return error_response(
                 status=409,
                 message="Контекст root approval изменился.",
@@ -623,6 +629,24 @@ async def _handle_ui_send_impl(
             safe_mode=bool(getattr(agent, "tools_enabled", {}).get("safe_mode", False)),
             skill_index=getattr(agent, "skill_index", None),
         )
+        gate_fingerprint = None
+        if requires_root_gate or root_context is not None:
+            gate_security = await _load_effective_session_security(hub=hub, session_id=session_id)
+            gate_categories = await session_store.get_categories(_agent_scope(request, session_id))
+            gate_fingerprint = fingerprint_json_payload(
+                {
+                    "tools": gate_security[0],
+                    "policy": gate_security[1],
+                    "approved_categories": sorted(gate_categories),
+                }
+            )
+            if root_context is not None and root_context[2] != gate_fingerprint:
+                return error_response(
+                    status=409,
+                    message="Security root approval изменилась.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
         if requires_root_gate and not bypass_root_gate:
             existing_decision = _normalize_ui_decision(
                 await hub.get_session_decision(session_id),
@@ -659,6 +683,7 @@ async def _handle_ui_send_impl(
                     "root_path": str(session_root),
                     "mode": mode,
                     "durable_request_key": durable_request_key,
+                    "security_fingerprint": gate_fingerprint,
                     "source_request": {
                         "content": content_raw,
                         "force_canvas": force_canvas,
@@ -788,6 +813,19 @@ async def _handle_ui_send_impl(
         run_store: TaskRunStore = request.app["task_run_store"]
         run_scope = RunScope(approval_scope.principal_id, session_id)
         async with agent_lock:
+            if root_context is not None and root_context[2] != fingerprint_json_payload(
+                {
+                    "tools": execution_security[0],
+                    "policy": execution_security[1],
+                    "approved_categories": sorted(approved_categories),
+                }
+            ):
+                return error_response(
+                    status=409,
+                    message="Security root approval изменилась.",
+                    error_type="invalid_request_error",
+                    code="task_run_context_changed",
+                )
             if mode in {"ask", "auto"} and not await admission_context_current():
                 await _abort_idempotency()
                 return error_response(
@@ -1328,6 +1366,7 @@ async def _handle_ui_send_impl(
                         agent.bind_chat_approval_run(
                             identity,
                             admitted_run,
+                            approved_categories=approved_categories,
                             security_fingerprint=fingerprint_json_payload(
                                 {"tools": execution_security[0], "policy": execution_security[1]}
                             ),
@@ -1907,7 +1946,7 @@ async def handle_ui_send_resume(
     lane: MessageLane,
     bypass_root_gate: bool,
     durable_request_key: str | None = None,
-    root_context: tuple[str, dict[str, str]] | None = None,
+    root_context: tuple[str, dict[str, str], str] | None = None,
 ) -> web.Response:
     return await _handle_ui_send_impl(
         request,
@@ -1953,10 +1992,8 @@ async def handle_ui_approval_continue(
     session_root = await _workspace_root_for_session(hub, session_id)
     if str(session_root) != resume_payload.get("workspace_root_snapshot"):
         return not_started("approval_continuation_unavailable")
-    try:
-        agent, _ = await _resolve_agent_for_ui_session(request, session_id)
-    except (ValueError, PermissionError):
-        return not_started("approval_continuation_unavailable")
+    provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+    agent = await provider.get_existing_for_current_task(_agent_scope(request, session_id))
     if agent is None:
         return not_started("approval_continuation_unavailable")
     lock = _agent_lock_for_request(request, session_id)
@@ -1991,7 +2028,28 @@ async def handle_ui_approval_continue(
                 or (request_cancellation is not None and request_cancellation.is_set())
             ):
                 return not_started("approval_continuation_unavailable")
+            resolver = cast(RuntimeModelResolverProtocol, request.app["runtime_model_resolver"])
+            selected_config = await resolver.resolve_main(session_id)
+            if selected_config is None:
+                return not_started("approval_continuation_unavailable")
+            source = resume_payload.get("source_request")
+            source_web_search = (
+                source.get("web_search")
+                if isinstance(source, dict)
+                else resume_payload.get("execution_web_search")
+            ) is True
+            expected_config = _inception_runtime_config_for_lane(selected_config, "chat")
+            if source_web_search:
+                expected_config = replace(expected_config, web_search_enabled=True)
+            try:
+                _require_custom_provider_owner(request, selected_config.provider, selected_config)
+                agent.validate_chat_approval_model(
+                    identity, expected_config, _resolve_provider_api_key(selected_config.provider)
+                )
+            except (ChatApprovalUnavailable, ValueError, PermissionError):
+                return not_started("approval_continuation_unavailable")
             resume_security = None
+            accepted_categories = await session_store.get_categories(scope)
             if mode in {"ask", "auto"}:
                 resume_security = await _load_effective_session_security(
                     hub=hub, session_id=session_id
@@ -2002,6 +2060,7 @@ async def handle_ui_approval_continue(
                         fingerprint_json_payload(
                             {"tools": resume_security[0], "policy": resume_security[1]}
                         ),
+                        accepted_categories,
                     )
                 except ChatApprovalUnavailable as exc:
                     return not_started(str(exc))
@@ -2053,9 +2112,10 @@ async def handle_ui_approval_continue(
                 )
             added_categories: set[ApprovalCategory] = set()
             try:
-                categories = await request.app["session_store"].get_categories(
-                    _agent_scope(request, session_id)
-                )
+                categories = set(accepted_categories)
+                current_categories = await session_store.get_categories(scope)
+                if current_categories != accepted_categories:
+                    return not_started("approval_continuation_unavailable")
                 if (
                     mode in {"ask", "auto"}
                     and choice == "approve_session"
@@ -2064,9 +2124,10 @@ async def handle_ui_approval_continue(
                     added_categories = (
                         set(agent.last_approval_request.required_categories) - categories
                     )
-                    categories = await session_store.approve(
+                    await session_store.approve(
                         scope, set(agent.last_approval_request.required_categories)
                     )
+                    categories.update(agent.last_approval_request.required_categories)
                 agent.set_session_context(session_id, categories)
                 with workspace_root_context(session_root):
                     worker = asyncio.create_task(
@@ -2116,6 +2177,7 @@ async def handle_ui_approval_continue(
                     next_payload["workspace_root_snapshot"] = str(session_root)
                     next_payload["user_message_id"] = parent
                     next_payload["selected_model_snapshot"] = selected
+                    next_payload["execution_web_search"] = source_web_search
                     next_decision = _build_ui_approval_decision(
                         approval_request=approval,
                         session_id=session_id,

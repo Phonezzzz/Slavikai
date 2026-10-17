@@ -72,10 +72,13 @@ class DummyAgent:
         self._session_id = session_id
         self._approved_categories = set(approved_categories)
 
-    def bind_chat_approval_run(self, identity, run, *, security_fingerprint):
+    def bind_chat_approval_run(self, identity, run, *, security_fingerprint, approved_categories):
         self.validate_chat_approval(identity)
 
-    def validate_chat_approval_security(self, identity, security_fingerprint):
+    def validate_chat_approval_security(self, identity, security_fingerprint, approved_categories):
+        self.validate_chat_approval(identity)
+
+    def validate_chat_approval_model(self, identity, main_config, main_api_key):
         self.validate_chat_approval(identity)
 
     def chat_approval_run(self, identity):

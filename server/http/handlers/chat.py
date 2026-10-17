@@ -299,6 +299,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                         agent.bind_chat_approval_run(
                             str(pending["continuation_id"]),
                             admitted_run,
+                            approved_categories=approved_categories,
                             security_fingerprint=fingerprint_json_payload(
                                 {"tools": security_snapshot[0], "policy": security_snapshot[1]}
                             ),

@@ -38,14 +38,7 @@ class _RealAgentStreamingBrain(Brain):
 
 
 class _RealStreamingAgent(Agent):
-    def reconfigure_models(
-        self,
-        main_config: ModelConfig,
-        main_api_key: str | None = None,
-        *,
-        persist: bool = True,
-    ) -> None:
-        del main_config, main_api_key, persist
+    pass
 
 
 class _SlowStreamingAgent(DummyAgent):

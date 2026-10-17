@@ -136,6 +136,7 @@ class PendingChatApproval:
     auto_run_id: str | None = None
     task_run: TaskRun | None = None
     security_fingerprint: str | None = None
+    accepted_categories: frozenset[ApprovalCategory] = frozenset()
     desktop_once_rules: tuple[DesktopApprovalRule, ...] = ()
     policy_application: PolicyApplication | None = None
     web_evidence: WebSearchEvidence | None = None
@@ -432,7 +433,12 @@ class AgentToolsMixin:
         }
 
     def bind_chat_approval_run(
-        self, identity: str, run: TaskRun, *, security_fingerprint: str
+        self,
+        identity: str,
+        run: TaskRun,
+        *,
+        security_fingerprint: str,
+        approved_categories: set[ApprovalCategory],
     ) -> None:
         self.validate_chat_approval(identity)
         pending = self._pending_chat_approval
@@ -444,14 +450,29 @@ class AgentToolsMixin:
         if pending.security_fingerprint not in {None, security_fingerprint}:
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
         self._pending_chat_approval = replace(
-            pending, task_run=run, security_fingerprint=security_fingerprint
+            pending,
+            task_run=run,
+            security_fingerprint=security_fingerprint,
+            accepted_categories=frozenset(approved_categories),
         )
 
-    def validate_chat_approval_security(self, identity: str, security_fingerprint: str) -> None:
+    def validate_chat_approval_security(
+        self, identity: str, security_fingerprint: str, approved_categories: set[ApprovalCategory]
+    ) -> None:
         self.validate_chat_approval(identity)
         pending = self._pending_chat_approval
         assert pending is not None
-        if pending.security_fingerprint != security_fingerprint:
+        if (
+            pending.security_fingerprint != security_fingerprint
+            or pending.accepted_categories != frozenset(approved_categories)
+        ):
+            raise ChatApprovalUnavailable("approval_continuation_unavailable")
+
+    def validate_chat_approval_model(
+        self, identity: str, main_config: ModelConfig, main_api_key: str | None
+    ) -> None:
+        self.validate_chat_approval(identity)
+        if self.main_config != main_config or self.main_api_key != main_api_key:
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
 
     def chat_approval_run(self, identity: str) -> TaskRun | None:
@@ -575,6 +596,7 @@ class AgentToolsMixin:
                     next_pending,
                     task_run=pending.task_run,
                     security_fingerprint=pending.security_fingerprint,
+                    accepted_categories=frozenset(self.approved_categories),
                     policy_application=pending.policy_application,
                     web_evidence=pending.web_evidence,
                     record_in_history=pending.record_in_history,

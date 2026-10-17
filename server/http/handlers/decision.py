@@ -18,6 +18,7 @@ from core.desktop_policy import (
 )
 from server.agent_provider import ScopedAgentProvider
 from server.http.common.auth import _request_principal_id, _require_owner
+from server.http.common.idempotency import fingerprint_json_payload
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
@@ -1301,6 +1302,14 @@ async def _complete_ui_decision(
                 error_type="invalid_request_error",
                 code="task_run_continuation_unavailable",
             )
+        saved_security = resume_payload.get("security_fingerprint")
+        if not isinstance(saved_security, str) or len(saved_security) != 64:
+            return error_response(
+                status=409,
+                message="Security root checkpoint недоступна.",
+                error_type="invalid_request_error",
+                code="task_run_continuation_unavailable",
+            )
         saved_mode = resume_payload.get("mode")
         saved_model_raw = resume_payload.get("selected_model_snapshot")
         if (
@@ -1350,7 +1359,24 @@ async def _complete_ui_decision(
         async with _agent_lock_for_request(request, session_id):
             workflow_now = await hub.get_session_workflow(session_id)
             model_now = await hub.get_session_model(session_id)
-            if workflow_now.get("mode") != saved_mode or model_now != saved_model:
+            current_security = await _load_effective_session_security(
+                hub=hub, session_id=session_id
+            )
+            current_categories = await session_store.get_categories(
+                _agent_scope(request, session_id)
+            )
+            current_fingerprint = fingerprint_json_payload(
+                {
+                    "tools": current_security[0],
+                    "policy": current_security[1],
+                    "approved_categories": sorted(current_categories),
+                }
+            )
+            if (
+                workflow_now.get("mode") != saved_mode
+                or model_now != saved_model
+                or current_fingerprint != saved_security
+            ):
                 return error_response(
                     status=409,
                     message="Контекст root approval изменился.",
@@ -1386,7 +1412,7 @@ async def _complete_ui_decision(
             lane=resume_lane,
             bypass_root_gate=True,
             durable_request_key=durable_request_key,
-            root_context=(saved_mode, saved_model),
+            root_context=(saved_mode, saved_model, saved_security),
         )
         resume_data: dict[str, JSONValue] | None = None
         resume_ok = resumed_response.status < 400
