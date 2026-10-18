@@ -63,6 +63,8 @@ async def begin_session_end(
     except ChatGenerationAlreadyActive:
         return {"error": "chat_generation_in_progress"}
     try:
+        if await _busy(request, session_id):
+            return {"error": "task_already_running"}
         async with _agent_lock_for_request(request, session_id):
             decision = await hub.get_session_decision(session_id)
             if decision and decision.get("status") in {"pending", "executing"}:
@@ -119,6 +121,8 @@ async def resolve_session_end(
     except ChatGenerationAlreadyActive:
         return {**result, "error": "chat_generation_in_progress"}
     try:
+        if await _busy(request, session_id):
+            return {**result, "error": "task_already_running"}
         # No/Cancel не создают Agent и не требуют настроенной модели.
         provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
         is_preview = decision.get("decision_type") == "memory_save"
@@ -197,7 +201,21 @@ async def resolve_session_end(
                     "Проверьте данные для Memory. Сохранение завершит сессию; "
                     "«Не сохранять» вернёт к разговору. История чата останется."
                 )
-                return {**result, "ok": True, "next_decision": packet}
+                published, latest = await hub.transition_session_decision(
+                    session_id,
+                    expected_id=str(decision["id"]),
+                    expected_status="executing",
+                    next_decision=packet,
+                    cancellation_tokens=(cancellation, generation.token),
+                )
+                if not published:
+                    code = (
+                        "session_end_cancelled"
+                        if cancellation.is_set() or generation.token.is_set()
+                        else "session_end_state_changed"
+                    )
+                    return {**result, "error": code}
+                return {**result, "ok": True, "published_decision": latest}
             proposed = decision.get("proposed_action")
             preview = copy.deepcopy(proposed) if isinstance(proposed, dict) else {}
             if choice == "edit_and_confirm":
@@ -211,8 +229,8 @@ async def resolve_session_end(
                     or not isinstance(claims[0], dict)
                 ):
                     return {**result, "error": "memory_preview_invalid"}
-                preview["text"] = text.strip()
-                claims[0]["value_json"] = {"text": text.strip()}
+                preview["text"] = text
+                claims[0]["value_json"] = {"text": text}
             latest = await hub.get_session_decision(session_id)
             if (
                 not latest

@@ -1591,6 +1591,7 @@ class UIHub:
         expected_id: str | None,
         expected_status: str | None,
         next_decision: dict[str, JSONValue],
+        cancellation_tokens: tuple[asyncio.Event, ...] = (),
     ) -> tuple[bool, dict[str, JSONValue] | None]:
         event: dict[str, JSONValue] | None = None
         subscribers: list[_SubscriberState] = []
@@ -1604,6 +1605,8 @@ class UIHub:
             current_id = current_id_raw if isinstance(current_id_raw, str) else None
             current_status = current_status_raw if isinstance(current_status_raw, str) else None
             if current_id != expected_id or current_status != expected_status:
+                return False, current
+            if any(token.is_set() for token in cancellation_tokens):
                 return False, current
 
             previous_decision = (

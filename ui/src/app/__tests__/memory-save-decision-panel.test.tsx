@@ -63,13 +63,13 @@ describe('DecisionPanel memory save contract', () => {
     fireEvent.click(view.getByRole('button', { name: 'Изменить и сохранить' }));
     const editor = view.getByRole('textbox') as HTMLTextAreaElement;
     expect(editor.value).toBe('я предпочитаю короткие ответы');
-    fireEvent.change(editor, { target: { value: 'отвечай только по-русски' } });
+    fireEvent.change(editor, { target: { value: ' \n    отвечай только по-русски\n ' } });
     fireEvent.click(view.getByRole('button', { name: 'Изменить и сохранить' }));
 
     await waitFor(() => {
       expect(onRespond).toHaveBeenCalledWith(
         'edit_and_confirm',
-        { text: 'отвечай только по-русски' },
+        { text: ' \n    отвечай только по-русски\n ' },
       );
     });
   });

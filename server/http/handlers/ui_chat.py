@@ -578,7 +578,17 @@ async def _handle_ui_send_impl(
         )
         durable_request_key = durable_request_key or hashlib.sha256(key_source.encode()).hexdigest()
         command = content_raw.strip().split()[0].lower() if content_raw.strip() else ""
-        if command in {"/end-session", "/end_session"} and not attachments:
+        if command in {"/end-session", "/end_session"} and attachments:
+            await _abort_idempotency()
+            return error_response(
+                status=400,
+                message=(
+                    "Отправьте /end-session без вложений. Вложения можно обсудить до завершения."
+                ),
+                error_type="invalid_request_error",
+                code="end_session_attachments_not_supported",
+            )
+        if command in {"/end-session", "/end_session"}:
             result = await begin_session_end(request, session_id, content_raw.strip())
             if "error" in result:
                 await _abort_idempotency()

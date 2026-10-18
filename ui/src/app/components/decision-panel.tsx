@@ -63,8 +63,8 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
 
   const handleApplyEdit = () => {
     if (editAction === 'edit_and_confirm') {
-      const text = editValue.trim();
-      if (!text) {
+      const text = editValue;
+      if (!text.trim()) {
         setEditError('Текст для Memory не может быть пустым.');
         return;
       }

@@ -1801,23 +1801,12 @@ async def _complete_ui_decision(
         resume_started = resume.get("resume_started") is True
         resume = {key: value for key, value in resume.items() if key != "resume_started"}
 
-    next_decision = resume.pop("next_decision", None)
-    if isinstance(next_decision, dict) and is_session_end_decision(current_decision):
-        replaced, latest = await hub.transition_session_decision(
-            session_id,
-            expected_id=decision_id,
-            expected_status="executing",
-            next_decision=next_decision,
-        )
-        if not replaced:
-            return _decision_mismatch_response(
-                expected_id=decision_id,
-                actual_decision=_normalize_ui_decision(latest, session_id=session_id),
-            )
+    published_decision = resume.pop("published_decision", None)
+    if isinstance(published_decision, dict) and is_session_end_decision(current_decision):
         return json_response(
             {
                 "ok": True,
-                "decision": _normalize_ui_decision(latest, session_id=session_id),
+                "decision": _normalize_ui_decision(published_decision, session_id=session_id),
                 "status": "pending",
                 "messages": await hub.get_messages(session_id, lane="chat"),
                 "output": await hub.get_session_output(session_id),
@@ -1841,7 +1830,15 @@ async def _complete_ui_decision(
             in {"chat.send", "workspace.send", "chat.tool_continue", "plan.execute_runner"}
             and resume.get("ok") is True
         )
-        if decision_type == "agent_decision" or nested_chat_resume:
+        session_end_result_data = resume.get("data")
+        completed_session_end = (
+            is_session_end_decision(current_decision)
+            and resume.get("ok") is True
+            and isinstance(session_end_result_data, dict)
+            and session_end_result_data.get("closed") is True
+        )
+        # Закрытие уже выполнено; запись (если была) подтверждена ToolResult.
+        if decision_type == "agent_decision" or nested_chat_resume or completed_session_end:
             workflow = await hub.get_session_workflow(session_id)
             latest_decision = _normalize_ui_decision(
                 await hub.get_session_decision(session_id),

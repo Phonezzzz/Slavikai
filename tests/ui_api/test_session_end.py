@@ -134,7 +134,7 @@ def test_summary_requires_second_confirm_and_exact_edit(tmp_path, monkeypatch, c
                 json={"content": "другое сообщение"},
             )
             assert normal.status == 409
-            edited = "remember: точные отредактированные данные"
+            edited = " \n    remember: точные отредактированные данные\n "
             result = await _choose(client, sid, second, choice, edited_action={"text": edited})
             assert result.status == 200, await result.text()
             atoms = agent._canonical_store.list_atoms()
@@ -382,6 +382,151 @@ def test_replaced_executing_decision_cannot_write_old_preview(tmp_path, monkeypa
             assert (await hub.get_session_decision(sid))["id"] == replacement["id"]
             assert agent._canonical_store.list_atoms() == syncs == agent.confirmed_tool_calls == []
             assert agent.short_term
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("selected_model", [False, True])
+def test_end_session_rejects_attachments_before_model_dispatch(
+    tmp_path, monkeypatch, selected_model
+):
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+        try:
+            if selected_model:
+                await hub.set_session_model(sid, "local", "isolated-model")
+            response = await client.post(
+                "/ui/api/chat/send",
+                headers={"X-Slavik-Session": sid},
+                json={
+                    "content": "/end-session",
+                    "attachments": [
+                        {"name": "note.txt", "mime": "text/plain", "content": "do not discard"}
+                    ],
+                },
+            )
+            assert response.status == 400
+            assert (await response.json())["error"][
+                "code"
+            ] == "end_session_attachments_not_supported"
+            assert await hub.get_session_decision(sid) is None
+            assert len(await hub.get_messages(sid, lane="chat")) == 1
+            assert brain.calls == syncs == []
+            assert agent.short_term
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_cancel_at_preview_publication_is_checked_inside_cas(tmp_path, monkeypatch):
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+        original = hub.transition_session_decision
+        cancelled = []
+
+        async def cancel_before_cas(session_id, **kwargs):
+            if kwargs["next_decision"].get("decision_type") == "memory_save":
+                registry = client.server.app["chat_cancellation_registry"]
+                cancelled.append(await registry.request_cancel(sid))
+            return await original(session_id, **kwargs)
+
+        try:
+            first = await _begin(client, sid)
+            monkeypatch.setattr(hub, "transition_session_decision", cancel_before_cas)
+            response = await _choose(client, sid, first, "confirm")
+            assert response.status == 409
+            assert (await response.json())["error"]["code"] == "session_end_cancelled"
+            pending = await hub.get_session_decision(sid)
+            assert pending["id"] == first["id"] and pending["status"] == "pending"
+            assert cancelled[0].generation.finished.is_set()
+            assert agent._canonical_store.list_atoms() == syncs == agent.confirmed_tool_calls == []
+            assert agent.short_term
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("responding", [False, True])
+def test_active_plan_is_rejected_before_waiting_for_its_agent_lock(
+    tmp_path, monkeypatch, responding
+):
+    from server.agent_provider import AgentScope
+
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+        try:
+            decision = await _begin(client, sid) if responding else None
+            await hub.set_session_workflow(
+                sid,
+                active_task={
+                    "task_id": "running-task",
+                    "plan_id": "plan",
+                    "plan_hash": "hash",
+                    "status": "running",
+                },
+            )
+            lock = client.server.app["agent_provider"].lock_for(AgentScope("static", sid))
+            async with lock:
+                if responding:
+                    operation = _choose(client, sid, decision, "reject")
+                else:
+                    operation = client.post(
+                        "/ui/api/chat/send",
+                        headers={"X-Slavik-Session": sid},
+                        json={"content": "/end-session"},
+                    )
+                response = await asyncio.wait_for(operation, timeout=0.5)
+                assert response.status == 409
+                assert (await response.json())["error"]["code"] == "task_already_running"
+            assert agent.short_term
+            assert brain.calls == syncs == []
+            if responding:
+                assert (await hub.get_session_decision(sid))["status"] == "pending"
+            else:
+                assert await hub.get_session_decision(sid) is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_successful_memory_write_reports_success_when_later_decision_replaces_it(
+    tmp_path, monkeypatch
+):
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+        original = hub.append_message
+        replacement = build_memory_save_packet({"text": "new decision", "claims": []}).to_dict()
+
+        async def replace_after_saved(session_id, message, **kwargs):
+            if message.get("role") == "assistant":
+                await hub.set_session_decision(session_id, replacement)
+            return await original(session_id, message, **kwargs)
+
+        try:
+            first = await _begin(client, sid)
+            second = (await (await _choose(client, sid, first, "confirm")).json())["decision"]
+            monkeypatch.setattr(hub, "append_message", replace_after_saved)
+            response = await _choose(client, sid, second, "confirm")
+            assert response.status == 200, await response.text()
+            body = await response.json()
+            assert body["resume"]["data"]["saved"] is True
+            assert body["resume"]["data"]["closed"] is True
+            assert body["decision"]["id"] == replacement["id"]
+            assert (await hub.get_session_decision(sid))["id"] == replacement["id"]
+            assert len(agent._canonical_store.list_atoms()) == len(syncs) == 1
+            assert agent.confirmed_tool_calls == [("memory_save_confirmed", True)]
+            assert agent.short_term == []
+            assert (await _choose(client, sid, second, "confirm")).status == 409
+            assert len(syncs) == 1
         finally:
             await client.close()
 
