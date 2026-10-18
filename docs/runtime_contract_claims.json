@@ -177,16 +177,18 @@
       "scope": "memory",
       "status": "implemented",
       "owner": "memory",
-      "version": 2,
+      "version": 3,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/test_agent_canonical_memory.py",
         "tests/test_ask_stateless.py",
         "tests/ui_api/test_memory_confirmation.py",
+        "tests/ui_api/test_session_end.py",
+        "tests/test_agent_commands.py",
         "core/decision/memory_save.py",
         "server/http/handlers/decision.py"
       ],
-      "summary": "Explicit Memory requests create a preview; only confirm or edit-and-confirm writes it, while reject performs no write."
+      "summary": "Explicit Memory requests create a preview; only confirm or edit-and-confirm writes it, while reject performs no write. End-session first asks Yes/No/Cancel and prepares a summary only after Yes; a separate Memory confirmation is required before saving and closing."
     },
     {
       "id": "api.proxy_model.slavik",

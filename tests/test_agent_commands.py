@@ -57,7 +57,7 @@ def test_agent_remember_command_is_not_command_lane_tool(tmp_path: Path) -> None
     assert atom is None
 
 
-def test_agent_end_session_command_saves_canonical_summary(
+def test_agent_end_session_command_requests_consent_without_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -82,12 +82,12 @@ def test_agent_end_session_command_saves_canonical_summary(
     response = agent.handle_tool_command("/end-session")
 
     assert "command_lane" in response.lower()
-    assert "Сессия закрыта, резюме сохранено: session:" in response
-    atoms = agent._canonical_store.list_atoms(stable_key_prefix="session:")
-    assert len(atoms) == 1
-    assert atoms[0].value_json == {"text": "ok"}
-    assert atoms[0].summary_text.startswith("session summary ")
-    assert agent.short_term == []
+    assert '"decision_type": "end_session"' in response
+    assert '"title": "Да"' in response
+    assert '"title": "Нет"' in response
+    assert '"title": "Отмена"' in response
+    assert agent._canonical_store.list_atoms(stable_key_prefix="session:") == []
+    assert len(agent.short_term) == 2
 
 
 def test_agent_end_session_command_skips_empty_session(tmp_path: Path) -> None:
@@ -101,5 +101,28 @@ def test_agent_end_session_command_skips_empty_session(tmp_path: Path) -> None:
     response = agent.handle_tool_command("/end-session")
 
     assert "command_lane" in response.lower()
-    assert "Сессия не содержит сообщений для резюме." in response
+    assert '"decision_type": "end_session"' in response
     assert agent._canonical_store.list_atoms(stable_key_prefix="session:") == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_end_session_does_not_reset_pending_approval(tmp_path, monkeypatch, stream):
+    agent = Agent(
+        brain=SimpleBrain(),
+        memory_companion_db_path=str(tmp_path / "mc.db"),
+        memory_inbox_db_path=str(tmp_path / "inbox.db"),
+        canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+    )
+
+    def unexpected_reset(*args, **kwargs):
+        raise AssertionError("end-session cancelled pending execution")
+
+    monkeypatch.setattr(agent, "_reset_approval_state", unexpected_reset)
+    monkeypatch.setattr(agent, "_reset_workspace_diffs", unexpected_reset)
+    messages = [LLMMessage(role="user", content="/end-session")]
+    if stream:
+        list(agent.respond_stream(messages))
+        text = agent.last_stream_response_raw
+    else:
+        text = agent.respond(messages).text
+    assert '"decision_type": "end_session"' in text

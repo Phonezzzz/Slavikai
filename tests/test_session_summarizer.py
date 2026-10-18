@@ -57,3 +57,45 @@ def test_session_summarizer_skips_empty_model_response() -> None:
     result = summarizer.summarize([LLMMessage(role="user", content="hello")])
 
     assert result is None
+
+
+def test_session_summary_cancellation_reaches_existing_brain_stream() -> None:
+    import asyncio
+
+    from llm.stream_model import Done, TextDelta
+
+    class StreamingBrain(CapturingBrain):
+        def generate_stream(self, messages, config=None, tools=None, cancellation_token=None):
+            assert cancellation_token is token
+            yield TextDelta(text="draft")
+            yield TextDelta(text="точный итог", mode="replace")
+            yield Done(finish_reason="stop")
+
+    token = asyncio.Event()
+    result = SessionSummarizer(StreamingBrain("unused")).summarize(
+        [LLMMessage(role="user", content="hello")], cancellation_token=token
+    )
+    assert result is not None and result.text == "точный итог"
+
+
+def test_session_summary_never_accepts_failed_or_unfinished_stream() -> None:
+    import asyncio
+
+    import pytest
+
+    from llm.stream_model import Error, TextDelta
+
+    class FailedBrain(CapturingBrain):
+        def generate_stream(self, messages, config=None, tools=None, cancellation_token=None):
+            yield TextDelta(text="неполный итог")
+            yield Error(message="provider failed")
+
+    class UnfinishedBrain(CapturingBrain):
+        def generate_stream(self, messages, config=None, tools=None, cancellation_token=None):
+            yield TextDelta(text="неполный итог")
+
+    for brain in (FailedBrain("unused"), UnfinishedBrain("unused")):
+        with pytest.raises(RuntimeError):
+            SessionSummarizer(brain).summarize(
+                [LLMMessage(role="user", content="hello")], cancellation_token=asyncio.Event()
+            )

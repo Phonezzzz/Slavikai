@@ -160,7 +160,7 @@ export function DecisionPanel({ decision, busy, error, onRespond }: DecisionPane
               || action === 'confirm'
                 ? 'bg-emerald-600 text-white hover:bg-emerald-500'
                 : 'border border-zinc-700 text-zinc-300 hover:bg-zinc-800';
-            const icon = action === 'reject'
+            const icon = action === 'reject' || action === 'abort'
               ? <X className="h-3.5 w-3.5" />
               : isEditAction
                 ? <Pencil className="h-3.5 w-3.5" />

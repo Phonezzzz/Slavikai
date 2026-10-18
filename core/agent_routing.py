@@ -249,6 +249,8 @@ class AgentRoutingMixin:
             if record_in_history:
                 self._append_short_term(messages)
             self.tracer.log("user_input", last_content)
+            if (last_content.split() or [""])[0].lower() in {"/end-session", "/end_session"}:
+                return AgentResponse(self.handle_tool_command(last_content))
             self._reset_approval_state()
             self.last_reasoning = None
             self._reset_workspace_diffs()
@@ -406,6 +408,11 @@ class AgentRoutingMixin:
             if record_in_history:
                 self._append_short_term(messages)
             self.tracer.log("user_input", last_content)
+            if (last_content.split() or [""])[0].lower() in {"/end-session", "/end_session"}:
+                result = self.handle_tool_command(last_content)
+                self.last_stream_response_raw = result
+                yield from _text_response_events(result)
+                return
             self._reset_approval_state()
             self.last_reasoning = None
             self._reset_workspace_diffs()

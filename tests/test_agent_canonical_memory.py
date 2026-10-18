@@ -377,8 +377,11 @@ def test_agent_context_includes_session_summary_slot(tmp_path, monkeypatch) -> N
         ]
     )
 
-    summary = agent.summarize_current_session()
+    summary = agent.prepare_session_summary(agent.short_term)
     assert summary is not None
+    assert agent._canonical_store.list_atoms(stable_key_prefix="session:") == []
+    saved = agent.apply_confirmed_memory_save(summary, source_kind="session.summary")
+    assert saved.ok
 
     context = agent._build_context_messages([LLMMessage(role="user", content="hi")], "memory")
 

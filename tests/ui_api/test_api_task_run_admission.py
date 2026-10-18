@@ -313,7 +313,7 @@ def test_api_debug_command_does_not_create_model_run(tmp_path, monkeypatch, comm
                 headers={"Authorization": f"Bearer {TEST_API_TOKEN}"},
                 json={"model": "slavik", "messages": [{"role": "user", "content": command}]},
             )
-            assert response.status == 200
+            assert response.status == 200, await response.text()
             assert brain.calls == 0
             with sqlite3.connect(client.app["task_run_store"].path) as conn:
                 assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 0

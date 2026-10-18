@@ -1588,17 +1588,17 @@ class UIHub:
         self,
         session_id: str,
         *,
-        expected_id: str,
-        expected_status: str,
+        expected_id: str | None,
+        expected_status: str | None,
         next_decision: dict[str, JSONValue],
     ) -> tuple[bool, dict[str, JSONValue] | None]:
         event: dict[str, JSONValue] | None = None
         subscribers: list[_SubscriberState] = []
         async with self._lock:
             state = self._sessions.get(session_id)
-            if state is None or state.decision_packet is None:
+            if state is None:
                 return False, None
-            current = dict(state.decision_packet)
+            current = dict(state.decision_packet) if state.decision_packet is not None else {}
             current_id_raw = current.get("id")
             current_status_raw = current.get("status")
             current_id = current_id_raw if isinstance(current_id_raw, str) else None
@@ -1606,7 +1606,9 @@ class UIHub:
             if current_id != expected_id or current_status != expected_status:
                 return False, current
 
-            previous_decision = dict(state.decision_packet)
+            previous_decision = (
+                dict(state.decision_packet) if state.decision_packet is not None else None
+            )
             candidate = dict(next_decision)
             if previous_decision == candidate:
                 return True, candidate

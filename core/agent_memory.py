@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -572,20 +573,25 @@ class AgentMemoryMixin:
         self.tracer.log("memory_atom_unpinned", stable_key, {"stable_key": stable_key})
         return self._atom_to_payload(atom)
 
-    def summarize_current_session(self) -> dict[str, JSONValue] | None:
-        summary = self._session_summarizer.summarize(self.short_term)
-        if summary is None:
-            self.tracer.log("session_summary_skipped", "No session messages to summarize")
-            return None
+    def close_session_context(self) -> None:
+        self.short_term.clear()
 
-        atom = self._canonical_aggregator.upsert_claim(summary.claim)
-        self._atom_embedding_index.sync_atom(atom)
-        self.tracer.log(
-            "session_summary_saved",
-            atom.stable_key,
-            {"stable_key": atom.stable_key, "chars": len(summary.text)},
+    def prepare_session_summary(
+        self,
+        messages: list[LLMMessage],
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> dict[str, JSONValue] | None:
+        """Подготавливает preview; запись выполняет только confirmed Memory tool."""
+        summary = self._session_summarizer.summarize(
+            messages, cancellation_token=cancellation_token
         )
-        return self._atom_to_payload(atom)
+        if summary is None:
+            return None
+        return {
+            "text": summary.text,
+            "claims": [self._claim_to_preview_payload(summary.claim)],
+        }
 
     def resolve_memory_conflict(
         self,

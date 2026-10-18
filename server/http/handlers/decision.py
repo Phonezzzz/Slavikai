@@ -22,6 +22,7 @@ from server.http.common.idempotency import fingerprint_json_payload
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
+from server.http.common.session_end import is_session_end_decision, resolve_session_end
 from server.http.common.workspace_git import (
     git_commit,
     git_stage,
@@ -347,6 +348,14 @@ async def _complete_ui_decision(
             return error_response(
                 status=400,
                 message="Для plan_execute доступны approve_once|edit_plan|reject.",
+                error_type="invalid_request_error",
+                code="invalid_request_error",
+            )
+    elif decision_type == "end_session":
+        if choice not in {"confirm", "reject", "abort"}:
+            return error_response(
+                status=400,
+                message="Для завершения сессии доступны confirm|reject|abort.",
                 error_type="invalid_request_error",
                 code="invalid_request_error",
             )
@@ -1682,7 +1691,11 @@ async def _complete_ui_decision(
             actual_decision=normalized_latest,
         )
 
-    if decision_type == "plan_execute":
+    if is_session_end_decision(current_decision):
+        resume = await resolve_session_end(
+            request, session_id, current_decision, choice, edited_action, request_cancellation
+        )
+    elif decision_type == "plan_execute":
         resume = await _resolve_plan_execute_decision()
     elif decision_type == "tool_approval":
         resume = await _resolve_tool_decision()
@@ -1721,6 +1734,11 @@ async def _complete_ui_decision(
         "memory_preview_invalid",
         "model_not_selected",
         "memory_write_failed",
+        "session_summary_failed",
+        "session_summary_empty",
+        "session_end_cancelled",
+        "session_end_state_changed",
+        "model_access_denied",
     }
     resume_error_code: str | None = None
     if isinstance(resume, dict):
@@ -1752,11 +1770,24 @@ async def _complete_ui_decision(
             "memory_preview_invalid": "Memory preview недействителен; создайте новый preview.",
             "model_not_selected": "Сначала выберите модель, затем повторите подтверждение.",
             "memory_write_failed": "Не удалось сохранить Memory; подтверждение можно повторить.",
+            "session_summary_failed": (
+                "Не удалось подготовить резюме. Повторите или завершите без сохранения."
+            ),
+            "session_summary_empty": "Нет данных для резюме. Можно завершить без сохранения.",
+            "session_end_cancelled": "Подготовка отменена. Сессия остаётся открытой.",
+            "session_end_state_changed": "Текущий запрос изменился. Обновите состояние сессии.",
+            "model_access_denied": "Нет доступа к выбранной модели.",
         }
         details_raw = resume.get("details")
         details = details_raw if isinstance(details_raw, dict) else None
         return error_response(
-            status=503 if resume_error_code == "memory_write_failed" else 409,
+            status=(
+                503
+                if resume_error_code == "memory_write_failed"
+                else 403
+                if resume_error_code == "model_access_denied"
+                else 409
+            ),
             message=message_by_code.get(
                 resume_error_code,
                 "Невозможно продолжить: конфликт состояния.",
@@ -1770,6 +1801,31 @@ async def _complete_ui_decision(
         resume_started = resume.get("resume_started") is True
         resume = {key: value for key, value in resume.items() if key != "resume_started"}
 
+    next_decision = resume.pop("next_decision", None)
+    if isinstance(next_decision, dict) and is_session_end_decision(current_decision):
+        replaced, latest = await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="executing",
+            next_decision=next_decision,
+        )
+        if not replaced:
+            return _decision_mismatch_response(
+                expected_id=decision_id,
+                actual_decision=_normalize_ui_decision(latest, session_id=session_id),
+            )
+        return json_response(
+            {
+                "ok": True,
+                "decision": _normalize_ui_decision(latest, session_id=session_id),
+                "status": "pending",
+                "messages": await hub.get_messages(session_id, lane="chat"),
+                "output": await hub.get_session_output(session_id),
+                "resume_started": False,
+                "already_resolved": False,
+                "resume": resume,
+            }
+        )
     resolved = _decision_with_status(executing, status="resolved", resolved=True)
     updated_resolved, latest_resolved = await hub.transition_session_decision(
         session_id,

@@ -87,7 +87,7 @@ export type DecisionRespondChoice =
 export type UiDecision = {
   id: string;
   kind: 'approval' | 'decision';
-  decision_type: 'tool_approval' | 'plan_execute' | 'agent_decision' | 'memory_save' | null;
+  decision_type: 'tool_approval' | 'plan_execute' | 'agent_decision' | 'memory_save' | 'end_session' | null;
   status: UiDecisionStatus;
   blocking: boolean;
   reason: string;

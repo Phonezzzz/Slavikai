@@ -204,6 +204,17 @@ class AgentProtocol(Protocol):
         lang_hint: str | None = None,
     ) -> dict[str, JSONValue]: ...
 
+    def prepare_session_summary(
+        self,
+        messages: list[LLMMessage],
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> dict[str, JSONValue] | None: ...
+
+    def close_session_context(self) -> None: ...
+
+    def session_context_busy(self) -> bool: ...
+
     def apply_confirmed_memory_save(
         self,
         proposed_action: dict[str, JSONValue],

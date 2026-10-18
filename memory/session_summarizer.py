@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from llm.brain_base import Brain
+from llm.stream_model import Done, Error, TextDelta
 from shared.canonical_atom_models import Claim, ClaimType, utc_now_iso
 from shared.models import LLMMessage
 
@@ -33,7 +35,12 @@ class SessionSummarizer:
     def __init__(self, brain: Brain) -> None:
         self.brain = brain
 
-    def summarize(self, messages: list[LLMMessage]) -> SessionSummaryResult | None:
+    def summarize(
+        self,
+        messages: list[LLMMessage],
+        *,
+        cancellation_token: asyncio.Event | None = None,
+    ) -> SessionSummaryResult | None:
         transcript_messages = [
             message
             for message in messages
@@ -46,13 +53,32 @@ class SessionSummarizer:
             f"{message.role}: {message.content[:MAX_TRANSCRIPT_MESSAGE_CHARS]}"
             for message in transcript_messages[-MAX_SUMMARY_MESSAGES:]
         )
-        result = self.brain.generate(
-            [
-                LLMMessage(role="system", content=SESSION_SUMMARY_PROMPT),
-                LLMMessage(role="user", content=transcript),
-            ]
-        )
-        summary_text = result.text.strip()
+        summary_messages = [
+            LLMMessage(role="system", content=SESSION_SUMMARY_PROMPT),
+            LLMMessage(role="user", content=transcript),
+        ]
+        if cancellation_token is None:
+            summary_text = self.brain.generate(summary_messages).text.strip()
+        else:
+            chunks: list[str] = []
+            finished = False
+            for event in self.brain.generate_stream(
+                summary_messages, cancellation_token=cancellation_token
+            ):
+                if isinstance(event, TextDelta):
+                    if event.mode == "replace":
+                        chunks = [event.text]
+                    else:
+                        chunks.append(event.text)
+                elif isinstance(event, Error):
+                    raise RuntimeError(event.message)
+                elif isinstance(event, Done):
+                    if event.finish_reason == "cancelled":
+                        return None
+                    finished = True
+            if not finished:
+                raise RuntimeError("Session summary stream ended without Done")
+            summary_text = "".join(chunks).strip()
         if not summary_text:
             return None
 

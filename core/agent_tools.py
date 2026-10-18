@@ -25,6 +25,7 @@ from core.auto_runtime import AutoContinuationUnavailable
 from core.computer_activity_log import ComputerActivityLog
 from core.decision.handler import DecisionContext
 from core.decision.models import DecisionPacket
+from core.decision.session_end import build_session_end_packet
 from core.desktop_policy import DesktopApprovalRule, DesktopPolicyRuntime
 from core.desktop_runtime import DesktopContinuationUnavailable, DesktopRunOutcome, DesktopRuntime
 from core.mwv.models import (
@@ -202,7 +203,6 @@ class AgentToolsMixin:
             source_id: str | None = None,
             lang_hint: str | None = None,
         ) -> dict[str, JSONValue]: ...
-        def summarize_current_session(self) -> dict[str, JSONValue] | None: ...
 
     main_config: ModelConfig | None
     main_api_key: str | None
@@ -244,14 +244,7 @@ class AgentToolsMixin:
 
         try:
             if cmd in {"end-session", "end_session"}:
-                summary = self.summarize_current_session()
-                if summary is None:
-                    result = "Сессия не содержит сообщений для резюме."
-                else:
-                    stable_key = summary.get("stable_key")
-                    self.short_term.clear()
-                    result = f"Сессия закрыта, резюме сохранено: {stable_key}"
-                response = _wrap(result)
+                response = _wrap(build_session_end_packet().to_json())
                 self._log_chat_interaction(raw_input=command, response_text=response)
                 return response
 
@@ -337,6 +330,9 @@ class AgentToolsMixin:
         self.last_approval_request = None
         self.last_approval_source_endpoint = None
         self.last_approval_resume_payload = None
+
+    def session_context_busy(self) -> bool:
+        return self._pending_chat_approval is not None or bool(self._mwv_checkpoints)
 
     def reset_runtime_transient_state(self) -> None:
         self._reset_workspace_diffs()

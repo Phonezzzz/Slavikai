@@ -45,6 +45,7 @@ from server.http.common.runtime_contract import (
     RuntimeModelResolverProtocol,
     _require_custom_provider_owner,
 )
+from server.http.common.session_end import begin_session_end, pending_session_end
 from server.http.common.ui_runtime import _decision_with_status
 from server.http_api import (
     MAX_CONTENT_CHARS,
@@ -576,6 +577,36 @@ async def _handle_ui_send_impl(
             [idempotency_endpoint, session_id, idempotency_key or uuid.uuid4().hex]
         )
         durable_request_key = durable_request_key or hashlib.sha256(key_source.encode()).hexdigest()
+        command = content_raw.strip().split()[0].lower() if content_raw.strip() else ""
+        if command in {"/end-session", "/end_session"} and not attachments:
+            result = await begin_session_end(request, session_id, content_raw.strip())
+            if "error" in result:
+                await _abort_idempotency()
+                return error_response(
+                    status=409,
+                    message="Сначала завершите активное выполнение или текущий выбор.",
+                    error_type="invalid_request_error",
+                    code=str(result["error"]),
+                )
+            response_payload: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "decision": result["decision"],
+                "messages": await hub.get_messages(session_id, lane="chat"),
+                "output": await hub.get_session_output(session_id),
+                "lane": "chat",
+            }
+            await _complete_idempotency(response_payload, status=200)
+            response = json_response(response_payload)
+            response.headers[UI_SESSION_HEADER] = session_id
+            return response
+        if pending_session_end(await hub.get_session_decision(session_id)):
+            await _abort_idempotency()
+            return error_response(
+                status=409,
+                message="Сначала ответьте на вопрос о завершении сессии.",
+                error_type="invalid_request_error",
+                code="decision_pending",
+            )
         selected_model_metadata = await hub.get_session_model(session_id)
         try:
             await _sync_session_runtime_override(request, session_id, selected_model_metadata)
@@ -799,7 +830,8 @@ async def _handle_ui_send_impl(
         async def admission_context_current() -> bool:
             current_workflow = await hub.get_session_workflow(session_id)
             return (
-                _normalize_mode_value(current_workflow.get("mode"), default="ask") == mode
+                not pending_session_end(await hub.get_session_decision(session_id))
+                and _normalize_mode_value(current_workflow.get("mode"), default="ask") == mode
                 and await hub.get_session_model(session_id) == selected_model_metadata
                 and await _workspace_root_for_session(hub, session_id) == session_root
                 and await session_store.get_categories(approval_scope) == approved_categories

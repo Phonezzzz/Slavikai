@@ -66,6 +66,9 @@ Desktop approvals также имеют explicit principal subject, при эт�
   `confirm` или `edit_and_confirm`; `reject` не пишет данные. Устаревший
   `auto_save_dialogue` удалён из config/runtime/UI и отклоняется settings API. Confirm endpoint
   сейчас существует только в browser UI lane; `/v1` может вернуть preview, но не применяет его.
+  `/end-session` сначала предлагает Да/Нет/Отмена; Да только подготавливает summary для
+  отдельного Memory confirm. Закрытие не удаляет историю чата. Точный flow описан в
+  `docs/agent/COMMAND_LANE_POLICY.md`.
 - Engineering skills: current `implemented` contract — instructions и supporting dependencies
   внедряются per run в Auto v1; MWV report/UI наблюдают выбранный skill и terminal status. Brain
   не мутируется, tool/approval/sandbox/verifier полномочия не расширяются.

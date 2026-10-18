@@ -74,3 +74,31 @@ describe('DecisionPanel memory save contract', () => {
     });
   });
 });
+
+it('requires a separate Memory confirmation after the end-session question', () => {
+  const onRespond = vi.fn();
+  const first: UiDecision = {
+    ...memoryDecision,
+    id: 'session-end-1',
+    decision_type: 'end_session',
+    reason: 'need_user_input',
+    summary: 'Сохранить важную информацию перед завершением?',
+    proposed_action: {},
+    context: { source_endpoint: 'session.end' },
+    options: [
+      { id: 'yes', title: 'Да', action: 'confirm', payload: {}, risk: 'low' },
+      { id: 'no', title: 'Нет', action: 'reject', payload: {}, risk: 'low' },
+      { id: 'cancel', title: 'Отмена', action: 'abort', payload: {}, risk: 'low' },
+    ],
+  };
+  const view = render(<DecisionPanel decision={first} busy={false} error={null} onRespond={onRespond} />);
+  expect(view.queryByRole('textbox')).toBeNull();
+  fireEvent.click(view.getByRole('button', { name: 'Да' }));
+  expect(onRespond).toHaveBeenCalledTimes(1);
+  expect(onRespond).toHaveBeenLastCalledWith('confirm', null);
+  view.rerender(<DecisionPanel decision={{ ...memoryDecision, context: { source_endpoint: 'session.end' } }} busy={false} error={null} onRespond={onRespond} />);
+  expect(view.container.textContent).toContain('я предпочитаю короткие ответы');
+  expect(onRespond).toHaveBeenCalledTimes(1);
+  fireEvent.click(view.getByRole('button', { name: 'Сохранить' }));
+  expect(onRespond).toHaveBeenCalledTimes(2);
+});
