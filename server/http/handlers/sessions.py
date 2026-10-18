@@ -154,6 +154,7 @@ async def handle_ui_models(request: web.Request) -> web.Response:
     provider_query = request.query.get("provider", "").strip().lower()
     summary_only = request.query.get("summary", "").strip().lower() in {"1", "true", "yes"}
     strict = request.query.get("strict", "").strip().lower() in {"1", "true", "yes"}
+    discovery_only = request.query.get("discovery_only", "").strip().lower() in {"1", "true", "yes"}
     skip_custom_probe = request.query.get("skip_custom_probe", "").strip().lower() in {
         "1",
         "true",
@@ -190,6 +191,7 @@ async def handle_ui_models(request: web.Request) -> web.Response:
                     "display_name": instance["display_name"] if instance else provider,
                     "models": [],
                     "error": None,
+                    "catalog_source": "not_checked",
                 }
             )
         return json_response({"providers": payload_items})
@@ -205,6 +207,7 @@ async def handle_ui_models(request: web.Request) -> web.Response:
                     "display_name": instance["display_name"],
                     "models": [],
                     "error": None,
+                    "catalog_source": "not_checked",
                 }
             )
             continue
@@ -222,12 +225,20 @@ async def handle_ui_models(request: web.Request) -> web.Response:
                     "Для провайдера не сохранён API-ключ.",
                 )
         else:
-            if strict:
+            if strict or discovery_only:
                 models, error_text = await asyncio.to_thread(
-                    api._fetch_provider_models, provider, allow_local_fallback=False
+                    api._fetch_provider_models,
+                    provider,
+                    allow_local_fallback=False,
+                    allow_documented_fallback=not discovery_only,
                 )
             else:
                 models, error_text = await asyncio.to_thread(api._fetch_provider_models, provider)
+        catalog_source = "unverified"
+        if provider == "inception" and not discovery_only:
+            catalog_source = "documented"
+        elif (strict or discovery_only or instance is not None) and error_text is None:
+            catalog_source = "endpoint"
         payload_items.append(
             {
                 "provider": provider,
@@ -235,6 +246,7 @@ async def handle_ui_models(request: web.Request) -> web.Response:
                 "models": models,
                 "error": error_text,
                 "status": catalog_status,
+                "catalog_source": catalog_source,
             }
         )
     return json_response({"providers": payload_items})

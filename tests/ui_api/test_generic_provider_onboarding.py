@@ -356,7 +356,9 @@ def test_settings_models_skip_custom_probe(monkeypatch: pytest.MonkeyPatch, tmp_
         return ["custom/model"], "ready", None
 
     def fake_fetch_provider_models(
-        provider_name: str, allow_local_fallback: bool = True
+        provider_name: str,
+        allow_local_fallback: bool = True,
+        allow_documented_fallback: bool = True,
     ) -> tuple[list[str], str | None]:
         return [f"{provider_name}-model"], None
 
@@ -373,6 +375,7 @@ def test_settings_models_skip_custom_probe(monkeypatch: pytest.MonkeyPatch, tmp_
             custom_item = next(item for item in items if item["provider"] == provider)
             assert custom_item["display_name"] == "Slow"
             assert custom_item["models"] == []
+            assert custom_item["catalog_source"] == "not_checked"
             assert probed_urls == []
             # Built-in diagnostics keep working.
             assert {"deepseek", "local", "xai", "openrouter", "inception"} <= {

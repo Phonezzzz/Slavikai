@@ -43,11 +43,13 @@ class SettingsRuntimeBindings:
         provider: str,
         *,
         allow_local_fallback: bool = True,
+        allow_documented_fallback: bool = True,
     ) -> tuple[list[str], str | None]:
         return ui_settings._fetch_provider_models(
             provider,
             api_keys_path=self._api_keys_path(),
             allow_local_fallback=allow_local_fallback,
+            allow_documented_fallback=allow_documented_fallback,
         )
 
     def load_memory_config_runtime(self) -> MemoryConfig:

@@ -51,7 +51,17 @@ type ProviderInstance = {
   base_url: string;
 };
 
+type CatalogSource = 'endpoint' | 'documented' | 'unverified' | 'not_checked';
+
+const CATALOG_SOURCE_LABELS: Record<CatalogSource, string> = {
+  endpoint: 'API response',
+  documented: 'Documented list',
+  unverified: 'Unverified',
+  not_checked: 'Not checked',
+};
+
 type ProviderRuntimeState = {
+  catalogSource: CatalogSource;
   modelsCount: number;
   error: string | null;
 };
@@ -64,7 +74,7 @@ type TtsBackendSettings = {
   model: string;
   voice: string;
   format: string;
-  backend_ready: boolean;
+  api_key_source: ApiKeySource;
 };
 
 type ParsedSettings = {
@@ -285,7 +295,7 @@ const DEFAULT_TTS_BACKEND: TtsBackendSettings = {
   model: 'gpt-4o-mini-tts',
   voice: 'alloy',
   format: 'mp3',
-  backend_ready: false,
+  api_key_source: 'missing',
 };
 
 const DEFAULT_PROVIDER_RUNTIME: ProviderRuntimeByModel = {
@@ -510,7 +520,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
       const model = (ttsRaw as { model?: unknown }).model;
       const voice = (ttsRaw as { voice?: unknown }).voice;
       const format = (ttsRaw as { format?: unknown }).format;
-      const backendReady = (ttsRaw as { backend_ready?: unknown }).backend_ready;
+      const apiKeySource = (ttsRaw as { api_key_source?: unknown }).api_key_source;
       ttsBackend = {
         provider: provider === 'openai' ? 'openai' : defaults.ttsBackend.provider,
         api_key_env:
@@ -523,8 +533,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
         model: typeof model === 'string' && model.trim() ? model : defaults.ttsBackend.model,
         voice: typeof voice === 'string' && voice.trim() ? voice : defaults.ttsBackend.voice,
         format: typeof format === 'string' && format.trim() ? format : defaults.ttsBackend.format,
-        backend_ready:
-          typeof backendReady === 'boolean' ? backendReady : defaults.ttsBackend.backend_ready,
+        api_key_source: isApiKeySource(apiKeySource) ? apiKeySource : defaults.ttsBackend.api_key_source,
       };
     }
   }
@@ -597,7 +606,10 @@ const parseProviderRuntimePayload = (payload: unknown): ProviderRuntimeByModel =
       : 0;
     const error =
       typeof errorRaw === 'string' && errorRaw.trim().length > 0 ? errorRaw.trim() : null;
-    result[providerRaw] = { modelsCount, error };
+    const source = (item as { catalog_source?: unknown }).catalog_source;
+    const catalogSource: CatalogSource = source === 'endpoint' || source === 'documented' || source === 'not_checked'
+      ? source : 'unverified';
+    result[providerRaw] = { modelsCount, error, catalogSource };
   }
   return result;
 };
@@ -987,7 +999,7 @@ export function Settings({
     try {
       await Promise.all([...pendingSettingsWrites.current]);
       if (controller.signal.aborted) return;
-      const providerRuntimeResponse = await fetch('/ui/api/models?skip_custom_probe=1', {
+      const providerRuntimeResponse = await fetch('/ui/api/models?skip_custom_probe=1&discovery_only=1', {
         signal: controller.signal,
       });
       const providerRuntimePayload: unknown = await providerRuntimeResponse.json();
@@ -2230,9 +2242,9 @@ export function Settings({
                             </span>
                             <div className="flex items-center gap-2">
                               <StatusBadge
-                                tone={credentialDiagnosticsLoading ? 'neutral' : credentialDiagnosticsError ? 'error' : ttsBackend.backend_ready ? 'success' : 'waiting'}
+                                tone={credentialDiagnosticsLoading ? 'neutral' : credentialDiagnosticsError ? 'error' : ttsBackend.api_key_set ? 'neutral' : 'waiting'}
                               >
-                                {credentialDiagnosticsLoading ? 'checking' : credentialDiagnosticsError ? 'check failed' : ttsBackend.backend_ready ? 'ready' : 'not ready'}
+                                {credentialDiagnosticsLoading ? 'checking' : credentialDiagnosticsError ? 'check failed' : ttsBackend.api_key_set ? 'Configured' : 'Not configured'}
                               </StatusBadge>
                               <StatusBadge tone={ttsBackend.api_key_set ? 'success' : 'waiting'}>
                                 {ttsBackend.api_key_set ? 'key set' : 'key missing'}
@@ -2240,6 +2252,8 @@ export function Settings({
                             </div>
                           </div>
                           <div className="mt-2 space-y-1 text-xs text-zinc-500">
+                            <div>Key source: {sourceLabel(ttsBackend.api_key_source)}</div>
+                            <div>Speech inference has not been tested.</div>
                             {credentialDiagnosticsError ? <div>Credential check: {credentialDiagnosticsError}</div> : null}
                             <div className="break-all">Endpoint: {ttsBackend.endpoint}</div>
                             <div>
@@ -2255,7 +2269,7 @@ export function Settings({
 
                       <SectionCard
                         title="Provider status"
-                        description="API key presence, validation status, and model endpoint probes."
+                        description="Key validation and catalog checks only. Inference and tool support have not been tested."
                         scope="Read only"
                       >
                         <div>
@@ -2265,8 +2279,10 @@ export function Settings({
                               : null;
                             const runtimeLabel = providerRuntimeLoading
                               ? 'checking'
-                              : runtime?.error
-                                ? 'models error'
+                              : runtime?.catalogSource === 'not_checked'
+                                ? 'not checked'
+                                : runtime?.error
+                                  ? 'models error'
                                 : runtime && runtime.modelsCount > 0
                                   ? `${runtime.modelsCount} models`
                                   : runtime
@@ -2278,7 +2294,7 @@ export function Settings({
                               ? 'neutral'
                               : runtime?.error || providerRuntimeError
                                 ? 'error'
-                                : runtime && runtime.modelsCount > 0
+                                : runtime && runtime.modelsCount > 0 && runtime.catalogSource === 'endpoint'
                                   ? 'success'
                                   : 'waiting';
                             const runtimeDetail = runtime?.error ?? providerRuntimeError;
@@ -2325,7 +2341,10 @@ export function Settings({
                                 </div>
                                 <div className="mt-1 space-y-1 text-xs text-zinc-500">
                                   <div className="break-all">Endpoint: {provider.endpoint}</div>
-                                  {provider.last_checked_at ? <div>Last check: {provider.last_checked_at}</div> : null}
+                                  {runtime ? (
+                                    <div>Catalog source: {CATALOG_SOURCE_LABELS[runtime.catalogSource]}</div>
+                                  ) : isModelProvider(provider.provider) ? <div>Catalog source: {providerRuntimeError ? 'Unverified' : 'Not checked'}</div> : null}
+                                  {provider.last_checked_at ? <div>Last key check: {provider.last_checked_at}</div> : null}
                                   {provider.last_check_error ? (
                                     <div className="text-rose-300">Validation: {provider.last_check_error}</div>
                                   ) : null}

@@ -232,6 +232,7 @@ def test_ui_models_inception_docs_fallback_returns_mercury_2(monkeypatch) -> Non
             assert isinstance(item, dict)
             assert item.get("provider") == "inception"
             assert item.get("models") == ["mercury-2"]
+            assert item.get("catalog_source") == "documented"
             assert item.get("error") is None
         finally:
             await client.close()
@@ -258,6 +259,7 @@ def test_ui_models_summary_returns_provider_shell_without_fetch(monkeypatch) -> 
             for item in providers:
                 assert isinstance(item, dict)
                 assert item.get("models") == []
+                assert item.get("catalog_source") == "not_checked"
                 assert item.get("error") is None
         finally:
             await client.close()

@@ -28,7 +28,7 @@ describe('generic provider onboarding', () => {
           },
         }), { status: 200 });
       }
-      if (url === '/ui/api/models?skip_custom_probe=1') {
+      if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') {
         return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       }
       if (url === '/ui/api/embeddings/status') {
@@ -84,7 +84,7 @@ describe('generic provider onboarding', () => {
         personalization: { tone: 'balanced', system_prompt: 'server value' },
         providers: saved ? [{ provider: 'custom-0123456789abcdef0123456789abcdef', display_name: 'Example', base_url: 'https://example.test/v1' }] : [],
       } }), { status: 200 });
-      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') return new Response(JSON.stringify({ base_url: 'https://example.test/v1', models: ['opaque/model'], status: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances') { saved = true; return new Response(JSON.stringify({ provider: 'custom-0123456789abcdef0123456789abcdef', display_name: 'Example', base_url: 'https://example.test/v1' }), { status: 200 }); }
@@ -108,7 +108,7 @@ describe('generic provider onboarding', () => {
   it('clears unsaved onboarding fields and key when Settings closes', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
-      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') return new Response(JSON.stringify({ base_url: 'https://example.test/v1', models: [], status: 'models_unavailable', message: 'Catalog unavailable.' }), { status: 200 });
       throw new Error(`Unexpected URL: ${url}`);
@@ -139,7 +139,7 @@ describe('generic provider onboarding', () => {
     };
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
-      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
         return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
@@ -180,7 +180,7 @@ describe('generic provider onboarding', () => {
     };
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
-      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
         return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
@@ -235,7 +235,7 @@ describe('generic provider onboarding', () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       requestedUrls.push(url);
       if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
-      if (url === '/ui/api/models?skip_custom_probe=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
+      if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
         return new Promise<Response>((resolve) => { probeResolvers.push(resolve); });
@@ -305,7 +305,7 @@ describe('generic provider onboarding', () => {
         if (settingsRequests === 1) return emptySettings();
         return new Promise<Response>((resolve) => { resolveReopenedSettings = resolve; });
       }
-      if (url === '/ui/api/models?skip_custom_probe=1') {
+      if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') {
         return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       }
       if (url === '/ui/api/embeddings/status') {
@@ -343,14 +343,14 @@ describe('generic provider onboarding', () => {
     expect(screen.getAllByText('Old')).toHaveLength(1);
   });
 
-  it('loads diagnostics explicitly from /ui/api/models?skip_custom_probe=1', async () => {
+  it('loads diagnostics explicitly from /ui/api/models?skip_custom_probe=1&discovery_only=1', async () => {
     const requestedUrls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       requestedUrls.push(url);
       if (url === '/ui/api/settings') {
         return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
       }
-      if (url === '/ui/api/models?skip_custom_probe=1') {
+      if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') {
         return new Response(JSON.stringify({ providers: [
           { provider: 'deepseek', display_name: 'deepseek', models: ['m1', 'm2'], error: null },
         ] }), { status: 200 });
@@ -363,11 +363,11 @@ describe('generic provider onboarding', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
     await screen.findByRole('textbox', { name: 'Provider display name' });
-    expect(requestedUrls).not.toContain('/ui/api/models?skip_custom_probe=1');
+    expect(requestedUrls).not.toContain('/ui/api/models?skip_custom_probe=1&discovery_only=1');
     fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findByText('2 models');
-    expect(requestedUrls).toContain('/ui/api/models?skip_custom_probe=1');
+    expect(requestedUrls).toContain('/ui/api/models?skip_custom_probe=1&discovery_only=1');
     expect(requestedUrls).not.toContain('/ui/api/models');
     expect(screen.queryByText(/Unexpected URL/)).toBeNull();
   });

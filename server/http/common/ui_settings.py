@@ -381,6 +381,7 @@ def _fetch_provider_models(
     *,
     api_keys_path: Path = API_KEYS_PATH,
     allow_local_fallback: bool = True,
+    allow_documented_fallback: bool = True,
 ) -> tuple[list[str], str | None]:
     instance = _load_provider_instance(provider)
     if instance is not None:
@@ -389,26 +390,8 @@ def _fetch_provider_models(
             return [], "Для провайдера не сохранён API-ключ."
         models, status, error = _probe_openai_models(instance["base_url"], key)
         return models, error if status != "ready" else None
-    if provider == "inception":
-        docs_models = list(INCEPTION_DOCS_MODELS)
-        headers, _ = _provider_auth_headers(provider, api_keys_path=api_keys_path)
-        if headers:
-            try:
-                url = _provider_models_endpoint(provider)
-                response = requests.get(url, headers=headers, timeout=MODEL_FETCH_TIMEOUT)
-                response.raise_for_status()
-                api_models = _parse_models_payload(response.json())
-                if api_models:
-                    allowed = set(docs_models)
-                    merged: list[str] = [item for item in docs_models if item in allowed]
-                    for model_id in api_models:
-                        if model_id in allowed and model_id not in merged:
-                            merged.append(model_id)
-                    if merged:
-                        return merged, None
-            except Exception:  # noqa: BLE001
-                pass
-        return docs_models, None
+    if provider == "inception" and allow_documented_fallback:
+        return list(INCEPTION_DOCS_MODELS), None
 
     try:
         url = _provider_models_endpoint(provider)
@@ -426,7 +409,21 @@ def _fetch_provider_models(
             if fallback:
                 return [fallback], None
         return [], f"Не удалось получить список моделей провайдера {provider}: {exc}"
-    models = _parse_models_payload(response.json())
+    try:
+        payload = response.json()
+    except ValueError:
+        return [], f"Некорректный JSON каталога моделей провайдера {provider}."
+    if not allow_local_fallback:
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            return [], f"Некорректный формат каталога моделей провайдера {provider}."
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or not item["id"].strip()
+            for item in payload["data"]
+        ):
+            return [], f"Некорректные записи каталога моделей провайдера {provider}."
+    models = _parse_models_payload(payload)
     if not models and provider == "local" and allow_local_fallback:
         fallback = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default").strip()
         if fallback:
@@ -937,7 +934,7 @@ def _tts_settings_payload(*, api_keys_path: Path = API_KEYS_PATH) -> dict[str, J
         "model": model,
         "voice": voice,
         "format": format_value,
-        "backend_ready": api_key is not None,
+        "api_key_source": _provider_api_key_source("openai", api_keys_path=api_keys_path),
     }
 
 

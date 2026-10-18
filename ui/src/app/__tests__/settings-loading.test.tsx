@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Settings } from '../components/Settings';
 
 const SETTINGS_URL = '/ui/api/settings';
-const MODELS_URL = '/ui/api/models?skip_custom_probe=1';
+const MODELS_URL = '/ui/api/models?skip_custom_probe=1&discovery_only=1';
 const EMBEDDINGS_URL = '/ui/api/embeddings/status';
 
 function deferred<T>() {
@@ -285,7 +285,7 @@ describe('Settings loading isolation', () => {
         gets += 1;
         return json({ settings: {
           ...settings('remote instructions').settings,
-          audio: { tts: { api_key_set: gets > 1, backend_ready: gets > 1 } },
+          audio: { tts: { api_key_set: gets > 1, api_key_source: gets > 1 ? 'file' : 'missing' } },
         } });
       }
       if (url === EMBEDDINGS_URL || url === MODELS_URL) return new Promise<Response>(() => {});
@@ -294,9 +294,9 @@ describe('Settings loading isolation', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('local unsaved instructions');
     fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
-    expect(screen.getByText('not ready')).toBeTruthy();
+    expect(screen.getByText('Not configured')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
-    await screen.findByText('ready');
+    await screen.findByText('Configured');
     fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('local unsaved instructions');
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
@@ -317,7 +317,7 @@ describe('Settings loading isolation', () => {
         }
         return json({ settings: {
           ...settings().settings,
-          audio: { tts: { api_key_set: gets > 2, backend_ready: gets > 2 } },
+          audio: { tts: { api_key_set: gets > 2, api_key_source: gets > 2 ? 'file' : 'missing' } },
         } });
       }
       if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
@@ -331,10 +331,10 @@ describe('Settings loading isolation', () => {
     await vi.waitFor(() => expect(gets).toBe(2));
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
     rerender(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByText('ready');
+    await screen.findByText('Configured');
     expect(oldSignal?.aborted).toBe(true);
     await act(async () => { oldBody.resolve(status === 200 ? settings() : { error: { message: 'Stale credential failure' } }); });
-    expect(screen.getByText('ready')).toBeTruthy();
+    expect(screen.getByText('Configured')).toBeTruthy();
     expect(screen.queryByText(/Stale credential failure/)).toBeNull();
   });
 
@@ -613,7 +613,7 @@ describe('Settings loading isolation', () => {
     let posts = 0;
     const snapshot = (ready: boolean) => ({ settings: {
       ...settings().settings,
-      audio: { tts: { api_key_set: ready, backend_ready: ready } },
+      audio: { tts: { api_key_set: ready, api_key_source: ready ? 'file' : 'missing' } },
     } });
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (url === SETTINGS_URL) {
@@ -649,9 +649,9 @@ describe('Settings loading isolation', () => {
     await screen.findByText('Global settings saved.');
     expect(readSignals[2]?.aborted).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
-    await screen.findByText('ready');
+    await screen.findByText('Configured');
     await act(async () => { oldBody.resolve(snapshot(false)); });
-    expect(screen.getByText('ready')).toBeTruthy();
+    expect(screen.getByText('Configured')).toBeTruthy();
     expect(screen.queryByText(/Your draft was kept/)).toBeNull();
   });
 
@@ -762,6 +762,43 @@ describe('Settings loading isolation', () => {
     await vi.waitFor(() => expect(posts).toBe(3));
     expect(payloads[2].appearance).toEqual({ theme: 'oled' });
     expect(payloads[2].personalization).toEqual({ tone: 'balanced', system_prompt: editDraft ? 'unsaved draft' : 'committed' });
+  });
+
+  it.each([
+    ['endpoint', 'API response'], ['documented', 'Documented list'],
+    ['unverified', 'Unverified'], ['not_checked', 'Not checked'],
+  ])('shows %s catalog evidence without claiming speech or inference readiness', async (source, label) => {
+    const snapshot = { settings: {
+      ...settings().settings,
+      model: { provider: 'deepseek', model: 'chosen-model' },
+      audio: { tts: { api_key_set: true, api_key_source: 'env' } },
+    } };
+    const posts: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') posts.push(JSON.parse(String(init.body)));
+        return json(snapshot);
+      }
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      if (url === MODELS_URL) return json({ providers: [{ provider: 'deepseek', models: ['different-model'], catalog_source: source }] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('keep these instructions');
+    expect(fetchMock.mock.calls.some(([url]) => url.startsWith('/ui/api/models'))).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    await screen.findByText('Configured');
+    expect(screen.getByText('Key source: Environment')).toBeTruthy();
+    expect(screen.getByText('Speech inference has not been tested.')).toBeTruthy();
+    expect(screen.queryByText('ready')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    if (source === 'not_checked') await screen.findByText('not checked');
+    else await screen.findByText(`Catalog source: ${label}`);
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('Global settings saved.');
+    expect(posts[0].model).toEqual({ provider: 'deepseek', model: 'chosen-model' });
+    expect(posts[0].personalization).toEqual({ tone: 'balanced', system_prompt: 'keep these instructions' });
   });
 
   it('does not hide a settings failure behind an indefinitely pending embedding status', async () => {

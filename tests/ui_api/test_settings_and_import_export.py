@@ -94,7 +94,8 @@ def test_ui_settings_endpoint() -> None:
             assert tts.get("provider") == "openai"
             assert tts.get("api_key_env") == "OPENAI_API_KEY"
             assert isinstance(tts.get("api_key_set"), bool)
-            assert isinstance(tts.get("backend_ready"), bool)
+            assert tts.get("api_key_source") in {"env", "file", "missing"}
+            assert "backend_ready" not in tts
         finally:
             await client.close()
 
@@ -227,7 +228,8 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             assert tts.get("provider") == "openai"
             assert tts.get("api_key_env") == "OPENAI_API_KEY"
             assert tts.get("api_key_set") is False
-            assert tts.get("backend_ready") is False
+            assert tts.get("api_key_source") == "missing"
+            assert "backend_ready" not in tts
         finally:
             await client.close()
 
