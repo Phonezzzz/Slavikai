@@ -561,7 +561,7 @@ describe('Settings loading isolation', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
       }
       expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value)
-        .toBe(edit === 'text' ? 'new unsaved draft' : 'before write');
+        .toBe(edit === 'text' ? 'new unsaved draft' : 'committed instructions');
     }
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
   });
@@ -653,6 +653,115 @@ describe('Settings loading isolation', () => {
     await act(async () => { oldBody.resolve(snapshot(false)); });
     expect(screen.getByText('ready')).toBeTruthy();
     expect(screen.queryByText(/Your draft was kept/)).toBeNull();
+  });
+
+  it('waits for a pending download before Recheck reads embedding status', async () => {
+    const download = deferred<Response>();
+    let downloading = false;
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === SETTINGS_URL) return json(settings());
+      if (url === EMBEDDINGS_URL) { reads += 1; return json({ model: 'local', state: downloading ? 'downloading' : 'missing' }); }
+      if (url === '/ui/api/embeddings/download') return download.promise;
+      if (url === MODELS_URL) return json({ providers: [] });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Download model' }));
+    const readsBeforeRecheck = reads;
+    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await act(async () => { await Promise.resolve(); });
+    expect(reads).toBe(readsBeforeRecheck);
+    await act(async () => {
+      downloading = true;
+      download.resolve(json({ model: 'local', state: 'downloading' }));
+    });
+    await vi.waitFor(() => expect(reads).toBe(readsBeforeRecheck + 1));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    await screen.findByText('downloading');
+  });
+
+  it.each(['provider', 'import'])('does not treat %s controls as persisted preference edits', async (control) => {
+    const post = deferred<Response>();
+    let committed = false;
+    let posts = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') { posts += 1; return post.promise; }
+        return json(settings(committed ? 'committed' : 'before'));
+      }
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('committed');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await vi.waitFor(() => expect(posts).toBe(1));
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByDisplayValue('before');
+    if (control === 'provider') {
+      fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+      fireEvent.change(screen.getByLabelText('Provider display name'), { target: { value: 'draft provider' } });
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'Data' }));
+      fireEvent.change(screen.getByRole('combobox', { name: 'Mode' }), { target: { value: 'replace' } });
+    }
+    await act(async () => { committed = true; post.resolve(json(settings('committed'))); });
+    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    await screen.findByDisplayValue('committed');
+    expect(screen.queryByText(/Your draft was kept/)).toBeNull();
+  });
+
+  it.each([
+    { editDraft: false, status: 200 },
+    { editDraft: true, status: 200 },
+    { editDraft: true, status: 503 },
+  ])('resumes reconciliation after a partial key save (draft=$editDraft, status=$status)', async ({ editDraft, status }) => {
+    const firstPost = deferred<Response>();
+    let committed = false;
+    let posts = 0;
+    let gets = 0;
+    const payloads: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') {
+          posts += 1;
+          payloads.push(JSON.parse(String(init.body)));
+          return posts === 1 ? firstPost.promise : json(settings('before'), status);
+        }
+        gets += 1;
+        return json({ settings: { ...settings(committed ? 'committed' : 'before').settings, appearance: { theme: committed ? 'oled' : 'default' } } });
+      }
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      if (url === '/ui/api/models?provider=deepseek&strict=1') return json({ providers: [{ provider: 'deepseek', models: ['test-model'] }] });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('committed');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await vi.waitFor(() => expect(posts).toBe(1));
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    const input = await screen.findByDisplayValue('before');
+    if (editDraft) fireEvent.change(input, { target: { value: 'unsaved draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'new-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    await vi.waitFor(() => expect(posts).toBe(2));
+    await act(async () => { committed = true; firstPost.resolve(json(settings('committed'))); });
+    await vi.waitFor(() => expect(gets).toBeGreaterThanOrEqual(3));
+    if (status === 200) await screen.findByRole('option', { name: 'test-model' });
+    else await vi.waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Load models' }).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    await screen.findByDisplayValue(editDraft ? 'unsaved draft' : 'committed');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await vi.waitFor(() => expect(posts).toBe(3));
+    expect(payloads[2].appearance).toEqual({ theme: 'oled' });
+    expect(payloads[2].personalization).toEqual({ tone: 'balanced', system_prompt: editDraft ? 'unsaved draft' : 'committed' });
   });
 
   it('does not hide a settings failure behind an indefinitely pending embedding status', async () => {

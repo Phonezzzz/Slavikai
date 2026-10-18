@@ -785,6 +785,10 @@ export function Settings({
   const embeddingStatusRequest = useRef<AbortController | null>(null);
   const pendingSettingsWrites = useRef(new Set<Promise<void>>());
   const formEdits = useRef(0);
+  // Reconciliation updates untouched preferences without replacing a newer draft.
+  const dirtyFields = useRef(new Set<string>());
+  const reconciliationNeeded = useRef(false);
+  const pendingEmbeddingWrites = useRef(new Set<Promise<void>>());
 
   const presetIsCustom = !THRESHOLD_PRESETS.includes(longPasteThresholdChars);
 
@@ -810,7 +814,7 @@ export function Settings({
     setTtsBackend(parsed.ttsBackend);
   };
 
-  const applyParsedSettings = (parsed: ParsedSettings, providerRevisionAtRequestStart: number): void => {
+  const applyParsedSettings = (parsed: ParsedSettings, providerRevisionAtRequestStart: number, preserveDraft = false): void => {
     applyCredentialSnapshot(parsed);
     setProviderInstances((current) => {
       if (providerInstancesRevision.current === providerRevisionAtRequestStart) {
@@ -821,22 +825,23 @@ export function Settings({
       const snapshotIds = new Set(parsed.providerInstances.map((item) => item.provider));
       return [...parsed.providerInstances, ...current.filter((item) => !snapshotIds.has(item.provider))];
     });
-    setApiKeys({ ...EMPTY_API_KEYS });
-    setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
-    setTone(parsed.tone);
-    setSystemPrompt(parsed.systemPrompt);
-    setAppearanceTheme(parsed.appearanceTheme);
-    setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
-    setLongPasteThresholdChars(parsed.longPasteThresholdChars);
-    setMemoryInboxMaxItems(parsed.memoryInboxMaxItems);
-    setMemoryInboxTtlDays(parsed.memoryInboxTtlDays);
-    setMemoryInboxWritesPerMinute(parsed.memoryInboxWritesPerMinute);
-    setEmbeddingsProvider(parsed.embeddingsProvider);
-    setEmbeddingsLocalModel(parsed.embeddingsLocalModel);
-    setEmbeddingsOpenaiModel(parsed.embeddingsOpenaiModel);
-    setDefaultModelProvider(parsed.defaultModelProvider);
-    setDefaultModelId(parsed.defaultModelId);
-    setDefaultModelOptions(parsed.defaultModelId ? [parsed.defaultModelId] : []);
+    if (!preserveDraft) setApiKeys({ ...EMPTY_API_KEYS });
+    if (!preserveDraft) setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
+    if (!preserveDraft || !dirtyFields.current.has('tone')) setTone(parsed.tone);
+    if (!preserveDraft || !dirtyFields.current.has('systemPrompt')) setSystemPrompt(parsed.systemPrompt);
+    if (!preserveDraft || !dirtyFields.current.has('appearanceTheme')) setAppearanceTheme(parsed.appearanceTheme);
+    if (!preserveDraft || !dirtyFields.current.has('longPasteToFileEnabled')) setLongPasteToFileEnabled(parsed.longPasteToFileEnabled);
+    if (!preserveDraft || !dirtyFields.current.has('longPasteThresholdChars')) setLongPasteThresholdChars(parsed.longPasteThresholdChars);
+    if (!preserveDraft || !dirtyFields.current.has('memoryInboxMaxItems')) setMemoryInboxMaxItems(parsed.memoryInboxMaxItems);
+    if (!preserveDraft || !dirtyFields.current.has('memoryInboxTtlDays')) setMemoryInboxTtlDays(parsed.memoryInboxTtlDays);
+    if (!preserveDraft || !dirtyFields.current.has('memoryInboxWritesPerMinute')) setMemoryInboxWritesPerMinute(parsed.memoryInboxWritesPerMinute);
+    if (!preserveDraft || !dirtyFields.current.has('embeddingsProvider')) setEmbeddingsProvider(parsed.embeddingsProvider);
+    if (!preserveDraft || !dirtyFields.current.has('embeddingsLocalModel')) setEmbeddingsLocalModel(parsed.embeddingsLocalModel);
+    if (!preserveDraft || !dirtyFields.current.has('embeddingsOpenaiModel')) setEmbeddingsOpenaiModel(parsed.embeddingsOpenaiModel);
+    if (!preserveDraft || !dirtyFields.current.has('defaultModelProvider')) setDefaultModelProvider(parsed.defaultModelProvider);
+    if (!preserveDraft || !dirtyFields.current.has('defaultModelId')) setDefaultModelId(parsed.defaultModelId);
+    if (!preserveDraft || !dirtyFields.current.has('defaultModelId')) setDefaultModelOptions(parsed.defaultModelId ? [parsed.defaultModelId] : []);
+    if (!preserveDraft) dirtyFields.current.clear();
   };
 
   const refreshEmbeddingRuntime = async (restart = false): Promise<void> => {
@@ -850,7 +855,7 @@ export function Settings({
     setEmbeddingRuntimeLoading(true);
     setEmbeddingRuntimeError(null);
     try {
-      await Promise.all([...pendingSettingsWrites.current]);
+      await Promise.all([...pendingSettingsWrites.current, ...pendingEmbeddingWrites.current]);
       if (controller.signal.aborted) return;
       const response = await fetch('/ui/api/embeddings/status', { signal: controller.signal });
       const payload: unknown = await response.json();
@@ -917,26 +922,31 @@ export function Settings({
     }
   };
 
-  const loadSettings = async (): Promise<void> => {
-    invalidateDiagnostics();
+  const loadSettings = async (preserveDraft = false): Promise<void> => {
+    if (!preserveDraft) invalidateDiagnostics();
     settingsRequest.current?.abort();
     const controller = new AbortController();
     settingsRequest.current = controller;
     const providerRevisionAtRequestStart = providerInstancesRevision.current;
     const writesBeforeSnapshot = [...pendingSettingsWrites.current];
-    setLoading(true);
-    setStatus(null);
-    void refreshEmbeddingRuntime();
+    if (writesBeforeSnapshot.length > 0) reconciliationNeeded.current = true;
+    if (!preserveDraft) setLoading(true);
+    if (!preserveDraft) setStatus(null);
+    if (!preserveDraft) void refreshEmbeddingRuntime();
     try {
+      if (preserveDraft) {
+        await Promise.all(writesBeforeSnapshot);
+        if (controller.signal.aborted) return;
+      }
       const settingsResponse = await fetch('/ui/api/settings', { signal: controller.signal });
       const settingsPayload: unknown = await settingsResponse.json();
       if (controller.signal.aborted) return;
       if (!settingsResponse.ok) {
         throw new Error(extractErrorMessage(settingsPayload, 'Failed to load settings.'));
       }
-      applyParsedSettings(parseSettingsPayload(settingsPayload), providerRevisionAtRequestStart);
+      applyParsedSettings(parseSettingsPayload(settingsPayload), providerRevisionAtRequestStart, preserveDraft);
       setLoading(false);
-      if (writesBeforeSnapshot.length > 0) {
+      if (writesBeforeSnapshot.length > 0 && !preserveDraft) {
         // Show the current snapshot immediately, then reconcile the completed write.
         // Preserve a draft created while waiting rather than silently replacing it.
         const editsAtSnapshot = formEdits.current;
@@ -952,10 +962,11 @@ export function Settings({
         if (formEdits.current === editsAtSnapshot) {
           applyParsedSettings(refreshed, providerRevisionAtRequestStart);
         } else {
-          applyCredentialSnapshot(refreshed);
+          applyParsedSettings(refreshed, providerRevisionAtRequestStart, true);
           setStatus('Settings changed on the server. Your draft was kept; Refresh loads the saved settings.');
         }
       }
+      reconciliationNeeded.current = false;
     } catch (error) {
       if (controller.signal.aborted) return;
       setStatus(error instanceof Error ? error.message : 'Failed to load settings.');
@@ -1076,6 +1087,7 @@ export function Settings({
         setProviderDirty((current) => ({ ...current, [defaultModelProvider]: false }));
         finishWrite();
         finishWrite = undefined;
+        if (reconciliationNeeded.current) await loadSettings(true);
       }
       await Promise.all([...pendingSettingsWrites.current]);
       if (epoch !== onboardingEpoch.current) return;
@@ -1108,7 +1120,10 @@ export function Settings({
       setDefaultModelOptions(defaultModelId ? [defaultModelId] : []);
       setStatus(error instanceof Error ? error.message : 'Failed to load provider models.');
     } finally {
-      finishWrite?.();
+      if (finishWrite) {
+        finishWrite();
+        if (epoch === onboardingEpoch.current && reconciliationNeeded.current) void loadSettings(true);
+      }
       setDefaultModelsLoading(false);
     }
   };
@@ -1213,6 +1228,10 @@ export function Settings({
     setEmbeddingRuntimeLoading(false);
     setEmbeddingRuntimeError(null);
     setStatus(null);
+    const epoch = onboardingEpoch.current;
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    pendingEmbeddingWrites.current.add(pending);
     try {
       const response = await fetch('/ui/api/embeddings/download', {
         method: 'POST',
@@ -1220,6 +1239,7 @@ export function Settings({
         body: JSON.stringify({ confirm: true, model: embeddingsLocalModel.trim() }),
       });
       const payload: unknown = await response.json();
+      if (epoch !== onboardingEpoch.current) return;
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to download embedding model.'));
       }
@@ -1227,7 +1247,10 @@ export function Settings({
       setEmbeddingRuntime(parsed);
       setStatus(parsed.state === 'ready' ? 'Embedding model is ready.' : 'Embedding model download started.');
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to download embedding model.');
+      if (epoch === onboardingEpoch.current) setStatus(error instanceof Error ? error.message : 'Failed to download embedding model.');
+    } finally {
+      pendingEmbeddingWrites.current.delete(pending);
+      finish();
     }
   };
 
@@ -1427,9 +1450,20 @@ export function Settings({
             role="dialog"
             aria-modal="true"
             aria-label="Settings"
-            onChangeCapture={() => { formEdits.current += 1; }}
+            onChangeCapture={(event) => {
+              if (event.target instanceof Element) {
+                const field = event.target.closest('[data-settings-field]')?.getAttribute('data-settings-field');
+                if (field) {
+                  dirtyFields.current.add(field);
+                  if (field === 'defaultModelProvider') dirtyFields.current.add('defaultModelId');
+                  formEdits.current += 1;
+                }
+              }
+            }}
             onClickCapture={(event) => {
               if (event.target instanceof Element && event.target.closest('[data-edits-settings], [role="switch"]')) {
+                const field = event.target.closest('[data-settings-field]')?.getAttribute('data-settings-field');
+                if (field) dirtyFields.current.add(field);
                 formEdits.current += 1;
               }
             }}
@@ -1549,6 +1583,7 @@ export function Settings({
                                   type="password"
                                   autoComplete="new-password"
                                   aria-label={`${PROVIDER_LABELS[provider.provider]} API key`}
+                                  data-settings-field="apiKeys"
                                   value={apiKeys[provider.provider]}
                                   onChange={(event) => {
                                     const value = event.target.value;
@@ -1678,6 +1713,7 @@ export function Settings({
                           <label>
                             <span className="mb-2 block text-sm font-medium text-zinc-300">Provider</span>
                             <select
+                              data-settings-field="defaultModelProvider"
                               value={defaultModelProvider}
                               onChange={(event) => {
                                 const provider = event.target.value;
@@ -1697,6 +1733,7 @@ export function Settings({
                           <label>
                             <span className="mb-2 block text-sm font-medium text-zinc-300">Model</span>
                             <select
+                              data-settings-field="defaultModelId"
                               value={defaultModelId}
                               onChange={(event) => setDefaultModelId(event.target.value)}
                               disabled={defaultModelsLoading || defaultModelOptions.length === 0}
@@ -1709,6 +1746,7 @@ export function Settings({
                           <button
                             type="button"
                             data-edits-settings
+                            data-settings-field="defaultModelId"
                             onClick={() => { void handleLoadDefaultModels(); }}
                             disabled={defaultModelsLoading}
                             className="self-end rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
@@ -1736,6 +1774,7 @@ export function Settings({
                               key={option.value}
                               type="button"
                               data-edits-settings
+                              data-settings-field="tone"
                               onClick={() => setTone(option.value)}
                               className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors ${
                                 tone === option.value
@@ -1787,6 +1826,7 @@ export function Settings({
                             <label className="block">
                               <span className="mb-2 block text-sm font-medium text-zinc-300">Custom instructions</span>
                               <textarea
+                                data-settings-field="systemPrompt"
                                 value={systemPrompt}
                                 onChange={(event) => setSystemPrompt(event.target.value)}
                                 rows={8}
@@ -1813,6 +1853,7 @@ export function Settings({
                               key={option.value}
                               type="button"
                               data-edits-settings
+                              data-settings-field="appearanceTheme"
                               onClick={() => setAppearanceTheme(option.value)}
                               className={`rounded px-3 py-1.5 text-[13px] transition-colors ${
                                 appearanceTheme === option.value
@@ -1846,7 +1887,10 @@ export function Settings({
                           <ToggleSwitch
                             checked={longPasteToFileEnabled}
                             label="Convert long paste to file"
-                            onToggle={() => setLongPasteToFileEnabled((current) => !current)}
+                            onToggle={() => {
+                              dirtyFields.current.add('longPasteToFileEnabled');
+                              setLongPasteToFileEnabled((current) => !current);
+                            }}
                           />
                         </Row>
                         <div className="border-t border-zinc-800/60 pt-3">
@@ -1860,6 +1904,7 @@ export function Settings({
                                   key={preset}
                                   type="button"
                                   data-edits-settings
+                                  data-settings-field="longPasteThresholdChars"
                                   onClick={() => setLongPasteThresholdChars(preset)}
                                   className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
                                     longPasteThresholdChars === preset
@@ -1875,6 +1920,7 @@ export function Settings({
                               type="number"
                               min={1000}
                               max={80000}
+                              data-settings-field="longPasteThresholdChars"
                               value={longPasteThresholdChars}
                               onChange={(event) => {
                                 const next = Number.parseInt(event.target.value, 10);
@@ -1907,6 +1953,7 @@ export function Settings({
                           <input
                             type="number"
                             min={1}
+                            data-settings-field="memoryInboxMaxItems"
                             value={memoryInboxMaxItems}
                             onChange={(event) => {
                               const next = Number.parseInt(event.target.value, 10);
@@ -1924,6 +1971,7 @@ export function Settings({
                           <input
                             type="number"
                             min={1}
+                            data-settings-field="memoryInboxTtlDays"
                             value={memoryInboxTtlDays}
                             onChange={(event) => {
                               const next = Number.parseInt(event.target.value, 10);
@@ -1941,6 +1989,7 @@ export function Settings({
                           <input
                             type="number"
                             min={1}
+                            data-settings-field="memoryInboxWritesPerMinute"
                             value={memoryInboxWritesPerMinute}
                             onChange={(event) => {
                               const next = Number.parseInt(event.target.value, 10);
@@ -1964,6 +2013,7 @@ export function Settings({
                               key={provider}
                               type="button"
                               data-edits-settings
+                              data-settings-field="embeddingsProvider"
                               onClick={() => setEmbeddingsProvider(provider)}
                               className={`rounded px-3 py-1.5 text-[13px] transition-colors ${
                                 embeddingsProvider === provider
@@ -1986,6 +2036,7 @@ export function Settings({
                             <Row label="Local embedding model">
                               <input
                                 type="text"
+                                data-settings-field="embeddingsLocalModel"
                                 value={embeddingsLocalModel}
                                 onChange={(event) => setEmbeddingsLocalModel(event.target.value)}
                                 className="w-64 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
@@ -2045,6 +2096,7 @@ export function Settings({
                             <Row label="OpenAI embedding model">
                             <input
                               type="text"
+                              data-settings-field="embeddingsOpenaiModel"
                               value={embeddingsOpenaiModel}
                               onChange={(event) => setEmbeddingsOpenaiModel(event.target.value)}
                                 className="w-64 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
