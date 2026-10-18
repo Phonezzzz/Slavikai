@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, TypedDict, cast
 
 from core.computer_activity_log import build_computer_activity_summary
+from core.decision.session_end import is_session_end_decision
 from server.ui_session_storage import (
     InMemoryUISessionStorage,
     PersistedFolder,
@@ -1971,10 +1972,46 @@ class UIHub:
 
     def _restore_sessions(self) -> None:
         migrated_session_ids: list[str] = []
+        recovered_session_ids: list[str] = []
         for item in self._storage.load_sessions():
             domains = split_persisted_session_domains(item)
             restored = legacy_session_from_domain_records(domains)
             decision = dict(restored.decision) if restored.decision is not None else None
+            messages = [dict(message) for message in restored.messages]
+            if (
+                is_session_end_decision(decision)
+                and decision is not None
+                and decision.get("status") == "executing"
+            ):
+                now = _utc_iso_now()
+                if decision.get("decision_type") == "end_session":
+                    expiry = decision.get("expires_at")
+                    expired = not isinstance(expiry, str) or self._parse_session_timestamp(
+                        expiry
+                    ) <= self._parse_session_timestamp(now)
+                    decision = {
+                        **decision,
+                        "status": "expired" if expired else "pending",
+                        "blocking": not expired,
+                        "updated_at": now,
+                    }
+                    notice = "Завершение сессии прервано перезапуском. Выбор можно повторить."
+                else:
+                    # Запись могла завершиться до сбоя. Не повторяем её без нового запроса.
+                    notice = (
+                        "Подтверждение Memory прервано перезапуском. Запись могла завершиться; "
+                        "проверьте Memory перед новым сохранением."
+                    )
+                    decision = {
+                        **decision,
+                        "status": "resolved",
+                        "blocking": False,
+                        "updated_at": now,
+                        "resolved_at": now,
+                        "summary": notice,
+                    }
+                messages.append(self.create_message(role="assistant", content=notice, lane="chat"))
+                recovered_session_ids.append(restored.session_id)
             last_decision_id: str | None = None
             if decision is not None:
                 decision_id = decision.get("id")
@@ -1983,7 +2020,7 @@ class UIHub:
             principal_id = self._normalize_persisted_principal_id(restored.principal_id)
             self._sessions[restored.session_id] = _SessionState(
                 principal_id=principal_id,
-                messages=[dict(message) for message in restored.messages],
+                messages=messages,
                 output_text=restored.output_text,
                 output_updated_at=restored.output_updated_at,
                 files=list(restored.files),
@@ -2013,6 +2050,13 @@ class UIHub:
                 migrated_session_ids.append(restored.session_id)
         for session_id in migrated_session_ids:
             self._persist_session_locked(session_id)
+        for session_id in recovered_session_ids:
+            try:
+                self._persist_session_locked(session_id)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception(
+                    "Recovered session decision persistence failed"
+                )
 
     def _restore_folders(self) -> None:
         migrated_folder_ids: list[str] = []

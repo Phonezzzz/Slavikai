@@ -531,3 +531,160 @@ def test_successful_memory_write_reports_success_when_later_decision_replaces_it
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("save", [False, True])
+@pytest.mark.parametrize("storage_failure", [False, True])
+def test_close_success_survives_notice_and_decision_persistence_failure(
+    tmp_path, monkeypatch, save, storage_failure
+):
+    import sqlite3
+
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+
+        def fail(*args, **kwargs):
+            raise sqlite3.OperationalError("synthetic disk I/O error")
+
+        try:
+            first = await _begin(client, sid)
+            decision = (
+                (await (await _choose(client, sid, first, "confirm")).json())["decision"]
+                if save
+                else first
+            )
+            if storage_failure:
+                close = agent.close_session_context
+
+                def close_then_fault():
+                    close()
+                    monkeypatch.setattr(hub._storage, "save_session", fail)
+
+                monkeypatch.setattr(agent, "close_session_context", close_then_fault)
+            else:
+                monkeypatch.setattr(hub, "append_message", fail)
+            response = await _choose(client, sid, decision, "confirm" if save else "reject")
+            assert response.status == 200, await response.text()
+            data = (await response.json())["resume"]["data"]
+            assert data["saved"] is save and data["closed"] is True
+            assert data["warnings"][0]["code"] == "session_notice_failed"
+            if storage_failure:
+                assert data["decision_persistence_failed"] is True
+            assert (await hub.get_session_decision(sid))["status"] == "resolved"
+            assert len(agent._canonical_store.list_atoms()) == len(syncs) == int(save)
+            assert agent.short_term == []
+            assert (
+                await _choose(client, sid, decision, "confirm" if save else "reject")
+            ).status == 409
+            assert len(syncs) == int(save)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_cancel_first_question_while_waiting_for_lock_publishes_nothing(tmp_path, monkeypatch):
+    from server.agent_provider import AgentScope
+
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+        registry = client.server.app["chat_cancellation_registry"]
+        start = registry.start
+        started = asyncio.Event()
+
+        async def mark_started(**kwargs):
+            generation = await start(**kwargs)
+            started.set()
+            return generation
+
+        monkeypatch.setattr(registry, "start", mark_started)
+        try:
+            lock = client.server.app["agent_provider"].lock_for(AgentScope("static", sid))
+            async with lock:
+                pending = asyncio.create_task(
+                    client.post(
+                        "/ui/api/chat/send",
+                        headers={"X-Slavik-Session": sid},
+                        json={"content": "/end-session"},
+                    )
+                )
+                await asyncio.wait_for(started.wait(), 2)
+                cancelled = await registry.request_cancel(sid)
+                assert cancelled is not None
+            response = await pending
+            assert response.status == 409
+            assert (await response.json())["error"]["code"] == "session_end_cancelled"
+            assert await hub.get_session_decision(sid) is None
+            assert len(await hub.get_messages(sid, lane="chat")) == 1
+            assert cancelled.generation.finished.is_set()
+            assert agent.short_term and brain.calls == syncs == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "stage", ["summary", "summary_expired", "memory_before_write", "memory_after_write"]
+)
+def test_restart_recovers_orphaned_end_session_without_replaying_memory(
+    tmp_path, monkeypatch, stage
+):
+    from server.ui_hub import UIHub
+    from server.ui_session_storage import SQLiteUISessionStorage
+
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+        storage = SQLiteUISessionStorage(tmp_path / "ui-restart.db")
+        try:
+            first = await _begin(client, sid)
+            if stage.startswith("summary"):
+                decision = first
+                if stage == "summary_expired":
+                    decision = {**decision, "expires_at": "1970-01-01T00:00:00+00:00"}
+            else:
+                decision = (await (await _choose(client, sid, first, "confirm")).json())["decision"]
+                if stage == "memory_after_write":
+                    saved = agent.apply_confirmed_memory_save(
+                        decision["proposed_action"], source_kind="session.summary", source_id=sid
+                    )
+                    assert saved.ok
+            await hub.set_session_decision(sid, {**decision, "status": "executing"})
+            principal = await hub.get_session_principal_id(sid)
+            assert isinstance(principal, str)
+            for session in await hub.export_sessions(principal):
+                storage.save_session(session)
+            restored = UIHub(storage=storage)
+            client.server.app["ui_hub"] = restored
+            recovered = await restored.get_session_decision(sid)
+            assert recovered["id"] == decision["id"]
+            if stage == "summary_expired":
+                assert recovered["status"] == "expired" and recovered["blocking"] is False
+                assert (await _begin(client, sid))["id"] != recovered["id"]
+            elif stage == "summary":
+                assert recovered["status"] == "pending"
+                response = await _choose(client, sid, recovered, "abort")
+                assert response.status == 200
+            else:
+                assert recovered["status"] == "resolved" and recovered["blocking"] is False
+                response = await _choose(client, sid, recovered, "confirm")
+                assert response.status == 409
+                assert (
+                    "могла завершиться"
+                    in (await restored.get_messages(sid, lane="chat"))[-1]["content"]
+                )
+                assert (await _begin(client, sid))["decision_type"] == "end_session"
+            expected_writes = int(stage == "memory_after_write")
+            assert len(agent._canonical_store.list_atoms()) == len(syncs) == expected_writes
+            assert len(brain.calls) == int(not stage.startswith("summary"))
+            assert any(
+                message["content"] == "Обсудим Memory"
+                for message in await restored.get_messages(sid, lane="chat")
+            )
+        finally:
+            await client.close()
+
+    asyncio.run(run())

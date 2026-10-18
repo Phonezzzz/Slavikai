@@ -10,6 +10,7 @@ from aiohttp import web
 
 from core.agent_computer import execute_local_commit
 from core.approval_policy import ApprovalRequired
+from core.decision.session_end import is_session_end_decision
 from core.desktop_policy import (
     DesktopApprovalRule,
     DesktopApprovalScope,
@@ -22,7 +23,7 @@ from server.http.common.idempotency import fingerprint_json_payload
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
-from server.http.common.session_end import is_session_end_decision, resolve_session_end
+from server.http.common.session_end import resolve_session_end
 from server.http.common.workspace_git import (
     git_commit,
     git_stage,
@@ -1815,13 +1816,30 @@ async def _complete_ui_decision(
                 "resume": resume,
             }
         )
-    resolved = _decision_with_status(executing, status="resolved", resolved=True)
-    updated_resolved, latest_resolved = await hub.transition_session_decision(
-        session_id,
-        expected_id=decision_id,
-        expected_status="executing",
-        next_decision=resolved,
+    session_end_result_data = resume.get("data")
+    completed_session_end = (
+        is_session_end_decision(current_decision)
+        and resume.get("ok") is True
+        and isinstance(session_end_result_data, dict)
+        and session_end_result_data.get("closed") is True
     )
+    resolved = _decision_with_status(executing, status="resolved", resolved=True)
+    try:
+        updated_resolved, latest_resolved = await hub.transition_session_decision(
+            session_id,
+            expected_id=decision_id,
+            expected_status="executing",
+            next_decision=resolved,
+        )
+    except Exception:  # noqa: BLE001
+        if not completed_session_end:
+            raise
+        request.app["http_api_logger"].exception("Session closed; decision persistence failed")
+        if isinstance(session_end_result_data, dict):
+            session_end_result_data["decision_persistence_failed"] = True
+        updated_resolved = False
+        latest_resolved = await hub.get_session_decision(session_id)
+
     normalized_resolved = _normalize_ui_decision(latest_resolved, session_id=session_id)
     if not updated_resolved:
         nested_chat_resume = (
@@ -1829,13 +1847,6 @@ async def _complete_ui_decision(
             and current_source_endpoint
             in {"chat.send", "workspace.send", "chat.tool_continue", "plan.execute_runner"}
             and resume.get("ok") is True
-        )
-        session_end_result_data = resume.get("data")
-        completed_session_end = (
-            is_session_end_decision(current_decision)
-            and resume.get("ok") is True
-            and isinstance(session_end_result_data, dict)
-            and session_end_result_data.get("closed") is True
         )
         # Закрытие уже выполнено; запись (если была) подтверждена ToolResult.
         if decision_type == "agent_decision" or nested_chat_resume or completed_session_end:

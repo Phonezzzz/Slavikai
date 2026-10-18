@@ -8,7 +8,7 @@ from typing import cast
 from aiohttp import web
 
 from core.decision.memory_save import build_memory_save_packet
-from core.decision.session_end import build_session_end_packet
+from core.decision.session_end import build_session_end_packet, is_session_end_decision
 from server.agent_provider import ScopedAgentProvider
 from server.http.common.chat_cancellation import (
     ChatCancellationRegistry,
@@ -23,17 +23,6 @@ from server.http.common.runtime_contract import (
     _resolve_agent,
 )
 from shared.models import JSONValue
-
-
-def is_session_end_decision(decision: dict[str, JSONValue] | None) -> bool:
-    if decision is None:
-        return False
-    context = decision.get("context")
-    return decision.get("decision_type") == "end_session" or (
-        decision.get("decision_type") == "memory_save"
-        and isinstance(context, dict)
-        and context.get("source_endpoint") == "session.end"
-    )
 
 
 def pending_session_end(decision: dict[str, JSONValue] | None) -> bool:
@@ -92,13 +81,37 @@ async def begin_session_end(
                 expected_id=previous_id if isinstance(previous_id, str) else None,
                 expected_status=previous_status if isinstance(previous_status, str) else None,
                 next_decision=decision,
+                cancellation_tokens=(generation.token,),
             )
             if not started:
-                return {"error": "decision_pending"}
+                return {
+                    "error": "session_end_cancelled"
+                    if generation.token.is_set()
+                    else "decision_pending"
+                }
             await hub.append_message(session_id, message, lane="chat")
             return {"decision": decision}
     finally:
         await registry.finish(generation)
+
+
+async def _publish_close_notice(
+    request: web.Request, session_id: str, text: str
+) -> list[JSONValue]:
+    hub = request.app["ui_hub"]
+    try:
+        await hub.append_message(
+            session_id, hub.create_message(role="assistant", content=text, lane="chat"), lane="chat"
+        )
+    except Exception:  # noqa: BLE001
+        request.app["http_api_logger"].exception("Session closed; notice publication failed")
+        return [
+            {
+                "code": "session_notice_failed",
+                "message": "Завершение выполнено, но служебное сообщение не удалось сохранить.",
+            }
+        ]
+    return []
 
 
 async def resolve_session_end(
@@ -157,16 +170,16 @@ async def resolve_session_end(
             if not is_preview and choice == "reject":
                 if agent is not None:
                     agent.close_session_context()
-                await hub.append_message(
+                warnings = await _publish_close_notice(
+                    request,
                     session_id,
-                    hub.create_message(
-                        role="assistant",
-                        content="Сессия завершена без сохранения в Memory. История чата сохранена.",
-                        lane="chat",
-                    ),
-                    lane="chat",
+                    "Сессия завершена без сохранения в Memory. История чата сохранена.",
                 )
-                return {**result, "ok": True, "data": {"closed": True, "saved": False}}
+                data: dict[str, JSONValue] = {"closed": True, "saved": False}
+                if warnings:
+                    data["warnings"] = warnings
+                return {**result, "ok": True, "data": data}
+
             if agent is None:
                 return {**result, "error": "model_not_selected"}
             categories = await request.app["session_store"].get_categories(
@@ -250,15 +263,15 @@ async def resolve_session_end(
             if not saved.ok:
                 return {**result, "error": "memory_write_failed"}
             agent.close_session_context()
-            await hub.append_message(
+            warnings = await _publish_close_notice(
+                request,
                 session_id,
-                hub.create_message(
-                    role="assistant",
-                    content="Данные сохранены в Memory. Сессия завершена. История чата сохранена.",
-                    lane="chat",
-                ),
-                lane="chat",
+                "Данные сохранены в Memory. Сессия завершена. История чата сохранена.",
             )
-            return {**result, "ok": True, "data": {**saved.data, "closed": True, "saved": True}}
+            data = {**saved.data, "closed": True, "saved": True}
+            if warnings:
+                data["warnings"] = warnings
+            return {**result, "ok": True, "data": data}
+
     finally:
         await registry.finish(generation)

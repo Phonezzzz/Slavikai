@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime
 
 from core.decision.models import DecisionAction, DecisionOption, DecisionPacket, DecisionReason
+from shared.models import JSONValue
 
 
 def build_session_end_packet() -> DecisionPacket:
@@ -23,4 +24,15 @@ def build_session_end_packet() -> DecisionPacket:
         default_option_id="cancel",
         decision_type="end_session",
         policy={"require_explicit_memory_confirmation": True},
+    )
+
+
+def is_session_end_decision(decision: dict[str, JSONValue] | None) -> bool:
+    if decision is None:
+        return False
+    context = decision.get("context")
+    return decision.get("decision_type") == "end_session" or (
+        decision.get("decision_type") == "memory_save"
+        and isinstance(context, dict)
+        and context.get("source_endpoint") == "session.end"
     )
