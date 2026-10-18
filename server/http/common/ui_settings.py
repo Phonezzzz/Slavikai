@@ -196,7 +196,9 @@ def _delete_provider_instance(provider: str, *, ui_settings_path: Path | None = 
     _save_ui_settings_blob(payload, ui_settings_path=path)
 
 
-def _probe_openai_models(base_url: str, api_key: str) -> tuple[list[str], str, str | None]:
+def _probe_openai_models(
+    base_url: str, api_key: str, *, discovery_only: bool = False
+) -> tuple[list[str], str, str | None]:
     try:
         response = requests.get(
             f"{base_url}/models",
@@ -216,8 +218,8 @@ def _probe_openai_models(base_url: str, api_key: str) -> tuple[list[str], str, s
                 "Доступ к /models запрещён. Можно ввести model ID вручную.",
             )
         response.raise_for_status()
-        models = _parse_models_payload(response.json())
-        if models:
+        models = _parse_models_payload(response.json(), discovery_only=discovery_only)
+        if models or discovery_only:
             return models, "ready", None
         return [], "models_unavailable", "Список моделей пуст. Можно ввести model ID вручную."
     except (requests.ConnectionError, requests.Timeout):
@@ -356,19 +358,27 @@ def _provider_auth_headers(
     return {}, f"Неизвестный провайдер: {provider}"
 
 
-def _parse_models_payload(payload: object) -> list[str]:
+def _parse_models_payload(payload: object, *, discovery_only: bool = False) -> list[str]:
     if not isinstance(payload, dict):
+        if discovery_only:
+            raise ValueError("Некорректный формат каталога моделей.")
         return []
     data = payload.get("data")
     if not isinstance(data, list):
+        if discovery_only:
+            raise ValueError("Некорректный формат каталога моделей.")
         return []
     models: list[str] = []
     for item in data:
         if not isinstance(item, dict):
+            if discovery_only:
+                raise ValueError("Некорректная запись каталога моделей.")
             continue
         model_id = item.get("id")
         if isinstance(model_id, str) and model_id.strip():
             models.append(model_id.strip())
+        elif discovery_only:
+            raise ValueError("Некорректная запись каталога моделей.")
     unique: list[str] = []
     for model_id in models:
         if model_id not in unique:
@@ -388,7 +398,9 @@ def _fetch_provider_models(
         key = _resolve_provider_api_key(provider, api_keys_path=api_keys_path)
         if not key:
             return [], "Для провайдера не сохранён API-ключ."
-        models, status, error = _probe_openai_models(instance["base_url"], key)
+        models, status, error = _probe_openai_models(
+            instance["base_url"], key, discovery_only=discovery_only
+        )
         return models, error if status != "ready" else None
     if provider == "inception" and not discovery_only:
         return list(INCEPTION_DOCS_MODELS), None
@@ -409,23 +421,12 @@ def _fetch_provider_models(
             if fallback:
                 return [fallback], None
         return [], f"Не удалось получить список моделей провайдера {provider}: {exc}"
-    if discovery_only:
-        try:
-            payload = response.json()
-        except ValueError:
-            return [], f"Некорректный JSON каталога моделей провайдера {provider}."
-        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-            return [], f"Некорректный формат каталога моделей провайдера {provider}."
-        if any(
-            not isinstance(item, dict)
-            or not isinstance(item.get("id"), str)
-            or not item["id"].strip()
-            for item in payload["data"]
-        ):
-            return [], f"Некорректные записи каталога моделей провайдера {provider}."
-    else:
-        payload = response.json()
-    models = _parse_models_payload(payload)
+    try:
+        models = _parse_models_payload(response.json(), discovery_only=discovery_only)
+    except ValueError:
+        if not discovery_only:
+            raise
+        return [], f"Некорректный каталог моделей провайдера {provider}."
     if not models and provider == "local" and allow_local_fallback and not discovery_only:
         fallback = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default").strip()
         if fallback:

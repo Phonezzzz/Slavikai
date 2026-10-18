@@ -216,7 +216,10 @@ async def handle_ui_models(request: web.Request) -> web.Response:
             key = api._resolve_provider_api_key(provider)
             if key:
                 models, catalog_status, error_text = await asyncio.to_thread(
-                    ui_settings._probe_openai_models, instance["base_url"], key
+                    ui_settings._probe_openai_models,
+                    instance["base_url"],
+                    key,
+                    discovery_only=discovery_only,
                 )
             else:
                 models, catalog_status, error_text = (

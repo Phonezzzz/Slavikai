@@ -350,7 +350,9 @@ def test_settings_models_skip_custom_probe(monkeypatch: pytest.MonkeyPatch, tmp_
 
     probed_urls: list[str] = []
 
-    def fake_probe(base_url: str, api_key: str) -> tuple[list[str], str, str | None]:
+    def fake_probe(
+        base_url: str, api_key: str, *, discovery_only: bool = False
+    ) -> tuple[list[str], str, str | None]:
         probed_urls.append(base_url)
         assert api_key == "probe-secret"
         return ["custom/model"], "ready", None

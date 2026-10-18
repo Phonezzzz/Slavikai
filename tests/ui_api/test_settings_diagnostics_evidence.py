@@ -52,7 +52,7 @@ def test_tts_reports_configuration_without_speech_probe(
 
 @pytest.mark.parametrize("provider", ["local", "inception"])
 @pytest.mark.parametrize(
-    "outcome", ["catalog", "empty", "transport", "auth", "malformed", "shape", "entry"]
+    "outcome", ["catalog", "empty", "transport", "auth", "malformed", "shape", "entry", "mixed"]
 )
 def test_discovery_catalog_evidence_excludes_configured_fallback(
     monkeypatch, provider: str, outcome: str
@@ -69,6 +69,8 @@ def test_discovery_catalog_evidence_excludes_configured_fallback(
         def json(self):
             if outcome == "malformed":
                 raise ValueError("invalid catalog JSON")
+            if outcome == "mixed":
+                return {"data": [{"id": "valid-model"}, {"name": "missing-id"}]}
             if outcome == "entry":
                 return {"data": [{"name": "missing-id"}]}
             if outcome == "shape":
@@ -203,6 +205,84 @@ def test_existing_consumers_keep_valid_ids_from_mixed_catalog(
                 )
                 assert response.status == 200
                 assert (await response.json())["settings"]["model"]["model"] == "valid-model"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "catalog",
+        "empty",
+        "transport",
+        "auth",
+        "malformed",
+        "shape",
+        "entry",
+        "mixed",
+        "legacy_mixed",
+    ],
+)
+def test_custom_catalog_uses_the_same_discovery_validation(
+    monkeypatch, tmp_path: Path, outcome: str
+) -> None:
+    from server.http.common import ui_settings
+
+    settings_path = tmp_path / "settings.json"
+    keys_path = tmp_path / "keys.json"
+    monkeypatch.setattr(ui_settings, "UI_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr("server.http_api.API_KEYS_PATH", keys_path)
+    provider = ui_settings._save_provider_instance(
+        display_name="Example", base_url="https://example.test/v1"
+    )
+    save_api_keys({provider: "custom-test-key"}, path=keys_path)
+    calls: list[str] = []
+
+    class Response:
+        status_code = 401 if outcome == "auth" else 200
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self):
+            if outcome == "malformed":
+                raise ValueError("invalid JSON")
+            if outcome == "shape":
+                return {"unexpected": []}
+            if outcome == "entry":
+                return {"data": [{"name": "missing-id"}]}
+            if outcome in {"mixed", "legacy_mixed"}:
+                return {"data": [{"id": "valid-model"}, {"name": "missing-id"}]}
+            return {"data": [{"id": "valid-model"}]} if outcome == "catalog" else {"data": []}
+
+    def get(url, **kwargs):
+        calls.append(url)
+        assert kwargs["allow_redirects"] is False
+        assert kwargs["headers"] == {"Authorization": "Bearer custom-test-key"}
+        if outcome == "transport":
+            raise requests.ConnectionError("offline")
+        return Response()
+
+    monkeypatch.setattr(ui_settings.requests, "get", get)
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            query = "" if outcome == "legacy_mixed" else "&discovery_only=1"
+            response = await client.get(f"/ui/api/models?provider={provider}{query}")
+            assert response.status == 200
+            item = (await response.json())["providers"][0]
+            success = outcome in {"catalog", "empty", "legacy_mixed"}
+            assert item["models"] == (
+                ["valid-model"] if outcome in {"catalog", "legacy_mixed"} else []
+            )
+            assert item["catalog_source"] == ("endpoint" if success else "unverified")
+            assert bool(item["error"]) is not success
+            assert "custom-test-key" not in json.dumps(item)
+            assert len(calls) == 1
         finally:
             await client.close()
 
