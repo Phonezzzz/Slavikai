@@ -230,7 +230,7 @@ async def handle_ui_models(request: web.Request) -> web.Response:
                     api._fetch_provider_models,
                     provider,
                     allow_local_fallback=False,
-                    allow_documented_fallback=not discovery_only,
+                    discovery_only=discovery_only,
                 )
             else:
                 models, error_text = await asyncio.to_thread(api._fetch_provider_models, provider)

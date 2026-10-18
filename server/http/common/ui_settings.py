@@ -381,7 +381,7 @@ def _fetch_provider_models(
     *,
     api_keys_path: Path = API_KEYS_PATH,
     allow_local_fallback: bool = True,
-    allow_documented_fallback: bool = True,
+    discovery_only: bool = False,
 ) -> tuple[list[str], str | None]:
     instance = _load_provider_instance(provider)
     if instance is not None:
@@ -390,7 +390,7 @@ def _fetch_provider_models(
             return [], "Для провайдера не сохранён API-ключ."
         models, status, error = _probe_openai_models(instance["base_url"], key)
         return models, error if status != "ready" else None
-    if provider == "inception" and allow_documented_fallback:
+    if provider == "inception" and not discovery_only:
         return list(INCEPTION_DOCS_MODELS), None
 
     try:
@@ -404,16 +404,16 @@ def _fetch_provider_models(
         response = requests.get(url, headers=headers, timeout=MODEL_FETCH_TIMEOUT)
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001
-        if provider == "local" and allow_local_fallback:
+        if provider == "local" and allow_local_fallback and not discovery_only:
             fallback = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default").strip()
             if fallback:
                 return [fallback], None
         return [], f"Не удалось получить список моделей провайдера {provider}: {exc}"
-    try:
-        payload = response.json()
-    except ValueError:
-        return [], f"Некорректный JSON каталога моделей провайдера {provider}."
-    if not allow_local_fallback:
+    if discovery_only:
+        try:
+            payload = response.json()
+        except ValueError:
+            return [], f"Некорректный JSON каталога моделей провайдера {provider}."
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
             return [], f"Некорректный формат каталога моделей провайдера {provider}."
         if any(
@@ -423,8 +423,10 @@ def _fetch_provider_models(
             for item in payload["data"]
         ):
             return [], f"Некорректные записи каталога моделей провайдера {provider}."
+    else:
+        payload = response.json()
     models = _parse_models_payload(payload)
-    if not models and provider == "local" and allow_local_fallback:
+    if not models and provider == "local" and allow_local_fallback and not discovery_only:
         fallback = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default").strip()
         if fallback:
             models = [fallback]

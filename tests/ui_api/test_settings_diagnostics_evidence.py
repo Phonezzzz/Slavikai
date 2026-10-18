@@ -167,3 +167,43 @@ def test_existing_strict_inception_picker_keeps_documented_options(monkeypatch) 
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["picker", "save"])
+def test_existing_consumers_keep_valid_ids_from_mixed_catalog(
+    monkeypatch, tmp_path: Path, operation: str
+) -> None:
+    monkeypatch.setattr("server.http_api.MODEL_CONFIG_PATH", tmp_path / "models.json")
+    monkeypatch.setattr("server.http_api.UI_SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr("server.http_api.API_KEYS_PATH", tmp_path / "keys.json")
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self):
+            return {"data": [{"id": "valid-model"}, {"name": "missing-id"}, {"id": ""}]}
+
+    monkeypatch.setattr(
+        "server.http.common.ui_settings.requests.get", lambda *args, **kwargs: Response()
+    )
+
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            if operation == "picker":
+                response = await client.get("/ui/api/models?provider=local&strict=1")
+                item = (await response.json())["providers"][0]
+                assert item["models"] == ["valid-model"]
+                assert item["error"] is None
+            else:
+                response = await client.post(
+                    "/ui/api/settings",
+                    json={"model": {"provider": "local", "model": "valid-model"}},
+                )
+                assert response.status == 200
+                assert (await response.json())["settings"]["model"]["model"] == "valid-model"
+        finally:
+            await client.close()
+
+    asyncio.run(run())

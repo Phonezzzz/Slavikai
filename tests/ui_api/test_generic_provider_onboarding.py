@@ -358,7 +358,7 @@ def test_settings_models_skip_custom_probe(monkeypatch: pytest.MonkeyPatch, tmp_
     def fake_fetch_provider_models(
         provider_name: str,
         allow_local_fallback: bool = True,
-        allow_documented_fallback: bool = True,
+        discovery_only: bool = False,
     ) -> tuple[list[str], str | None]:
         return [f"{provider_name}-model"], None
 
