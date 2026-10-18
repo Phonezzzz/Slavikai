@@ -1679,6 +1679,12 @@ async def _complete_ui_decision(
         }
 
     executing = _decision_with_status(current_decision, status="executing")
+    if is_session_end_decision(current_decision):
+        session_end_context_raw = executing.get("context")
+        session_end_context = (
+            dict(session_end_context_raw) if isinstance(session_end_context_raw, dict) else {}
+        )
+        executing["context"] = {**session_end_context, "session_end_choice": choice}
     updated, latest = await hub.transition_session_decision(
         session_id,
         expected_id=decision_id,

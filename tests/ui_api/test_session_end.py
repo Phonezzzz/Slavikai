@@ -663,6 +663,9 @@ def test_restart_recovers_orphaned_end_session_without_replaying_memory(
             assert recovered["id"] == decision["id"]
             if stage == "summary_expired":
                 assert recovered["status"] == "expired" and recovered["blocking"] is False
+                notice = (await restored.get_messages(sid, lane="chat"))[-1]["content"]
+                assert "Отправьте /end-session снова" in notice
+                assert "Выбор можно повторить" not in notice
                 assert (await _begin(client, sid))["id"] != recovered["id"]
             elif stage == "summary":
                 assert recovered["status"] == "pending"
@@ -684,6 +687,104 @@ def test_restart_recovers_orphaned_end_session_without_replaying_memory(
                 message["content"] == "Обсудим Memory"
                 for message in await restored.get_messages(sid, lane="chat")
             )
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_cancel_after_latest_read_preserves_context_without_memory(tmp_path, monkeypatch):
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+        original = hub.get_session_decision
+        registry = client.server.app["chat_cancellation_registry"]
+        cancelled = []
+
+        async def cancel_after_read(session_id):
+            decision = await original(session_id)
+            if decision and decision.get("status") == "executing" and not cancelled:
+                cancelled.append(await registry.request_cancel(session_id))
+            return decision
+
+        try:
+            first = await _begin(client, sid)
+            monkeypatch.setattr(hub, "get_session_decision", cancel_after_read)
+            response = await _choose(client, sid, first, "reject")
+            assert response.status == 409, await response.text()
+            assert (await response.json())["error"]["code"] == "session_end_cancelled"
+            assert cancelled[0] is not None
+            assert cancelled[0].generation.finished.is_set()
+            assert agent.short_term and brain.calls == syncs == []
+            assert (await original(sid))["status"] == "pending"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("choice,preview", [("reject", False), ("abort", False), ("reject", True)])
+def test_restart_after_disk_fault_preserves_durable_no_save_choice(
+    tmp_path, monkeypatch, choice, preview
+):
+    import sqlite3
+
+    from server.ui_hub import UIHub
+    from server.ui_session_storage import SQLiteUISessionStorage
+
+    async def run():
+        agent, brain, syncs = _agent(tmp_path, monkeypatch)
+        client, sid, hub = await _setup(agent)
+        storage = SQLiteUISessionStorage(tmp_path / "close-fault.db")
+        try:
+            first = await _begin(client, sid)
+            if preview:
+                first = (await (await _choose(client, sid, first, "confirm")).json())["decision"]
+            principal = await hub.get_session_principal_id(sid)
+            for session in await hub.export_sessions(principal):
+                storage.save_session(session)
+            hub._storage = storage
+            save = storage.save_session
+            transition = hub.transition_session_decision
+
+            def fail(*args, **kwargs):
+                raise sqlite3.OperationalError("synthetic disk I/O error")
+
+            async def fault_after_durable_choice(*args, **kwargs):
+                result = await transition(*args, **kwargs)
+                if kwargs["next_decision"]["status"] == "executing":
+                    monkeypatch.setattr(storage, "save_session", fail)
+                return result
+
+            monkeypatch.setattr(hub, "transition_session_decision", fault_after_durable_choice)
+            # Отмена не имеет необратимого эффекта; ошибка диска может прервать её HTTP-ответ.
+            if choice == "abort" or preview:
+                await _choose(client, sid, first, choice)
+            else:
+                response = await _choose(client, sid, first, choice)
+                assert response.status == 200, await response.text()
+                assert (await response.json())["resume"]["data"]["closed"] is True
+                assert agent.short_term == []
+            monkeypatch.setattr(storage, "save_session", save)
+            durable = next(item for item in storage.load_sessions() if item.session_id == sid)
+            assert durable.decision["status"] == "executing"
+            assert durable.decision["context"]["session_end_choice"] == choice
+            restored = UIHub(storage=storage)
+            decision = await restored.get_session_decision(sid)
+            assert decision["status"] == "resolved" and decision["blocking"] is False
+            assert await restored.get_session_principal_id(sid) == principal
+            history = await restored.get_messages(sid, lane="chat")
+            assert (
+                "без сохранения" in history[-1]["content"]
+                if choice == "reject" and not preview
+                else "отменено" in history[-1]["content"]
+            )
+            assert len(brain.calls) == int(preview) and syncs == []
+            assert agent._canonical_store.list_atoms() == []
+            again = UIHub(storage=storage)
+            assert len(await again.get_messages(sid, lane="chat")) == len(history)
+            client.server.app["ui_hub"] = restored
+            assert (await _choose(client, sid, first, "confirm")).status == 409
         finally:
             await client.close()
 

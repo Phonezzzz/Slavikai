@@ -1984,7 +1984,26 @@ class UIHub:
                 and decision.get("status") == "executing"
             ):
                 now = _utc_iso_now()
-                if decision.get("decision_type") == "end_session":
+                context = decision.get("context")
+                choice = context.get("session_end_choice") if isinstance(context, dict) else None
+                if choice in ("reject", "abort"):
+                    notice = (
+                        "Сессия завершена без сохранения в Memory. История чата сохранена."
+                        if decision.get("decision_type") == "end_session" and choice == "reject"
+                        else (
+                            "Завершение сессии отменено. Разговор доступен; "
+                            "запись Memory не выполнялась."
+                        )
+                    )
+                    decision = {
+                        **decision,
+                        "status": "resolved",
+                        "blocking": False,
+                        "updated_at": now,
+                        "resolved_at": now,
+                        "summary": notice,
+                    }
+                elif decision.get("decision_type") == "end_session":
                     expiry = decision.get("expires_at")
                     expired = not isinstance(expiry, str) or self._parse_session_timestamp(
                         expiry
@@ -1995,7 +2014,11 @@ class UIHub:
                         "blocking": not expired,
                         "updated_at": now,
                     }
-                    notice = "Завершение сессии прервано перезапуском. Выбор можно повторить."
+                    notice = (
+                        "Срок выбора завершения истёк. Отправьте /end-session снова."
+                        if expired
+                        else "Завершение сессии прервано перезапуском. Выбор можно повторить."
+                    )
                 else:
                     # Запись могла завершиться до сбоя. Не повторяем её без нового запроса.
                     notice = (

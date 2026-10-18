@@ -165,6 +165,8 @@ async def resolve_session_end(
                 or latest.get("status") != "executing"
             ):
                 return {**result, "error": "session_end_state_changed"}
+            if cancellation.is_set() or generation.token.is_set():
+                return {**result, "error": "session_end_cancelled"}
             if choice == "abort" or (is_preview and choice == "reject"):
                 return {**result, "ok": True, "data": {"closed": False, "saved": False}}
             if not is_preview and choice == "reject":
