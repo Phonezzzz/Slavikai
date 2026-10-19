@@ -327,3 +327,82 @@ def test_environment_api_key_takes_priority_over_saved_file(
 
     assert http_api._resolve_provider_api_key("openrouter") == "environment-key"
     assert http_api._provider_api_key_source("openrouter") == "env"
+
+
+def test_default_model_update_does_not_reconfigure_existing_scoped_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from server.agent_provider import AgentScope, ScopedAgentProvider
+
+    _isolate_settings_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider, **kwargs: (["model-a", "model-b"], None),
+    )
+
+    async def run() -> None:
+        agents: list[CaptureConfigAgent] = []
+
+        def factory(scope, config):
+            agent = CaptureConfigAgent()
+            agent.reconfigure_models(config, persist=False)
+            agents.append(agent)
+            return agent
+
+        provider = ScopedAgentProvider(factory=factory)
+        app = create_app(
+            agent=DummyAgent(),
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(
+                api_token=TEST_API_TOKEN,
+                allow_unauth_local=False,
+                browser_auth_mode="token",
+            ),
+        )
+        app["agent_provider"] = provider
+        client = TestClient(TestServer(app), headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        try:
+            first = await client.post(
+                "/ui/api/settings",
+                json={"model": {"provider": "local", "model": "model-a"}},
+            )
+            assert first.status == 200
+            await first.read()
+            sessions = []
+            for _ in range(2):
+                response = await client.post("/ui/api/sessions")
+                assert response.status == 200
+                sessions.append((await response.json())["session"]["session_id"])
+            state = app["runtime_model_state"]
+            original = await state.get_global_main()
+            for principal in ("owner", "member"):
+                for session in sessions:
+                    await provider.get_for_current_task(AgentScope(principal, session), original)
+            assert len(agents) == 4
+            assert all(agent.last_model == "model-a" for agent in agents)
+
+            updated = await client.post(
+                "/ui/api/settings",
+                json={"model": {"provider": "local", "model": "model-b"}},
+            )
+            assert updated.status == 200
+            await updated.read()
+            # Проверяем до следующего request: resolver мог бы скрыть ошибочный broadcast.
+            assert all(agent.last_model == "model-a" for agent in agents)
+            for session in sessions:
+                assert (await state.get_session_override(session)).model == "model-a"
+                assert (
+                    await app["runtime_model_resolver"].resolve_main(session)
+                ).model == "model-a"
+                assert (await app["ui_hub"].get_session_model(session))["model"] == "model-a"
+            created = await client.post("/ui/api/sessions")
+            assert created.status == 200
+            new_session = (await created.json())["session"]
+            assert new_session["selected_model"] == {"provider": "local", "model": "model-b"}
+            assert (await state.get_global_main()).model == "model-b"
+        finally:
+            await client.close()
+
+    asyncio.run(run())

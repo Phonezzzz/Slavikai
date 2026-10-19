@@ -746,19 +746,6 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 RuntimeModelStateProtocol, request.app["runtime_model_state"]
             )
             await runtime_model_state.set_global_main(default_model)
-            agent_provider = cast(
-                ScopedAgentProvider[api.AgentProtocol], request.app["agent_provider"]
-            )
-
-            def _apply_main_model(agent: api.AgentProtocol) -> None:
-                agent.reconfigure_models(
-                    default_model,
-                    main_api_key=api._resolve_provider_api_key(model_provider),
-                    persist=False,
-                )
-
-            failures = await agent_provider.apply_to_existing(_apply_main_model)
-            _log_agent_apply_failures("main_model", failures)
 
     if next_embeddings_settings is not None:
         agent_provider = cast(ScopedAgentProvider[api.AgentProtocol], request.app["agent_provider"])
