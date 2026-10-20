@@ -287,6 +287,7 @@ class UIHub:
         legacy_principal_id: str = DEFAULT_LEGACY_PRINCIPAL_ID,
         legacy_principal_aliases: Collection[str] = (),
         on_session_pruned: Callable[[str, str], None] | None = None,
+        default_model_getter: Callable[[], tuple[str, str] | None] | None = None,
     ) -> None:
         self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
         normalized_legacy_principal = legacy_principal_id.strip()
@@ -328,11 +329,19 @@ class UIHub:
             if event_buffer_ttl_seconds > 0
             else DEFAULT_EVENT_BUFFER_TTL_SECONDS
         )
+        self._default_model_getter = default_model_getter
         self._on_session_pruned = on_session_pruned
         self._lock = asyncio.Lock()
         self._restore_sessions()
         self._restore_folders()
         self._reconcile_session_folders()
+
+    def _new_session_state(self, principal_id: str) -> _SessionState:
+        state = _SessionState(principal_id=principal_id)
+        selected = self._default_model_getter() if self._default_model_getter else None
+        if selected is not None:
+            state.model_provider, state.model_id = selected
+        return state
 
     async def get_or_create_session(self, session_id: str | None, principal_id: str) -> str:
         normalized = session_id.strip() if session_id else ""
@@ -342,7 +351,7 @@ class UIHub:
             if normalized:
                 state = self._sessions.get(normalized)
                 if state is None:
-                    self._sessions[normalized] = _SessionState(principal_id=normalized_principal)
+                    self._sessions[normalized] = self._new_session_state(normalized_principal)
                     self._persist_session_locked(normalized)
                 elif state.principal_id != normalized_principal:
                     raise PermissionError("session belongs to another principal")
@@ -350,7 +359,7 @@ class UIHub:
             new_id = uuid.uuid4().hex
             while new_id in self._sessions:
                 new_id = uuid.uuid4().hex
-            self._sessions[new_id] = _SessionState(principal_id=normalized_principal)
+            self._sessions[new_id] = self._new_session_state(normalized_principal)
             self._persist_session_locked(new_id)
             self._prune_sessions_locked(keep_session_id=new_id)
             return new_id

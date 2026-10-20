@@ -392,7 +392,6 @@ def test_default_model_update_does_not_reconfigure_existing_scoped_agents(
             # Проверяем до следующего request: resolver мог бы скрыть ошибочный broadcast.
             assert all(agent.last_model == "model-a" for agent in agents)
             for session in sessions:
-                assert (await state.get_session_override(session)).model == "model-a"
                 assert (
                     await app["runtime_model_resolver"].resolve_main(session)
                 ).model == "model-a"
@@ -478,5 +477,53 @@ def test_plan_model_is_restored_from_persisted_session_after_default_change(
             assert agent.last_model == "model-a"
         finally:
             await restarted.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        ("/ui/api/chat/send", {"content": "first answer"}),
+        ("/ui/api/mode", {"mode": "plan"}),
+    ],
+)
+def test_auto_created_ui_session_keeps_creation_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    endpoint,
+    payload,
+) -> None:
+    _isolate_settings_paths(monkeypatch, tmp_path)
+
+    async def run() -> None:
+        from llm.types import ModelConfig
+
+        agent = CaptureConfigAgent()
+        client = await _create_client(agent)
+        try:
+            state = client.app["runtime_model_state"]
+            await state.set_global_main(ModelConfig(provider="local", model="model-a"))
+            created = await client.post(endpoint, json=payload)
+            assert created.status == 200, await created.text()
+            body = await created.json()
+            session_id = body["session_id"]
+            await state.set_global_main(ModelConfig(provider="local", model="model-b"))
+            assert await client.app["ui_hub"].get_session_model(session_id) == {
+                "provider": "local",
+                "model": "model-a",
+            }
+            assert (
+                await client.app["runtime_model_resolver"].resolve_main(session_id)
+            ).model == "model-a"
+            if endpoint == "/ui/api/chat/send":
+                repeated = await client.post(
+                    endpoint, headers={"X-Slavik-Session": session_id}, json=payload
+                )
+                assert repeated.status == 200, await repeated.text()
+                await repeated.read()
+                assert agent.last_model == "model-a"
+        finally:
+            await client.close()
 
     asyncio.run(run())

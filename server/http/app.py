@@ -193,8 +193,14 @@ def create_app(
         api.PROJECT_ROOT / ".run" / "ui_sessions.db",
     )
     provider = cast(ScopedAgentProvider[AgentProtocol], app["agent_provider"])
+
+    def _default_session_model() -> tuple[str, str] | None:
+        config = runtime_model_state.peek_global_main()
+        return (config.provider, config.model) if config is not None else None
+
     app["ui_hub"] = UIHub(
         storage=resolved_ui_storage,
+        default_model_getter=_default_session_model,
         legacy_principal_id=owner_principal_id,
         legacy_principal_aliases=_legacy_owner_principal_aliases(),
         on_session_pruned=lambda principal_id, session_id: provider.schedule_release(
@@ -207,6 +213,12 @@ def create_app(
         selected = await hub.get_session_model(session_id)
         if selected is None:
             return None
+        default = await runtime_model_state.get_global_main()
+        if default is not None and (default.provider, default.model) == (
+            selected["provider"],
+            selected["model"],
+        ):
+            return default
         return api._build_model_config(selected["provider"], selected["model"])
 
     app["runtime_model_resolver"] = RuntimeModelResolver(
