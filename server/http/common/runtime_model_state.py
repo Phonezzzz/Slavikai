@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from llm.types import ModelConfig
 
@@ -60,12 +60,19 @@ class RuntimeModelResolver:
 
     Resolution order is:
     1. Session override
-    2. Global runtime main model
-    3. None
+    2. Persisted session model
+    3. Global runtime main model
+    4. None
     """
 
-    def __init__(self, store: RuntimeModelStateStore) -> None:
+    def __init__(
+        self,
+        store: RuntimeModelStateStore,
+        *,
+        load_session_model: Callable[[str], Awaitable[ModelConfig | None]] | None = None,
+    ) -> None:
         self._store = store
+        self._load_session_model = load_session_model
 
     async def resolve_main(self, session_id: str | None) -> ModelConfig | None:
         normalized = _normalize_session_id(session_id)
@@ -73,6 +80,10 @@ class RuntimeModelResolver:
             session_override = await self._store.get_session_override(normalized)
             if session_override is not None:
                 return session_override
+            if self._load_session_model is not None:
+                persisted_model = await self._load_session_model(normalized)
+                if persisted_model is not None:
+                    return persisted_model
         return await self._store.get_global_main()
 
 

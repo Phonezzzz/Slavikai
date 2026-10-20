@@ -91,3 +91,41 @@ def test_build_runtime_model_state_from_persisted_hydrates_global_main() -> None
     store = build_runtime_model_state_from_persisted(load_model_configs_fn=lambda: expected)
 
     assert asyncio.run(store.get_global_main()) == expected
+
+
+def test_resolver_reads_persisted_model_before_global_default() -> None:
+    store = RuntimeModelStateStore(global_main=_model("new-default"))
+    loaded = []
+
+    async def load(session_id):
+        loaded.append(session_id)
+        return _model("saved-model")
+
+    resolver = RuntimeModelResolver(store, load_session_model=load)
+    assert asyncio.run(resolver.resolve_main(" session-1 ")) == _model("saved-model")
+    assert loaded == ["session-1"]
+    assert asyncio.run(store.get_global_main()) == _model("new-default")
+
+
+def test_resolver_keeps_runtime_selection_ahead_of_persisted_model() -> None:
+    store = RuntimeModelStateStore(global_main=_model("default"))
+    asyncio.run(store.set_session_override("session-1", _model("selected-model")))
+
+    async def load(session_id):
+        raise AssertionError("runtime selection must take precedence")
+
+    resolver = RuntimeModelResolver(store, load_session_model=load)
+    assert asyncio.run(resolver.resolve_main("session-1")) == _model("selected-model")
+
+
+def test_resolver_does_not_fall_back_on_persisted_model_load_failure() -> None:
+    import pytest
+
+    async def load(session_id):
+        raise ValueError("persisted model unavailable")
+
+    resolver = RuntimeModelResolver(
+        RuntimeModelStateStore(global_main=_model("default")), load_session_model=load
+    )
+    with pytest.raises(ValueError, match="persisted model unavailable"):
+        asyncio.run(resolver.resolve_main("session-1"))

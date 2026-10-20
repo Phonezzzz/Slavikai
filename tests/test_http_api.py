@@ -1222,3 +1222,43 @@ def test_api_session_context_is_owned_and_fail_closed(monkeypatch, tmp_path, fau
             await client.close()
 
     asyncio.run(run())
+
+
+def test_api_explicit_session_keeps_initial_default_model(monkeypatch, tmp_path) -> None:
+    class CapturingAgent(DummyAgent):
+        def reconfigure_models(self, main_config, main_api_key=None, *, persist=True):
+            self.main_config = main_config
+
+    async def run() -> None:
+        agent = CapturingAgent(tmp_path / "trace.log")
+        client = await _create_client(agent, tmp_path / "trace.log", monkeypatch)
+        try:
+            await _set_runtime_global_main(client, ModelConfig(provider="local", model="model-a"))
+            payload = {
+                "model": "slavik",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            first = await client.post(
+                "/v1/chat/completions",
+                headers={"X-Slavik-Session": "stable-api-session"},
+                json=payload,
+            )
+            assert first.status == 200
+            await first.read()
+            await _set_runtime_global_main(client, ModelConfig(provider="local", model="model-b"))
+            second = await client.post(
+                "/v1/chat/completions",
+                headers={"X-Slavik-Session": "stable-api-session"},
+                json=payload,
+            )
+            assert second.status == 200
+            await second.read()
+            assert agent.main_config.model == "model-a"
+            assert await client.app["ui_hub"].get_session_model("stable-api-session") == {
+                "provider": "local",
+                "model": "model-a",
+            }
+        finally:
+            await client.close()
+
+    asyncio.run(run())

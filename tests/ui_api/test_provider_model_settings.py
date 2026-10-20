@@ -406,3 +406,77 @@ def test_default_model_update_does_not_reconfigure_existing_scoped_agents(
             await client.close()
 
     asyncio.run(run())
+
+
+def test_plan_model_is_restored_from_persisted_session_after_default_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_settings_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "server.http_api._fetch_provider_models",
+        lambda provider, **kwargs: (["model-a", "model-b"], None),
+    )
+
+    from config.model_store import load_model_configs
+
+    monkeypatch.setattr(
+        "server.http.app.load_model_configs",
+        lambda: load_model_configs(tmp_path / "model_config.json"),
+    )
+
+    async def start(agent):
+        app = create_app(
+            agent=agent,
+            ui_storage=SQLiteUISessionStorage(tmp_path / "sessions.db"),
+            auth_config=HttpAuthConfig(
+                api_token=TEST_API_TOKEN,
+                allow_unauth_local=False,
+                browser_auth_mode="token",
+            ),
+        )
+        client = TestClient(TestServer(app), headers=TEST_AUTH_HEADERS)
+        await client.start_server()
+        return client
+
+    async def run() -> None:
+        client = await start(CaptureConfigAgent())
+        try:
+            saved = await client.post(
+                "/ui/api/settings",
+                json={"model": {"provider": "local", "model": "model-a"}},
+            )
+            assert saved.status == 200
+            await saved.read()
+            created = await client.post("/ui/api/sessions")
+            session_id = (await created.json())["session"]["session_id"]
+            changed = await client.post(
+                "/ui/api/settings",
+                json={"model": {"provider": "local", "model": "model-b"}},
+            )
+            assert changed.status == 200
+            await changed.read()
+        finally:
+            await client.close()
+        agent = CaptureConfigAgent()
+        restarted = await start(agent)
+        try:
+            state = restarted.app["runtime_model_state"]
+            assert await state.get_session_override(session_id) is None
+            assert (await state.get_global_main()).model == "model-b"
+            headers = {"X-Slavik-Session": session_id}
+            mode = await restarted.post("/ui/api/mode", headers=headers, json={"mode": "plan"})
+            assert mode.status == 200
+            await mode.read()
+            drafted = await restarted.post(
+                "/ui/api/plan/draft",
+                headers=headers,
+                json={"goal": "inspect workspace"},
+            )
+            assert drafted.status == 200, await drafted.text()
+            await drafted.read()
+            assert agent.last_model == "model-a"
+        finally:
+            await restarted.close()
+
+    asyncio.run(run())

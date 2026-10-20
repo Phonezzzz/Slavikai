@@ -22,6 +22,7 @@ from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
     AgentProtocol,
     RuntimeModelResolverProtocol,
+    RuntimeModelStateProtocol,
     _require_custom_provider_owner,
 )
 from server.http_api import (
@@ -190,6 +191,12 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                     error_type="invalid_request_error",
                     code="owner_required",
                 )
+            if explicit_session_id is not None and await hub.get_session_model(session_id) is None:
+                await hub.set_session_model(
+                    session_id, execution_config.provider, execution_config.model
+                )
+                model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
+                await model_state.set_session_override(session_id, execution_config)
             execution_key = _resolve_provider_api_key(execution_config.provider)
 
             async def request_context() -> tuple[

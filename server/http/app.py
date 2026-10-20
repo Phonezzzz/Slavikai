@@ -134,7 +134,6 @@ def create_app(
         load_model_configs_fn=load_model_configs
     )
     app["runtime_model_state"] = runtime_model_state
-    app["runtime_model_resolver"] = RuntimeModelResolver(runtime_model_state)
     owner_principal_id = _owner_principal_id(resolved_auth_config)
     desktop_run_coordinator = DesktopRunCoordinator()
     app["desktop_run_coordinator"] = desktop_run_coordinator
@@ -201,6 +200,17 @@ def create_app(
         on_session_pruned=lambda principal_id, session_id: provider.schedule_release(
             AgentScope(principal_id=principal_id, session_id=session_id)
         ),
+    )
+
+    async def _load_session_model(session_id: str) -> ModelConfig | None:
+        hub = cast(UIHub, app["ui_hub"])
+        selected = await hub.get_session_model(session_id)
+        if selected is None:
+            return None
+        return api._build_model_config(selected["provider"], selected["model"])
+
+    app["runtime_model_resolver"] = RuntimeModelResolver(
+        runtime_model_state, load_session_model=_load_session_model
     )
     app.on_cleanup.append(_close_plan_executions)
     app.on_cleanup.append(_close_chat_generations)
