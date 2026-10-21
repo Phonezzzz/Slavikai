@@ -52,6 +52,11 @@ class FakeHttpResponse:
 
 class HoldingProvider:
     def __init__(self, monkeypatch, stage, *, streaming=False):
+        # Fixture перехватывает provider.test, а не внешний системный proxy.
+        # Тесты proxy policy задают нужный proxy явно после создания fixture.
+        for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+            monkeypatch.delenv(name, raising=False)
+            monkeypatch.delenv(name.upper(), raising=False)
         self.stage = stage
         self.started = threading.Event()
         self.cleaned = threading.Event()

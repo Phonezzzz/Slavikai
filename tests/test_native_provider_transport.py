@@ -209,6 +209,9 @@ def test_native_stream_preserves_tool_protocol_and_credentials_policy(monkeypatc
     context = ssl.create_default_context()
     monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/fixture/ca.pem")
     monkeypatch.setenv("ALL_PROXY", "http://proxy.test:8888")
+    monkeypatch.setenv("all_proxy", "http://proxy.test:8888")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
     monkeypatch.delenv("HTTPS_PROXY", raising=False)
     monkeypatch.delenv("https_proxy", raising=False)
 
