@@ -72,5 +72,6 @@ async def handle_embeddings_download(request: web.Request) -> web.Response:
             message="Не удалось активировать локальную embeddings model.",
             error_type="configuration_error",
             code="embeddings_model_load_failed",
+            details=snapshot.to_dict(),
         )
     return json_response({**snapshot.to_dict(), "started": started}, status=202 if started else 200)

@@ -38,6 +38,27 @@ afterEach(() => {
 });
 
 describe('Settings loading isolation', () => {
+  it('replaces ready badge with the runtime error after cached activation fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === SETTINGS_URL) return json(settings());
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'ready' });
+      if (url === '/ui/api/embeddings/download') return json({ error: {
+        message: 'Activation failed', code: 'embeddings_model_load_failed',
+        details: { model: 'local', state: 'error', error: 'cached files invalid' },
+      } }, 503);
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    await screen.findByText('local is available locally.');
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await screen.findByText('cached files invalid');
+    expect(screen.queryByText('local is available locally.')).toBeNull();
+    expect(screen.queryByText('ready', { exact: true })).toBeNull();
+    expect(screen.getByText('error', { exact: true })).toBeTruthy();
+  });
+
   it('loads and saves preferences while embedding status is pending, without probing providers', async () => {
     const embedding = deferred<Response>();
     const posts: Array<Record<string, unknown>> = [];

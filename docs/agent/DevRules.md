@@ -94,7 +94,7 @@ expected state или correlated follow-up observation.
 
 - Тесты лежат в `tests/`, именование: `test_*.py`.
 - Запрещены реальные сетевые вызовы в тестах. Используйте стабы (пример: `tests/test_tts_stt_tools.py`, `tests/test_web_search_tool.py`).
-- Тесты для индекса должны избегать загрузки real `sentence-transformers` модели (пример: monkeypatch `VectorIndex._get_model` в `tests/test_vector_index.py`).
+- Тесты для индекса должны избегать загрузки real `sentence-transformers` модели (пример: monkeypatch `VectorIndex.load_local_model` в `tests/test_vector_index.py`).
 - Для SQLite в тестах используйте `tmp_path`, не пишите в `memory/*.db`.
 
 ## 8) Минимальные требования качества (как сейчас настроено)

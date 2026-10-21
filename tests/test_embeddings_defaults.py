@@ -303,3 +303,47 @@ def test_explicit_download_activates_existing_and_future_ask_indexes(
         assert len(loads) == 1
     finally:
         agent.close()
+
+
+def test_explicit_download_restores_files_even_when_weights_are_loaded(tmp_path, monkeypatch):
+    import asyncio
+
+    from server.embedding_download import EmbeddingDownloadManager
+
+    files = tmp_path / "model-files"
+    loads = []
+
+    class Model:
+        def __init__(self, name, *, local_files_only):
+            loads.append(local_files_only)
+            if local_files_only and not files.exists():
+                raise OSError("missing files")
+            files.write_text("model")
+
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=Model)
+    )
+    monkeypatch.setattr(VectorIndex, "_model_cache", {})
+    VectorIndex.load_local_model("restore-test", allow_download=True)
+    files.unlink()
+
+    async def run():
+        manager = EmbeddingDownloadManager(
+            package_available=lambda: True, model_cached=lambda _: files.exists()
+        )
+        assert (await manager.status("restore-test")).state == "missing"
+        await manager.start("restore-test")
+        for _ in range(100):
+            snapshot = await manager.status("restore-test")
+            if snapshot.state != "downloading":
+                break
+            await asyncio.sleep(0.01)
+        assert snapshot.state == "ready"
+        assert files.exists()
+        await manager.shutdown()
+
+    asyncio.run(run())
+    assert loads == [False, False]
+    VectorIndex._model_cache.clear()
+    VectorIndex.load_local_model("restore-test")
+    assert loads == [False, False, True]

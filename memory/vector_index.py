@@ -73,7 +73,7 @@ class VectorIndex:
         cls, model_name: str, *, allow_download: bool = False
     ) -> SentenceTransformer:
         model = cls._model_cache.get(model_name)
-        if model is None:
+        if model is None or allow_download:
             try:
                 from sentence_transformers import SentenceTransformer
             except Exception as exc:  # noqa: BLE001

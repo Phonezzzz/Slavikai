@@ -1302,6 +1302,15 @@ export function Settings({
       const payload: unknown = await response.json();
       if (epoch !== onboardingEpoch.current) return;
       if (!response.ok) {
+        if (payload && typeof payload === 'object' && 'error' in payload) {
+          const error = payload.error;
+          if (error && typeof error === 'object' && 'details' in error) {
+            const details = error.details;
+            if (details && typeof details === 'object' && 'state' in details && details.state === 'error') {
+              setEmbeddingRuntime(parseEmbeddingRuntime(details));
+            }
+          }
+        }
         throw new Error(extractErrorMessage(payload, 'Failed to download embedding model.'));
       }
       const parsed = parseEmbeddingRuntime(payload);
