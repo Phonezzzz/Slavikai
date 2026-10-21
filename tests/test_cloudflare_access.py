@@ -326,7 +326,7 @@ def test_cloudflare_browser_lane_is_separate_from_bearer_automation(tmp_path: Pa
             member_settings_update = await client.post(
                 "/ui/api/settings",
                 headers={"Cf-Access-Jwt-Assertion": "member-token"},
-                json={"appearance": {"theme": "oled"}},
+                json={"memory": {"inbox_max_items": 20}},
             )
             assert member_settings_update.status == 403
             assert (await member_settings_update.json())["error"]["code"] == "owner_required"

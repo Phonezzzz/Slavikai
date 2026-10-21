@@ -78,6 +78,9 @@ type TtsBackendSettings = {
 };
 
 type ParsedSettings = {
+  preferencesEtag: string | null;
+  preferencesSubject: string | null;
+  canManageInstallation: boolean;
   providers: ProviderSettings[];
   providerInstances: ProviderInstance[];
   ttsBackend: TtsBackendSettings;
@@ -334,6 +337,9 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
 
 const parseSettingsPayload = (payload: unknown): ParsedSettings => {
   const defaults: ParsedSettings = {
+    preferencesEtag: null,
+    preferencesSubject: null,
+    canManageInstallation: false,
     providers: DEFAULT_PROVIDER_SETTINGS,
     providerInstances: [],
     ttsBackend: DEFAULT_TTS_BACKEND,
@@ -538,7 +544,11 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
+  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown };
   return {
+    preferencesEtag: typeof metadata.preferences_etag === 'string' ? metadata.preferences_etag : null,
+    preferencesSubject: typeof metadata.preferences_subject === 'string' ? metadata.preferences_subject : null,
+    canManageInstallation: metadata.can_manage_installation === true,
     providers,
     providerInstances,
     ttsBackend,
@@ -736,6 +746,9 @@ export function Settings({
   onSaved,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('assistant');
+  const [canManageInstallation, setCanManageInstallation] = useState(false);
+  const preferencesEtag = useRef<string | null>(null);
+  const preferencesSubject = useRef<string | null>(null);
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
   const [providerInstances, setProviderInstances] = useState<ProviderInstance[]>([]);
   const [newProviderName, setNewProviderName] = useState('');
@@ -827,9 +840,30 @@ export function Settings({
   };
 
   const applyParsedSettings = (parsed: ParsedSettings, providerRevisionAtRequestStart: number, preserveDraft = false): void => {
+    const subjectChanged = preferencesSubject.current !== null && preferencesSubject.current !== parsed.preferencesSubject;
+    preferencesSubject.current = parsed.preferencesSubject;
+    if (subjectChanged) {
+      onboardingEpoch.current += 1;
+      invalidateDiagnostics();
+      setNewProviderName('');
+      setNewProviderBaseUrl('');
+      setNewProviderKey('');
+      setNewProviderProbeStatus(null);
+      setProviderOnboardingBusy(false);
+      preserveDraft = false;
+      dirtyFields.current.clear();
+    }
+    if (!parsed.canManageInstallation) {
+      setActiveTab((tab) => ['api', 'memory', 'diagnostics'].includes(tab) ? 'assistant' : tab);
+      setApiKeys({ ...EMPTY_API_KEYS });
+      setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
+    }
+    setCanManageInstallation(parsed.canManageInstallation);
+    const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
+    if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
     applyCredentialSnapshot(parsed);
     setProviderInstances((current) => {
-      if (providerInstancesRevision.current === providerRevisionAtRequestStart) {
+      if (subjectChanged || providerInstancesRevision.current === providerRevisionAtRequestStart) {
         return parsed.providerInstances;
       }
       // A provider confirmed after this snapshot was requested must survive
@@ -1272,9 +1306,12 @@ export function Settings({
     }
     const providerRevisionAtRequestStart = providerInstancesRevision.current;
     const epoch = onboardingEpoch.current;
+    const privateEtagAtRequestStart = preferencesEtag.current;
     setSaving(true);
     setStatus(null);
     let finishWrite: (() => void) | undefined;
+    let installationCommitted = false;
+    let personalPending = false;
     try {
       const providersPayload: Record<string, { api_key: string } | null> = {};
       let hasProviderChanges = false;
@@ -1316,26 +1353,52 @@ export function Settings({
       if (hasProviderChanges) {
         payload.providers = providersPayload;
       }
-      finishWrite = beginSettingsWrite(hasProviderChanges);
-      const response = await fetch('/ui/api/settings', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-      const body: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(body, 'Failed to save settings.'));
+      const changed = (fields: string[]) => fields.some((field) => dirtyFields.current.has(field));
+      const personal: Record<string, unknown> = {};
+      if (changed(['tone', 'systemPrompt'])) personal.personalization = payload.personalization;
+      if (changed(['appearanceTheme'])) personal.appearance = payload.appearance;
+      if (changed(['longPasteToFileEnabled', 'longPasteThresholdChars'])) personal.composer = payload.composer;
+      const installation: Record<string, unknown> = {};
+      if (changed(['defaultModelProvider', 'defaultModelId'])) installation.model = payload.model;
+      if (changed(['memoryInboxMaxItems', 'memoryInboxTtlDays', 'memoryInboxWritesPerMinute', 'embeddingsProvider', 'embeddingsLocalModel', 'embeddingsOpenaiModel'])) installation.memory = payload.memory;
+      if (hasProviderChanges) installation.providers = payload.providers;
+      const requests: Array<{ payload: Record<string, unknown>; personal: boolean }> = [];
+      if (Object.keys(installation).length > 0) {
+        if (!canManageInstallation) throw new Error('Owner access required for installation settings.');
+        requests.push({ payload: installation, personal: false });
       }
-      onSaved?.();
+      if (Object.keys(personal).length > 0) {
+        if (!privateEtagAtRequestStart) throw new Error('Refresh Settings before saving preferences.');
+        requests.push({ payload: personal, personal: true });
+        personalPending = true;
+      }
+      if (requests.length === 0) { setStatus('No changes to save.'); return; }
+      finishWrite = beginSettingsWrite(hasProviderChanges);
+      let lastBody: unknown;
+      for (const item of requests) {
+        if (epoch !== onboardingEpoch.current) return;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (item.personal && privateEtagAtRequestStart) headers['If-Match'] = privateEtagAtRequestStart;
+        const response = await fetch('/ui/api/settings', {
+          method: 'POST', headers, body: JSON.stringify(item.payload),
+        });
+        lastBody = await response.json();
+        if (!response.ok) {
+          throw new Error(extractErrorMessage(lastBody, 'Failed to save settings.'));
+        }
+        if (item.personal) personalPending = false;
+        else installationCommitted = true;
+        onSaved?.();
+      }
       if (epoch !== onboardingEpoch.current) return;
-      applyParsedSettings(parseSettingsPayload(body), providerRevisionAtRequestStart);
-      setStatus('Global settings saved.');
+      applyParsedSettings(parseSettingsPayload(lastBody), providerRevisionAtRequestStart);
+      setStatus('Settings saved.');
     } catch (error) {
       if (epoch !== onboardingEpoch.current) return;
       const message = error instanceof Error ? error.message : 'Failed to save settings.';
-      setStatus(message);
+      setStatus(installationCommitted && personalPending
+        ? `Installation settings saved. Preferences were not saved: ${message}`
+        : message);
     } finally {
       finishWrite?.();
       setSaving(false);
@@ -1521,7 +1584,7 @@ export function Settings({
               <div className="flex min-h-0 flex-1 overflow-hidden">
                 <nav className="w-48 shrink-0 border-r border-zinc-800 p-2.5">
                   <div className="space-y-0.5">
-                    {TAB_ITEMS.map((tab) => (
+                    {TAB_ITEMS.filter((tab) => canManageInstallation || !['api', 'memory', 'diagnostics'].includes(tab.id)).map((tab) => (
                       <button
                         key={tab.id}
                         type="button"
@@ -1552,7 +1615,7 @@ export function Settings({
                     <div className="text-sm text-zinc-400">Loading settings...</div>
                   ) : null}
 
-                  {!loading && activeTab === 'api' ? (
+                  {canManageInstallation && !loading && activeTab === 'api' ? (
                     <div>
                       <SectionCard
                         title="Provider API keys"
@@ -1777,8 +1840,8 @@ export function Settings({
                     <div>
                       <SectionCard
                         title="Response style"
-                        description="Choose the default tone for answers in the UI."
-                        scope="Global"
+                        description="Saved for your account. This preference does not affect answers yet."
+                        scope="You"
                       >
                         <div>
                           {RESPONSE_STYLE_OPTIONS.map((option) => (
@@ -1820,8 +1883,8 @@ export function Settings({
 
                       <SectionCard
                         title="Advanced assistant behavior"
-                        description="Optional high-impact customization for advanced users."
-                        scope="Global"
+                        description="Private saved instructions. They do not affect answers yet."
+                        scope="You"
                       >
                         <button
                           type="button"
@@ -1843,7 +1906,7 @@ export function Settings({
                                 onChange={(event) => setSystemPrompt(event.target.value)}
                                 rows={8}
                                 className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
-                                placeholder="Add advanced global instructions for the assistant..."
+                                placeholder="Save your private instructions..."
                               />
                             </label>
                           </div>
@@ -1857,7 +1920,7 @@ export function Settings({
                       <SectionCard
                         title="Theme"
                         description="Choose the app background style."
-                        scope="Global"
+                        scope="You"
                       >
                         <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-900 p-0.5">
                           {APPEARANCE_THEME_OPTIONS.map((option) => (
@@ -1893,7 +1956,7 @@ export function Settings({
                       <SectionCard
                         title="Long paste handling"
                         description="Decide when large pasted text should become a file attachment in the message composer."
-                        scope="Global"
+                        scope="You"
                       >
                         <Row label="Convert long paste to file" description="Applies to the message composer before sending.">
                           <ToggleSwitch
@@ -1950,7 +2013,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {!loading && activeTab === 'memory' ? (
+                  {canManageInstallation && !loading && activeTab === 'memory' ? (
                     <div>
                       <SectionCard
                         title="Memory behavior"
@@ -2204,7 +2267,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {!loading && activeTab === 'diagnostics' ? (
+                  {canManageInstallation && !loading && activeTab === 'diagnostics' ? (
                     <div>
                       <SectionCard
                         title="Read-only diagnostics"

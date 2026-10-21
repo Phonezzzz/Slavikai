@@ -37,6 +37,7 @@ from server.http.common.runtime_model_state import (
     RuntimeModelResolver,
     build_runtime_model_state_from_persisted,
 )
+from server.preferences_store import PreferencesStore
 from server.principal_storage import principal_storage_paths
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
@@ -128,6 +129,7 @@ def create_app(
                 audience=resolved_auth_config.cloudflare_access_aud,
             )
         )
+    app["preferences_store"] = PreferencesStore(api.PROJECT_ROOT / ".run" / "preferences.db")
     app["http_api_logger"] = logger
     app["settings_snapshot_builder"] = api._build_settings_payload
     runtime_model_state = build_runtime_model_state_from_persisted(

@@ -83,3 +83,13 @@ def _isolate_http_task_run_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     # Default bootstrap dependencies are test-owned; explicit injected stores retain their path.
     monkeypatch.setattr(http_app, "TaskRunStore", isolated_store)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_http_preferences_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from server.http import app as http_app
+    from server.preferences_store import PreferencesStore
+
+    monkeypatch.setattr(
+        http_app, "PreferencesStore", lambda _path: PreferencesStore(tmp_path / "preferences.db")
+    )

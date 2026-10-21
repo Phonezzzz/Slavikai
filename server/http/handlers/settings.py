@@ -14,13 +14,18 @@ from core.approval_policy import ApprovalRequired
 from server import http_api as api
 from server.agent_provider import AgentApplyFailure, ScopedAgentProvider
 from server.http.common import ui_settings
-from server.http.common.auth import _require_owner, _resolve_ui_session_id_for_principal
+from server.http.common.auth import (
+    _request_principal_id,
+    _require_owner,
+    _resolve_ui_session_id_for_principal,
+)
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
     RuntimeModelStateProtocol,
     _agent_scope,
     _resolve_agent,
 )
+from server.preferences_store import PERSONAL_FIELDS, PreferencesConflictError, PreferencesStore
 from server.ui_hub import UIHub
 from shared.models import JSONValue
 
@@ -225,33 +230,36 @@ def _tts_error_response(message: str) -> web.Response:
     )
 
 
+def _settings_response(request: web.Request) -> web.Response:
+    principal = _request_principal_id(request)
+    if principal is None:
+        raise RuntimeError("Request principal is unavailable")
+    owner = _require_owner(request) is None
+    payload = api._build_settings_payload(include_custom_providers=owner)
+    settings = cast(dict[str, JSONValue], payload["settings"])
+    snapshot = cast(PreferencesStore, request.app["preferences_store"]).get(principal)
+    settings.update(snapshot.value.to_dict())
+    settings["preferences_etag"] = snapshot.etag
+    settings["preferences_subject"] = snapshot.subject
+    settings["can_manage_installation"] = owner
+    response = json_response(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 async def handle_ui_settings(request: web.Request) -> web.Response:
     try:
-        payload = api._build_settings_payload(
-            include_custom_providers=_require_owner(request) is None
-        )
-        logger.info(
-            "Settings payload prepared",
-            extra={
-                "path": "/ui/api/settings",
-                "reason": "success",
-                "settings_snapshot": payload,
-            },
-        )
-        return json_response(payload)
-    except Exception as exc:  # noqa: BLE001
+        return _settings_response(request)
+    except Exception:  # noqa: BLE001
         return error_response(
             status=500,
-            message=f"Не удалось загрузить settings: {exc}",
+            message="Не удалось загрузить settings.",
             error_type="internal_error",
             code="settings_load_failed",
         )
 
 
 async def handle_ui_settings_update(request: web.Request) -> web.Response:
-    owner_error = _require_owner(request)
-    if owner_error is not None:
-        return owner_error
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -268,6 +276,53 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_json",
         )
+    if set(payload) & PERSONAL_FIELDS:
+        if set(payload) - PERSONAL_FIELDS:
+            owner_error = _require_owner(request)
+            if owner_error is not None:
+                return owner_error
+            return error_response(
+                status=400,
+                message="Личные и installation settings сохраняются отдельно.",
+                error_type="invalid_request_error",
+                code="mixed_settings_scopes",
+            )
+        principal = _request_principal_id(request)
+        if principal is None:
+            return error_response(
+                status=401,
+                message="Unauthorized.",
+                error_type="invalid_request_error",
+                code="unauthorized",
+            )
+        expected = request.headers.get("If-Match")
+        if expected is None:
+            return error_response(
+                status=428,
+                message="Сначала загрузите личные настройки.",
+                error_type="invalid_request_error",
+                code="preferences_precondition_required",
+            )
+        try:
+            store = cast(PreferencesStore, request.app["preferences_store"])
+            await asyncio.to_thread(
+                store.update, principal, expected_etag=expected, payload=payload
+            )
+        except PreferencesConflictError as exc:
+            return error_response(
+                status=409, message=str(exc), error_type="conflict", code="preferences_conflict"
+            )
+        except ValueError as exc:
+            return error_response(
+                status=400,
+                message=str(exc),
+                error_type="invalid_request_error",
+                code="invalid_preferences",
+            )
+        return _settings_response(request)
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
     forbidden_key = api._user_plane_forbidden_settings_key(payload)
     if forbidden_key is not None:
         return error_response(
@@ -287,122 +342,6 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
         )
 
     next_embeddings_settings: UIEmbeddingsSettings | None = None
-
-    appearance_raw = payload.get("appearance")
-    if appearance_raw is not None:
-        if not isinstance(appearance_raw, dict):
-            return error_response(
-                status=400,
-                message="appearance должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        theme_raw = appearance_raw.get("theme")
-        if theme_raw is not None:
-            if not isinstance(theme_raw, str):
-                return error_response(
-                    status=400,
-                    message="appearance.theme должен быть строкой.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            theme = theme_raw.strip().lower()
-            if theme not in api.APPEARANCE_THEMES:
-                return error_response(
-                    status=400,
-                    message="appearance.theme должен быть default или oled.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            api._save_appearance_settings(theme=theme)
-
-    personalization_raw = payload.get("personalization")
-    if personalization_raw is not None:
-        if not isinstance(personalization_raw, dict):
-            return error_response(
-                status=400,
-                message="personalization должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        tone, system_prompt = api._load_personalization_settings()
-        if "tone" in personalization_raw:
-            tone_raw = personalization_raw.get("tone")
-            if not isinstance(tone_raw, str):
-                return error_response(
-                    status=400,
-                    message="personalization.tone должен быть строкой.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            normalized_tone = tone_raw.strip()
-            if not normalized_tone:
-                return error_response(
-                    status=400,
-                    message="personalization.tone не должен быть пустым.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            tone = normalized_tone
-        if "system_prompt" in personalization_raw:
-            prompt_raw = personalization_raw.get("system_prompt")
-            if not isinstance(prompt_raw, str):
-                return error_response(
-                    status=400,
-                    message="personalization.system_prompt должен быть строкой.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            system_prompt = prompt_raw
-        api._save_personalization_settings(tone=tone, system_prompt=system_prompt)
-
-    composer_raw = payload.get("composer")
-    if composer_raw is not None:
-        if not isinstance(composer_raw, dict):
-            return error_response(
-                status=400,
-                message="composer должен быть объектом.",
-                error_type="invalid_request_error",
-                code="invalid_request_error",
-            )
-        long_paste_to_file_enabled, long_paste_threshold_chars = api._load_composer_settings()
-        if "long_paste_to_file_enabled" in composer_raw:
-            enabled_raw = composer_raw.get("long_paste_to_file_enabled")
-            if not isinstance(enabled_raw, bool):
-                return error_response(
-                    status=400,
-                    message="composer.long_paste_to_file_enabled должен быть bool.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            long_paste_to_file_enabled = enabled_raw
-        if "long_paste_threshold_chars" in composer_raw:
-            threshold_raw = composer_raw.get("long_paste_threshold_chars")
-            if isinstance(threshold_raw, bool) or not isinstance(threshold_raw, int):
-                return error_response(
-                    status=400,
-                    message="composer.long_paste_threshold_chars должен быть int.",
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            if (
-                threshold_raw < api.MIN_LONG_PASTE_THRESHOLD_CHARS
-                or threshold_raw > api.MAX_LONG_PASTE_THRESHOLD_CHARS
-            ):
-                return error_response(
-                    status=400,
-                    message=(
-                        "composer.long_paste_threshold_chars вне диапазона "
-                        f"{api.MIN_LONG_PASTE_THRESHOLD_CHARS}..{api.MAX_LONG_PASTE_THRESHOLD_CHARS}."
-                    ),
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            long_paste_threshold_chars = threshold_raw
-        api._save_composer_settings(
-            long_paste_to_file_enabled=long_paste_to_file_enabled,
-            long_paste_threshold_chars=long_paste_threshold_chars,
-        )
 
     memory_raw = payload.get("memory")
     if memory_raw is not None:
@@ -771,7 +710,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
         failures = await agent_provider.apply_to_existing(_apply_embeddings)
         _log_agent_apply_failures("embeddings", failures)
 
-    return json_response(api._build_settings_payload())
+    return _settings_response(request)
 
 
 async def handle_admin_security_settings_update(request: web.Request) -> web.Response:
@@ -926,7 +865,7 @@ async def handle_admin_security_settings_update(request: web.Request) -> web.Res
         failures = await agent_provider.apply_to_existing(_apply_tools)
         _log_agent_apply_failures("tools", failures)
 
-    return json_response(api._build_settings_payload())
+    return _settings_response(request)
 
 
 async def handle_ui_tts_speak(request: web.Request) -> web.Response:

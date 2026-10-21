@@ -17,7 +17,7 @@ describe('generic provider onboarding', () => {
       calls.push({ path: url, body });
       if (url === '/ui/api/settings') {
         return new Response(JSON.stringify({
-          settings: {
+          settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true,
             model: { provider: 'deepseek', model: 'deepseek-chat' },
             providers: saved ? [{
               provider: 'custom-0123456789abcdef0123456789abcdef',
@@ -55,7 +55,7 @@ describe('generic provider onboarding', () => {
     const onSaved = vi.fn();
     render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     await screen.findByRole('button', { name: 'Test connection' });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test/' } });
@@ -80,7 +80,7 @@ describe('generic provider onboarding', () => {
   it('keeps unsaved instructions when a provider is saved', async () => {
     let saved = false;
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: {
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true,
         personalization: { tone: 'balanced', system_prompt: 'server value' },
         providers: saved ? [{ provider: 'custom-0123456789abcdef0123456789abcdef', display_name: 'Example', base_url: 'https://example.test/v1' }] : [],
       } }), { status: 200 });
@@ -93,7 +93,7 @@ describe('generic provider onboarding', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Show advanced editor' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Custom instructions' }), { target: { value: 'unsaved value' } });
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
@@ -107,14 +107,14 @@ describe('generic provider onboarding', () => {
 
   it('clears unsaved onboarding fields and key when Settings closes', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true, providers: [] } }), { status: 200 });
       if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') return new Response(JSON.stringify({ base_url: 'https://example.test/v1', models: [], status: 'models_unavailable', message: 'Catalog unavailable.' }), { status: 200 });
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Unsaved' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'unsaved-secret' } });
@@ -138,7 +138,7 @@ describe('generic provider onboarding', () => {
       resolve(new Response(JSON.stringify(payload), { status: 200 }));
     };
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true, providers: [] } }), { status: 200 });
       if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
@@ -147,7 +147,7 @@ describe('generic provider onboarding', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
@@ -179,7 +179,7 @@ describe('generic provider onboarding', () => {
       resolve(new Response(JSON.stringify(payload), { status: 200 }));
     };
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true, providers: [] } }), { status: 200 });
       if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
@@ -193,7 +193,7 @@ describe('generic provider onboarding', () => {
       fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
     };
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     await fillOnboardingFields();
     fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     await vi.waitFor(() => expect(probeResolvers.length).toBe(1));
@@ -234,7 +234,7 @@ describe('generic provider onboarding', () => {
     const onSaved = vi.fn();
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       requestedUrls.push(url);
-      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+      if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true, providers: [] } }), { status: 200 });
       if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') return new Response(JSON.stringify({ providers: [] }), { status: 200 });
       if (url === '/ui/api/embeddings/status') return new Response(JSON.stringify({ model: 'local', state: 'ready' }), { status: 200 });
       if (url === '/ui/api/provider-instances/probe') {
@@ -251,7 +251,7 @@ describe('generic provider onboarding', () => {
       fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
     };
     const { rerender } = render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     await fillOnboardingFields('Old');
     fireEvent.click(screen.getByRole('button', { name: 'Save provider' }));
     await vi.waitFor(() => expect(saveResolvers.length).toBe(1));
@@ -298,7 +298,7 @@ describe('generic provider onboarding', () => {
     let resolveReopenedSettings: ((response: Response) => void) | undefined;
     let resolveSave: ((response: Response) => void) | undefined;
     const onSaved = vi.fn();
-    const emptySettings = () => new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+    const emptySettings = () => new Response(JSON.stringify({ settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true, providers: [] } }), { status: 200 });
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === '/ui/api/settings') {
         settingsRequests += 1;
@@ -318,7 +318,7 @@ describe('generic provider onboarding', () => {
     }));
 
     const { rerender } = render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Old' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
@@ -348,7 +348,7 @@ describe('generic provider onboarding', () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       requestedUrls.push(url);
       if (url === '/ui/api/settings') {
-        return new Response(JSON.stringify({ settings: { providers: [] } }), { status: 200 });
+        return new Response(JSON.stringify({ settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true, providers: [] } }), { status: 200 });
       }
       if (url === '/ui/api/models?skip_custom_probe=1&discovery_only=1') {
         return new Response(JSON.stringify({ providers: [
@@ -361,7 +361,7 @@ describe('generic provider onboarding', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     await screen.findByRole('textbox', { name: 'Provider display name' });
     expect(requestedUrls).not.toContain('/ui/api/models?skip_custom_probe=1&discovery_only=1');
     fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));

@@ -292,7 +292,6 @@ def test_default_model_is_persisted_and_inherited_by_new_sessions(
                 "/ui/api/settings",
                 json={
                     "model": {"provider": "deepseek", "model": "deepseek-chat"},
-                    "personalization": {"tone": "balanced"},
                 },
             )
             assert repeat_response.status == 200

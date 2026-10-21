@@ -4,6 +4,14 @@ from __future__ import annotations
 from .fakes import *
 
 
+async def _save_preferences(client, payload):
+    response = await client.get("/ui/api/settings")
+    snapshot = (await response.json())["settings"]
+    return await client.post(
+        "/ui/api/settings", headers={"If-Match": snapshot["preferences_etag"]}, json=payload
+    )
+
+
 def test_ui_settings_unauthorized_logs_snapshot(monkeypatch) -> None:
     records: list[dict[str, object]] = []
 
@@ -133,9 +141,9 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
-            response = await client.post(
-                "/ui/api/settings",
-                json={
+            personal = await _save_preferences(
+                client,
+                {
                     "personalization": {
                         "tone": "direct",
                         "system_prompt": "Focus on concise implementation details.",
@@ -145,6 +153,13 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
                         "long_paste_threshold_chars": 20000,
                     },
                     "appearance": {"theme": "oled"},
+                },
+            )
+            assert personal.status == 200
+            await personal.read()
+            response = await client.post(
+                "/ui/api/settings",
+                json={
                     "memory": {
                         "inbox_max_items": 77,
                         "inbox_ttl_days": 14,
@@ -215,7 +230,9 @@ def test_ui_settings_update_endpoint(monkeypatch, tmp_path) -> None:
             saved_payload = json.loads(ui_settings_path.read_text(encoding="utf-8"))
             assert isinstance(saved_payload, dict)
             assert "providers" not in saved_payload
-            assert saved_payload.get("appearance") == {"theme": "oled"}
+            assert "appearance" not in saved_payload
+            assert "personalization" not in saved_payload
+            assert "composer" not in saved_payload
             openai_provider = provider_by_name.get("openai")
             assert isinstance(openai_provider, dict)
             assert openai_provider.get("api_key_set") is False
@@ -240,14 +257,17 @@ def test_user_plane_settings_allows_only_supported_fields(monkeypatch) -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
-            allowed_resp = await client.post(
-                "/ui/api/settings",
-                json={
+            personal = await _save_preferences(
+                client,
+                {
                     "personalization": {"tone": "strict"},
                     "composer": {"long_paste_threshold_chars": 25000},
                     "appearance": {"theme": "oled"},
-                    "memory": {"inbox_max_items": 101},
                 },
+            )
+            assert personal.status == 200
+            allowed_resp = await client.post(
+                "/ui/api/settings", json={"memory": {"inbox_max_items": 101}}
             )
             assert allowed_resp.status == 200
 
@@ -305,7 +325,7 @@ def test_ui_settings_update_drops_legacy_provider_api_keys(tmp_path, monkeypatch
         try:
             response = await client.post(
                 "/ui/api/settings",
-                json={"personalization": {"tone": "strict"}},
+                json={"providers": {}},
             )
             assert response.status == 200
             persisted = json.loads(ui_settings_path.read_text(encoding="utf-8"))
@@ -438,15 +458,15 @@ def test_ui_settings_update_rejects_invalid_composer_threshold() -> None:
     async def run() -> None:
         client = await _create_client(DummyAgent())
         try:
-            response = await client.post(
-                "/ui/api/settings",
-                json={"composer": {"long_paste_threshold_chars": 10}},
+            response = await _save_preferences(
+                client,
+                {"composer": {"long_paste_threshold_chars": 10}},
             )
             assert response.status == 400
             payload = await response.json()
             error = payload.get("error")
             assert isinstance(error, dict)
-            assert error.get("code") == "invalid_request_error"
+            assert error.get("code") == "invalid_preferences"
         finally:
             await client.close()
 

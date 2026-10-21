@@ -73,6 +73,27 @@ Desktop approvals также имеют explicit principal subject, при эт�
   внедряются per run в Auto v1; MWV report/UI наблюдают выбранный skill и terminal status. Brain
   не мутируется, tool/approval/sandbox/verifier полномочия не расширяются.
 
+## Личные настройки браузера
+
+`personalization`, `appearance` и `composer` принадлежат verified browser principal.
+Settings читает их только из `.run/preferences.db`; старые значения общего UI JSON
+не импортируются и не используются. Новый principal получает встроенные defaults.
+Общие providers/keys, model default, Memory installation config и grants сохраняют
+существующих владельцев. Личные настройки не являются Memory и не расширяют полномочия.
+
+GET `/ui/api/settings` возвращает личный snapshot текущего principal и
+`preferences_etag` и opaque `preferences_subject` для сброса UI draft при смене identity.
+Личный POST требует `If-Match` с этим ETag; другой subject или
+устаревшая revision получает 409 без записи, отсутствие precondition — 428.
+Installation и личные поля нельзя изменять одним POST. Installation update остаётся
+owner-only. `{ "reset_preferences": true }` с текущим ETag возвращает только личные
+поля к defaults, увеличивая revision. Неизвестные поля и неверные типы отклоняются до записи.
+UI отправляет только изменённые группы; ошибка второй операции не отменяет уже
+сохранённую installation operation и сообщается как частичный результат.
+
+Tone и private instructions сейчас сохраняются изолированно, но не включаются в
+model request. Их применение — отдельный scope; эта изоляция не переписывает runtime prompts.
+
 ## Change protocol
 
 1. Найти claim и его owner в `docs/runtime_contract_claims.json`.

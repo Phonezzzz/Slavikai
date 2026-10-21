@@ -16,7 +16,6 @@ from config.api_keys import (
     load_api_keys,
     save_api_keys,
 )
-from config.memory_config import load_memory_config
 from config.model_store import load_model_configs, save_model_configs
 from config.tools_config import (
     DEFAULT_TOOLS_STATE,
@@ -461,35 +460,6 @@ def _save_ui_settings_blob(
     )
 
 
-def _load_personalization_settings(
-    *,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
-) -> tuple[str, str]:
-    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
-    personalization_raw = payload.get("personalization")
-    if not isinstance(personalization_raw, dict):
-        return DEFAULT_UI_TONE, ""
-    tone_raw = personalization_raw.get("tone")
-    prompt_raw = personalization_raw.get("system_prompt")
-    tone = tone_raw.strip() if isinstance(tone_raw, str) and tone_raw.strip() else DEFAULT_UI_TONE
-    system_prompt = prompt_raw if isinstance(prompt_raw, str) else ""
-    return tone, system_prompt
-
-
-def _save_personalization_settings(
-    *,
-    tone: str,
-    system_prompt: str,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
-) -> None:
-    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
-    payload["personalization"] = {
-        "tone": tone.strip() or DEFAULT_UI_TONE,
-        "system_prompt": system_prompt,
-    }
-    _save_ui_settings_blob(payload, ui_settings_path=ui_settings_path)
-
-
 def _load_embeddings_settings(
     *,
     ui_settings_path: Path = UI_SETTINGS_PATH,
@@ -503,71 +473,6 @@ def _save_embeddings_settings(
     ui_settings_path: Path = UI_SETTINGS_PATH,
 ) -> None:
     save_ui_embeddings_settings(settings, path=ui_settings_path)
-
-
-def _load_composer_settings(
-    *,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
-) -> tuple[bool, int]:
-    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
-    composer_raw = payload.get("composer")
-    if not isinstance(composer_raw, dict):
-        return DEFAULT_LONG_PASTE_TO_FILE_ENABLED, DEFAULT_LONG_PASTE_THRESHOLD_CHARS
-    enabled_raw = composer_raw.get("long_paste_to_file_enabled")
-    threshold_raw = composer_raw.get("long_paste_threshold_chars")
-    enabled = enabled_raw if isinstance(enabled_raw, bool) else DEFAULT_LONG_PASTE_TO_FILE_ENABLED
-    threshold = (
-        threshold_raw
-        if isinstance(threshold_raw, int) and not isinstance(threshold_raw, bool)
-        else DEFAULT_LONG_PASTE_THRESHOLD_CHARS
-    )
-    if threshold < MIN_LONG_PASTE_THRESHOLD_CHARS:
-        threshold = MIN_LONG_PASTE_THRESHOLD_CHARS
-    if threshold > MAX_LONG_PASTE_THRESHOLD_CHARS:
-        threshold = MAX_LONG_PASTE_THRESHOLD_CHARS
-    return enabled, threshold
-
-
-def _save_composer_settings(
-    *,
-    long_paste_to_file_enabled: bool,
-    long_paste_threshold_chars: int,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
-) -> None:
-    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
-    payload["composer"] = {
-        "long_paste_to_file_enabled": long_paste_to_file_enabled,
-        "long_paste_threshold_chars": long_paste_threshold_chars,
-    }
-    _save_ui_settings_blob(payload, ui_settings_path=ui_settings_path)
-
-
-def _load_appearance_settings(
-    *,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
-) -> str:
-    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
-    appearance_raw = payload.get("appearance")
-    if not isinstance(appearance_raw, dict):
-        return DEFAULT_APPEARANCE_THEME
-    theme_raw = appearance_raw.get("theme")
-    if not isinstance(theme_raw, str):
-        return DEFAULT_APPEARANCE_THEME
-    theme = theme_raw.strip().lower()
-    return theme if theme in APPEARANCE_THEMES else DEFAULT_APPEARANCE_THEME
-
-
-def _save_appearance_settings(
-    *,
-    theme: str,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
-) -> None:
-    normalized = theme.strip().lower()
-    if normalized not in APPEARANCE_THEMES:
-        normalized = DEFAULT_APPEARANCE_THEME
-    payload = _load_ui_settings_blob(ui_settings_path=ui_settings_path)
-    payload["appearance"] = {"theme": normalized}
-    _save_ui_settings_blob(payload, ui_settings_path=ui_settings_path)
 
 
 def _user_plane_forbidden_settings_key(payload: dict[str, object]) -> str | None:
@@ -938,59 +843,4 @@ def _tts_settings_payload(*, api_keys_path: Path = API_KEYS_PATH) -> dict[str, J
         "voice": voice,
         "format": format_value,
         "api_key_source": _provider_api_key_source("openai", api_keys_path=api_keys_path),
-    }
-
-
-def _build_settings_payload(
-    *,
-    ui_settings_path: Path = UI_SETTINGS_PATH,
-    api_keys_path: Path = API_KEYS_PATH,
-) -> dict[str, JSONValue]:
-    tone, system_prompt = _load_personalization_settings(ui_settings_path=ui_settings_path)
-    appearance_theme = _load_appearance_settings(ui_settings_path=ui_settings_path)
-    long_paste_to_file_enabled, long_paste_threshold_chars = _load_composer_settings(
-        ui_settings_path=ui_settings_path
-    )
-    policy_profile, yolo_armed, yolo_armed_at = _load_policy_settings(
-        ui_settings_path=ui_settings_path
-    )
-    memory_config = load_memory_config()
-    embeddings_settings = _load_embeddings_settings(ui_settings_path=ui_settings_path)
-    tools_state = _load_tools_state()
-    tools_registry = {key: value for key, value in tools_state.items() if key != "safe_mode"}
-    return {
-        "settings": {
-            "personalization": {"tone": tone, "system_prompt": system_prompt},
-            "appearance": {"theme": appearance_theme},
-            "composer": {
-                "long_paste_to_file_enabled": long_paste_to_file_enabled,
-                "long_paste_threshold_chars": long_paste_threshold_chars,
-            },
-            "memory": {
-                "inbox_max_items": memory_config.inbox_max_items,
-                "inbox_ttl_days": memory_config.inbox_ttl_days,
-                "inbox_writes_per_minute": memory_config.inbox_writes_per_minute,
-                "embeddings": {
-                    "provider": embeddings_settings.provider,
-                    "local_model": embeddings_settings.local_model,
-                    "openai_model": embeddings_settings.openai_model,
-                },
-            },
-            "tools": {
-                "state": tools_state,
-                "registry": tools_registry,
-            },
-            "policy": {
-                "profile": policy_profile,
-                "yolo_armed": yolo_armed,
-                "yolo_armed_at": yolo_armed_at,
-            },
-            "audio": {
-                "tts": _tts_settings_payload(api_keys_path=api_keys_path),
-            },
-            "providers": _provider_settings_payload(
-                ui_settings_path=ui_settings_path,
-                api_keys_path=api_keys_path,
-            ),
-        },
     }

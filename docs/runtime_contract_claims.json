@@ -356,6 +356,20 @@
         "tests/ui_api/test_desktop_response_observation.py"
       ],
       "summary": "Request-local typed Agent response reaches HTTP through sync return or ResponseProduced stream event. Auto outcome and returned Ask LLMResult/AgentToolLoopResult remain separate from text projection; post-result review/logging errors retain observations, explicit stream error/cancellation retains returned loop result, cancellation during dispatch captures completed ToolResult before stopping further calls and HTTP drains the typed observation without publishing cancelled content, provider creation/iteration exceptions retain completed observations through ToolLoopExecutionError, and ApprovalRequired reaches the existing outer approval handler. Missing/duplicate stream results fail without stale mutable result reads or execution rerun. Volatile boundary only: lifecycle authority, exceptional dispatch/serialization capture and canonical durability remain target. Returned MWVRunResult reaches sync/stream HTTP boundary with original work/verifier statuses and bounded retry metadata; formatting/decision/logging faults retain it separately from ResponseFailure. Act packet runner retains available typed tool observations before diff projection and on cancellation; its approval checkpoint is volatile. MWV full raw byte capture, durable continuation and full prior attempt history remain target. Desktop initial/resume responses retain the existing DesktopRunOutcome including verification and loop observations; presentation faults preserve it separately. No durable/canonical capture guarantee added."
+    },
+    {
+      "id": "settings.principal_preferences",
+      "scope": "configuration",
+      "status": "implemented",
+      "owner": "settings",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_preferences_store.py",
+        "tests/ui_api/test_personal_preferences.py",
+        "ui/src/app/__tests__/settings-loading.test.tsx"
+      ],
+      "summary": "Browser personal preferences are principal-scoped with subject-bound CAS, independent installation permissions, defaults for new principals and no import of global personal values; tone/instructions runtime consumption is not implemented."
     }
   ]
 }

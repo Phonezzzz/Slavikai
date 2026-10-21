@@ -14,11 +14,15 @@ function deferred<T>() {
 }
 
 function json(payload: unknown, status = 200): Response {
+  if (payload && typeof payload === 'object' && 'settings' in payload) {
+    const value = payload as { settings: Record<string, unknown> };
+    payload = { ...value, settings: { preferences_etag: '"preferences-fixture-0"', can_manage_installation: true, preferences_subject: 'fixture', ...value.settings } };
+  }
   return new Response(JSON.stringify(payload), { status });
 }
 
 function settings(prompt = 'saved instructions') {
-  return { settings: { personalization: { tone: 'balanced', system_prompt: prompt }, providers: [] } };
+  return { settings: { preferences_etag: '"preferences-fixture-0"', preferences_subject: 'fixture', can_manage_installation: true, personalization: { tone: 'balanced', system_prompt: prompt }, providers: [] } };
 }
 
 async function editInstructions(value: string): Promise<HTMLTextAreaElement> {
@@ -51,7 +55,7 @@ describe('Settings loading isolation', () => {
 
     await editInstructions('edited while status is pending');
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
-    await screen.findByText('Global settings saved.');
+    await screen.findByText('Settings saved.');
     expect(posts[0].personalization).toEqual({ tone: 'balanced', system_prompt: 'edited while status is pending' });
     expect(fetchMock.mock.calls.some(([url]) => url.startsWith('/ui/api/models'))).toBe(false);
   });
@@ -388,10 +392,10 @@ describe('Settings loading isolation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await vi.waitFor(() => expect(signals).toHaveLength(1));
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement-test-key' } });
     fireEvent.click(screen.getByRole('button', { name: action }));
-    await screen.findByText(action === 'Save changes' ? 'Global settings saved.' : 'Loaded 1 deepseek models.');
+    await screen.findByText(action === 'Save changes' ? 'Settings saved.' : 'Loaded 1 deepseek models.');
     expect(posts[0]?.providers).toEqual({ deepseek: { api_key: 'replacement-test-key' } });
     expect(signals[0]?.aborted).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
@@ -433,7 +437,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement-test-key' } });
     fireEvent.click(screen.getByRole('button', { name: action }));
     await vi.waitFor(() => expect(posts).toBe(1));
@@ -507,7 +511,7 @@ describe('Settings loading isolation', () => {
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'test-key' } });
     fireEvent.click(screen.getByRole('button', { name: action }));
     await vi.waitFor(() => expect(posts).toBe(1));
@@ -597,7 +601,7 @@ describe('Settings loading isolation', () => {
       await screen.findByText('2 models');
     }
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
-    await screen.findByText('Global settings saved.');
+    await screen.findByText('Settings saved.');
     expect(posts[0]).not.toHaveProperty('providers');
     expect(signals[0]?.aborted).toBe(false);
     if (!completed) await act(async () => { body.resolve(result); });
@@ -635,7 +639,7 @@ describe('Settings loading isolation', () => {
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'first-key' } });
     fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
     await vi.waitFor(() => expect(posts).toBe(1));
@@ -646,7 +650,7 @@ describe('Settings loading isolation', () => {
     await vi.waitFor(() => expect(gets).toBe(3));
     fireEvent.change(screen.getByLabelText('OpenAI API key'), { target: { value: 'new-key' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
-    await screen.findByText('Global settings saved.');
+    await screen.findByText('Settings saved.');
     expect(readSignals[2]?.aborted).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
     await screen.findByText('Configured');
@@ -704,7 +708,7 @@ describe('Settings loading isolation', () => {
     rerender(<Settings isOpen onClose={() => undefined} />);
     await screen.findByDisplayValue('before');
     if (control === 'provider') {
-      fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
       fireEvent.change(screen.getByLabelText('Provider display name'), { target: { value: 'draft provider' } });
     } else {
       fireEvent.click(screen.getByRole('button', { name: 'Data' }));
@@ -731,7 +735,7 @@ describe('Settings loading isolation', () => {
         if (init?.method === 'POST') {
           posts += 1;
           payloads.push(JSON.parse(String(init.body)));
-          return posts === 1 ? firstPost.promise : json(settings('before'), status);
+          return posts === 1 ? firstPost.promise : json(settings('before'), posts === 2 ? status : 200);
         }
         gets += 1;
         return json({ settings: { ...settings(committed ? 'committed' : 'before').settings, appearance: { theme: committed ? 'oled' : 'default' } } });
@@ -748,7 +752,7 @@ describe('Settings loading isolation', () => {
     rerender(<Settings isOpen onClose={() => undefined} />);
     const input = await screen.findByDisplayValue('before');
     if (editDraft) fireEvent.change(input, { target: { value: 'unsaved draft' } });
-    fireEvent.click(screen.getByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'new-key' } });
     fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
     await vi.waitFor(() => expect(posts).toBe(2));
@@ -757,11 +761,12 @@ describe('Settings loading isolation', () => {
     if (status === 200) await screen.findByRole('option', { name: 'test-model' });
     else await vi.waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Load models' }).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
-    await screen.findByDisplayValue(editDraft ? 'unsaved draft' : 'committed');
+    const reconciled = await screen.findByDisplayValue(editDraft ? 'unsaved draft' : 'committed');
+    fireEvent.change(reconciled, { target: { value: 'next local preference' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
-    await vi.waitFor(() => expect(posts).toBe(3));
-    expect(payloads[2].appearance).toEqual({ theme: 'oled' });
-    expect(payloads[2].personalization).toEqual({ tone: 'balanced', system_prompt: editDraft ? 'unsaved draft' : 'committed' });
+    await vi.waitFor(() => expect(payloads[payloads.length - 1]?.personalization).toEqual({ tone: 'balanced', system_prompt: 'next local preference' }));
+    expect(payloads[payloads.length - 1]).not.toHaveProperty('appearance');
+    expect(payloads[payloads.length - 1]).not.toHaveProperty('providers');
   });
 
   it.each([
@@ -796,8 +801,8 @@ describe('Settings loading isolation', () => {
     if (source === 'not_checked') await screen.findByText('not checked');
     else await screen.findByText(`Catalog source: ${label}`);
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
-    await screen.findByText('Global settings saved.');
-    expect(posts[0].model).toEqual({ provider: 'deepseek', model: 'chosen-model' });
+    await screen.findByText('Settings saved.');
+    expect(posts[0]).not.toHaveProperty('model');
     expect(posts[0].personalization).toEqual({ tone: 'balanced', system_prompt: 'keep these instructions' });
   });
 
@@ -810,5 +815,108 @@ describe('Settings loading isolation', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByText('Cannot load preferences');
     expect(screen.queryByText('Loading settings...')).toBeNull();
+  });
+});
+
+describe('principal preferences', () => {
+  it('saves only member preferences with a subject-bound precondition', async () => {
+    const writes: Array<{ body: Record<string, unknown>; etag: string | null }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') {
+          writes.push({ body: JSON.parse(String(init.body)), etag: new Headers(init.headers).get('If-Match') });
+        }
+        return json({ settings: { ...settings().settings, can_manage_installation: false, preferences_etag: '"member-0"' } });
+      }
+      if (url === EMBEDDINGS_URL) return new Promise<Response>(() => {});
+      throw new Error(`Unexpected URL ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('member private draft');
+    expect(screen.queryByRole('button', { name: 'API Keys' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Memory' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('Settings saved.');
+    expect(writes).toEqual([{ body: { personalization: { tone: 'balanced', system_prompt: 'member private draft' } }, etag: '"member-0"' }]);
+  });
+
+  it('keeps a conflicting draft and never retries against a new revision', async () => {
+    let writes = 0;
+    const onSaved = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') { writes += 1; return json({ error: { message: 'Preferences changed. Refresh before saving.' } }, 409); }
+        return json(settings());
+      }
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      throw new Error(`Unexpected URL ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
+    const input = await editInstructions('unsaved conflicting draft');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('Preferences changed. Refresh before saving.');
+    expect(writes).toBe(1);
+    expect(input.value).toBe('unsaved conflicting draft');
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+});
+
+describe('settings scope transactions', () => {
+  it('reports installation commit separately when personal CAS conflicts', async () => {
+    const writes: Array<{ body: Record<string, unknown>; etag: string | null }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') {
+          writes.push({ body: JSON.parse(String(init.body)), etag: new Headers(init.headers).get('If-Match') });
+          if (writes.length === 2) return json({ error: { message: 'Preferences changed.' } }, 409);
+          return json({ settings: { ...settings().settings, preferences_etag: '"new-revision"' } });
+        }
+        return json(settings());
+      }
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      if (url === MODELS_URL) return json({ providers: [] });
+      throw new Error(`Unexpected URL ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('private pending draft');
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('Installation settings saved. Preferences were not saved: Preferences changed.');
+    expect(writes).toHaveLength(2);
+    expect(writes[0].body).not.toHaveProperty('personalization');
+    expect(writes[1].body).not.toHaveProperty('providers');
+    expect(writes[1].etag).toBe('"preferences-fixture-0"');
+    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('private pending draft');
+  });
+
+  it('does not dispatch an old personal draft after closing and changing identity', async () => {
+    const pending = deferred<Response>();
+    const writes: Array<Record<string, unknown>> = [];
+    let member = false;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') { writes.push(JSON.parse(String(init.body))); return pending.promise; }
+        return json({ settings: { ...settings(member ? 'member saved' : 'owner saved').settings, preferences_etag: member ? '"member-0"' : '"owner-0"', preferences_subject: member ? 'member' : 'owner', can_manage_installation: !member } });
+      }
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      if (url === MODELS_URL) return json({ providers: [] });
+      throw new Error(`Unexpected URL ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('owner unsaved private');
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    member = true;
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByDisplayValue('member saved');
+    await act(async () => pending.resolve(json(settings('owner saved'))));
+    await screen.findByDisplayValue('member saved');
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).not.toHaveProperty('personalization');
   });
 });

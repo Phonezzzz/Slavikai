@@ -74,44 +74,11 @@ class SettingsRuntimeBindings:
     def save_ui_settings_blob(self, payload: dict[str, object]) -> None:
         ui_settings._save_ui_settings_blob(payload, ui_settings_path=self._ui_settings_path())
 
-    def load_personalization_settings(self) -> tuple[str, str]:
-        return ui_settings._load_personalization_settings(ui_settings_path=self._ui_settings_path())
-
-    def save_personalization_settings(self, *, tone: str, system_prompt: str) -> None:
-        ui_settings._save_personalization_settings(
-            tone=tone,
-            system_prompt=system_prompt,
-            ui_settings_path=self._ui_settings_path(),
-        )
-
     def load_embeddings_settings(self) -> UIEmbeddingsSettings:
         return ui_settings._load_embeddings_settings(ui_settings_path=self._ui_settings_path())
 
     def save_embeddings_settings(self, settings: UIEmbeddingsSettings) -> None:
         ui_settings._save_embeddings_settings(settings, ui_settings_path=self._ui_settings_path())
-
-    def load_composer_settings(self) -> tuple[bool, int]:
-        return ui_settings._load_composer_settings(ui_settings_path=self._ui_settings_path())
-
-    def save_composer_settings(
-        self,
-        *,
-        long_paste_to_file_enabled: bool,
-        long_paste_threshold_chars: int,
-    ) -> None:
-        ui_settings._save_composer_settings(
-            long_paste_to_file_enabled=long_paste_to_file_enabled,
-            long_paste_threshold_chars=long_paste_threshold_chars,
-            ui_settings_path=self._ui_settings_path(),
-        )
-
-    def load_appearance_settings(self) -> str:
-        return ui_settings._load_appearance_settings(ui_settings_path=self._ui_settings_path())
-
-    def save_appearance_settings(self, *, theme: str) -> None:
-        ui_settings._save_appearance_settings(
-            theme=theme, ui_settings_path=self._ui_settings_path()
-        )
 
     def load_policy_settings(self) -> tuple[str, bool, str | None]:
         return ui_settings._load_policy_settings(ui_settings_path=self._ui_settings_path())
@@ -193,9 +160,6 @@ class SettingsRuntimeBindings:
     def build_settings_payload(
         self, *, include_custom_providers: bool = True
     ) -> dict[str, JSONValue]:
-        tone, system_prompt = self.load_personalization_settings()
-        appearance_theme = self.load_appearance_settings()
-        long_paste_to_file_enabled, long_paste_threshold_chars = self.load_composer_settings()
         policy_profile, yolo_armed, yolo_armed_at = self.load_policy_settings()
         memory_config = self.load_memory_config_fn()
         embeddings_settings = self.load_embeddings_settings()
@@ -217,12 +181,6 @@ class SettingsRuntimeBindings:
         return {
             "settings": {
                 "model": default_model_payload,
-                "personalization": {"tone": tone, "system_prompt": system_prompt},
-                "appearance": {"theme": appearance_theme},
-                "composer": {
-                    "long_paste_to_file_enabled": long_paste_to_file_enabled,
-                    "long_paste_threshold_chars": long_paste_threshold_chars,
-                },
                 "memory": {
                     "inbox_max_items": memory_config.inbox_max_items,
                     "inbox_ttl_days": memory_config.inbox_ttl_days,
