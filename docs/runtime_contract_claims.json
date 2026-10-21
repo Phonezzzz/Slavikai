@@ -372,6 +372,22 @@
         "ui/src/app/__tests__/settings-loading.test.tsx"
       ],
       "summary": "Browser personal preferences are principal-scoped with subject-bound CAS, independent installation permissions, defaults for new principals and no import of global personal values; new browser model requests consume tone/instructions as user input without modifying system prompts or policy; tool continuations retain their original messages and Bearer requests use defaults."
+    },
+    {
+      "id": "memory.embedding_defaults",
+      "scope": "configuration",
+      "status": "implemented",
+      "owner": "memory",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_embeddings_defaults.py",
+        "tests/ui_api/test_embeddings_download_consent.py",
+        "tests/test_vector_index.py",
+        "tests/test_embedding_download.py",
+        "tests/test_ask_stateless.py"
+      ],
+      "summary": "Implicit UI configuration shapes consistently select local embeddings. Runtime model loads are cache-only, absent dependencies degrade Chat without remote fallback, local load can recover after files appear, explicit remote selection is preserved and existing vectors are not rebuilt."
     }
   ]
 }

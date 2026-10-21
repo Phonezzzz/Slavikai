@@ -101,6 +101,21 @@ Balanced + пустые инструкции сохраняют прежний r
 сохраняет исходные messages даже после изменения Settings. Bearer `/v1` использует defaults
 и не импортирует browser preferences.
 
+## Embeddings defaults и загрузка моделей
+
+Неявный embeddings provider всегда `local`: отсутствие файла, пустой `memory`,
+пустой `embeddings` и отсутствующий/неизвестный provider дают один default.
+Явно сохранённый `openai` остаётся OpenAI; наличие API key само по себе не включает
+remote embeddings. OpenAI получает текст индексирования и поисковые queries только
+через существующий выбранный remote provider path.
+
+Local runtime загружает только локальные файлы (`local_files_only=True`); download
+выполняется существующим owner-only endpoint после `confirm=true`. Отсутствие пакета
+или файлов не включает remote fallback: обычный Chat продолжает работу без semantic
+retrieval. Следующий вызов может загрузить модель после появления файлов; первая ошибка
+не блокирует index навсегда. Vectors не удаляются и автоматически не пересоздаются.
+Inbox TTL относится только к inbox entries, не к chat history, confirmed Memory или vectors.
+
 ## Change protocol
 
 1. Найти claim и его owner в `docs/runtime_contract_claims.json`.

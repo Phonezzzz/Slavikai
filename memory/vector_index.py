@@ -66,7 +66,6 @@ class VectorIndex:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = ThreadLocalSQLiteConnection(db_path)
         self.model: SentenceTransformer | None = None
-        self._load_error: Exception | None = None
         self._init_db()
 
     @classmethod
@@ -79,7 +78,7 @@ class VectorIndex:
                 raise RuntimeError(
                     "Local embeddings provider requires sentence-transformers package"
                 ) from exc
-            model = SentenceTransformer(model_name)
+            model = SentenceTransformer(model_name, local_files_only=True)
             cls._model_cache[model_name] = model
         return model
 
@@ -280,15 +279,10 @@ class VectorIndex:
     def _ensure_local_model(self) -> SentenceTransformer:
         if self.model is not None:
             return self.model
-        if self._load_error is not None:
-            raise RuntimeError(
-                f"VectorIndex модель недоступна: {self._load_error}"
-            ) from self._load_error
         try:
             self.model = self._get_model(self.local_model)
             return self.model
         except Exception as exc:  # noqa: BLE001
-            self._load_error = exc
             raise RuntimeError(
                 f"VectorIndex не смог загрузить локальную модель {self.local_model}: {exc}"
             ) from exc

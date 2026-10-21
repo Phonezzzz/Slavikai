@@ -2059,8 +2059,8 @@ export function Settings({
                           />
                         </Row>
                         <Row
-                          label="Retention window"
-                          description="How many days inbox entries stay available."
+                          label="Inbox retention window"
+                          description="Applies only to inbox entries, not chat history, confirmed Memory, or vectors."
                         >
                           <input
                             type="number"
@@ -2121,8 +2121,8 @@ export function Settings({
                         </div>
                         <p className="mt-2 text-xs text-zinc-500">
                           {embeddingsProvider === 'local'
-                            ? 'Uses a local sentence-transformer model.'
-                            : 'Uses the OpenAI key from the environment or API Keys settings.'}
+                            ? 'Processes embeddings locally using downloaded model files. Without the package or files, semantic search is unavailable; chat remains available. Download is explicit.'
+                            : 'Sends text for indexing and search queries to OpenAI. Select and save this provider to enable remote embeddings using your configured OpenAI key.'}
                         </p>
 
                         {embeddingsProvider === 'local' ? (

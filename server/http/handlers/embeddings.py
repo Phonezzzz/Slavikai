@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from server.embedding_download import EmbeddingDownloadManager
+from server.http.common.auth import _require_owner
 from server.http.common.responses import error_response, json_response
 from server.http_api import _load_embeddings_settings
 
@@ -21,6 +22,9 @@ async def handle_embeddings_status(request: web.Request) -> web.Response:
 
 
 async def handle_embeddings_download(request: web.Request) -> web.Response:
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return owner_error
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
