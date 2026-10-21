@@ -113,7 +113,12 @@ Local runtime загружает только локальные файлы (`lo
 выполняется существующим owner-only endpoint после `confirm=true`. Отсутствие пакета
 или файлов не включает remote fallback: обычный Chat продолжает работу без semantic
 retrieval. Следующий вызов может загрузить модель после появления файлов; первая ошибка
-не блокирует index навсегда. Vectors не удаляются и автоматически не пересоздаются.
+не блокирует index навсегда. После явного Download (включая уже cached файлы)
+модель остаётся в общем cache загруженных weights, доступном существующим и новым
+scoped indexes. Ask может использовать эти weights без загрузки/инициализации runtime.
+Замена vector вычисляет embedding до удаления прежней строки, а delete/insert выполняются
+в одной транзакции: сбой embedding, metadata или insert сохраняет прежний vector.
+Vectors автоматически не пересоздаются.
 Inbox TTL относится только к inbox entries, не к chat history, confirmed Memory или vectors.
 
 ## Change protocol

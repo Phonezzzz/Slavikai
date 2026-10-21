@@ -69,7 +69,9 @@ class VectorIndex:
         self._init_db()
 
     @classmethod
-    def _get_model(cls, model_name: str) -> SentenceTransformer:
+    def load_local_model(
+        cls, model_name: str, *, allow_download: bool = False
+    ) -> SentenceTransformer:
         model = cls._model_cache.get(model_name)
         if model is None:
             try:
@@ -78,7 +80,7 @@ class VectorIndex:
                 raise RuntimeError(
                     "Local embeddings provider requires sentence-transformers package"
                 ) from exc
-            model = SentenceTransformer(model_name, local_files_only=True)
+            model = SentenceTransformer(model_name, local_files_only=not allow_download)
             cls._model_cache[model_name] = model
         return model
 
@@ -111,12 +113,29 @@ class VectorIndex:
         namespace: str = "default",
         meta: dict[str, JSONValue] | None = None,
     ) -> None:
+        self._store_text(path, content, namespace, meta, replace_existing=False)
+
+    def _store_text(
+        self,
+        path: str,
+        content: str,
+        namespace: str,
+        meta: dict[str, JSONValue] | None,
+        *,
+        replace_existing: bool,
+    ) -> None:
         if not content.strip():
+            if replace_existing:
+                self.delete_path(path, namespace=namespace)
             return
         if meta is not None and not isinstance(meta, dict):
             raise ValueError("meta для VectorIndex должно быть словарём")
         embedding = self._encode_texts([content])[0].astype(np.float32).tobytes()
         with self.conn:
+            if replace_existing:
+                self.conn.execute(
+                    "DELETE FROM vectors WHERE namespace = ? AND path = ?", (namespace, path)
+                )
             self.conn.execute(
                 "INSERT INTO vectors (namespace, path, content, embedding, meta) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -138,8 +157,7 @@ class VectorIndex:
         namespace: str = "default",
         meta: dict[str, JSONValue] | None = None,
     ) -> None:
-        self.delete_path(path, namespace=namespace)
-        self.index_text(path, content, namespace=namespace, meta=meta)
+        self._store_text(path, content, namespace, meta, replace_existing=True)
 
     def index_batch(
         self,
@@ -271,7 +289,7 @@ class VectorIndex:
 
     def is_runtime_ready(self) -> bool:
         if self.provider == "local":
-            return self.model is not None
+            return self.model is not None or self.local_model in self._model_cache
         if self.provider == "openai":
             return bool(self.openai_api_key)
         return False
@@ -280,7 +298,7 @@ class VectorIndex:
         if self.model is not None:
             return self.model
         try:
-            self.model = self._get_model(self.local_model)
+            self.model = self.load_local_model(self.local_model)
             return self.model
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
@@ -297,7 +315,7 @@ class VectorIndex:
             if allow_runtime_init:
                 model = self._ensure_local_model()
             else:
-                local_model = self.model
+                local_model = self.model or self._model_cache.get(self.local_model)
                 if local_model is None:
                     raise RuntimeError("VectorIndex local model is not loaded")
                 model = local_model

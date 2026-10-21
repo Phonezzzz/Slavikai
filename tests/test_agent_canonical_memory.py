@@ -40,7 +40,7 @@ class JsonMemoryBrain(Brain):
 
 def _build_agent(tmp_path, monkeypatch) -> Agent:
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model",
+        "memory.vector_index.VectorIndex.load_local_model",
         lambda _self, _name: DummyModel(),
     )
     return Agent(
@@ -170,7 +170,7 @@ def test_agent_starts_fail_closed_with_invalid_desktop_policy_store(
     store_path = tmp_path / "desktop-approvals.json"
     store_path.write_text("{not-json", encoding="utf-8")
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model",
+        "memory.vector_index.VectorIndex.load_local_model",
         lambda _self, _name: DummyModel(),
     )
 
@@ -280,7 +280,7 @@ def test_agent_memory_preview_uses_llm_enrichment_and_waits_for_confirm(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model",
+        "memory.vector_index.VectorIndex.load_local_model",
         lambda _self, _name: DummyModel(),
     )
     agent = Agent(

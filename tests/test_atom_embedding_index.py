@@ -30,7 +30,7 @@ def _atom(*, status: AtomStatus) -> CanonicalAtom:
 def test_atom_embedding_index_sync_upsert_and_delete(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "vec.db"
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model",
+        "memory.vector_index.VectorIndex.load_local_model",
         lambda _self, _name: DummyModel(),
     )
     vectors = VectorIndex(str(db_path))

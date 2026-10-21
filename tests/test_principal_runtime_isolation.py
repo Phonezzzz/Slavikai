@@ -381,7 +381,7 @@ def test_agent_memory_vectors_and_runtime_state_are_principal_session_isolated(
     monkeypatch: MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model",
+        "memory.vector_index.VectorIndex.load_local_model",
         lambda _self, _name: _DummyEmbeddingModel(),
     )
     owner_principal = "email:owner@example.com"

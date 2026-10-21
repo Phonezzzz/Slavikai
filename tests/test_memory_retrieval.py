@@ -26,7 +26,7 @@ def test_retrieval_filter_rank_pack_excludes_conflicts(tmp_path, monkeypatch) ->
     vectors_db = tmp_path / "vectors.db"
 
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model",
+        "memory.vector_index.VectorIndex.load_local_model",
         lambda _self, _name: DummyModel(),
     )
 

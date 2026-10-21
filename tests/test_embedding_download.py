@@ -43,10 +43,29 @@ def test_cached_embedding_model_is_ready_without_download() -> None:
         manager = EmbeddingDownloadManager(
             package_available=lambda: True,
             model_cached=lambda model: model == "cached-model",
+            load_cached_model=lambda model: None,
             download_model=lambda model: (_ for _ in ()).throw(AssertionError(model)),
         )
         snapshot, started = await manager.start("cached-model")
         assert started is False
         assert snapshot.state == "ready"
+
+    asyncio.run(run())
+
+
+def test_cached_model_activation_failure_does_not_report_ready() -> None:
+    async def run() -> None:
+        def fail(_model):
+            raise RuntimeError("cached model cannot load")
+
+        manager = EmbeddingDownloadManager(
+            package_available=lambda: True,
+            model_cached=lambda _: True,
+            load_cached_model=fail,
+        )
+        snapshot, started = await manager.start("cached-model")
+        assert not started
+        assert snapshot.state == "error"
+        assert (await manager.status("cached-model")).state == "error"
 
     asyncio.run(run())

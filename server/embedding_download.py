@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from memory.vector_index import VectorIndex
 from shared.models import JSONValue
 
 EmbeddingDownloadState = Literal[
@@ -55,9 +56,11 @@ def _model_cached(model: str) -> bool:
 
 
 def _download_model(model: str) -> None:
-    from sentence_transformers import SentenceTransformer
+    VectorIndex.load_local_model(model, allow_download=True)
 
-    SentenceTransformer(model)
+
+def _load_cached_model(model: str) -> None:
+    VectorIndex.load_local_model(model)
 
 
 class EmbeddingDownloadManager:
@@ -67,10 +70,12 @@ class EmbeddingDownloadManager:
         package_available: Callable[[], bool] = _package_available,
         model_cached: Callable[[str], bool] = _model_cached,
         download_model: Callable[[str], None] = _download_model,
+        load_cached_model: Callable[[str], None] = _load_cached_model,
     ) -> None:
         self._package_available = package_available
         self._model_cached = model_cached
         self._download_model = download_model
+        self._load_cached_model = load_cached_model
         self._lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self._snapshot: EmbeddingDownloadSnapshot | None = None
@@ -120,7 +125,14 @@ class EmbeddingDownloadManager:
                 self._snapshot = snapshot
                 return snapshot, False
             if self._model_cached(normalized):
-                snapshot = EmbeddingDownloadSnapshot(model=normalized, state="ready")
+                try:
+                    await asyncio.to_thread(self._load_cached_model, normalized)
+                except Exception as exc:  # noqa: BLE001
+                    snapshot = EmbeddingDownloadSnapshot(
+                        model=normalized, state="error", error=str(exc)
+                    )
+                else:
+                    snapshot = EmbeddingDownloadSnapshot(model=normalized, state="ready")
                 self._snapshot = snapshot
                 return snapshot, False
             snapshot = EmbeddingDownloadSnapshot(model=normalized, state="downloading")

@@ -66,4 +66,11 @@ async def handle_embeddings_download(request: web.Request) -> web.Response:
             error_type="configuration_error",
             code="embeddings_package_missing",
         )
+    if snapshot.state == "error":
+        return error_response(
+            status=503,
+            message="Не удалось активировать локальную embeddings model.",
+            error_type="configuration_error",
+            code="embeddings_model_load_failed",
+        )
     return json_response({**snapshot.to_dict(), "started": started}, status=202 if started else 200)

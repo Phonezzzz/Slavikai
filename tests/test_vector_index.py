@@ -17,7 +17,7 @@ class DummyModel:
 def test_vector_index_namespace_and_limit(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "vec.db"
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model", lambda self, name: DummyModel()
+        "memory.vector_index.VectorIndex.load_local_model", lambda self, name: DummyModel()
     )
     index = VectorIndex(str(db_path), max_records=2)
 
@@ -41,7 +41,7 @@ def test_vector_index_namespace_and_limit(tmp_path, monkeypatch) -> None:
 def test_vector_index_batch_and_total_limit(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "vec.db"
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model", lambda self, name: DummyModel()
+        "memory.vector_index.VectorIndex.load_local_model", lambda self, name: DummyModel()
     )
     index = VectorIndex(str(db_path), max_records=10, max_total_records=3, batch_size=2)
     items = [(f"path{i}", f"content{i}") for i in range(5)]
@@ -53,7 +53,7 @@ def test_vector_index_batch_and_total_limit(tmp_path, monkeypatch) -> None:
 def test_vector_index_rejects_bad_meta(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "vec.db"
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model", lambda self, name: DummyModel()
+        "memory.vector_index.VectorIndex.load_local_model", lambda self, name: DummyModel()
     )
     index = VectorIndex(str(db_path))
     with pytest.raises(ValueError):
@@ -64,12 +64,12 @@ def test_vector_index_does_not_load_model_on_startup(tmp_path, monkeypatch) -> N
     db_path = tmp_path / "vec.db"
     calls = 0
 
-    def _get_model(_self: object, _name: str) -> DummyModel:
+    def load_local_model(_self: object, _name: str) -> DummyModel:
         nonlocal calls
         calls += 1
         return DummyModel()
 
-    monkeypatch.setattr("memory.vector_index.VectorIndex._get_model", _get_model)
+    monkeypatch.setattr("memory.vector_index.VectorIndex.load_local_model", load_local_model)
     _ = VectorIndex(str(db_path))
     assert calls == 0
 
@@ -78,13 +78,13 @@ def test_vector_index_first_search_loads_then_reuses_model(tmp_path, monkeypatch
     db_path = tmp_path / "vec.db"
     calls = 0
 
-    def _slow_get_model(_self: object, _name: str) -> DummyModel:
+    def _slow_load_local_model(_self: object, _name: str) -> DummyModel:
         nonlocal calls
         calls += 1
         time.sleep(0.05)
         return DummyModel()
 
-    monkeypatch.setattr("memory.vector_index.VectorIndex._get_model", _slow_get_model)
+    monkeypatch.setattr("memory.vector_index.VectorIndex.load_local_model", _slow_load_local_model)
     index = VectorIndex(str(db_path))
     embedding = np.array([1.0, 0.0, 0.0], dtype=np.float32).tobytes()
     with index.conn:
@@ -112,7 +112,7 @@ def test_vector_index_first_search_loads_then_reuses_model(tmp_path, monkeypatch
 def test_vector_index_upsert_delete_and_clear_namespace(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "vec.db"
     monkeypatch.setattr(
-        "memory.vector_index.VectorIndex._get_model", lambda _self, _name: DummyModel()
+        "memory.vector_index.VectorIndex.load_local_model", lambda _self, _name: DummyModel()
     )
     index = VectorIndex(str(db_path))
 
@@ -149,7 +149,7 @@ def test_vector_index_local_provider_errors_without_sentence_transformers(
     def _raise(*_args: object, **_kwargs: object) -> DummyModel:
         raise RuntimeError("sentence-transformers not available")
 
-    monkeypatch.setattr("memory.vector_index.VectorIndex._get_model", _raise)
+    monkeypatch.setattr("memory.vector_index.VectorIndex.load_local_model", _raise)
     index = VectorIndex(str(db_path), provider="local", local_model="all-MiniLM-L6-v2")
     with pytest.raises(RuntimeError, match="не смог загрузить локальную модель"):
         index.search("query", namespace="default", top_k=1)
