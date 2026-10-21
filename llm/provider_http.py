@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import ipaddress
 import ssl
 import threading
+from collections.abc import AsyncGenerator, AsyncIterator, Coroutine, Generator
+from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -39,7 +42,7 @@ class _ProviderOperation:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
         self.stopped = threading.Event()
-        self.task: asyncio.Task[requests.Response] | None = None
+        self.task: asyncio.Task[object] | None = None
 
     def close(self) -> None:
         self.stopped.set()
@@ -54,13 +57,29 @@ class _ProviderOperation:
         if self.task is not None and not self.task.cancelling():
             self.task.cancel()
 
+    def run[T](self, coroutine: Coroutine[object, object, T]) -> T:
+        task = self.loop.create_task(coroutine)
+        self.task = task
+        if self.stopped.is_set():
+            task.cancel()
+        try:
+            return self.loop.run_until_complete(task)
+        except asyncio.CancelledError as exc:
+            raise GenerationCancelled("Provider request cancelled") from exc
+
     def sleep(self, delay: float) -> None:
         self.stopped.wait(delay)
 
 
-async def _post(
-    url: str, headers: dict[str, str], payload: dict[str, JSONValue], timeout: int
-) -> requests.Response:
+@asynccontextmanager
+async def _open_post(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, JSONValue],
+    timeout: int,
+    *,
+    streaming: bool = False,
+) -> AsyncIterator[aiohttp.ClientResponse]:
     # Dedicated resolver принадлежит попытке; blocking getaddrinfo/executor нет.
     resolver = aiohttp.AsyncResolver(timeout=timeout)
     try:
@@ -79,7 +98,12 @@ async def _post(
             async with aiohttp.ClientSession(
                 connector=connector,
                 trust_env=False,
-                timeout=aiohttp.ClientTimeout(total=timeout),
+                timeout=aiohttp.ClientTimeout(
+                    total=None if streaming else timeout,
+                    connect=timeout,
+                    sock_connect=timeout,
+                    sock_read=timeout,
+                ),
             ) as session:
                 async with session.post(
                     url,
@@ -89,21 +113,85 @@ async def _post(
                     proxy=proxy,
                     ssl=ssl_context,
                 ) as upstream:
-                    response = requests.Response()
-                    response.status_code = upstream.status
-                    response.headers.update(upstream.headers)
-                    response.url = url
-                    # Проверка status до body read: 429/5xx не удерживают retry
-                    # на зависшем error body. Context закроет upstream до retry.
+                    response = _response_metadata(upstream, url)
+                    # Не читаем error body перед status/retry и не принимаем redirect.
                     response.raise_for_status()
-                    response._content = await upstream.read()
-                    return response
+                    if 300 <= response.status_code < 400:
+                        raise requests.HTTPError("Provider redirect rejected", response=response)
+                    yield upstream
     except TimeoutError as exc:
         raise requests.Timeout("Provider request timed out") from exc
     except aiohttp.ClientError as exc:
         raise requests.ConnectionError("Provider transport failed") from exc
     finally:
         await resolver.close()
+
+
+def _response_metadata(upstream: aiohttp.ClientResponse, url: str) -> requests.Response:
+    response = requests.Response()
+    response.status_code = upstream.status
+    response.headers.update(upstream.headers)
+    response.url = url
+    return response
+
+
+async def _post(
+    url: str, headers: dict[str, str], payload: dict[str, JSONValue], timeout: int
+) -> requests.Response:
+    async with _open_post(url, headers, payload, timeout) as upstream:
+        response = _response_metadata(upstream, url)
+        response._content = await upstream.read()
+        return response
+
+
+async def _stream_post(
+    url: str, headers: dict[str, str], payload: dict[str, JSONValue], timeout: int
+) -> AsyncGenerator[str, None]:
+    async with _open_post(url, headers, payload, timeout, streaming=True) as upstream:
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        pending = ""
+        # Framing не зависит от aiohttp readline limit: большой tool delta
+        # может занимать одну SSE строку. Сам протокол разбирает stream_model.
+        async for chunk in upstream.content.iter_any():
+            lines = (pending + decoder.decode(chunk)).splitlines(keepends=True)
+            pending = ""
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                pending = lines.pop()
+            for line in lines:
+                yield line
+        pending += decoder.decode(b"", final=True)
+        if pending:
+            yield pending
+
+
+async def _next_line(stream: AsyncIterator[str], token: asyncio.Event | None) -> str:
+    if cancellation_requested(token):
+        raise GenerationCancelled("Provider request cancelled")
+    return await anext(stream)
+
+
+def post_stream_lines(
+    *,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, JSONValue],
+    timeout: int,
+    cancellation_token: asyncio.Event | None,
+) -> Generator[str, None, None]:
+    # Один запрос без replay/retry после начала SSE; тот же generation worker.
+    with asyncio.Runner() as runner:
+        operation = _ProviderOperation(runner.get_loop())
+        with bind_cancellation_resource(cancellation_token, operation):
+            stream = _stream_post(url, headers, payload, timeout)
+            try:
+                while True:
+                    try:
+                        line = operation.run(_next_line(stream, cancellation_token))
+                    except StopAsyncIteration:
+                        return
+                    yield line
+            finally:
+                runner.run(stream.aclose())
 
 
 def post_plain_completion(
@@ -123,11 +211,7 @@ def post_plain_completion(
             def attempt() -> requests.Response:
                 if cancellation_requested(cancellation_token):
                     raise GenerationCancelled("Provider request cancelled")
-                operation.task = operation.loop.create_task(_post(url, headers, payload, timeout))
-                try:
-                    return operation.loop.run_until_complete(operation.task)
-                except asyncio.CancelledError as exc:
-                    raise GenerationCancelled("Provider request cancelled") from exc
+                return operation.run(_post(url, headers, payload, timeout))
 
             try:
                 return RetryPolicy().run(

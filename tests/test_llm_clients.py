@@ -794,10 +794,11 @@ def test_custom_transport_preserves_ca_bundle_and_remote_proxy(monkeypatch):
     assert ca_files == ["/synthetic/owner-ca.pem"]
 
 
-def test_custom_requests_have_independent_cancellation_ownership(monkeypatch):
+@pytest.mark.parametrize("native_tools", [False, True], ids=["plain-custom", "native-sse"])
+def test_requests_have_independent_cancellation_ownership(monkeypatch, native_tools):
     from tests.fake_provider_http import FakeHttpResponse, HoldingProvider
 
-    HoldingProvider(monkeypatch, "body")
+    HoldingProvider(monkeypatch, "body", streaming=native_tools)
     started = [threading.Event(), threading.Event()]
     responses = {}
     events = [[], []]
@@ -818,11 +819,11 @@ def test_custom_requests_have_independent_cancellation_ownership(monkeypatch):
     monkeypatch.setattr(aiohttp.ClientSession, "_request", fake_request)
     brain = LocalHttpBrain(
         ModelConfig(
-            provider="custom-" + "0" * 32,
+            provider="local" if native_tools else "custom-" + "0" * 32,
             model="m",
             base_url="https://provider.test/v1/chat/completions",
         ),
-        native_tools=False,
+        native_tools=native_tools,
     )
 
     def run(index):

@@ -88,6 +88,19 @@ def test_all_providers_emit_stream_events(provider: str, monkeypatch) -> None:
     config = ModelConfig(provider=provider, model=f"{provider}-model")
     brain: Brain
     if provider == "local":
+        import aiohttp
+
+        from tests.fake_provider_http import FakeHttpResponse
+
+        class SSE(FakeHttpResponse):
+            async def _lines(self):
+                for line in _StreamResponse().iter_lines():
+                    yield (line + "\n").encode("utf-8")
+
+        async def request(session, method, url, **kwargs):
+            return SSE()
+
+        monkeypatch.setattr(aiohttp.ClientSession, "_request", request)
         brain = LocalHttpBrain(default_config=config)
     elif provider == "deepseek":
         brain = DeepSeekBrain(api_key="test-key", default_config=config)

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from collections.abc import Iterator
+from contextlib import closing
 from typing import Final
 
 import requests
@@ -12,12 +13,11 @@ from config.system_prompts import THINKING_PROMPT
 from llm.brain_base import Brain
 from llm.cancellation import (
     GenerationCancelled,
-    bind_cancellation_resource,
     cancellation_requested,
     iter_cancellable,
 )
 from llm.capabilities import CapabilityEvidence, NativeToolCapability
-from llm.provider_http import post_plain_completion, proxies_for_provider_url
+from llm.provider_http import post_plain_completion, post_stream_lines, proxies_for_provider_url
 from llm.retry import request_with_retry
 from llm.stream_model import (
     Done,
@@ -200,15 +200,7 @@ class LocalHttpBrain(Brain):
         proxies = proxies_for_provider_url(self.base_url)
 
         def send_request() -> requests.Response:
-            if self.supports_native_tools:
-                return requests.post(
-                    self.base_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=DEFAULT_TIMEOUT,
-                    proxies=proxies,
-                )
-            return requests.post(
+            response = requests.post(
                 self.base_url,
                 json=payload,
                 headers=headers,
@@ -216,6 +208,10 @@ class LocalHttpBrain(Brain):
                 allow_redirects=False,
                 proxies=proxies,
             )
+            if 300 <= response.status_code < 400:
+                response.close()
+                raise requests.HTTPError("Provider redirect rejected", response=response)
+            return response
 
         response = request_with_retry(send_request, provider=cfg.provider)
         return _parse_chat_result(response.json())
@@ -283,21 +279,21 @@ class LocalHttpBrain(Brain):
         if cfg.top_p is not None:
             payload["top_p"] = cfg.top_p
 
-        response = requests.post(
-            self.base_url,
-            json=payload,
-            headers=headers,
-            timeout=DEFAULT_TIMEOUT,
-            stream=True,
-            proxies=proxies_for_provider_url(self.base_url),
-        )
-        with bind_cancellation_resource(cancellation_token, response):
-            response.raise_for_status()
-            response.encoding = "utf-8"
-            yield from iter_cancellable(
-                iter_openai_sse_events(response.iter_lines(decode_unicode=True)),
-                cancellation_token=cancellation_token,
-            )
+        try:
+            with closing(
+                post_stream_lines(
+                    url=self.base_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=DEFAULT_TIMEOUT,
+                    cancellation_token=cancellation_token,
+                )
+            ) as lines:
+                yield from iter_cancellable(
+                    iter_openai_sse_events(lines), cancellation_token=cancellation_token
+                )
+        except GenerationCancelled:
+            yield Done(finish_reason="cancelled")
 
     def _stream_events_from_plain_completion(
         self,

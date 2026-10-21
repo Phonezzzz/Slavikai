@@ -30,3 +30,16 @@ listing, discovery, selection and completion boundaries until explicit delegatio
 TODO: Add first-class `Sign in with ChatGPT` subscription access through a separately designed
 auth/entitlement route as required by ADR-0001. An API key provider instance is never treated
 as subscription access. Owner credential delegation remains the separate ADR-0007 target gap.
+
+## Transport OpenAI-compatible адаптера
+
+Native SSE в `LocalHttpBrain` и обычный custom Chat используют один scoped HTTP механизм
+из `llm/provider_http.py`. Отмена относится к конкретному запросу и прерывает DNS, connect,
+TLS, headers и чтение body; consumer close закрывает response/session/connector/resolver.
+SSE читается постепенно, UTF-8 и разделение строк сохраняются между сетевыми chunks;
+большая строка с tool delta не ограничивается внутренним readline limit aiohttp.
+Redirects запрещены в sync и stream requests; Authorization не пересылается на redirect target.
+Remote proxy и owner CA bundle сохраняются, loopback не использует proxy environment.
+Native stream не повторяет HTTP request после ошибки или отмены. Read/connect timeout
+ограничивает сетевое ожидание, а не всю длительность последовательного SSE ответа.
+Эта transport предпосылка не подтверждает модель и не включает custom native tools.

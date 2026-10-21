@@ -23,6 +23,19 @@ class FakeHttpResponse:
             await self._read()
         return json.dumps(self.payload).encode()
 
+    def iter_any(self):
+        return self._lines()
+
+    def __aiter__(self):
+        return self._lines()
+
+    async def _lines(self):
+        yield await self.read()
+
+    @property
+    def content(self):
+        return self
+
     def release(self):
         self.closed = True
 
@@ -38,7 +51,7 @@ class FakeHttpResponse:
 
 
 class HoldingProvider:
-    def __init__(self, monkeypatch, stage):
+    def __init__(self, monkeypatch, stage, *, streaming=False):
         self.stage = stage
         self.started = threading.Event()
         self.cleaned = threading.Event()
@@ -94,7 +107,7 @@ class HoldingProvider:
                 return await original_request(session, method, url, **kwargs)
             owner.calls += 1
             assert kwargs.get("allow_redirects") is False
-            assert kwargs["json"].get("stream") is not True
+            assert (kwargs["json"].get("stream") is True) is streaming
             if owner.calls == 1:
                 if stage in {"dns", "connect", "tls"}:
                     return await original_request(session, method, url, **kwargs)
