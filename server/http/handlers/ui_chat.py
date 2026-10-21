@@ -16,6 +16,7 @@ from core.agent_tools import ChatApprovalUnavailable
 from core.approval_policy import ApprovalCategory
 from core.desktop_policy import DesktopApprovalRule, DesktopApprovalScope, DesktopPolicyStore
 from core.mwv.routing import classify_request
+from core.response_preferences import ResponsePreferences
 from core.skills.index import SkillIndex
 from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
@@ -89,6 +90,7 @@ from server.http_api import (
     _utc_now_iso,
     _workspace_root_for_session,
 )
+from server.preferences_store import PreferencesStore
 from server.ui_hub import MessageHistoryConflictError, UIHub
 from shared.models import JSONValue, LLMMessage
 from shared.task_run import RunScope, RunState, TaskRun, TransitionAuthority
@@ -1117,6 +1119,15 @@ async def _handle_ui_send_impl(
                     error_type="invalid_request_error",
                     code="task_run_context_changed",
                 )
+            principal = _request_principal_id(request)
+            if principal is None:
+                raise RuntimeError("Request principal is unavailable")
+            preferences = (
+                cast(PreferencesStore, request.app["preferences_store"]).get(principal).value
+            )
+            agent.response_preferences = ResponsePreferences(
+                tone=preferences.tone, instructions=preferences.system_prompt
+            )
             response_raw: str
             agent_response: AgentResponse | None = None
             respond_stream_method = getattr(agent, "respond_stream", None)

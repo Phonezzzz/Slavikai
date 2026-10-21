@@ -6,6 +6,7 @@ import pytest
 from core.agent import Agent
 from core.approval_policy import ApprovalRequired
 from core.auto_runtime import AutoContinuationUnavailable, AutoOrchestrator
+from core.response_preferences import ResponsePreferences
 from llm.brain_base import Brain
 from llm.types import LLMResult, ToolCall
 from shared.models import ToolResult
@@ -74,6 +75,7 @@ def test_auto_resume_does_not_repeat_completed_tool(tmp_path: Path, changed_scop
             description="Diagnostic read",
             parameters_schema={"type": "object"},
         )
+    agent.response_preferences = ResponsePreferences("technical", "ORIGINAL_PRIVATE")
     orchestrator = AutoOrchestrator(agent, workspace_root=tmp_path)
     try:
         with pytest.raises(ApprovalRequired) as stopped:
@@ -153,6 +155,7 @@ def test_auto_resume_does_not_repeat_completed_tool(tmp_path: Path, changed_scop
             assert orchestrator._paused_runs[run_id] is paused
             assert executions == ["before_approval"]
             setattr(agent, changed_scope, previous)
+        agent.response_preferences = ResponsePreferences("friendly", "NEW_PRIVATE")
         # Core scope test; exact once authorization проверяется отдельно через HTTP.
         agent.set_session_context("auto-session", {"NETWORK_RISK"})
         orchestrator.resume(run_id)
@@ -164,5 +167,7 @@ def test_auto_resume_does_not_repeat_completed_tool(tmp_path: Path, changed_scop
         assert executions == ["before_approval", "pending_network"]
         assert brain.initial_requests == 1
         assert brain.history[-1][-1].tool_call_id == "pending-original"
+        assert any("ORIGINAL_PRIVATE" in m.content for m in brain.history[-1])
+        assert not any("NEW_PRIVATE" in m.content for m in brain.history[-1])
     finally:
         agent.close()

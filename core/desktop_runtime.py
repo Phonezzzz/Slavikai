@@ -12,6 +12,7 @@ from typing import Protocol, TypeVar
 from core.approval_policy import ApprovalRequired
 from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
+from core.response_preferences import ResponsePreferences, compose_response_preferences
 from core.tool_gateway import ToolGateway
 from core.tool_loop import (
     AgentToolLoop,
@@ -53,6 +54,7 @@ desktop_shell.
 
 
 class DesktopAgentProtocol(Protocol):
+    response_preferences: ResponsePreferences
     main_config: ModelConfig | None
     tool_registry: ToolRegistry
     desktop_execution_control: DesktopExecutionControl
@@ -325,10 +327,13 @@ class DesktopRuntime:
             loop_result = AgentToolLoop(max_iterations=self.max_iterations).run(
                 brain=brain,
                 gateway=gateway,
-                messages=[
-                    LLMMessage(role="system", content=DESKTOP_SYSTEM_PROMPT),
-                    LLMMessage(role="user", content=goal),
-                ],
+                messages=compose_response_preferences(
+                    [
+                        LLMMessage(role="system", content=DESKTOP_SYSTEM_PROMPT),
+                        LLMMessage(role="user", content=goal),
+                    ],
+                    self.parent.response_preferences,
+                ),
                 tools=tool_specs,
                 config=self.parent.main_config,
                 cancellation_token=cancellation_token,

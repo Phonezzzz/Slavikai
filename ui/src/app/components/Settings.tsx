@@ -1859,7 +1859,7 @@ export function Settings({
                     <div>
                       <SectionCard
                         title="Response style"
-                        description="Saved for your account. This preference does not affect answers yet."
+                        description="Applies to your next browser chat request. Existing runs keep their original preferences."
                         scope="You"
                       >
                         <div>
@@ -1902,7 +1902,7 @@ export function Settings({
 
                       <SectionCard
                         title="Advanced assistant behavior"
-                        description="Private saved instructions. They do not affect answers yet."
+                        description="Private instructions for your next browser chat request. System policy and approvals still apply."
                         scope="You"
                       >
                         <button
@@ -1915,7 +1915,7 @@ export function Settings({
                         {showAssistantAdvanced ? (
                           <div className="mt-4 space-y-3">
                             <div className="rounded-xl border border-amber-500/30 bg-amber-950/10 px-4 py-3 text-xs text-amber-100/90">
-                              Custom instructions apply globally and can significantly change agent behavior. Use this only when the default style options are not enough.
+                              These instructions apply to your browser chats, below system policy. They do not grant tool permissions or replace task approvals.
                             </div>
                             <label className="block">
                               <span className="mb-2 block text-sm font-medium text-zinc-300">Custom instructions</span>

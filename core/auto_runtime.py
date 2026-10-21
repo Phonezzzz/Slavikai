@@ -24,6 +24,7 @@ from core.mwv.verifier_runtime import (
     is_repo_workspace,
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
+from core.response_preferences import compose_response_preferences
 from core.skills.index import SkillResolution
 from core.skills.runtime import skill_run_metadata, skill_run_report
 from core.tool_loop import (
@@ -272,10 +273,13 @@ class AutoOrchestrator:
             loop_result = AgentToolLoop(max_iterations=budgets.max_tool_calls).run(
                 brain=brain,
                 gateway=gateway,
-                messages=[
-                    LLMMessage(role="system", content=system_prompt),
-                    LLMMessage(role="user", content=goal),
-                ],
+                messages=compose_response_preferences(
+                    [
+                        LLMMessage(role="system", content=system_prompt),
+                        LLMMessage(role="user", content=goal),
+                    ],
+                    self.parent.response_preferences,
+                ),
                 tools=tool_specs,
                 config=self.parent.main_config,
                 continuation=continuation,

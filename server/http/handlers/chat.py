@@ -10,6 +10,7 @@ from typing import cast
 
 from aiohttp import web
 
+from core.response_preferences import ResponsePreferences
 from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
 from server.agent_provider import ScopedAgentProvider
 from server.http.common.auth import _request_principal_id
@@ -277,6 +278,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             agent = await provider.get_for_current_task(scope, execution_config)
             previous_trace_id = agent.last_chat_interaction_id
             previous_decision_packet = getattr(agent, "last_decision_packet", None)
+            agent.response_preferences = ResponsePreferences()
             agent.set_session_context(session_id, approved_categories)
             agent.reconfigure_models(execution_config, main_api_key=execution_key, persist=False)
             agent.apply_runtime_tools_enabled(security_snapshot[0])

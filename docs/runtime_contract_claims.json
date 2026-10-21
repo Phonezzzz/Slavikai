@@ -362,14 +362,16 @@
       "scope": "configuration",
       "status": "implemented",
       "owner": "settings",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
+        "tests/test_response_preferences.py",
+        "tests/test_auto_native_continuation.py",
         "tests/test_preferences_store.py",
         "tests/ui_api/test_personal_preferences.py",
         "ui/src/app/__tests__/settings-loading.test.tsx"
       ],
-      "summary": "Browser personal preferences are principal-scoped with subject-bound CAS, independent installation permissions, defaults for new principals and no import of global personal values; tone/instructions runtime consumption is not implemented."
+      "summary": "Browser personal preferences are principal-scoped with subject-bound CAS, independent installation permissions, defaults for new principals and no import of global personal values; new browser model requests consume tone/instructions as user input without modifying system prompts or policy; tool continuations retain their original messages and Bearer requests use defaults."
     }
   ]
 }

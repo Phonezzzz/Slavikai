@@ -12,6 +12,7 @@ from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.desktop_policy import DesktopApprovalRule
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import RunContext, TaskPacket
+from core.response_preferences import ResponsePreferences
 from llm.stream_model import StreamEvent
 from llm.types import ModelConfig
 from server.agent_provider import AgentScope, ScopedAgentProvider
@@ -107,6 +108,7 @@ class TracerProtocol(Protocol):
 
 
 class AgentProtocol(Protocol):
+    response_preferences: ResponsePreferences
     brain: object
     tools_enabled: dict[str, bool]
     last_approval_request: ApprovalRequest | None

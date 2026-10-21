@@ -9,6 +9,7 @@ from core.agent_tools import AgentToolsMixin
 from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
 from core.auto_agent import AutoAgent
 from core.mwv.models import StopReasonCode, VerificationResult, VerificationStatus
+from core.response_preferences import ResponsePreferences
 from core.skills.index import SkillResolution
 from core.skills.models import SkillEntry
 from core.tool_gateway import ToolGateway
@@ -105,6 +106,8 @@ class _FakeTracer:
 
 
 class _FakeAgent:
+    response_preferences = ResponsePreferences()
+
     def __init__(self, *, brain_text: str) -> None:
         self._brain = _FakeBrain(brain_text)
         self.main_config = None

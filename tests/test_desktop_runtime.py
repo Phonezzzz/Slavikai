@@ -12,6 +12,7 @@ from core.desktop_runtime import (
 from core.desktop_security import DesktopPathSecurity
 from core.mwv.models import VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
+from core.response_preferences import ResponsePreferences
 from core.tool_gateway import ToolGateway
 from llm.brain_base import Brain
 from llm.types import LLMResult, ToolCall
@@ -39,6 +40,8 @@ class ScriptedBrain(Brain):
 
 
 class DesktopParent:
+    response_preferences = ResponsePreferences()
+
     def __init__(self, brain: Brain, registry: ToolRegistry) -> None:
         self.brain = brain
         self.tool_registry = registry

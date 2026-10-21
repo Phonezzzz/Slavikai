@@ -28,6 +28,7 @@ from core.desktop_security import DesktopPathSecurity
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.plan_compiler import compile_structured_plan_steps
+from core.response_preferences import ResponsePreferences
 from core.rule_engine import RuleEngine
 from core.skills.candidates import SkillCandidateWriter
 from core.skills.index import SkillIndex, SkillMatch
@@ -287,6 +288,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self._retrieval_config = RetrievalConfig()
         self.skill_index = SkillIndex.load_default()
         self._skill_candidate_writer = SkillCandidateWriter()
+        self.response_preferences = ResponsePreferences()
         self.short_term: list[LLMMessage] = []
         self.conversation_id = str(uuid.uuid4())
         self.session_id: str | None = None

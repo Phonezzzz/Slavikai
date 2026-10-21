@@ -10,6 +10,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from core.batch_review import BatchReviewer
+from core.response_preferences import ResponsePreferences, compose_response_preferences
 from memory.memory_retrieval import build_memory_capsule as build_memory_capsule_payload
 from shared.batch_review_models import (
     BatchReviewRun,
@@ -72,6 +73,7 @@ class AgentMemoryMixin:
         user_id: str
         session_id: str | None
         conversation_id: str
+        response_preferences: ResponsePreferences
         short_term: list[LLMMessage]
         memory_config: MemoryConfig
         memory: MemoryManager
@@ -640,6 +642,7 @@ class AgentMemoryMixin:
         }
 
     def _build_context_messages(self, messages: list[LLMMessage], query: str) -> list[LLMMessage]:
+        messages = compose_response_preferences(messages, self.response_preferences)
         budget = self.memory_config.context_budget
         allow_vector_runtime_init = getattr(self, "runtime_mode", "ask") != "ask"
         remaining = budget.total_chars

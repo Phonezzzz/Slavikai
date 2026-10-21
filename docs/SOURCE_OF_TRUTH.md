@@ -91,8 +91,15 @@ owner-only. `{ "reset_preferences": true }` с текущим ETag возвра�
 UI отправляет только изменённые группы; ошибка второй операции не отменяет уже
 сохранённую installation operation и сообщается как частичный результат.
 
-Tone и private instructions сейчас сохраняются изолированно, но не включаются в
-model request. Их применение — отдельный scope; эта изоляция не переписывает runtime prompts.
+Tone и private instructions применяются к следующему новому browser chat request.
+Snapshot verified principal читается под существующим agent execution lock. Отдельное
+user-role сообщение с preferences входит в Ask/chat (sync/stream), Auto и Desktop перед
+исходным user goal; system prompts и policy/approval authority не изменяются.
+Balanced + пустые инструкции сохраняют прежний request. Preferences не добавляются
+в историю чата, Memory или context logs. Structured Plan/MWV без model request
+не использует их для изменения packet/operations. Существующий native tool continuation
+сохраняет исходные messages даже после изменения Settings. Bearer `/v1` использует defaults
+и не импортирует browser preferences.
 
 ## Change protocol
 
