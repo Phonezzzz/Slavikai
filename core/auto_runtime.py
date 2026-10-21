@@ -204,16 +204,17 @@ class AutoOrchestrator:
         started_monotonic, skill_resolution = frame.started_monotonic, frame.skill_resolution
         try:
             brain = frame.brain
-            if not brain.supports_native_tools:
-                reason = "Выбранный provider не поддерживает native tool calls для Auto."
+            capability = brain.native_tool_capability()
+            if not capability.allowed:
+                reason = capability.reason
                 state["error"] = reason
                 state["error_code"] = "native_tools_required"
                 self._set_status(state, AutoRunStatus.FAILED_WORKER)
                 return AutoRunOutcome(
                     text=self.parent._format_stop_response(
-                        what="Auto-run остановлен: provider несовместим с Auto",
+                        what="Auto-run остановлен: native tools недоступны",
                         why=reason,
-                        next_steps=["Выбери DeepSeek или Local model и повтори запуск."],
+                        next_steps=["Выбери модель с доступными native tools и повтори запуск."],
                         stop_reason_code=StopReasonCode.WORKER_FAILED,
                         route="auto",
                         plan_summary="Auto требует native tool-calling provider.",
@@ -223,7 +224,7 @@ class AutoOrchestrator:
                     status=AutoRunStatus.FAILED_WORKER,
                     stop_reason_code=StopReasonCode.WORKER_FAILED,
                     verifier=None,
-                    next_steps=["Выбери DeepSeek или Local model и повтори запуск."],
+                    next_steps=["Выбери модель с доступными native tools и повтори запуск."],
                 )
             self._set_status(state, AutoRunStatus.PLANNING)
             budget_stop = _budget_runtime_stop(

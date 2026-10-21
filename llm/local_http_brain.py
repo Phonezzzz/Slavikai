@@ -16,6 +16,7 @@ from llm.cancellation import (
     cancellation_requested,
     iter_cancellable,
 )
+from llm.capabilities import CapabilityEvidence, NativeToolCapability
 from llm.provider_http import post_plain_completion, proxies_for_provider_url
 from llm.retry import request_with_retry
 from llm.stream_model import (
@@ -162,6 +163,15 @@ class LocalHttpBrain(Brain):
             or DEFAULT_LOCAL_ENDPOINT
         )
         self.api_key = api_key or default_config.api_key or os.getenv("LOCAL_LLM_API_KEY")
+
+    def native_tool_capability(self) -> NativeToolCapability:
+        if self.supports_native_tools:
+            return super().native_tool_capability()
+        return NativeToolCapability(
+            adapter=CapabilityEvidence(state="supported", source="adapter_declaration"),
+            model=CapabilityEvidence(state="unknown", source="not_observed"),
+            eligibility="unqualified",
+        )
 
     def _resolve_config(self, override: ModelConfig | None) -> ModelConfig:
         if override:

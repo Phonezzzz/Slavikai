@@ -12,7 +12,16 @@ unsupported, the picker permits a manual opaque model ID; HTTP 401 never permits
 The selected ID belongs to session state. The existing OpenAI-compatible `LocalHttpBrain` sends
 text/chat completions to the stored Base URL. Dynamic instances are fail-closed for native tools;
 Auto reports `native_tools_required` and no tool schema is sent to an unqualified endpoint.
-Capability qualification is a future increment. Built-in `local` capability and the public
+Admission в Ask, Plan, Auto и Desktop читает typed snapshot `NativeToolCapability`.
+Декларация адаптера имеет provenance `adapter_declaration`; evidence модели остаётся
+`unknown` с provenance `not_observed`. Адаптер без native tools сообщает `unsupported`;
+custom route — `unqualified`, хотя OpenAI-compatible адаптер реализует протокол.
+Существующее разрешение встроенных адаптеров называется `legacy_adapter`, а не qualification
+модели. Snapshot вычисляется из текущего Brain при каждом admission, не сохраняется и не
+кэшируется между изменениями route/model/credentials; endpoint и секреты в него не входят.
+Это только capability admission: ToolGateway, policy, approvals и credential authority
+остаются отдельными проверками. Live qualification модели — следующий отдельный этап.
+Built-in `local` capability and the public
 `/v1` proxy model `slavik` are unchanged.
 
 Dynamic instances use owner credentials and are server-side default-deny for members at model

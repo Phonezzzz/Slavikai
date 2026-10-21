@@ -286,7 +286,8 @@ class DesktopRuntime:
         continuation: ToolLoopContinuation | None = None,
     ) -> DesktopRunOutcome:
         brain = self.parent._get_main_brain()
-        if not brain.supports_native_tools:
+        capability = brain.native_tool_capability()
+        if not capability.allowed:
             verification = _failed_verification("native_tools_required")
             empty = AgentToolLoopResult(
                 text="",
@@ -294,7 +295,7 @@ class DesktopRuntime:
                 error="native_tools_required",
             )
             return DesktopRunOutcome(
-                text="Desktop mode requires a provider with native tool calling.",
+                text=f"Desktop: {capability.reason}",
                 verification=verification,
                 loop_result=empty,
             )

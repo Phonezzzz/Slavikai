@@ -14,6 +14,7 @@ from core.skills.index import SkillResolution
 from core.skills.models import SkillEntry
 from core.tool_gateway import ToolGateway
 from core.tool_loop import ExecutedToolCall
+from llm.brain_base import Brain
 from llm.types import LLMResult, ToolCall, ToolSpec
 from shared.auto_models import AutoRunStatus
 from shared.models import LLMMessage, ToolResult
@@ -29,7 +30,7 @@ def test_auto_process_outcome_through_gateway_and_next_model_request(tmp_path, e
         encoding="utf-8",
     )
 
-    class ScriptBrain:
+    class ScriptBrain(Brain):
         supports_native_tools = True
 
         def __init__(self):
@@ -84,7 +85,7 @@ def test_auto_process_outcome_through_gateway_and_next_model_request(tmp_path, e
     assert brain.projection["data"]["stderr"] == "process diagnostic\n"
 
 
-class _FakeBrain:
+class _FakeBrain(Brain):
     supports_native_tools = False
 
     def __init__(self, text: str) -> None:
@@ -139,7 +140,7 @@ class _FakeAgent:
         return f"stop:{kwargs.get('what', '')}"
 
 
-class _ToolLoopBrain:
+class _ToolLoopBrain(Brain):
     supports_native_tools = True
 
     def __init__(self) -> None:
@@ -167,7 +168,7 @@ class _ToolLoopBrain:
         return LLMResult(text="auto v1 final")
 
 
-class _ResponseOnlyBrain:
+class _ResponseOnlyBrain(Brain):
     supports_native_tools = True
 
     def __init__(self) -> None:
@@ -199,7 +200,7 @@ class _AutoV1Agent(_FakeAgent):
         return ToolGateway(self.tool_registry)
 
 
-class _RecoveryToolLoopBrain:
+class _RecoveryToolLoopBrain(Brain):
     """First call triggers a failing tool; second call recovers with a final answer."""
 
     supports_native_tools = True
@@ -396,7 +397,7 @@ def test_auto_v1_failed_tool_call_without_recovery_is_worker_failed(
     assert coders[0]["status"] == "failed"
 
 
-class _CorrectiveRecoveryBrain:
+class _CorrectiveRecoveryBrain(Brain):
     supports_native_tools = True
 
     def __init__(self) -> None:
@@ -551,7 +552,8 @@ def test_auto_runtime_rejects_provider_without_native_tools(tmp_path) -> None:
     assert outcome.stop_reason_code is not None
     assert isinstance(agent.last_auto_state, dict)
     assert agent.last_auto_state.get("error_code") == "native_tools_required"
-    assert "DeepSeek" in outcome.next_steps[0]
+    assert "native tools" in outcome.next_steps[0]
+    assert "не поддерживает" in agent.last_auto_state["error"]
 
 
 def test_auto_orchestrator_has_no_legacy_run_entrypoint() -> None:

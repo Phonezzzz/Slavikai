@@ -763,7 +763,8 @@ class AgentRoutingMixin:
         messages: list[LLMMessage],
     ) -> AgentToolLoopResult | None:
         brain = self._get_main_brain()
-        if not brain.supports_native_tools:
+        capability = brain.native_tool_capability()
+        if not capability.allowed:
             return None
         tool_specs = self._chat_read_tool_specs()
         if not tool_specs:

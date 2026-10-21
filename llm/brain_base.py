@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 
 from llm.cancellation import cancellation_requested
+from llm.capabilities import CapabilityEvidence, NativeToolCapability
 from llm.stream_model import Done, StreamEvent, stream_events_from_result
 from llm.types import LLMResult, ModelConfig, ToolSpec
 from shared.models import LLMMessage
@@ -15,6 +16,16 @@ class Brain(ABC):
 
     supports_native_tools: bool = False
     supports_streaming_tools: bool = False
+
+    def native_tool_capability(self) -> NativeToolCapability:
+        return NativeToolCapability(
+            adapter=CapabilityEvidence(
+                state="supported" if self.supports_native_tools else "unsupported",
+                source="adapter_declaration",
+            ),
+            model=CapabilityEvidence(state="unknown", source="not_observed"),
+            eligibility="legacy_adapter" if self.supports_native_tools else "unsupported",
+        )
 
     @abstractmethod
     def generate(

@@ -25,10 +25,8 @@ def create_brain(config: ModelConfig, api_key: str | None = None) -> Brain:
     if config.provider == "deepseek":
         return DeepSeekBrain(api_key=api_key or config.api_key, default_config=config)
     if config.base_url:
-        # Trust boundary: a dynamic OpenAI-compatible provider must not become
-        # executable merely because base_url is present. Only explicitly
-        # qualified custom provider identities may enter this path; anything
-        # else fails closed like an unknown provider.
+        # Base URL не разрешает инструменты. Формат custom ID допускает только
+        # подключение Chat-адаптера, а не подтверждает capabilities модели.
         if not is_custom_provider_id(config.provider):
             raise ValueError(f"Неизвестный провайдер модели: {config.provider}")
         return LocalHttpBrain(

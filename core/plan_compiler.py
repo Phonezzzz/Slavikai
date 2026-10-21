@@ -26,10 +26,11 @@ def compile_structured_plan_steps(
     audit_log: list[dict[str, JSONValue]],
     available_tools: list[ToolSpec],
 ) -> list[dict[str, JSONValue]]:
-    if not brain.supports_native_tools:
+    capability = brain.native_tool_capability()
+    if not capability.allowed:
         raise PlanCompilationError(
             code="native_tools_required",
-            message="Plan требует provider с native tool calls. Выбери DeepSeek или Local model.",
+            message=f"Plan: {capability.reason}",
         )
     tool_names = [tool.name for tool in available_tools]
     if not tool_names:
