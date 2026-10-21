@@ -242,7 +242,7 @@ describe('Settings loading isolation', () => {
     await screen.findByRole('button', { name: 'Show advanced editor' });
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
     rerender(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Memory' }));
     await screen.findByText('fresh-model is available locally.');
     expect(signals[0]?.aborted).toBe(true);
     await act(async () => { oldBody.resolve({ error: { message: 'Old embedding check failed' } }); });
@@ -863,6 +863,7 @@ describe('principal preferences', () => {
 
 describe('settings scope transactions', () => {
   it('reports installation commit separately when personal CAS conflicts', async () => {
+    const onSaved = vi.fn();
     const writes: Array<{ body: Record<string, unknown>; etag: string | null }> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (url === SETTINGS_URL) {
@@ -877,13 +878,14 @@ describe('settings scope transactions', () => {
       if (url === MODELS_URL) return json({ providers: [] });
       throw new Error(`Unexpected URL ${url}`);
     }));
-    render(<Settings isOpen onClose={() => undefined} />);
+    render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
     await editInstructions('private pending draft');
     fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await screen.findByText('Installation settings saved. Preferences were not saved: Preferences changed.');
     expect(writes).toHaveLength(2);
+    expect(onSaved).toHaveBeenCalledTimes(1);
     expect(writes[0].body).not.toHaveProperty('personalization');
     expect(writes[1].body).not.toHaveProperty('providers');
     expect(writes[1].etag).toBe('"preferences-fixture-0"');
@@ -918,5 +920,50 @@ describe('settings scope transactions', () => {
     await screen.findByDisplayValue('member saved');
     expect(writes).toHaveLength(1);
     expect(writes[0]).not.toHaveProperty('personalization');
+  });
+});
+
+describe('review regressions', () => {
+  it('hides previous principal fields when reopening fails to load settings', async () => {
+    let fail = false;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === SETTINGS_URL) return fail ? json({ error: { message: 'Identity settings unavailable' } }, 503) : json(settings('old principal private'));
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      throw new Error(`Unexpected URL ${url}`);
+    }));
+    const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
+    await editInstructions('old private draft');
+    rerender(<Settings isOpen={false} onClose={() => undefined} />);
+    fail = true;
+    rerender(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByText('Identity settings unavailable');
+    expect(screen.queryByDisplayValue('old private draft')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'API Keys' })).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(true);
+  });
+
+  it('notifies consumers once after both scope commits, never between them', async () => {
+    const personal = deferred<Response>();
+    const onSaved = vi.fn();
+    let writes = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') { writes += 1; return writes === 1 ? json(settings()) : personal.promise; }
+        return json(settings());
+      }
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      if (url === MODELS_URL) return json({ providers: [] });
+      throw new Error(`Unexpected URL ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
+    await editInstructions('new private draft');
+    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await vi.waitFor(() => expect(writes).toBe(2));
+    expect(onSaved).not.toHaveBeenCalled();
+    await act(async () => personal.resolve(json(settings('new private draft'))));
+    await screen.findByText('Settings saved.');
+    expect(onSaved).toHaveBeenCalledTimes(1);
   });
 });

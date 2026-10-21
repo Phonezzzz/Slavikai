@@ -747,6 +747,7 @@ export function Settings({
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('assistant');
   const [canManageInstallation, setCanManageInstallation] = useState(false);
+  const [settingsReady, setSettingsReady] = useState(false);
   const preferencesEtag = useRef<string | null>(null);
   const preferencesSubject = useRef<string | null>(null);
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
@@ -858,6 +859,7 @@ export function Settings({
       setApiKeys({ ...EMPTY_API_KEYS });
       setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
     }
+    setSettingsReady(true);
     setCanManageInstallation(parsed.canManageInstallation);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
@@ -976,7 +978,7 @@ export function Settings({
     const providerRevisionAtRequestStart = providerInstancesRevision.current;
     const writesBeforeSnapshot = [...pendingSettingsWrites.current];
     if (writesBeforeSnapshot.length > 0) reconciliationNeeded.current = true;
-    if (!preserveDraft) setLoading(true);
+    if (!preserveDraft) { setLoading(true); setSettingsReady(false); }
     if (!preserveDraft) setStatus(null);
     if (!preserveDraft) void refreshEmbeddingRuntime();
     try {
@@ -1056,6 +1058,19 @@ export function Settings({
 
   useEffect(() => {
     if (!isOpen) {
+      setSettingsReady(false);
+      setCanManageInstallation(false);
+      preferencesEtag.current = null;
+      setTone('balanced');
+      setSystemPrompt(DEFAULT_SYSTEM_PROMPT);
+      setAppearanceTheme(DEFAULT_APPEARANCE_THEME);
+      setLongPasteToFileEnabled(DEFAULT_LONG_PASTE_TO_FILE_ENABLED);
+      setLongPasteThresholdChars(DEFAULT_LONG_PASTE_THRESHOLD_CHARS);
+      setApiKeys({ ...EMPTY_API_KEYS });
+      setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
+      setImportPayloadText(null);
+      setImportPreview(null);
+      dirtyFields.current.clear();
       onboardingEpoch.current += 1;
       // Release the busy state owned by the invalidated operation so a
       // reopened Settings is never stuck disabled by a stale probe/save.
@@ -1376,7 +1391,10 @@ export function Settings({
       finishWrite = beginSettingsWrite(hasProviderChanges);
       let lastBody: unknown;
       for (const item of requests) {
-        if (epoch !== onboardingEpoch.current) return;
+        if (epoch !== onboardingEpoch.current) {
+          if (installationCommitted) onSaved?.();
+          return;
+        }
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (item.personal && privateEtagAtRequestStart) headers['If-Match'] = privateEtagAtRequestStart;
         const response = await fetch('/ui/api/settings', {
@@ -1388,12 +1406,13 @@ export function Settings({
         }
         if (item.personal) personalPending = false;
         else installationCommitted = true;
-        onSaved?.();
       }
+      onSaved?.();
       if (epoch !== onboardingEpoch.current) return;
       applyParsedSettings(parseSettingsPayload(lastBody), providerRevisionAtRequestStart);
       setStatus('Settings saved.');
     } catch (error) {
+      if (installationCommitted) onSaved?.();
       if (epoch !== onboardingEpoch.current) return;
       const message = error instanceof Error ? error.message : 'Failed to save settings.';
       setStatus(installationCommitted && personalPending
@@ -1566,7 +1585,7 @@ export function Settings({
                     onClick={() => {
                       void handleSave();
                     }}
-                    disabled={saving || loading}
+                    disabled={saving || loading || !settingsReady}
                     className="rounded-md border border-zinc-600 bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {saving ? 'Saving...' : 'Save changes'}
@@ -1615,7 +1634,7 @@ export function Settings({
                     <div className="text-sm text-zinc-400">Loading settings...</div>
                   ) : null}
 
-                  {canManageInstallation && !loading && activeTab === 'api' ? (
+                  {canManageInstallation && settingsReady && !loading && activeTab === 'api' ? (
                     <div>
                       <SectionCard
                         title="Provider API keys"
@@ -1836,7 +1855,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {!loading && activeTab === 'assistant' ? (
+                  {settingsReady && !loading && activeTab === 'assistant' ? (
                     <div>
                       <SectionCard
                         title="Response style"
@@ -1915,7 +1934,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {!loading && activeTab === 'appearance' ? (
+                  {settingsReady && !loading && activeTab === 'appearance' ? (
                     <div>
                       <SectionCard
                         title="Theme"
@@ -1951,7 +1970,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {!loading && activeTab === 'composer' ? (
+                  {settingsReady && !loading && activeTab === 'composer' ? (
                     <div>
                       <SectionCard
                         title="Long paste handling"
@@ -2013,7 +2032,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {canManageInstallation && !loading && activeTab === 'memory' ? (
+                  {canManageInstallation && settingsReady && !loading && activeTab === 'memory' ? (
                     <div>
                       <SectionCard
                         title="Memory behavior"
@@ -2183,7 +2202,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {!loading && activeTab === 'data' ? (
+                  {settingsReady && !loading && activeTab === 'data' ? (
                     <div>
                       <SectionCard
                         title="Export chats"
@@ -2267,7 +2286,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {canManageInstallation && !loading && activeTab === 'diagnostics' ? (
+                  {canManageInstallation && settingsReady && !loading && activeTab === 'diagnostics' ? (
                     <div>
                       <SectionCard
                         title="Read-only diagnostics"
