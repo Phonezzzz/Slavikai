@@ -180,6 +180,37 @@ def test_failed_upsert_preserves_existing_vector(tmp_path, monkeypatch, failure)
     assert index.conn.execute("SELECT * FROM vectors").fetchall() == before
 
 
+@pytest.mark.parametrize("operation", ["upsert", "batch"])
+def test_pruning_failure_rolls_back_entire_vector_write(tmp_path, monkeypatch, operation):
+    import sqlite3
+
+    class Model:
+        def encode(self, texts):
+            return np.array([[1.0, 0.0, 0.0] for _ in texts], dtype=np.float32)
+
+    monkeypatch.setattr(VectorIndex, "load_local_model", lambda _self, _name: Model())
+    index = VectorIndex(str(tmp_path / "vectors.db"))
+    index.index_text("protected", "other namespace", namespace="other")
+    index.index_text("atom", "old", namespace="atoms")
+    index.index_text("excess", "excess", namespace="atoms")
+    before = index.conn.execute("SELECT * FROM vectors ORDER BY id").fetchall()
+    index.max_records = 1
+    index.max_total_records = 1
+    index.conn.execute(
+        "CREATE TRIGGER fail_global_prune BEFORE DELETE ON vectors "
+        "WHEN OLD.path = 'protected' BEGIN SELECT RAISE(ABORT, 'prune failed'); END"
+    )
+    index.conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="prune failed"):
+        if operation == "upsert":
+            index.upsert_text("atom", "new", namespace="atoms")
+        else:
+            index.index_batch([("new", "new")], namespace="atoms")
+    assert index.conn.execute("SELECT * FROM vectors ORDER BY id").fetchall() == before
+    with sqlite3.connect(index.db_path) as reopened:
+        assert reopened.execute("SELECT * FROM vectors ORDER BY id").fetchall() == before
+
+
 @pytest.mark.parametrize("files_cached", [False, True])
 def test_explicit_download_activates_existing_and_future_ask_indexes(
     tmp_path, monkeypatch, files_cached

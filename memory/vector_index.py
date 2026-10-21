@@ -206,7 +206,6 @@ class VectorIndex:
                 f"DELETE FROM vectors WHERE id IN ({','.join('?' for _ in to_delete)})",
                 to_delete,
             )
-            self.conn.commit()
 
     def _prune_total(self) -> None:
         cur = self.conn.cursor()
@@ -220,7 +219,6 @@ class VectorIndex:
                 f"DELETE FROM vectors WHERE id IN ({','.join('?' for _ in to_delete)})",
                 to_delete,
             )
-            self.conn.commit()
 
     def delete_path(self, path: str, namespace: str = "default") -> int:
         with self.conn:
