@@ -133,6 +133,16 @@ POST повторно проверяет owner и сохранённую мод�
 После Settings refresh/close уведомление читает новый status; старые async responses
 при размонтировании игнорируются. Dismiss не меняет config и не запускает инструменты.
 
+## Custom native tool protocol admission
+
+Custom route начинается Chat-only. Только явная verified owner/session проверка
+synthetic sync/stream protocol может создать transient evidence текущего scoped Agent.
+Endpoint/model/effective credential context и config/key revisions проверяются перед
+native request; recheck отзывает прежнее proof, другой чат/restart получает unknown.
+ModelConfig и persisted JSON не содержат proof. Эта capability admission не меняет
+ToolGateway, policy, approvals или запрет members использовать owner custom credentials.
+Точный flow и ограничения: `docs/architecture/GENERIC_PROVIDER_ONBOARDING.md`.
+
 ## Change protocol
 
 1. Найти claim и его owner в `docs/runtime_contract_claims.json`.

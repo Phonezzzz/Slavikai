@@ -36,6 +36,7 @@ from core.tracer import Tracer
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.brain_manager import BrainManager
+from llm.capabilities import NativeToolQualification
 from llm.types import ModelConfig
 from memory.atom_embedding_index import AtomEmbeddingIndex
 from memory.canonical_aggregator import CanonicalAggregator
@@ -181,6 +182,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
     ) -> None:
         self.main_config = main_config
         self.main_api_key = main_api_key
+        self._native_tool_qualification: NativeToolQualification | None = None
         self.shell_config_path = str(DEFAULT_SHELL_CONFIG_PATH)
         self._external_brain = brain
         self._brain_manager = brain_manager
@@ -371,8 +373,18 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             return self._external_brain
         if self.main_config is None:
             raise RuntimeError("Не выбрана модель. Укажите model id в настройках.")
-        main_brain = create_brain(self.main_config, api_key=self.main_api_key)
+        main_brain = create_brain(
+            self.main_config,
+            api_key=self.main_api_key,
+            qualification=self._native_tool_qualification,
+        )
         return main_brain
+
+    def set_native_tool_qualification(self, proof: NativeToolQualification | None) -> None:
+        if self._external_brain is not None or self._brain_manager is not None:
+            raise RuntimeError("Qualification requires the configured session model")
+        self._native_tool_qualification = proof
+        self.brain = self._build_brain()
 
     def _register_tools(self) -> None:
         def register_tool(

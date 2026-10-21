@@ -19,7 +19,12 @@ from server.http.common import ui_settings
 from server.http.common.auth import _require_owner
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
-from server.http.common.runtime_contract import RuntimeModelStateProtocol, SessionApprovalStore
+from server.http.common.runtime_contract import (
+    AgentProtocol,
+    RuntimeModelStateProtocol,
+    SessionApprovalStore,
+    _agent_scope,
+)
 from server.http.common.ui_settings import _load_provider_instance, _load_provider_instances
 from server.http_api import (
     SUPPORTED_MODEL_PROVIDERS,
@@ -431,6 +436,11 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
     model_config = api._build_model_config(provider, model_raw)
     runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
     async with _agent_lock_for_request(request, session_id):
+        agents = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+        if not agents.is_static:
+            existing = await agents.get_existing_for_current_task(_agent_scope(request, session_id))
+            if existing is not None:
+                existing.set_native_tool_qualification(None)
         await runtime_model_state.set_session_override(session_id, model_config)
         await hub.set_session_model(session_id, provider, model_raw)
     response = json_response(

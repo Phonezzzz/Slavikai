@@ -3,6 +3,7 @@ import { ChevronRight, LoaderCircle, Play, Server, Shield, X } from 'lucide-reac
 import { useEffect, useRef, useState } from 'react';
 
 import { ToggleSwitch } from './ui/toggle-switch';
+import { ModelQualification } from './model-qualification';
 import { useFocusTrap } from '../use-focus-trap';
 import {
   SESSION_MODE_VALUES,
@@ -433,6 +434,9 @@ export function SessionDrawer({
                   <div className="text-[11px] uppercase tracking-[0.16em] text-zinc-500">Session</div>
                   <div className="text-sm font-medium text-zinc-100">{modelLabel}</div>
                 </div>
+                {sessionId && selectedModelValue?.startsWith('custom-') && (
+                  <ModelQualification key={`${sessionId}:${selectedModelValue}`} sessionId={sessionId} sessionHeader={sessionHeader} />
+                )}
 
                 <div className="space-y-2">
                   <div className="text-xs font-medium text-zinc-300">Mode</div>

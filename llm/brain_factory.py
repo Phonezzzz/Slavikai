@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from llm.brain_base import Brain
+from llm.capabilities import NativeToolQualification
 from llm.deepseek_brain import DeepSeekBrain
 from llm.inception_brain import InceptionBrain
 from llm.local_http_brain import LocalHttpBrain
@@ -9,7 +10,12 @@ from llm.types import ModelConfig, is_custom_provider_id
 from llm.xai_brain import XAiBrain
 
 
-def create_brain(config: ModelConfig, api_key: str | None = None) -> Brain:
+def create_brain(
+    config: ModelConfig,
+    api_key: str | None = None,
+    *,
+    qualification: NativeToolQualification | None = None,
+) -> Brain:
     if config.provider == "openrouter":
         return OpenRouterBrain(api_key=api_key or config.api_key, default_config=config)
     if config.provider == "xai":
@@ -34,5 +40,6 @@ def create_brain(config: ModelConfig, api_key: str | None = None) -> Brain:
             base_url=config.base_url,
             api_key=api_key or config.api_key,
             native_tools=False,
+            qualification=qualification,
         )
     raise ValueError(f"Неизвестный провайдер модели: {config.provider}")

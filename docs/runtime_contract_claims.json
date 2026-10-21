@@ -151,14 +151,17 @@
       "scope": "model_access",
       "status": "implemented",
       "owner": "model_provider_access",
-      "version": 3,
+      "version": 4,
       "source": "docs/architecture/GENERIC_PROVIDER_ONBOARDING.md",
       "verified_by": [
         "tests/ui_api/test_generic_provider_onboarding.py",
         "tests/test_native_tool_capabilities.py",
-        "tests/test_native_provider_transport.py"
+        "tests/test_native_provider_transport.py",
+        "tests/test_route_qualification.py",
+        "tests/ui_api/test_model_qualification.py",
+        "ui/src/app/__tests__/model-qualification.test.tsx"
       ],
-      "summary": "Owner can save an OpenAI-compatible endpoint without a model, then discover and select an opaque model ID in the chat session picker; manual IDs require an unavailable catalog. Member use of owner credentials is denied, dynamic native tools are unqualified, and remote HTTP is rejected. Typed capability admission distinguishes unsupported adapters from unqualified custom models; built-in legacy adapter allowance is not model qualification. No live probes or new tools are enabled. LocalHttpBrain native SSE shares scoped cancellable HTTP transport with plain custom Chat; sync/stream redirects are disabled, streaming is incremental and does not replay on errors. Model qualification remains unknown."
+      "summary": "Owner can save an OpenAI-compatible endpoint, then select a session model. Custom routes start Chat-only and members remain denied. Explicit owner/session confirm checks four inert sync/stream tool-call and role=tool requests without host actions or chat history. Transient Agent-owned evidence binds exact endpoint/model/effective headers/key and config/credential revisions; changed/revoked context and other sessions remain unqualified. No proof is persisted in ModelConfig. Existing ToolGateway policy remains mandatory. LocalHttpBrain native SSE is scoped/cancellable with no redirects/replay. Built-in legacy adapter admission is not model qualification; no production endpoint is claimed qualified by fixture tests."
     },
     {
       "id": "model_access.openai_subscription",

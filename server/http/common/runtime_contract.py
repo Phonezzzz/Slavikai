@@ -13,6 +13,7 @@ from core.desktop_policy import DesktopApprovalRule
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import RunContext, TaskPacket
 from core.response_preferences import ResponsePreferences
+from llm.capabilities import NativeToolQualification
 from llm.stream_model import StreamEvent
 from llm.types import ModelConfig
 from server.agent_provider import AgentScope, ScopedAgentProvider
@@ -108,6 +109,8 @@ class TracerProtocol(Protocol):
 
 
 class AgentProtocol(Protocol):
+    def set_native_tool_qualification(self, proof: NativeToolQualification | None) -> None: ...
+
     response_preferences: ResponsePreferences
     brain: object
     tools_enabled: dict[str, bool]

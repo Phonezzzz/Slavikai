@@ -49,6 +49,7 @@ from core.tool_loop import (
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.cancellation import cancellation_requested
+from llm.capabilities import NativeToolQualification
 from llm.types import ModelConfig, WebSearchEvidence
 from shared.memory_companion_models import (
     BlockedReason,
@@ -146,6 +147,7 @@ class PendingChatApproval:
 
 class AgentToolsMixin:
     if TYPE_CHECKING:
+        _native_tool_qualification: NativeToolQualification | None
         desktop_runtime: DesktopRuntime
         logger: logging.Logger
         _mwv_checkpoints: dict[str, MWVWorkerCheckpoint]
@@ -1275,6 +1277,8 @@ class AgentToolsMixin:
         persist: bool = True,
     ) -> None:
         """Переинициализирует мозг с новыми настройками."""
+        if main_config != self.main_config or main_api_key != self.main_api_key:
+            self._native_tool_qualification = None
         self.main_config = main_config
         self.main_api_key = main_api_key
         self.brain = self._build_brain()

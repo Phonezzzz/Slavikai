@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import closing
 from typing import Final
 
@@ -16,7 +17,7 @@ from llm.cancellation import (
     cancellation_requested,
     iter_cancellable,
 )
-from llm.capabilities import CapabilityEvidence, NativeToolCapability
+from llm.capabilities import CapabilityEvidence, NativeToolCapability, NativeToolQualification
 from llm.provider_http import post_plain_completion, post_stream_lines, proxies_for_provider_url
 from llm.retry import request_with_retry
 from llm.stream_model import (
@@ -25,7 +26,7 @@ from llm.stream_model import (
     iter_openai_sse_events,
     stream_events_from_result,
 )
-from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
+from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec, is_custom_provider_id
 from shared.models import JSONValue, LLMMessage
 
 DEFAULT_LOCAL_ENDPOINT: Final[str] = "http://localhost:11434/v1/chat/completions"
@@ -152,20 +153,41 @@ class LocalHttpBrain(Brain):
         base_url: str | None = None,
         api_key: str | None = None,
         native_tools: bool = True,
+        qualification: NativeToolQualification | None = None,
     ) -> None:
         self.supports_native_tools = native_tools
         self.supports_streaming_tools = native_tools
         self.default_config = default_config
+        self._qualification = qualification
         self.base_url = (
             base_url
             or default_config.base_url
             or os.getenv("LOCAL_LLM_URL")
             or DEFAULT_LOCAL_ENDPOINT
         )
-        self.api_key = api_key or default_config.api_key or os.getenv("LOCAL_LLM_API_KEY")
+        self.api_key = api_key or default_config.api_key
+        if self.api_key is None and not is_custom_provider_id(default_config.provider):
+            self.api_key = os.getenv("LOCAL_LLM_API_KEY")
+
+    def request_binding(self, config: ModelConfig | None = None) -> str:
+        cfg = self._resolve_config(config)
+        material = [cfg.provider, cfg.model, self.base_url, cfg.base_url, self._build_headers(cfg)]
+        return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
     def native_tool_capability(self) -> NativeToolCapability:
-        if self.supports_native_tools:
+        return self.native_tool_capability_for()
+
+    def native_tool_capability_for(self, config: ModelConfig | None = None) -> NativeToolCapability:
+        if self._qualification is not None:
+            if self._qualification.valid_for(self.request_binding(config)):
+                return NativeToolCapability(
+                    adapter=CapabilityEvidence("supported", "adapter_declaration"),
+                    model=CapabilityEvidence(self._qualification.state, "inert_protocol_v1"),
+                    eligibility=(
+                        "qualified" if self._qualification.state == "supported" else "unsupported"
+                    ),
+                )
+        elif self.supports_native_tools:
             return super().native_tool_capability()
         return NativeToolCapability(
             adapter=CapabilityEvidence(state="supported", source="adapter_declaration"),
@@ -191,7 +213,7 @@ class LocalHttpBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResult:
-        if tools and not self.supports_native_tools:
+        if tools and not self.native_tool_capability_for(config).allowed:
             raise RuntimeError("native_tools_required")
         cfg = self._resolve_config(config)
         headers = self._build_headers(cfg)
@@ -244,10 +266,10 @@ class LocalHttpBrain(Brain):
         config: ModelConfig | None = None,
         tools: list[ToolSpec] | None = None,
         cancellation_token: asyncio.Event | None = None,
-    ) -> Iterator[StreamEvent]:
-        if tools and not self.supports_native_tools:
+    ) -> Generator[StreamEvent, None, None]:
+        if tools and not self.native_tool_capability_for(config).allowed:
             raise RuntimeError("native_tools_required")
-        if not self.supports_native_tools:
+        if not self.native_tool_capability_for(config).allowed:
             # Unqualified dynamic endpoint: SSE support is not verified, so
             # never claim native streaming. Use a plain (non-SSE) chat
             # completion, cancellable through the standard token, and convert
@@ -310,7 +332,7 @@ class LocalHttpBrain(Brain):
             yield Done(finish_reason="cancelled")
             return
         try:
-            result = self._generate_plain_cancellable(
+            result = self.generate_cancellable(
                 messages, config=config, cancellation_token=cancellation_token
             )
         except GenerationCancelled:
@@ -325,19 +347,22 @@ class LocalHttpBrain(Brain):
                 return
             yield event
 
-    def _generate_plain_cancellable(
+    def generate_cancellable(
         self,
         messages: list[LLMMessage],
         config: ModelConfig | None,
         cancellation_token: asyncio.Event | None,
+        tools: list[ToolSpec] | None = None,
     ) -> LLMResult:
+        if tools and not self.native_tool_capability_for(config).allowed:
+            raise RuntimeError("native_tools_required")
         cfg = self._resolve_config(config)
         if cancellation_token is None:
-            return self.generate(messages, config=config)
+            return self.generate(messages, config=config, tools=tools)
         response = post_plain_completion(
             url=self.base_url,
             headers=self._build_headers(cfg),
-            payload=self._build_chat_payload(cfg, messages, None),
+            payload=self._build_chat_payload(cfg, messages, tools),
             provider=cfg.provider,
             timeout=DEFAULT_TIMEOUT,
             cancellation_token=cancellation_token,

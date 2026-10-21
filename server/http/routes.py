@@ -16,6 +16,7 @@ def register_routes(app: web.Application) -> None:
         models,
         plan,
         project,
+        qualification,
         sessions,
         settings,
         slavik,
@@ -80,6 +81,12 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/stt/transcribe", settings.handle_ui_stt_transcribe)
     app.router.add_get("/ui/api/settings/chats/export", sessions.handle_ui_chats_export)
     app.router.add_post("/ui/api/settings/chats/import", sessions.handle_ui_chats_import)
+    app.router.add_get(
+        "/ui/api/sessions/{session_id}/model/capabilities", qualification.handle_model_capabilities
+    )
+    app.router.add_post(
+        "/ui/api/sessions/{session_id}/model/qualify", qualification.handle_model_qualify
+    )
     app.router.add_get("/ui/api/models", sessions.handle_ui_models)
     app.router.add_post("/ui/api/local/ollama/start", sessions.handle_ui_local_ollama_start)
     app.router.add_get("/ui/api/folders", sessions.handle_ui_folders_list)
