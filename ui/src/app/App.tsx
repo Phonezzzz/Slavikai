@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Artifact } from './components/artifacts-sidebar';
 import { ChatSessionScreen } from './components/chat-session-screen';
 import { GlobalSettingsShell } from './components/global-settings-shell';
+import { EmbeddingNotice } from './components/embedding-notice';
 import { HistorySidebar } from './components/history-sidebar';
 import { RepositoryPanel } from './components/repository-panel';
 import { SearchModal } from './components/search-modal';
@@ -70,6 +71,7 @@ export default function App() {
   const [uiTheme, setUiTheme] = useState<UiTheme>('default');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [streamWarning, setStreamWarning] = useState<string | null>(null);
+  const [settingsVersion, setSettingsVersion] = useState(0);
 
   const overlays = useSessionOverlays({ activeView });
 
@@ -167,6 +169,7 @@ export default function App() {
     const parsed = parseComposerSettings(payload);
     setComposerSettings(parsed);
     setUiTheme(parseUiTheme(payload));
+    setSettingsVersion((value) => value + 1);
     return parsed;
   };
 
@@ -624,7 +627,9 @@ export default function App() {
       />
 
       <div className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <EmbeddingNotice key={settingsVersion} />
+          <div className="min-h-0 flex-1">
           <ChatSessionScreen
             sessionId={runtime.selectedConversation}
             messages={transport.canvasMessages}
@@ -670,6 +675,7 @@ export default function App() {
             onDownloadArtifact={handleDownloadArtifact}
             onDownloadAll={handleDownloadAllArtifacts}
           />
+          </div>
         </div>
         {activeView === 'workspace' ? (
           <div className="h-full min-h-0 w-[48vw] min-w-[420px] max-w-[920px] border-l border-zinc-800 bg-zinc-950 shadow-[-12px_0_30px_rgba(0,0,0,0.28)] max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:w-[min(92vw,760px)] max-lg:min-w-0">
@@ -767,7 +773,10 @@ export default function App() {
 
       <GlobalSettingsShell
         isOpen={overlays.settingsOpen}
-        onClose={() => overlays.setSettingsOpen(false)}
+        onClose={() => {
+          overlays.setSettingsOpen(false);
+          setSettingsVersion((value) => value + 1);
+        }}
         onSaved={() => {
           void handleSettingsSaved();
         }}

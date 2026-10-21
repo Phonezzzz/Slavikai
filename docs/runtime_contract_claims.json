@@ -388,6 +388,20 @@
         "tests/test_ask_stateless.py"
       ],
       "summary": "Implicit UI configuration shapes consistently select local embeddings. Runtime model loads are cache-only, absent dependencies degrade Chat without remote fallback, local load can recover after files appear, explicit remote selection is preserved and existing vectors are not rebuilt."
+    },
+    {
+      "id": "ui.embedding_availability_notice",
+      "scope": "ui",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_embeddings_download_consent.py",
+        "ui/src/app/__tests__/embedding-notice.test.tsx",
+        "ui/src/app/__tests__/settings-loading.test.tsx"
+      ],
+      "summary": "A nonblocking browser notice explains unavailable local semantic search. Only verified owner eligibility and missing model files expose an explicit confirmed download through the existing endpoint; absent libraries get manual server guidance without fake installer or agent repair. Unknown diagnostics fail closed, Chat remains usable, and refreshed or unmounted observers ignore stale responses."
     }
   ]
 }

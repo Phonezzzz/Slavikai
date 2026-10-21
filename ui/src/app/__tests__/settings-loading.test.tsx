@@ -38,6 +38,19 @@ afterEach(() => {
 });
 
 describe('Settings loading isolation', () => {
+  it('offers manual server setup instead of an unusable model download when the package is missing', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === SETTINGS_URL) return json(settings());
+      if (url === EMBEDDINGS_URL) return json({ model: 'local', state: 'package_missing' });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Show advanced editor' });
+    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    await screen.findByText(/Local embeddings library is missing/);
+    expect(screen.queryByRole('button', { name: 'Download model' })).toBeNull();
+  });
+
   it('replaces ready badge with the runtime error after cached activation fails', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url === SETTINGS_URL) return json(settings());

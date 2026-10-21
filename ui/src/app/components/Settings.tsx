@@ -2148,7 +2148,10 @@ export function Settings({
                             <Row
                               label="Model files"
                               description={
-                                embeddingRuntimeError || embeddingRuntime.error ||
+                                embeddingRuntimeError ||
+                                  (embeddingRuntime.state === 'package_missing'
+                                    ? 'Local embeddings library is missing. On the SlavikAI server, run make install-beta, restart the server, then recheck. Automatic installation is unavailable.'
+                                    : embeddingRuntime.error) ||
                                   (embeddingRuntime.state === 'ready'
                                     ? `${embeddingRuntime.model} is available locally.`
                                     : 'Save the model name first, then download it once.')
@@ -2174,7 +2177,7 @@ export function Settings({
                                     ? 'error'
                                     : embeddingRuntime.state.replace('_', ' ')}
                               </StatusBadge>
-                              <button
+                              {embeddingRuntime.state !== 'package_missing' ? <button
                                 type="button"
                                 onClick={() => {
                                   void handleDownloadEmbeddings();
@@ -2191,7 +2194,7 @@ export function Settings({
                                   : embeddingRuntime.state === 'ready'
                                     ? 'Check again'
                                     : 'Download model'}
-                              </button>
+                              </button> : null}
                             </Row>
                           </div>
                         ) : (

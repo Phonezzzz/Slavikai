@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from server.embedding_download import EmbeddingDownloadManager
-from server.http.common.auth import _require_owner
+from server.http.common.auth import _request_identity, _require_owner
 from server.http.common.responses import error_response, json_response
 from server.http_api import _load_embeddings_settings
 
@@ -12,11 +12,18 @@ async def handle_embeddings_status(request: web.Request) -> web.Response:
     manager: EmbeddingDownloadManager = request.app["embedding_download_manager"]
     settings = _load_embeddings_settings()
     snapshot = await manager.status(settings.local_model)
+    identity = _request_identity(request)
     return json_response(
         {
             **snapshot.to_dict(),
             "provider": settings.provider,
             "install_command": "make install-beta",
+            "can_download": (
+                identity is not None
+                and identity.role == "owner"
+                and settings.provider == "local"
+                and snapshot.state == "missing"
+            ),
         }
     )
 

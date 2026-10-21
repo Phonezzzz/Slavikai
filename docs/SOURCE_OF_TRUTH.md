@@ -121,6 +121,15 @@ scoped indexes. Ask может использовать эти weights без з
 Vectors автоматически не пересоздаются.
 Inbox TTL относится только к inbox entries, не к chat history, confirmed Memory или vectors.
 
+Browser показывает неблокирующее уведомление при недоступном local semantic search.
+GET embeddings status сообщает `can_download` только verified owner при отсутствующих
+файлах и наличии библиотеки. Явная кнопка Download передаёт существующий `confirm=true`;
+POST повторно проверяет owner и сохранённую модель. Отсутствующая библиотека требует
+действия администратора на сервере; UI не обещает автоматическую установку или agent repair
+без доказанной capability. Chat остаётся доступным при loading/error diagnostics.
+После Settings refresh/close уведомление читает новый status; старые async responses
+при размонтировании игнорируются. Dismiss не меняет config и не запускает инструменты.
+
 ## Change protocol
 
 1. Найти claim и его owner в `docs/runtime_contract_claims.json`.
