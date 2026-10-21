@@ -7,6 +7,8 @@ type Snapshot = {
   model: string;
   state: 'missing' | 'package_missing' | 'downloading' | 'ready' | 'error';
   canDownload: boolean;
+  canActivate: boolean;
+  runtimeReady: boolean;
 };
 
 function parseSnapshot(payload: unknown): Snapshot {
@@ -20,7 +22,12 @@ function parseSnapshot(payload: unknown): Snapshot {
       && state !== 'ready' && state !== 'error')) {
     throw new Error('Unknown embedding status.');
   }
-  return { provider, model, state, canDownload: 'can_download' in payload && payload.can_download === true };
+  return {
+    provider, model, state,
+    canDownload: 'can_download' in payload && payload.can_download === true,
+    canActivate: 'can_activate' in payload && payload.can_activate === true,
+    runtimeReady: 'runtime_ready' in payload && payload.runtime_ready === true,
+  };
 }
 
 export function EmbeddingNotice() {
@@ -65,7 +72,9 @@ export function EmbeddingNotice() {
   }, [snapshot?.state]);
 
   const download = async () => {
-    if (write.current || !snapshot || !snapshot.canDownload || snapshot.state !== 'missing') return;
+    if (write.current || !snapshot) return;
+    if (!((snapshot.canDownload && (snapshot.state === 'missing' || snapshot.state === 'error'))
+      || (snapshot.canActivate && snapshot.state === 'ready'))) return;
     const controller = new AbortController();
     write.current = controller;
     read.current?.abort();
@@ -94,7 +103,7 @@ export function EmbeddingNotice() {
   };
 
   if (dismissed || (!snapshot && !error)
-    || (snapshot && (snapshot.provider !== 'local' || snapshot.state === 'ready'))) return null;
+    || (snapshot && (snapshot.provider !== 'local' || (snapshot.state === 'ready' && snapshot.runtimeReady)))) return null;
 
   return (
     <aside aria-label="Semantic search availability" className="shrink-0 border-b border-zinc-700 bg-zinc-900 px-4 py-3 text-sm text-zinc-200">
@@ -103,19 +112,22 @@ export function EmbeddingNotice() {
           : snapshot?.state === 'package_missing' ? 'Semantic search is unavailable: the server is missing the local embeddings library.'
             : snapshot?.state === 'missing' ? `Semantic search is unavailable: model files for ${snapshot.model} are missing.`
               : snapshot?.state === 'downloading' ? 'Semantic search model files are downloading.'
+                : snapshot?.state === 'ready' ? 'Model files are available, but local semantic search has not been activated in this server process.'
                 : 'The local semantic search model could not be loaded.'}
         {' '}Chat remains available.
       </p>
       {snapshot?.state === 'package_missing' ? (
         <p className="mt-1 text-xs text-zinc-400">The server administrator can install the local embeddings dependencies with <code>make install-beta</code> in the SlavikAI server checkout, then restart the server and recheck. Automatic installation is unavailable.</p>
       ) : null}
-      {snapshot?.state === 'missing' && !snapshot.canDownload ? (
-        <p className="mt-1 text-xs text-zinc-400">Ask the owner to download the model on the SlavikAI server.</p>
+      {snapshot && ['missing', 'ready', 'error'].includes(snapshot.state) && !snapshot.canDownload && !snapshot.canActivate ? (
+        <p className="mt-1 text-xs text-zinc-400">Ask the owner to set up the model on the SlavikAI server.</p>
       ) : null}
       <div className="mt-2 flex gap-3">
-        {snapshot?.state === 'missing' && snapshot.canDownload ? (
+        {snapshot && ((snapshot.canDownload && ['missing', 'error'].includes(snapshot.state))
+          || (snapshot.state === 'ready' && snapshot.canActivate)) ? (
           <button type="button" className="rounded-md bg-zinc-100 px-3 py-1.5 text-zinc-950 hover:bg-white disabled:opacity-40" disabled={busy} onClick={() => { void download(); }}>
-            {busy ? 'Starting download…' : 'Download model to server'}
+            {busy ? 'Starting model setup…' : snapshot.state === 'ready'
+              ? 'Activate local model' : snapshot.state === 'error' ? 'Retry model setup' : 'Download model to server'}
           </button>
         ) : null}
         <button type="button" className="rounded-md border border-zinc-600 px-3 py-1.5 hover:bg-zinc-800 disabled:opacity-40" disabled={busy} onClick={() => setRevision((value) => value + 1)}>Recheck semantic search</button>

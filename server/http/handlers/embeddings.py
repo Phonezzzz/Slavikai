@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aiohttp import web
 
+from memory.vector_index import VectorIndex
 from server.embedding_download import EmbeddingDownloadManager
 from server.http.common.auth import _request_identity, _require_owner
 from server.http.common.responses import error_response, json_response
@@ -13,16 +14,22 @@ async def handle_embeddings_status(request: web.Request) -> web.Response:
     settings = _load_embeddings_settings()
     snapshot = await manager.status(settings.local_model)
     identity = _request_identity(request)
+    owner = identity is not None and identity.role == "owner"
+    runtime_ready = VectorIndex.is_local_model_loaded(settings.local_model)
     return json_response(
         {
             **snapshot.to_dict(),
             "provider": settings.provider,
             "install_command": "make install-beta",
-            "can_download": (
-                identity is not None
-                and identity.role == "owner"
+            "runtime_ready": runtime_ready,
+            "can_activate": (
+                owner
                 and settings.provider == "local"
-                and snapshot.state == "missing"
+                and snapshot.state == "ready"
+                and not runtime_ready
+            ),
+            "can_download": (
+                owner and settings.provider == "local" and snapshot.state in {"missing", "error"}
             ),
         }
     )

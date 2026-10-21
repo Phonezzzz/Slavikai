@@ -394,14 +394,14 @@
       "scope": "ui",
       "status": "implemented",
       "owner": "ui",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/ui_api/test_embeddings_download_consent.py",
         "ui/src/app/__tests__/embedding-notice.test.tsx",
         "ui/src/app/__tests__/settings-loading.test.tsx"
       ],
-      "summary": "A nonblocking browser notice explains unavailable local semantic search. Only verified owner eligibility and missing model files expose an explicit confirmed download through the existing endpoint; absent libraries get manual server guidance without fake installer or agent repair. Unknown diagnostics fail closed, Chat remains usable, and refreshed or unmounted observers ignore stale responses."
+      "summary": "A nonblocking browser notice explains unavailable local semantic search. Verified owner eligibility exposes explicit confirmed download, cached activation or retry through the existing endpoint. File presence and loaded weights are distinct; GET never initializes the runtime. Absent libraries get manual server guidance without fake installer or agent repair. Unknown diagnostics fail closed, Chat remains usable, and refreshed or unmounted observers ignore stale responses."
     }
   ]
 }

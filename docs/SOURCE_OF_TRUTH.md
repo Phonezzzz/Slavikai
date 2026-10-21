@@ -123,7 +123,10 @@ Inbox TTL относится только к inbox entries, не к chat history
 
 Browser показывает неблокирующее уведомление при недоступном local semantic search.
 GET embeddings status сообщает `can_download` только verified owner при отсутствующих
-файлах и наличии библиотеки. Явная кнопка Download передаёт существующий `confirm=true`;
+файлах или известной ошибке setup и наличии библиотеки. `runtime_ready` отдельно сообщает
+о загруженных weights: наличие файлов (`state=ready`) не доказывает активацию. Для owner
+`can_activate` разрешает явную cache-only активацию; после ошибки доступен подтверждённый
+Retry через тот же endpoint. GET не инициализирует модель. Явная кнопка передаёт `confirm=true`;
 POST повторно проверяет owner и сохранённую модель. Отсутствующая библиотека требует
 действия администратора на сервере; UI не обещает автоматическую установку или agent repair
 без доказанной capability. Chat остаётся доступным при loading/error diagnostics.

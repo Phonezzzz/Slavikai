@@ -87,7 +87,7 @@ class EmbeddingDownloadManager:
         async with self._lock:
             current = self._snapshot
             if current is not None and current.model == normalized:
-                if current.state in {"downloading", "ready", "error"}:
+                if current.state == "downloading":
                     return current
             if not self._package_available():
                 snapshot = EmbeddingDownloadSnapshot(
@@ -95,6 +95,12 @@ class EmbeddingDownloadManager:
                     state="package_missing",
                     error="Local embeddings dependencies are not installed.",
                 )
+            elif (
+                current is not None
+                and current.model == normalized
+                and current.state in {"ready", "error"}
+            ):
+                return current
             elif self._model_cached(normalized):
                 snapshot = EmbeddingDownloadSnapshot(model=normalized, state="ready")
             else:

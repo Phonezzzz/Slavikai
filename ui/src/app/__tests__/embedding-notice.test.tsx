@@ -11,7 +11,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('Embedding notice', () => {
   it.each([
-    { ...missing, state: 'ready' },
+    { ...missing, state: 'ready', runtime_ready: true },
     { ...missing, provider: 'openai' },
   ])('does not show a missing-component notice for $provider/$state', async (payload) => {
     const fetcher = vi.fn(async () => response(payload));
@@ -25,7 +25,7 @@ describe('Embedding notice', () => {
   it('downloads only after the owner explicitly requests it, using the saved model and consent', async () => {
     let downloaded = false;
     const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url === statusUrl) return response(downloaded ? { ...missing, state: 'ready' } : missing);
+      if (url === statusUrl) return response(downloaded ? { ...missing, state: 'ready', runtime_ready: true } : missing);
       expect(init?.method).toBe('POST');
       expect(JSON.parse(String(init?.body))).toEqual({ model: 'model-a', confirm: true });
       downloaded = true;
@@ -76,7 +76,7 @@ describe('Embedding notice', () => {
   it('ignores a late status after identity/configuration invalidates the component', async () => {
     let resolve!: (value: Response) => void;
     const old = new Promise<Response>((done) => { resolve = done; });
-    vi.stubGlobal('fetch', vi.fn().mockReturnValueOnce(old).mockResolvedValue(response({ ...missing, state: 'ready' })));
+    vi.stubGlobal('fetch', vi.fn().mockReturnValueOnce(old).mockResolvedValue(response({ ...missing, state: 'ready', runtime_ready: true })));
     const view = render(<EmbeddingNotice key="old-principal" />);
     view.rerender(<EmbeddingNotice key="new-principal" />);
     await act(async () => { await Promise.resolve(); });
@@ -113,7 +113,7 @@ describe('Embedding notice', () => {
   it('polls an explicit download until ready without dispatching another download', async () => {
     vi.useFakeTimers();
     const fetcher = vi.fn().mockResolvedValueOnce(response({ ...missing, state: 'downloading' }))
-      .mockResolvedValueOnce(response({ ...missing, state: 'ready' }));
+      .mockResolvedValueOnce(response({ ...missing, state: 'ready', runtime_ready: true }));
     vi.stubGlobal('fetch', fetcher);
     render(<EmbeddingNotice />);
     await act(async () => { await Promise.resolve(); });
@@ -153,7 +153,27 @@ describe('Embedding notice', () => {
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
     expect(fetcher).toHaveBeenCalledTimes(2);
-    await act(async () => { resolve(response({ ...missing, state: 'ready' })); });
+    await act(async () => { resolve(response({ ...missing, state: 'ready', runtime_ready: true })); });
     expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it.each([
+    { state: 'ready', can_activate: true, can_download: false, label: 'Activate local model' },
+    { state: 'error', can_activate: false, can_download: true, label: 'Retry model setup' },
+  ])('offers an explicit confirmed $label instead of hiding inactive or failed setup', async (setup) => {
+    let activated = false;
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === statusUrl) return response(activated
+        ? { ...missing, state: 'ready', runtime_ready: true }
+        : { ...missing, ...setup, runtime_ready: false });
+      expect(JSON.parse(String(init?.body))).toEqual({ model: 'model-a', confirm: true });
+      activated = true;
+      return response({ state: 'ready' });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(<EmbeddingNotice />);
+    fireEvent.click(await screen.findByRole('button', { name: setup.label }));
+    await vi.waitFor(() => expect(screen.queryByRole('complementary')).toBeNull());
+    expect(fetcher).toHaveBeenCalledTimes(3);
   });
 });

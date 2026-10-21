@@ -69,6 +69,10 @@ class VectorIndex:
         self._init_db()
 
     @classmethod
+    def is_local_model_loaded(cls, model_name: str) -> bool:
+        return model_name in cls._model_cache
+
+    @classmethod
     def load_local_model(
         cls, model_name: str, *, allow_download: bool = False
     ) -> SentenceTransformer:
@@ -287,7 +291,7 @@ class VectorIndex:
 
     def is_runtime_ready(self) -> bool:
         if self.provider == "local":
-            return self.model is not None or self.local_model in self._model_cache
+            return self.model is not None or self.is_local_model_loaded(self.local_model)
         if self.provider == "openai":
             return bool(self.openai_api_key)
         return False

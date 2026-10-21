@@ -136,3 +136,65 @@ def test_status_does_not_offer_download_without_a_missing_local_model(
             assert (await response.json())["can_download"] is False
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_status_distinguishes_activation_and_allows_explicit_retry(monkeypatch, cached):
+    from memory.vector_index import VectorIndex
+
+    monkeypatch.setattr(VectorIndex, "_model_cache", {})
+    monkeypatch.setattr(
+        "server.http.handlers.embeddings._load_embeddings_settings",
+        lambda: UIEmbeddingsSettings(local_model="diagnostic-test"),
+    )
+
+    async def run():
+        broken = True
+        loads = []
+
+        def load(model):
+            loads.append(model)
+            if broken:
+                raise RuntimeError("temporary failure")
+            VectorIndex._model_cache[model] = object()
+
+        manager = EmbeddingDownloadManager(
+            package_available=lambda: True,
+            model_cached=lambda _: cached,
+            download_model=load,
+            load_cached_model=load,
+        )
+        app = create_app(
+            agent=DummyAgent(),
+            ui_storage=InMemoryUISessionStorage(),
+            auth_config=HttpAuthConfig(api_token=None, allow_unauth_local=True),
+        )
+        app["embedding_download_manager"] = manager
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/ui/api/embeddings/status")
+            initial = await response.json()
+            assert initial["runtime_ready"] is False
+            assert initial["can_activate"] is cached
+            assert loads == []  # GET must not initialize or load the model.
+            await client.post("/ui/api/embeddings/download", json={"confirm": True})
+            for _ in range(100):
+                if (await manager.status("diagnostic-test")).state != "downloading":
+                    break
+                await asyncio.sleep(0.01)
+            response = await client.get("/ui/api/embeddings/status")
+            failed = await response.json()
+            assert failed["state"] == "error"
+            assert failed["can_download"] is True
+            broken = False
+            await client.post("/ui/api/embeddings/download", json={"confirm": True})
+            for _ in range(100):
+                if (await manager.status("diagnostic-test")).state != "downloading":
+                    break
+                await asyncio.sleep(0.01)
+            response = await client.get("/ui/api/embeddings/status")
+            ready = await response.json()
+            assert ready["runtime_ready"] is True
+            assert ready["can_activate"] is False
+            assert len(loads) == 2
+
+    asyncio.run(run())
