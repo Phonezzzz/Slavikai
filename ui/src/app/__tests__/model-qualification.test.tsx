@@ -39,3 +39,15 @@ it('aborts a pending check on unmount and ignores its late result', async () => 
   expect(signal.aborted).toBe(true);
   await act(async () => { resolve({ ok: true, json: async () => ({ state: 'supported', can_check: true }) }); });
 });
+
+it('refreshes read-only evidence after the model becomes idle', async () => {
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'unknown', can_check: false }) })
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'unknown', can_check: true }) });
+  vi.stubGlobal('fetch', fetcher);
+  render(<ModelQualification sessionId="idle" sessionHeader="X-Session" />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Обновить доступность проверки' }));
+  await screen.findByRole('button', { name: 'Проверить tools' });
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(fetcher.mock.calls.every((call) => !call[1].method)).toBe(true);
+});

@@ -23,6 +23,7 @@ export function ModelQualification({ sessionId, sessionHeader }: {
   const [snapshot, setSnapshot] = useState<Evidence | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshRevision, setRefreshRevision] = useState(0);
   const controller = useRef<AbortController | null>(null);
   const capabilitiesPath = `/ui/api/sessions/${encodeURIComponent(sessionId)}/model/capabilities`;
   const qualifyPath = `/ui/api/sessions/${encodeURIComponent(sessionId)}/model/qualify`;
@@ -36,7 +37,7 @@ export function ModelQualification({ sessionId, sessionHeader }: {
         if (!pending.signal.aborted) setSnapshot(result);
       }).catch(() => { /* Unknown остаётся без обещания действия. */ });
     return () => { controller.current?.abort(); };
-  }, [capabilitiesPath, sessionHeader, sessionId]);
+  }, [capabilitiesPath, sessionHeader, sessionId, refreshRevision]);
 
   const check = async () => {
     controller.current?.abort();
@@ -71,6 +72,10 @@ export function ModelQualification({ sessionId, sessionHeader }: {
     {snapshot.message && <p className="text-zinc-400">{snapshot.message}</p>}
     <p className="text-zinc-500">Проверка отправит четыре коротких запроса выбранной модели. История чата не отправляется, действия на компьютере не выполняются. Разрешения инструментов сохраняются.</p>
     {error && <p role="alert" className="text-amber-400">{error}</p>}
+    {!snapshot.can_check && <button type="button" onClick={() => { setRefreshRevision((value) => value + 1); }}
+      className="rounded border border-zinc-700 px-3 py-1 text-zinc-200">
+      Обновить доступность проверки
+    </button>}
     {snapshot.can_check && <button type="button" disabled={busy} onClick={() => { void check(); }}
       className="rounded border border-zinc-700 px-3 py-1 text-zinc-200 disabled:opacity-50">
       {busy ? 'Проверка…' : snapshot.state === 'supported' ? 'Проверить снова' : 'Проверить tools'}

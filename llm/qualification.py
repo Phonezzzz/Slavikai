@@ -41,26 +41,31 @@ def _stream_result(
 ) -> LLMResult:
     result = LLMResult(text="")
     terminal = False
-    with closing(
-        brain.generate_stream_events(messages, config=config, tools=tools, cancellation_token=token)
-    ) as events:
-        for index, event in enumerate(events):
-            if cancellation_requested(token):
-                raise GenerationCancelled("Qualification cancelled")
-            if index >= 256:
-                raise ProtocolQualificationError("Слишком длинный ответ проверки.")
-            if isinstance(event, Error):
-                raise ProtocolQualificationError("Модель вернула ошибку tool protocol.")
-            if isinstance(event, TextDelta):
-                result.text += event.text
-            elif isinstance(event, ToolCallCompleted):
-                result.tool_calls.append(event.call)
-            elif isinstance(event, Done):
-                if event.finish_reason not in {"stop", "tool_calls"}:
-                    raise ProtocolQualificationError("Проверка не получила завершённый ответ.")
-                terminal = True
-            if len(result.text) > 4096 or len(result.tool_calls) > 1:
-                raise ProtocolQualificationError("Ответ превысил пределы проверки.")
+    try:
+        with closing(
+            brain.generate_stream_events(
+                messages, config=config, tools=tools, cancellation_token=token
+            )
+        ) as events:
+            for index, event in enumerate(events):
+                if cancellation_requested(token):
+                    raise GenerationCancelled("Qualification cancelled")
+                if index >= 256:
+                    raise ProtocolQualificationError("Слишком длинный ответ проверки.")
+                if isinstance(event, Error):
+                    raise ProtocolQualificationError("Модель вернула ошибку tool protocol.")
+                if isinstance(event, TextDelta):
+                    result.text += event.text
+                elif isinstance(event, ToolCallCompleted):
+                    result.tool_calls.append(event.call)
+                elif isinstance(event, Done):
+                    if event.finish_reason not in {"stop", "tool_calls"}:
+                        raise ProtocolQualificationError("Проверка не получила завершённый ответ.")
+                    terminal = True
+                if len(result.text) > 4096 or len(result.tool_calls) > 1:
+                    raise ProtocolQualificationError("Ответ превысил пределы проверки.")
+    except UnicodeError as exc:
+        raise ProtocolQualificationError("Некорректная кодировка streaming protocol.") from exc
     if not terminal:
         raise ProtocolQualificationError("Поток завершился без terminal result.")
     return result

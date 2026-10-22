@@ -24,6 +24,7 @@ from server.http.common.runtime_contract import (
     RuntimeModelStateProtocol,
     SessionApprovalStore,
     _agent_scope,
+    _resolve_runtime_main_for_session,
 )
 from server.http.common.ui_settings import _load_provider_instance, _load_provider_instances
 from server.http_api import (
@@ -437,9 +438,17 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
     runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
     async with _agent_lock_for_request(request, session_id):
         agents = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
-        if not agents.is_static:
+        selected = await _resolve_runtime_main_for_session(request, session_id)
+        if not agents.is_static and selected != model_config:
             existing = await agents.get_existing_for_current_task(_agent_scope(request, session_id))
             if existing is not None:
+                if existing.last_approval_request is not None:
+                    return error_response(
+                        status=409,
+                        message="Сначала завершите ожидающее подтверждение.",
+                        error_type="conflict_error",
+                        code="model_change_pending_approval",
+                    )
                 existing.set_native_tool_qualification(None)
         await runtime_model_state.set_session_override(session_id, model_config)
         await hub.set_session_model(session_id, provider, model_raw)

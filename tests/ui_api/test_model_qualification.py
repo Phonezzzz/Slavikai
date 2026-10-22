@@ -467,3 +467,72 @@ def test_approval_arriving_at_lock_keeps_brain_and_proof(monkeypatch, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_invalid_utf8_stream_is_protocol_failure(monkeypatch, tmp_path):
+    config, calls = setup(monkeypatch, tmp_path)
+    original = aiohttp.ClientSession._request
+
+    class InvalidSSE(FakeHttpResponse):
+        async def _lines(self):
+            yield b"data: \xff\n"
+
+    async def request(session, method, url, **kwargs):
+        if "provider.test" in str(url) and kwargs["json"].get("stream"):
+            calls.append(kwargs["json"])
+            return InvalidSSE()
+        return await original(session, method, url, **kwargs)
+
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", request)
+
+    async def run():
+        client, app, session, principal = await client_and_session(config)
+        try:
+            response = await client.post(
+                f"/ui/api/sessions/{session}/model/qualify",
+                json={"confirm": True},
+                headers={"Cf-Access-Jwt-Assertion": "owner"},
+            )
+            assert response.status == 200
+            assert (await response.json())["state"] == "unsupported"
+            assert len(calls) == 3
+            agent = await app["agent_provider"].get_existing_for_current_task(
+                AgentScope(principal, session)
+            )
+            assert not agent.brain.native_tool_capability().allowed
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_same_model_selection_preserves_pending_brain(monkeypatch, tmp_path):
+    config, calls = setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        ui_settings, "_probe_openai_models", lambda *_: (["opaque", "other"], "ready", None)
+    )
+
+    async def run():
+        client, app, session, principal = await client_and_session(config)
+        headers = {"Cf-Access-Jwt-Assertion": "owner", api.UI_SESSION_HEADER: session}
+        try:
+            agent = await app["agent_provider"].get_for_current_task(
+                AgentScope(principal, session), config
+            )
+            pending = object()
+            agent.last_approval_request = pending
+            before = agent.brain
+            for model, expected_status in (("opaque", 200), ("other", 409)):
+                response = await client.post(
+                    "/ui/api/session-model",
+                    json={"provider": config.provider, "model": model},
+                    headers=headers,
+                )
+                assert response.status == expected_status
+                assert agent.brain is before
+                assert agent.last_approval_request is pending
+            assert calls == []
+        finally:
+            await client.close()
+
+    asyncio.run(run())
