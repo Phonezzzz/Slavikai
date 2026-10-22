@@ -536,3 +536,34 @@ def test_same_model_selection_preserves_pending_brain(monkeypatch, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_overall_timeout_is_unknown_and_settles_worker(monkeypatch, tmp_path):
+    from server.http.handlers import qualification
+    from tests.fake_provider_http import HoldingProvider
+
+    config, _ = setup(monkeypatch, tmp_path)
+    upstream = HoldingProvider(monkeypatch, "body")
+    monkeypatch.setattr(qualification, "QUALIFICATION_TIMEOUT_SECONDS", 0.1)
+
+    async def run():
+        client, app, session, principal = await client_and_session(config)
+        try:
+            response = await client.post(
+                f"/ui/api/sessions/{session}/model/qualify",
+                json={"confirm": True},
+                headers={"Cf-Access-Jwt-Assertion": "owner"},
+            )
+            assert response.status == 200, await response.text()
+            assert (await response.json())["state"] == "unknown"
+            assert upstream.calls == 1
+            assert upstream.active == 0
+            assert all(item.closed for item in upstream.responses)
+            provider = app["agent_provider"]
+            assert not provider.lock_for(AgentScope(principal, session)).locked()
+            agent = await provider.get_existing_for_current_task(AgentScope(principal, session))
+            assert not agent.brain.native_tool_capability().allowed
+        finally:
+            await client.close()
+
+    asyncio.run(run())

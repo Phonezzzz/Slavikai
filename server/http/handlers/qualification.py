@@ -30,6 +30,8 @@ from server.http.common.runtime_contract import (
 from server.http.common.ui_settings import _load_provider_instance
 from server.ui_hub import UIHub
 
+QUALIFICATION_TIMEOUT_SECONDS = 45.0
+
 
 def _revision(path: Path) -> tuple[int, int, int, int] | None:
     try:
@@ -197,18 +199,26 @@ async def handle_model_qualify(request: web.Request) -> web.Response:
         monitor = asyncio.create_task(_watch_disconnect(request, token))
         state: Literal["supported", "unsupported", "unknown"] = "supported"
         message = "Sync, stream и role=tool protocol проверены для текущей session."
+        timed_out = False
         try:
             try:
-                await asyncio.wait_for(asyncio.shield(worker), timeout=45)
+                await asyncio.wait_for(
+                    asyncio.shield(worker), timeout=QUALIFICATION_TIMEOUT_SECONDS
+                )
             except ProtocolQualificationError as exc:
                 state, message = "unsupported", str(exc)
-            except (TimeoutError, GenerationCancelled):
+            except TimeoutError:
+                timed_out = True
                 cancel_generation(token)
-                state, message = "unknown", "Проверка отменена или превысила время."
+                state, message = "unknown", "Проверка превысила время; protocol не подтверждён."
+            except GenerationCancelled:
+                state, message = "unknown", "Проверка отменена."
             except (ProviderRequestError, requests.RequestException):
                 state, message = "unknown", "Provider недоступен; protocol не подтверждён."
             if (
-                token.is_set()
+                (token.is_set() and not timed_out)
+                or request.transport is None
+                or request.transport.is_closing()
                 or not current()
                 or (await _resolve_runtime_main_for_session(request, session_id) != config)
             ):
