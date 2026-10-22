@@ -856,7 +856,7 @@ class AgentRoutingMixin:
                 if reply.usage is not None:
                     yield Usage(usage=reply.usage)
             else:
-                tool_specs = self._chat_read_tool_specs() if brain.supports_streaming_tools else []
+                tool_specs = self._chat_read_tool_specs() if brain.can_stream_native_tools() else []
                 tool_loop_result = yield from _tool_stream_observations(
                     AgentToolLoop().run_stream_events(
                         brain=brain,

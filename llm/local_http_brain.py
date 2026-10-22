@@ -33,6 +33,10 @@ DEFAULT_LOCAL_ENDPOINT: Final[str] = "http://localhost:11434/v1/chat/completions
 DEFAULT_TIMEOUT: Final[int] = 30
 
 
+class ChatResponseError(RuntimeError):
+    """Успешный HTTP response не соответствует chat completion protocol."""
+
+
 def _tool_spec_to_provider_dict(tool: ToolSpec) -> dict[str, JSONValue]:
     parameters: dict[str, JSONValue] = tool.parameters_schema or {
         "type": "object",
@@ -103,17 +107,17 @@ def _message_content_to_text(value: JSONValue) -> str:
 
 def _parse_chat_result(data_json: object) -> LLMResult:
     if not isinstance(data_json, dict):
-        raise RuntimeError("Некорректный ответ локального LLM.")
+        raise ChatResponseError("Некорректный ответ локального LLM.")
     data: dict[str, JSONValue] = data_json
     choices_raw = data.get("choices")
     if not isinstance(choices_raw, list) or not choices_raw:
-        raise RuntimeError("Пустой ответ локального LLM.")
+        raise ChatResponseError("Пустой ответ локального LLM.")
     first_choice = choices_raw[0]
     if not isinstance(first_choice, dict):
-        raise RuntimeError("Некорректный формат choices.")
+        raise ChatResponseError("Некорректный формат choices.")
     message_raw = first_choice.get("message")
     if not isinstance(message_raw, dict):
-        raise RuntimeError("Некорректный формат message.")
+        raise ChatResponseError("Некорректный формат message.")
     content = _message_content_to_text(message_raw.get("content"))
     tool_calls = _parse_tool_calls(message_raw)
     reasoning_raw = message_raw.get("reasoning")
@@ -126,11 +130,14 @@ def _parse_chat_result(data_json: object) -> LLMResult:
     usage: LLMUsage | None = None
     usage_block = data.get("usage")
     if isinstance(usage_block, dict):
-        usage = LLMUsage(
-            prompt_tokens=int(usage_block.get("prompt_tokens", 0)),
-            completion_tokens=int(usage_block.get("completion_tokens", 0)),
-            total_tokens=int(usage_block.get("total_tokens", 0)),
-        )
+        try:
+            usage = LLMUsage(
+                prompt_tokens=int(usage_block.get("prompt_tokens", 0)),
+                completion_tokens=int(usage_block.get("completion_tokens", 0)),
+                total_tokens=int(usage_block.get("total_tokens", 0)),
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ChatResponseError("Некорректный формат usage.") from exc
 
     return LLMResult(
         text=content,
@@ -176,6 +183,9 @@ class LocalHttpBrain(Brain):
 
     def native_tool_capability(self) -> NativeToolCapability:
         return self.native_tool_capability_for()
+
+    def can_stream_native_tools(self) -> bool:
+        return self.native_tool_capability().allowed
 
     def native_tool_capability_for(self, config: ModelConfig | None = None) -> NativeToolCapability:
         if self._qualification is not None:
@@ -353,6 +363,7 @@ class LocalHttpBrain(Brain):
         config: ModelConfig | None,
         cancellation_token: asyncio.Event | None,
         tools: list[ToolSpec] | None = None,
+        max_attempts: int = 3,
     ) -> LLMResult:
         if tools and not self.native_tool_capability_for(config).allowed:
             raise RuntimeError("native_tools_required")
@@ -366,6 +377,7 @@ class LocalHttpBrain(Brain):
             provider=cfg.provider,
             timeout=DEFAULT_TIMEOUT,
             cancellation_token=cancellation_token,
+            max_attempts=max_attempts,
         )
         return _parse_chat_result(response.json())
 

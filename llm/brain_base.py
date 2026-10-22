@@ -17,6 +17,9 @@ class Brain(ABC):
     supports_native_tools: bool = False
     supports_streaming_tools: bool = False
 
+    def can_stream_native_tools(self) -> bool:
+        return self.supports_streaming_tools and self.native_tool_capability().allowed
+
     def native_tool_capability(self) -> NativeToolCapability:
         return NativeToolCapability(
             adapter=CapabilityEvidence(

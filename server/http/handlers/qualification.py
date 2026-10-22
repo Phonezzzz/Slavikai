@@ -25,7 +25,6 @@ from server.http.common.runtime_contract import (
     AgentProtocol,
     _agent_scope,
     _require_custom_provider_owner,
-    _resolve_agent_for_ui_session,
     _resolve_runtime_main_for_session,
 )
 from server.http.common.ui_settings import _load_provider_instance
@@ -138,14 +137,16 @@ async def handle_model_qualify(request: web.Request) -> web.Response:
             error_type="conflict_error",
             code="qualification_unavailable",
         )
-    agent, config = await _resolve_agent_for_ui_session(request, session_id)
-    if agent is None or config is None or not is_custom_provider_id(config.provider):
+    config = await _resolve_runtime_main_for_session(request, session_id)
+    if config is None or not is_custom_provider_id(config.provider):
         return error_response(
             status=400,
             message="Нужна выбранная custom model.",
             error_type="invalid_request_error",
             code="custom_model_required",
         )
+    _require_custom_provider_owner(request, config.provider, config)
+    agent = await provider.get_for_current_task(_agent_scope(request, session_id), config)
     if lock.locked() or agent.last_approval_request is not None:
         return error_response(
             status=409,
@@ -154,6 +155,13 @@ async def handle_model_qualify(request: web.Request) -> web.Response:
             code="qualification_unavailable",
         )
     async with lock:
+        if agent.last_approval_request is not None:
+            return error_response(
+                status=409,
+                message="Сначала завершите approval.",
+                error_type="conflict_error",
+                code="qualification_unavailable",
+            )
         agent.set_native_tool_qualification(None)
         if await _resolve_runtime_main_for_session(request, session_id) != config:
             return error_response(
@@ -170,6 +178,7 @@ async def handle_model_qualify(request: web.Request) -> web.Response:
                 error_type="invalid_request_error",
                 code="provider_key_missing",
             )
+        agent.reconfigure_models(config, main_api_key=key, persist=False)
         current = _context_validator(config, key)
         probe = LocalHttpBrain(config, api_key=key)
         if not isinstance(agent.brain, LocalHttpBrain) or (

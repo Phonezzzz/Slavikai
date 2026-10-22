@@ -7,7 +7,7 @@ from contextlib import closing
 from dataclasses import replace
 
 from llm.cancellation import GenerationCancelled, cancellation_requested
-from llm.local_http_brain import LocalHttpBrain
+from llm.local_http_brain import ChatResponseError, LocalHttpBrain
 from llm.stream_model import Done, Error, TextDelta, ToolCallCompleted
 from llm.types import LLMResult, ModelConfig, ToolSpec
 from shared.models import LLMMessage
@@ -15,6 +15,21 @@ from shared.models import LLMMessage
 
 class ProtocolQualificationError(ValueError):
     """Ответ модели не подтвердил проверяемый inert tool protocol."""
+
+
+def _sync_result(
+    brain: LocalHttpBrain,
+    messages: list[LLMMessage],
+    config: ModelConfig,
+    tools: list[ToolSpec],
+    token: asyncio.Event,
+) -> LLMResult:
+    try:
+        return brain.generate_cancellable(
+            messages, config=config, tools=tools, cancellation_token=token, max_attempts=1
+        )
+    except (ChatResponseError, ValueError) as exc:
+        raise ProtocolQualificationError("Некорректный ответ chat completion protocol.") from exc
 
 
 def _stream_result(
@@ -87,9 +102,7 @@ def run_inert_qualification(
         result = (
             _stream_result(brain, messages, cfg, [tool], token)
             if streaming
-            else brain.generate_cancellable(
-                messages, config=cfg, tools=[tool], cancellation_token=token
-            )
+            else _sync_result(brain, messages, cfg, [tool], token)
         )
         if len(result.tool_calls) != 1:
             raise ProtocolQualificationError("Модель не вернула единственный inert tool call.")
@@ -125,9 +138,7 @@ def run_inert_qualification(
         final = (
             _stream_result(brain, messages, cfg, [tool], token)
             if streaming
-            else brain.generate_cancellable(
-                messages, config=cfg, tools=[tool], cancellation_token=token
-            )
+            else _sync_result(brain, messages, cfg, [tool], token)
         )
         if final.tool_calls or final.text.strip() != nonce:
             raise ProtocolQualificationError("Модель не подтвердила role=tool continuation.")

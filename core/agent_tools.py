@@ -50,6 +50,7 @@ from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.cancellation import cancellation_requested
 from llm.capabilities import NativeToolQualification
+from llm.local_http_brain import LocalHttpBrain
 from llm.types import ModelConfig, WebSearchEvidence
 from shared.memory_companion_models import (
     BlockedReason,
@@ -1277,11 +1278,15 @@ class AgentToolsMixin:
         persist: bool = True,
     ) -> None:
         """Переинициализирует мозг с новыми настройками."""
-        if main_config != self.main_config or main_api_key != self.main_api_key:
-            self._native_tool_qualification = None
         self.main_config = main_config
         self.main_api_key = main_api_key
         self.brain = self._build_brain()
+        if self._native_tool_qualification is not None and (
+            not isinstance(self.brain, LocalHttpBrain)
+            or not self._native_tool_qualification.valid_for(self.brain.request_binding())
+        ):
+            self._native_tool_qualification = None
+            self.brain = self._build_brain()
         if persist:
             save_model_configs(self.main_config)
         self.tracer.log("brain_reconfigured", "Мозг переинициализирован")

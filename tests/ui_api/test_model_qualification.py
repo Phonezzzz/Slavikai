@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import aiohttp
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from config.api_keys import save_api_keys
@@ -286,6 +287,183 @@ def test_disconnect_cancels_probe_and_never_admits_tools(monkeypatch, tmp_path):
         finally:
             if pending is not None:
                 pending.cancel()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_request_only_config_keeps_qualification_and_streaming(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    config, _ = setup(monkeypatch, tmp_path)
+
+    async def run():
+        client, app, session, principal = await client_and_session(config)
+        try:
+            response = await client.post(
+                f"/ui/api/sessions/{session}/model/qualify",
+                json={"confirm": True},
+                headers={"Cf-Access-Jwt-Assertion": "owner"},
+            )
+            assert response.status == 200
+            agent = await app["agent_provider"].get_existing_for_current_task(
+                AgentScope(principal, session)
+            )
+            assert agent.brain.can_stream_native_tools()
+            for changed in (replace(config, web_search_enabled=True), config):
+                agent.reconfigure_models(changed, main_api_key="fixture-key", persist=False)
+                assert agent.brain.native_tool_capability().allowed
+                assert agent.brain.can_stream_native_tools()
+            from shared.models import LLMMessage
+
+            sent = []
+            original = aiohttp.ClientSession._request
+
+            class ChatSSE(FakeHttpResponse):
+                async def _lines(self):
+                    yield (
+                        b'data: {"choices":[{"delta":{"content":"fixture answer"},'
+                        b'"finish_reason":"stop"}]}\n'
+                    )
+                    yield b"data: [DONE]\n"
+
+            async def chat_request(client_session, method, url, **kwargs):
+                if "provider.test" in str(url):
+                    sent.append(kwargs["json"])
+                    return ChatSSE()
+                return await original(client_session, method, url, **kwargs)
+
+            monkeypatch.setattr(aiohttp.ClientSession, "_request", chat_request)
+            expected = {spec.name for spec in agent._chat_read_tool_specs()}
+            assert expected
+            await asyncio.to_thread(
+                lambda: list(
+                    agent.respond_stream([LLMMessage(role="user", content="fixture query")])
+                )
+            )
+            assert len(sent) == 1
+            assert {tool["function"]["name"] for tool in sent[0]["tools"]} == expected
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"unexpected": True},
+        {"choices": []},
+        {"choices": [{}]},
+        ["invalid"],
+        {"choices": [{"message": {"content": "fixture"}}], "usage": {"total_tokens": None}},
+    ],
+)
+def test_invalid_success_is_protocol_failure(monkeypatch, tmp_path, payload):
+    config, calls = setup(monkeypatch, tmp_path)
+    original = aiohttp.ClientSession._request
+
+    async def malformed(session, method, url, **kwargs):
+        if "provider.test" in str(url):
+            calls.append(kwargs["json"])
+            return FakeHttpResponse(payload=payload)
+        return await original(session, method, url, **kwargs)
+
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", malformed)
+
+    async def run():
+        client, _, session, _ = await client_and_session(config)
+        try:
+            response = await client.post(
+                f"/ui/api/sessions/{session}/model/qualify",
+                json={"confirm": True},
+                headers={"Cf-Access-Jwt-Assertion": "owner"},
+            )
+            assert response.status == 200
+            assert (await response.json())["state"] == "unsupported"
+            assert len(calls) == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_inert_probe_does_not_retry_paid_requests(monkeypatch, tmp_path):
+    config, calls = setup(monkeypatch, tmp_path)
+    original = aiohttp.ClientSession._request
+
+    async def unavailable(session, method, url, **kwargs):
+        if "provider.test" in str(url):
+            calls.append(kwargs["json"])
+            return FakeHttpResponse(status=503)
+        return await original(session, method, url, **kwargs)
+
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", unavailable)
+
+    async def run():
+        client, _, session, _ = await client_and_session(config)
+        try:
+            response = await client.post(
+                f"/ui/api/sessions/{session}/model/qualify",
+                json={"confirm": True},
+                headers={"Cf-Access-Jwt-Assertion": "owner"},
+            )
+            assert response.status == 200
+            assert (await response.json())["state"] == "unknown"
+            assert len(calls) == 1
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_approval_arriving_at_lock_keeps_brain_and_proof(monkeypatch, tmp_path):
+    config, calls = setup(monkeypatch, tmp_path)
+
+    async def run():
+        client, app, session, principal = await client_and_session(config)
+        headers = {"Cf-Access-Jwt-Assertion": "owner"}
+        url = f"/ui/api/sessions/{session}/model/qualify"
+        try:
+            assert (await client.post(url, json={"confirm": True}, headers=headers)).status == 200
+            provider = app["agent_provider"]
+            agent = await provider.get_existing_for_current_task(AgentScope(principal, session))
+            armed = [False]
+            captured = []
+            pending = object()
+
+            class HandoffLock(asyncio.Lock):
+                async def __aenter__(self):
+                    await super().__aenter__()
+                    if armed[0]:
+                        agent.last_approval_request = pending
+                        armed[0] = False
+                    return self
+
+            lock = HandoffLock()
+            monkeypatch.setattr(provider, "lock_for", lambda _: lock)
+            resolve = provider.get_for_current_task
+
+            async def handoff(*args):
+                result = await resolve(*args)
+                captured.append(agent.brain)
+                armed[0] = True
+                return result
+
+            monkeypatch.setattr(provider, "get_for_current_task", handoff)
+            response = await client.post(url, json={"confirm": True}, headers=headers)
+            assert response.status == 409
+            assert agent.brain is captured[0]
+            assert agent.brain.native_tool_capability().allowed
+            assert agent.last_approval_request is pending
+            assert len(calls) == 4
+            # Уже существующий approval также нельзя разрушить при resolve.
+            previous_brain = agent.brain
+            response = await client.post(url, json={"confirm": True}, headers=headers)
+            assert response.status == 409
+            assert agent.brain is previous_brain
+            assert len(calls) == 4
+        finally:
             await client.close()
 
     asyncio.run(run())

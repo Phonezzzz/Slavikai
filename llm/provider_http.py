@@ -202,6 +202,7 @@ def post_plain_completion(
     provider: str,
     timeout: int,
     cancellation_token: asyncio.Event,
+    max_attempts: int = 3,
 ) -> requests.Response:
     # Вызов выполняется в существующем generation worker, новый worker не нужен.
     with asyncio.Runner() as runner:
@@ -214,7 +215,7 @@ def post_plain_completion(
                 return operation.run(_post(url, headers, payload, timeout))
 
             try:
-                return RetryPolicy().run(
+                return RetryPolicy(max_attempts=max_attempts).run(
                     attempt,
                     provider=provider,
                     sleep=operation.sleep,
