@@ -396,6 +396,8 @@ def test_model_change_before_execution_lock_fences_old_request(
             release.set()
             assert (await pending).status == 409
             assert invocations == []
+            if kind == "project":
+                assert await hub.get_messages(session, lane="workspace") == []
             assert calls == []
         finally:
             release.set()

@@ -19,6 +19,7 @@ from llm.types import ModelConfig
 from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.http.common.auth import _ensure_session_owned, _request_identity, _request_principal_id
 from server.http.common.responses import error_response as _error_response
+from server.http.common.ui_runtime import _set_current_plan_step_status
 from server.http.common.ui_settings import (
     CUSTOM_PROVIDER_PREFIX,
     _build_model_config,
@@ -424,6 +425,10 @@ async def _set_model_bound_decision(
                 message="Модель сессии изменилась. Повторите запрос.",
                 error_type="conflict_error",
                 code="session_model_changed",
+            )
+        if isinstance(decision, dict) and decision.get("blocking") is True:
+            await _set_current_plan_step_status(
+                hub=hub, session_id=session_id, status="waiting_approval"
             )
         await hub.set_session_decision(session_id, decision)
     return None

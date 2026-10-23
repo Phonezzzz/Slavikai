@@ -10,7 +10,11 @@ from core.approval_policy import ApprovalCategory, ApprovalRequired
 from server import http_api as api
 from server.http.common.auth import _owner_principal_id
 from server.http.common.responses import error_response, json_response
-from server.http.common.runtime_contract import AgentProtocol
+from server.http.common.runtime_contract import (
+    AgentProtocol,
+    _resolve_runtime_main_for_session,
+    _set_model_bound_decision,
+)
 from server.http.common.workspace_git import (
     git_commit,
     git_stage,
@@ -74,6 +78,7 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
         return session_error
     if session_id is None:
         return _session_forbidden_response()
+    expected_model = await _resolve_runtime_main_for_session(request, session_id)
     workflow = await hub.get_session_workflow(session_id)
     if _normalize_mode_value(workflow.get("mode"), default="ask") == "plan":
         return error_response(
@@ -179,12 +184,9 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
             active_task=active_task,
         ),
     )
-    await _set_current_plan_step_status(
-        hub=hub,
-        session_id=session_id,
-        status="waiting_approval",
-    )
-    await hub.set_session_decision(session_id, decision)
+    decision_error = await _set_model_bound_decision(request, session_id, decision, expected_model)
+    if decision_error is not None:
+        return decision_error
     response = json_response(
         {
             "session_id": session_id,
@@ -334,6 +336,7 @@ async def _check_git_write_approval(
 ) -> web.Response | None:
     from core.approval_policy import ApprovalPrompt, ApprovalRequest
 
+    expected_model = await _resolve_runtime_main_for_session(request, session_id)
     session_store = request.app["session_store"]
     approved_categories = await session_store.get_categories(_agent_scope(request, session_id))
     required: list[ApprovalCategory] = ["EXEC_ARBITRARY"]
@@ -362,7 +365,9 @@ async def _check_git_write_approval(
         source_endpoint="workspace.git",
         resume_payload=resume,
     )
-    await hub.set_session_decision(session_id, decision)
+    decision_error = await _set_model_bound_decision(request, session_id, decision, expected_model)
+    if decision_error is not None:
+        return decision_error
     return json_response(
         {
             "session_id": session_id,

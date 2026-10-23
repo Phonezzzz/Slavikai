@@ -134,6 +134,17 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
                 ),
             )
             steps = await asyncio.to_thread(agent.compile_plan_steps, goal_raw.strip(), audit_log)
+            verifier: dict[str, JSONValue] = {}
+            if has_canonical_repo_verifier(root):
+                verifier = {"command": canonical_check_command(), "cwd": str(root)}
+            draft = _build_plan_draft(
+                goal=goal_raw.strip(),
+                audit_log=audit_log,
+                steps=steps,
+                verifier=verifier,
+            )
+            await hub.set_session_workflow(session_id, active_plan=draft, active_task=None)
+            updated = await hub.get_session_workflow(session_id)
     except SessionModelChangedError as exc:
         return error_response(
             status=409, message=str(exc), error_type="conflict_error", code="session_model_changed"
@@ -152,17 +163,6 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="plan_compilation_failed",
         )
-    verifier: dict[str, JSONValue] = {}
-    if has_canonical_repo_verifier(root):
-        verifier = {"command": canonical_check_command(), "cwd": str(root)}
-    draft = _build_plan_draft(
-        goal=goal_raw.strip(),
-        audit_log=audit_log,
-        steps=steps,
-        verifier=verifier,
-    )
-    await hub.set_session_workflow(session_id, active_plan=draft, active_task=None)
-    updated = await hub.get_session_workflow(session_id)
     response = json_response(
         {
             "ok": True,

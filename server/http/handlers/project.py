@@ -19,7 +19,6 @@ from server.http.common.runtime_contract import (
     RuntimeModelStateProtocol,
     SessionModelChangedError,
     _resolve_runtime_main_for_session,
-    _set_model_bound_decision,
 )
 from server.http_api import (
     UI_GITHUB_REQUIRED_CATEGORIES,
@@ -155,86 +154,195 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             return _model_not_selected_response()
         agent_lock = _agent_lock_for_request(request, session_id)
         selected_model = _selected_model_snapshot(selected_main_config)
-        workflow = await hub.get_session_workflow(session_id)
-        mode = _normalize_mode_value(workflow.get("mode"), default="ask")
-        active_plan = _normalize_plan_payload(workflow.get("active_plan"))
-        active_task = _normalize_task_payload(workflow.get("active_task"))
-        await hub.set_session_status(session_id, "busy")
-        status_opened = True
-        await _publish_agent_activity(
-            hub,
-            session_id=session_id,
-            phase="request.received",
-            detail="project",
-        )
-
-        approved_categories = await session_store.get_categories(_agent_scope(request, session_id))
-        user_message = hub.create_message(role="user", content=user_command, lane=WORKSPACE_LANE)
-        await hub.append_message(session_id, user_message, lane=WORKSPACE_LANE)
-        user_message_id_raw = user_message.get("message_id")
-        user_message_id = (
-            user_message_id_raw
-            if isinstance(user_message_id_raw, str) and user_message_id_raw
-            else None
-        )
-        await _publish_agent_activity(
-            hub,
-            session_id=session_id,
-            phase="context.prepared",
-            detail="project",
-        )
-
-        if command == "github_import":
-            try:
-                repo_url, branch = _parse_github_import_args(args_raw)
-            except ValueError as exc:
+        async with agent_lock:
+            if (
+                await model_state.get_session_revision(session_id) != expected_model_revision
+                or await _resolve_runtime_main_for_session(request, session_id)
+                != selected_main_config
+            ):
                 return error_response(
-                    status=400,
-                    message=str(exc),
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
+                    status=409,
+                    message="Модель сессии изменилась. Повторите запрос.",
+                    error_type="conflict_error",
+                    code="session_model_changed",
                 )
-            missing_categories = [
-                category
-                for category in UI_GITHUB_REQUIRED_CATEGORIES
-                if category not in approved_categories
-            ]
-            if missing_categories:
-                approval_request_obj = _build_github_import_approval_request(
+            workflow = await hub.get_session_workflow(session_id)
+            mode = _normalize_mode_value(workflow.get("mode"), default="ask")
+            active_plan = _normalize_plan_payload(workflow.get("active_plan"))
+            active_task = _normalize_task_payload(workflow.get("active_task"))
+            await hub.set_session_status(session_id, "busy")
+            status_opened = True
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="request.received",
+                detail="project",
+            )
+
+            approved_categories = await session_store.get_categories(
+                _agent_scope(request, session_id)
+            )
+            user_message = hub.create_message(
+                role="user", content=user_command, lane=WORKSPACE_LANE
+            )
+            await hub.append_message(session_id, user_message, lane=WORKSPACE_LANE)
+            user_message_id_raw = user_message.get("message_id")
+            user_message_id = (
+                user_message_id_raw
+                if isinstance(user_message_id_raw, str) and user_message_id_raw
+                else None
+            )
+            await _publish_agent_activity(
+                hub,
+                session_id=session_id,
+                phase="context.prepared",
+                detail="project",
+            )
+
+            if command == "github_import":
+                try:
+                    repo_url, branch = _parse_github_import_args(args_raw)
+                except ValueError as exc:
+                    return error_response(
+                        status=400,
+                        message=str(exc),
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                missing_categories = [
+                    category
+                    for category in UI_GITHUB_REQUIRED_CATEGORIES
+                    if category not in approved_categories
+                ]
+                if missing_categories:
+                    approval_request_obj = _build_github_import_approval_request(
+                        session_id=session_id,
+                        repo_url=repo_url,
+                        branch=branch,
+                        required_categories=missing_categories,
+                    )
+                    approval_payload = _serialize_approval_request(approval_request_obj)
+                    approval_decision = _build_ui_approval_decision(
+                        approval_request=approval_payload or {},
+                        session_id=session_id,
+                        source_endpoint="project.command",
+                        resume_payload={
+                            "source_request": {
+                                "command": command,
+                                "args": args_raw,
+                            },
+                            "user_message_id": user_message_id,
+                            "selected_model_snapshot": dict(selected_model),
+                        },
+                        workflow_context=_decision_workflow_context(
+                            mode=mode,
+                            active_plan=active_plan,
+                            active_task=active_task,
+                        ),
+                    )
+                    if _decision_is_pending_blocking(approval_decision):
+                        await _set_current_plan_step_status(
+                            hub=hub, session_id=session_id, status="waiting_approval"
+                        )
+                    await hub.set_session_decision(session_id, approval_decision)
+                    messages = await hub.get_messages(session_id, lane="chat")
+                    workspace_messages = await hub.get_messages(session_id, lane="workspace")
+                    current_decision = await hub.get_session_decision(session_id)
+                    current_model = await hub.get_session_model(session_id) or dict(selected_model)
+                    current_workflow = await hub.get_session_workflow(session_id)
+                    response = json_response(
+                        {
+                            "session_id": session_id,
+                            "lane": WORKSPACE_LANE,
+                            "messages": messages,
+                            "workspace_messages": workspace_messages,
+                            "decision": _normalize_ui_decision(
+                                current_decision, session_id=session_id
+                            ),
+                            "selected_model": current_model,
+                            "trace_id": None,
+                            "approval_request": approval_payload,
+                            "mode": _normalize_mode_value(
+                                current_workflow.get("mode"), default="ask"
+                            ),
+                            "active_plan": _normalize_plan_payload(
+                                current_workflow.get("active_plan")
+                            ),
+                            "active_task": _normalize_task_payload(
+                                current_workflow.get("active_task")
+                            ),
+                        },
+                    )
+                    response.headers[UI_SESSION_HEADER] = session_id
+                    await _publish_agent_activity(
+                        hub,
+                        session_id=session_id,
+                        phase="approval.required",
+                        detail="project/github_import",
+                    )
+                    return response
+
+                try:
+                    target_path, relative_target = api._resolve_github_target(repo_url)
+                except ValueError as exc:
+                    return error_response(
+                        status=400,
+                        message=str(exc),
+                        error_type="invalid_request_error",
+                        code="invalid_request_error",
+                    )
+                await _publish_agent_activity(
+                    hub,
                     session_id=session_id,
+                    phase="github.clone.start",
+                    detail=repo_url,
+                )
+                cloned, clone_result = await api._clone_github_repository(
                     repo_url=repo_url,
                     branch=branch,
-                    required_categories=missing_categories,
+                    target_path=target_path,
                 )
-                approval_payload = _serialize_approval_request(approval_request_obj)
-                approval_decision = _build_ui_approval_decision(
-                    approval_request=approval_payload or {},
-                    session_id=session_id,
-                    source_endpoint="project.command",
-                    resume_payload={
-                        "source_request": {
-                            "command": command,
-                            "args": args_raw,
-                        },
-                        "user_message_id": user_message_id,
-                        "selected_model_snapshot": dict(selected_model),
-                    },
-                    workflow_context=_decision_workflow_context(
-                        mode=mode,
-                        active_plan=active_plan,
-                        active_task=active_task,
+                if not cloned:
+                    response_text = f"Командный режим (без MWV)\n{clone_result}"
+                else:
+                    await _publish_agent_activity(
+                        hub,
+                        session_id=session_id,
+                        phase="github.index.start",
+                        detail=relative_target,
+                    )
+                    indexed, index_result = api._index_imported_project(relative_target)
+                    await _publish_agent_activity(
+                        hub,
+                        session_id=session_id,
+                        phase="github.index.end",
+                        detail=index_result,
+                    )
+                    if indexed:
+                        response_text = (
+                            "Командный режим (без MWV)\n"
+                            f"GitHub import completed: {repo_url}\n"
+                            f"Path: {relative_target}\n"
+                            f"Index: {index_result}"
+                        )
+                    else:
+                        response_text = (
+                            "Командный режим (без MWV)\n"
+                            f"GitHub import completed with indexing errors: {repo_url}\n"
+                            f"Path: {relative_target}\n"
+                            f"Index error: {index_result}"
+                        )
+                await hub.append_message(
+                    session_id,
+                    hub.create_message(
+                        role="assistant",
+                        content=response_text,
+                        lane=WORKSPACE_LANE,
+                        parent_user_message_id=user_message_id,
                     ),
+                    lane=WORKSPACE_LANE,
                 )
-                decision_error = await _set_model_bound_decision(
-                    request, session_id, approval_decision, selected_main_config
-                )
-                if decision_error is not None:
-                    return decision_error
-                await _set_current_plan_step_status(
-                    hub=hub,
-                    session_id=session_id,
-                    status="waiting_approval",
-                )
+                await hub.set_session_decision(session_id, None)
                 messages = await hub.get_messages(session_id, lane="chat")
                 workspace_messages = await hub.get_messages(session_id, lane="workspace")
                 current_decision = await hub.get_session_decision(session_id)
@@ -249,7 +357,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                         "decision": _normalize_ui_decision(current_decision, session_id=session_id),
                         "selected_model": current_model,
                         "trace_id": None,
-                        "approval_request": approval_payload,
+                        "approval_request": None,
                         "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
                         "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
                         "active_task": _normalize_task_payload(current_workflow.get("active_task")),
@@ -259,121 +367,17 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 await _publish_agent_activity(
                     hub,
                     session_id=session_id,
-                    phase="approval.required",
+                    phase="response.ready",
                     detail="project/github_import",
                 )
                 return response
 
-            try:
-                target_path, relative_target = api._resolve_github_target(repo_url)
-            except ValueError as exc:
-                return error_response(
-                    status=400,
-                    message=str(exc),
-                    error_type="invalid_request_error",
-                    code="invalid_request_error",
-                )
-            await _publish_agent_activity(
-                hub,
-                session_id=session_id,
-                phase="github.clone.start",
-                detail=repo_url,
+            llm_messages = _ui_messages_to_llm(
+                await hub.get_messages(session_id, lane=WORKSPACE_LANE)
             )
-            cloned, clone_result = await api._clone_github_repository(
-                repo_url=repo_url,
-                branch=branch,
-                target_path=target_path,
-            )
-            if not cloned:
-                response_text = f"Командный режим (без MWV)\n{clone_result}"
-            else:
-                await _publish_agent_activity(
-                    hub,
-                    session_id=session_id,
-                    phase="github.index.start",
-                    detail=relative_target,
-                )
-                indexed, index_result = api._index_imported_project(relative_target)
-                await _publish_agent_activity(
-                    hub,
-                    session_id=session_id,
-                    phase="github.index.end",
-                    detail=index_result,
-                )
-                if indexed:
-                    response_text = (
-                        "Командный режим (без MWV)\n"
-                        f"GitHub import completed: {repo_url}\n"
-                        f"Path: {relative_target}\n"
-                        f"Index: {index_result}"
-                    )
-                else:
-                    response_text = (
-                        "Командный режим (без MWV)\n"
-                        f"GitHub import completed with indexing errors: {repo_url}\n"
-                        f"Path: {relative_target}\n"
-                        f"Index error: {index_result}"
-                    )
-            await hub.append_message(
-                session_id,
-                hub.create_message(
-                    role="assistant",
-                    content=response_text,
-                    lane=WORKSPACE_LANE,
-                    parent_user_message_id=user_message_id,
-                ),
-                lane=WORKSPACE_LANE,
-            )
-            decision_error = await _set_model_bound_decision(
-                request, session_id, None, selected_main_config
-            )
-            if decision_error is not None:
-                return decision_error
-            messages = await hub.get_messages(session_id, lane="chat")
-            workspace_messages = await hub.get_messages(session_id, lane="workspace")
-            current_decision = await hub.get_session_decision(session_id)
-            current_model = await hub.get_session_model(session_id) or dict(selected_model)
-            current_workflow = await hub.get_session_workflow(session_id)
-            response = json_response(
-                {
-                    "session_id": session_id,
-                    "lane": WORKSPACE_LANE,
-                    "messages": messages,
-                    "workspace_messages": workspace_messages,
-                    "decision": _normalize_ui_decision(current_decision, session_id=session_id),
-                    "selected_model": current_model,
-                    "trace_id": None,
-                    "approval_request": None,
-                    "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
-                    "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
-                    "active_task": _normalize_task_payload(current_workflow.get("active_task")),
-                },
-            )
-            response.headers[UI_SESSION_HEADER] = session_id
-            await _publish_agent_activity(
-                hub,
-                session_id=session_id,
-                phase="response.ready",
-                detail="project/github_import",
-            )
-            return response
 
-        llm_messages = _ui_messages_to_llm(await hub.get_messages(session_id, lane=WORKSPACE_LANE))
-
-        mwv_report: dict[str, JSONValue] | None = None
-        ui_decision: dict[str, JSONValue] | None = None
-        async with agent_lock:
-            if (
-                await model_state.get_session_revision(session_id) != expected_model_revision
-                or await _resolve_runtime_main_for_session(request, session_id)
-                != selected_main_config
-            ):
-                return error_response(
-                    status=409,
-                    message="Модель сессии изменилась. Повторите запрос.",
-                    error_type="conflict_error",
-                    code="session_model_changed",
-                )
+            mwv_report: dict[str, JSONValue] | None = None
+            ui_decision: dict[str, JSONValue] | None = None
             try:
                 model_config = _workspace_inception_runtime_config(selected_main_config)
                 api_key = _resolve_provider_api_key(selected_model["provider"])
@@ -443,23 +447,59 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     ),
                 )
 
-        if _decision_is_pending_blocking(ui_decision):
-            decision_error = await _set_model_bound_decision(
-                request, session_id, ui_decision, selected_main_config
+            if _decision_is_pending_blocking(ui_decision):
+                await _set_current_plan_step_status(
+                    hub=hub, session_id=session_id, status="waiting_approval"
+                )
+                await hub.set_session_decision(session_id, ui_decision)
+                await _publish_agent_activity(
+                    hub,
+                    session_id=session_id,
+                    phase="approval.required",
+                    detail="project",
+                )
+                messages = await hub.get_messages(session_id, lane="chat")
+                workspace_messages = await hub.get_messages(session_id, lane="workspace")
+                current_decision = await hub.get_session_decision(session_id)
+                current_model = await hub.get_session_model(session_id) or dict(selected_model)
+                current_workflow = await hub.get_session_workflow(session_id)
+                response = json_response(
+                    {
+                        "session_id": session_id,
+                        "lane": WORKSPACE_LANE,
+                        "messages": messages,
+                        "workspace_messages": workspace_messages,
+                        "decision": _normalize_ui_decision(current_decision, session_id=session_id),
+                        "selected_model": current_model,
+                        "trace_id": trace_id,
+                        "approval_request": approval_request,
+                        "mwv_report": mwv_report,
+                        "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
+                        "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
+                        "active_task": _normalize_task_payload(current_workflow.get("active_task")),
+                    }
+                )
+                response.headers[UI_SESSION_HEADER] = session_id
+                await _publish_agent_activity(
+                    hub,
+                    session_id=session_id,
+                    phase="response.ready",
+                    detail="project",
+                )
+                return response
+
+            await hub.append_message(
+                session_id,
+                hub.create_message(
+                    role="assistant",
+                    content=response_text,
+                    lane=WORKSPACE_LANE,
+                    trace_id=trace_id if isinstance(trace_id, str) else None,
+                    parent_user_message_id=user_message_id,
+                ),
+                lane=WORKSPACE_LANE,
             )
-            if decision_error is not None:
-                return decision_error
-            await _set_current_plan_step_status(
-                hub=hub,
-                session_id=session_id,
-                status="waiting_approval",
-            )
-            await _publish_agent_activity(
-                hub,
-                session_id=session_id,
-                phase="approval.required",
-                detail="project",
-            )
+            await hub.set_session_decision(session_id, ui_decision)
             messages = await hub.get_messages(session_id, lane="chat")
             workspace_messages = await hub.get_messages(session_id, lane="workspace")
             current_decision = await hub.get_session_decision(session_id)
@@ -479,7 +519,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                     "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
                     "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
                     "active_task": _normalize_task_payload(current_workflow.get("active_task")),
-                }
+                },
             )
             response.headers[UI_SESSION_HEADER] = session_id
             await _publish_agent_activity(
@@ -489,52 +529,6 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 detail="project",
             )
             return response
-
-        await hub.append_message(
-            session_id,
-            hub.create_message(
-                role="assistant",
-                content=response_text,
-                lane=WORKSPACE_LANE,
-                trace_id=trace_id if isinstance(trace_id, str) else None,
-                parent_user_message_id=user_message_id,
-            ),
-            lane=WORKSPACE_LANE,
-        )
-        decision_error = await _set_model_bound_decision(
-            request, session_id, ui_decision, selected_main_config
-        )
-        if decision_error is not None:
-            return decision_error
-        messages = await hub.get_messages(session_id, lane="chat")
-        workspace_messages = await hub.get_messages(session_id, lane="workspace")
-        current_decision = await hub.get_session_decision(session_id)
-        current_model = await hub.get_session_model(session_id) or dict(selected_model)
-        current_workflow = await hub.get_session_workflow(session_id)
-        response = json_response(
-            {
-                "session_id": session_id,
-                "lane": WORKSPACE_LANE,
-                "messages": messages,
-                "workspace_messages": workspace_messages,
-                "decision": _normalize_ui_decision(current_decision, session_id=session_id),
-                "selected_model": current_model,
-                "trace_id": trace_id,
-                "approval_request": approval_request,
-                "mwv_report": mwv_report,
-                "mode": _normalize_mode_value(current_workflow.get("mode"), default="ask"),
-                "active_plan": _normalize_plan_payload(current_workflow.get("active_plan")),
-                "active_task": _normalize_task_payload(current_workflow.get("active_task")),
-            },
-        )
-        response.headers[UI_SESSION_HEADER] = session_id
-        await _publish_agent_activity(
-            hub,
-            session_id=session_id,
-            phase="response.ready",
-            detail="project",
-        )
-        return response
     except Exception as exc:  # noqa: BLE001
         error = True
         if status_opened and session_id is not None:

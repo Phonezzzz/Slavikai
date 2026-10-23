@@ -152,6 +152,8 @@ Browser setter проверяет owned session, активные Chat/Plan exec
 revision отклоняет поздний результат model catalog после другого переключения,
 включая A → B → A. Request-time синхронизация не может записать устаревший снимок
 модели поверх нового выбора. Эти guards не изменяют grants, policy или ToolGateway.
+Тот же scoped lock защищает создание model-bound decisions, публикацию draft и
+project history/results. Шаг переходит в `waiting_approval` до видимости approval decision.
 Frontend привязывает результат выбора к текущему поколению чата: поздний success,
 error или cleanup не изменяет другой чат и не снимает busy у нового запроса.
 

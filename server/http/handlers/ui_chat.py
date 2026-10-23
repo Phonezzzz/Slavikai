@@ -767,11 +767,6 @@ async def _handle_ui_send_impl(
             if decision_error is not None:
                 await _abort_idempotency()
                 return decision_error
-            await _set_current_plan_step_status(
-                hub=hub,
-                session_id=session_id,
-                status="waiting_approval",
-            )
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -1602,9 +1597,7 @@ async def _handle_ui_send_impl(
 
         if _decision_is_pending_blocking(ui_decision):
             await _set_current_plan_step_status(
-                hub=hub,
-                session_id=session_id,
-                status="waiting_approval",
+                hub=hub, session_id=session_id, status="waiting_approval"
             )
             await hub.set_session_decision(session_id, ui_decision)
             await _publish_agent_activity(

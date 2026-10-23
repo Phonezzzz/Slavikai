@@ -413,16 +413,18 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/ui_api/test_model_switch.py",
         "ui/src/app/__tests__/root-reconcile.test.ts",
         "server/http/handlers/sessions.py",
         "server/http/handlers/plan.py",
-        "server/http/handlers/project.py"
+        "server/http/handlers/project.py",
+        "tests/ui_api/test_model_switch_publication.py",
+        "server/http/handlers/workspace.py"
       ],
-      "summary": "Owned session model changes reject active Chat/Plan and pending decisions until cancellation settles. Scoped execution checks and model revisions fence stale catalog and Plan/project snapshots; request hydration cannot overwrite newer selection. UI manual and automatic restoration share generation/token ownership and ignore late results after conversation changes."
+      "summary": "Owned session model changes reject active Chat/Plan and pending decisions until cancellation settles. Scoped execution locks cover model-bound decision creation, plan publication and project history/result publication. Approval steps enter waiting before decision visibility. Model revisions fence stale catalog and request snapshots; hydration cannot overwrite newer selection. UI manual and automatic restoration share generation/token ownership, preserving the current model request when New Chat fails."
     }
   ]
 }
