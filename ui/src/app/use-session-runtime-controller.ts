@@ -281,9 +281,12 @@ export function useSessionRuntimeController({
   const [savingModel, setSavingModel] = useState(false);
   const modelRequestRef = useRef<symbol | null>(null);
   const workflowRequestRef = useRef<symbol | null>(null);
+  const initialStateAbortRef = useRef<AbortController | null>(null);
   const beginConversationChange = () => {
     modelRequestRef.current = null;
     workflowRequestRef.current = null;
+    initialStateAbortRef.current?.abort();
+    setModeTransitions(null);
     setModeBusy(false);
     setModeError(null);
     setSavingModel(false);
@@ -336,6 +339,8 @@ export function useSessionRuntimeController({
       mode_transitions?: unknown;
       computer_events?: unknown;
     };
+    if (body.mode !== undefined || body.active_plan !== undefined || body.active_task !== undefined
+        || body.auto_state !== undefined || body.decision !== undefined) initialStateAbortRef.current?.abort();
     if (body.decision !== undefined) {
       setPendingDecision(parseUiDecision(body.decision));
       setDecisionError(null);
@@ -789,6 +794,7 @@ export function useSessionRuntimeController({
   ): Promise<void> => {
     if (!selectedConversation || workflowRequestRef.current) return;
     const generation = reconcileGuardRef.current.snapshot();
+    initialStateAbortRef.current?.abort();
     const token = Symbol('workflow-request');
     workflowRequestRef.current = token;
     const current = () => workflowRequestRef.current === token
@@ -885,6 +891,8 @@ export function useSessionRuntimeController({
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
+    initialStateAbortRef.current = controller;
     const refreshWorkflowSnapshot = async () => {
       if (resyncFetchInFlightRef.current) {
         return;
@@ -892,12 +900,13 @@ export function useSessionRuntimeController({
       resyncFetchInFlightRef.current = true;
       try {
         const stateResponse = await fetch('/ui/api/state', {
+          signal: controller.signal,
           headers: {
             [sessionHeader]: selectedConversation,
           },
         });
         const statePayload: unknown = await stateResponse.json();
-        if (!stateResponse.ok || cancelled) {
+        if (!stateResponse.ok || cancelled || controller.signal.aborted) {
           return;
         }
         const snapshot = statePayload as {
@@ -916,13 +925,14 @@ export function useSessionRuntimeController({
       } catch {
         // Keep live session state; next event or manual action will recover.
       } finally {
-        resyncFetchInFlightRef.current = false;
+        if (initialStateAbortRef.current === controller) resyncFetchInFlightRef.current = false;
       }
     };
     void refreshWorkflowSnapshot();
     return () => {
       cancelled = true;
-      resyncFetchInFlightRef.current = false;
+      controller.abort();
+      if (initialStateAbortRef.current === controller) resyncFetchInFlightRef.current = false;
     };
   }, [selectedConversation]);
 

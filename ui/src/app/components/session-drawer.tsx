@@ -6,7 +6,6 @@ import { ToggleSwitch } from './ui/toggle-switch';
 import { ModelQualification } from './model-qualification';
 import { useFocusTrap } from '../use-focus-trap';
 import {
-  SESSION_MODE_VALUES,
   SESSION_MODE_LABELS,
   type ModeTransitionsContract,
   type SessionMode,
@@ -312,7 +311,7 @@ export function SessionDrawer({
                 </div>
                 <h2 className="mt-1 text-sm font-semibold text-zinc-100">Session Controls</h2>
                 <p className="mt-1 text-xs text-zinc-400">
-                  Mode, safety level, and tool access for the active session. Choose the model by the message input.
+                  Safety level and tool access for the active session. Model and mode are selected by the message input.
                 </p>
               </div>
               <button
@@ -335,42 +334,13 @@ export function SessionDrawer({
                   <ModelQualification key={`${sessionId}:${selectedModelValue}`} sessionId={sessionId} sessionHeader={sessionHeader} />
                 )}
 
-                <div className="space-y-2">
-                  <div className="text-xs font-medium text-zinc-300">Mode</div>
-                  <div className="grid grid-cols-5 gap-2">
-                    {SESSION_MODE_VALUES.map((item) => {
-                        const transition = modeTransitions?.targets[item] ?? null;
-                        const blockedReason =
-                          transition && !transition.allowed
-                            ? transition.message ?? transition.reasonCode ?? 'blocked'
-                            : null;
-                        const buttonTitle =
-                          blockedReason
-                            ?? (transition?.requiresConfirm ? 'Для перехода понадобится confirm.' : null)
-                            ?? undefined;
-                        return (
-                          <button
-                            key={item}
-                            type="button"
-                            title={buttonTitle}
-                            onClick={() => {
-                              void onChangeMode(item);
-                            }}
-                            disabled={
-                              modeBusy || !sessionId || !transition || !transition.allowed
-                            }
-                            className={`rounded-md border px-2 py-2 text-[11px] uppercase tracking-wide ${
-                              mode === item
-                                ? 'border-zinc-700 bg-zinc-800 text-zinc-100'
-                                : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:bg-zinc-800'
-                            } disabled:opacity-50`}
-                          >
-                            {SESSION_MODE_LABELS[item]}
-                          </button>
-                        );
-                    })}
-                  </div>
-                </div>
+                <p className="text-xs text-zinc-400">{SESSION_MODE_LABELS[mode]} · Режим выбирается у поля сообщения.</p>
+                {mode !== 'act' && modeTransitions?.targets.act.allowed ? <button
+                  type="button" disabled={!sessionId || modeBusy}
+                  onClick={() => { void onChangeMode('act'); }}
+                  className="rounded border border-zinc-700 px-3 py-2 text-xs text-zinc-200 disabled:opacity-50">
+                  Перейти к выполнению плана
+                </button> : null}
               </section>
 
               <section className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">

@@ -7,6 +7,7 @@ import { EmbeddingNotice } from './components/embedding-notice';
 import { HistorySidebar } from './components/history-sidebar';
 import { RepositoryPanel } from './components/repository-panel';
 import { SearchModal } from './components/search-modal';
+import { ComposerModes } from './components/composer-modes';
 import { SessionModelPicker } from './components/session-model-picker';
 import { SessionControlShell } from './components/session-control-shell';
 import { WorkspaceSessionScreen } from './components/workspace-session-screen';
@@ -632,18 +633,28 @@ export default function App() {
           <EmbeddingNotice key={settingsVersion} />
           <div className="min-h-0 flex-1">
           <ChatSessionScreen
-            composerControls={<SessionModelPicker
-              key={runtime.selectedConversation}
-              sessionId={runtime.selectedConversation}
-              modelLabel={modelLabel}
-              providerModels={providerModels}
-              selectedModelValue={selectedModelValue}
-              modelsLoading={modelsLoading}
-              savingModel={runtime.savingModel}
-              onLoadProviderModels={loadProviderModels}
-              onStartLocalOllama={startLocalOllama}
-              onSelectModel={(provider, model) => { void runtime.handleSetModel(provider, model); }}
-            />}
+            composerControls={<>
+              <ComposerModes
+                sessionId={runtime.selectedConversation}
+                mode={runtime.sessionMode}
+                transitions={runtime.modeTransitions}
+                busy={runtime.modeBusy || transport.sending || transport.cancelling || runtime.decisionBusy}
+                decision={runtime.pendingDecision}
+                onChangeMode={runtime.handleChangeMode}
+              />
+              <SessionModelPicker
+                key={runtime.selectedConversation}
+                sessionId={runtime.selectedConversation}
+                modelLabel={modelLabel}
+                providerModels={providerModels}
+                selectedModelValue={selectedModelValue}
+                modelsLoading={modelsLoading}
+                savingModel={runtime.savingModel}
+                onLoadProviderModels={loadProviderModels}
+                onStartLocalOllama={startLocalOllama}
+                onSelectModel={(provider, model) => { void runtime.handleSetModel(provider, model); }}
+              />
+            </>}
             sessionId={runtime.selectedConversation}
             messages={transport.canvasMessages}
             pendingMessage={transport.pendingCanvasMessage}

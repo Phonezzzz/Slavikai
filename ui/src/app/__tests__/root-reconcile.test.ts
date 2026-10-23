@@ -76,7 +76,7 @@ const sessionPayload = (sessionId: string, workspaceRoot: string) => ({
   },
 });
 
-const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
+const createHarness = (restore: 'bootstrap' | 'create' | null = null, initialState?: Deferred<Response>) => {
   const restoredModel = { provider: 'local', model: 'restored' };
   vi.mocked(loadLastModel).mockReturnValue(restore ? restoredModel : null);
   const availableModels = [{ provider: 'local', models: ['restored'], error: null }];
@@ -84,6 +84,7 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
   const rootRequests = new Map<string, Deferred<Response>>();
   const modelRequests = new Map<string, Deferred<Response>>();
   const workflowRequests = new Map<string, Deferred<Response>>();
+  if (initialState) workflowRequests.set('C:/ui/api/state', initialState);
   const createRequests: { current: Deferred<Response> | null } = { current: null };
   const roots = new Map([
     ['C', '/root-C'],
@@ -227,6 +228,19 @@ describe('useSessionRuntimeController root reconciliation', () => {
     act(() => { first = invoke(h.result.current, action); duplicate = invoke(h.result.current, action); });
     await act(async () => { pending.resolve(workflowResponse()); await Promise.all([first!, duplicate!]); });
     expect(h.fetchMock.mock.calls.filter(([url]) => url === endpoint)).toHaveLength(1);
+  });
+
+  it('does not overwrite a completed mode change with the initial state response', async () => {
+    const initial = deferred<Response>();
+    const h = createHarness(null, initial);
+    await waitFor(() => expect(h.fetchMock.mock.calls.some(([url]) => url === '/ui/api/state')).toBe(true));
+    const change = deferred<Response>(); h.workflowRequests.set('C:/ui/api/mode', change);
+    let request: Promise<void>;
+    act(() => { request = h.result.current.handleChangeMode('auto'); });
+    await act(async () => { change.resolve(workflowResponse()); await request!; });
+    expect(h.result.current.sessionMode).toBe('auto');
+    await act(async () => { initial.resolve(jsonResponse({ mode: 'ask' })); await initial.promise; });
+    expect(h.result.current.sessionMode).toBe('auto');
   });
 
   it('keeps an in-flight workflow request owned when New Chat fails', async () => {

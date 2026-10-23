@@ -106,11 +106,11 @@ export const SESSION_MODE_VALUES = ['ask', 'plan', 'act', 'auto', 'desktop'] as 
 export type SessionMode = (typeof SESSION_MODE_VALUES)[number];
 
 export const SESSION_MODE_LABELS: Record<SessionMode, string> = {
-  ask: 'Chat',
-  plan: 'Plan',
-  act: 'Act',
-  auto: 'Agent',
-  desktop: 'Desktop',
+  ask: 'Обсудить',
+  plan: 'План',
+  act: 'Выполнение плана',
+  auto: 'Агент',
+  desktop: 'Этот компьютер',
 };
 
 export const isSessionMode = (value: unknown): value is SessionMode =>

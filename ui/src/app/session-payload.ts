@@ -589,7 +589,7 @@ export const parseModeTransitions = (value: unknown): ModeTransitionsContract | 
     return null;
   }
   const parsedTargets = {} as ModeTransitionsContract['targets'];
-  for (const mode of ['ask', 'plan', 'act', 'auto'] as const) {
+  for (const mode of ['ask', 'plan', 'act', 'auto', 'desktop'] as const) {
     const item = (candidate.targets as Record<string, unknown>)[mode];
     if (!item || typeof item !== 'object') {
       return null;
