@@ -53,6 +53,9 @@ type WorkflowSnapshot = {
   modeTransitions: ModeTransitionsContract | null;
 };
 
+type WorkflowField = keyof WorkflowSnapshot | 'decision';
+type WorkflowEvidence = { version: number; signature: string; planId?: string; planRevision?: number };
+
 type UseSessionRuntimeControllerOptions = {
   sessionHeader: string;
   providerModels: ProviderModels[];
@@ -79,6 +82,7 @@ export type SessionRuntimeControllerResult = {
   workspaceRoot: string;
   computerEvents: ComputerActivityEvent[];
   modeBusy: boolean;
+  planCancelling: boolean;
   modeError: string | null;
   handleSelectConversation: (sessionId: string) => Promise<void>;
   handleCreateConversation: () => Promise<void>;
@@ -287,10 +291,21 @@ export function useSessionRuntimeController({
   const [savingModel, setSavingModel] = useState(false);
   const modelRequestRef = useRef<symbol | null>(null);
   const workflowRequestRef = useRef<symbol | null>(null);
+  const decisionRequestRef = useRef<symbol | null>(null);
+  const cancelRequestRef = useRef<symbol | null>(null);
+  const workflowVersionRef = useRef(0);
+  const workflowEvidenceRef = useRef(new Map<WorkflowField, WorkflowEvidence>());
+  const decisionIdentityRef = useRef<string | null>(null);
+  const [planCancelling, setPlanCancelling] = useState(false);
   const initialStateAbortRef = useRef<AbortController | null>(null);
   const beginConversationChange = () => {
     modelRequestRef.current = null;
     workflowRequestRef.current = null;
+    decisionRequestRef.current = null;
+    cancelRequestRef.current = null;
+    setDecisionBusy(false);
+    setDecisionError(null);
+    setPlanCancelling(false);
     initialStateAbortRef.current?.abort();
     setModeTransitions(null);
     setModeBusy(false);
@@ -301,6 +316,14 @@ export function useSessionRuntimeController({
   const [pendingDecision, setPendingDecision] = useState<UiDecision | null>(null);
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [decisionError, setDecisionError] = useState<string | null>(null);
+  const applyDecision = (decision: UiDecision | null) => {
+    if (decisionIdentityRef.current !== (decision?.id ?? null)) {
+      decisionRequestRef.current = null;
+      setDecisionBusy(false);
+    }
+    decisionIdentityRef.current = decision?.id ?? null;
+    setPendingDecision(decision);
+  };
   const [sessionSecuritySummary, setSessionSecuritySummary] = useState<SessionSecuritySummary>(
     DEFAULT_SESSION_SECURITY_SUMMARY,
   );
@@ -334,6 +357,24 @@ export function useSessionRuntimeController({
       }));
   };
 
+  const observeWorkflow = (field: WorkflowField, value: unknown) => {
+    const plan = field === 'activePlan' ? parsePlanEnvelope(value) : null;
+    workflowEvidenceRef.current.set(field, { version: workflowVersionRef.current,
+      signature: JSON.stringify(value), ...(plan ? { planId: plan.plan_id, planRevision: plan.plan_revision } : {}),
+    });
+  };
+  const canApplyWorkflow = (snapshot: Partial<WorkflowSnapshot & { decision: UiDecision | null }>, version: number) => {
+    const decision = workflowEvidenceRef.current.get('decision');
+    if ('decision' in snapshot && decision && decision.version > version
+        && decision.signature !== JSON.stringify(snapshot.decision)) return false;
+    const plan = workflowEvidenceRef.current.get('activePlan');
+    if (snapshot.activePlan && plan && plan.version > version
+        && plan.planId === snapshot.activePlan.plan_id
+        && plan.planRevision !== undefined && snapshot.activePlan.plan_revision > plan.planRevision) return true;
+    return [...workflowEvidenceRef.current].every(([field, evidence]) => evidence.version <= version
+      || !(field in snapshot) || evidence.signature === JSON.stringify(snapshot[field]));
+  };
+
   const applyRuntimePayload = (payload: unknown) => {
     const body = payload as {
       decision?: unknown;
@@ -346,9 +387,13 @@ export function useSessionRuntimeController({
       computer_events?: unknown;
     };
     if (body.mode !== undefined || body.active_plan !== undefined || body.active_task !== undefined
-        || body.auto_state !== undefined || body.decision !== undefined) initialStateAbortRef.current?.abort();
+        || body.auto_state !== undefined || body.decision !== undefined || body.mode_transitions !== undefined) {
+      initialStateAbortRef.current?.abort();
+      workflowVersionRef.current += 1;
+    }
     if (body.decision !== undefined) {
-      setPendingDecision(parseUiDecision(body.decision));
+      observeWorkflow('decision', parseUiDecision(body.decision));
+      applyDecision(parseUiDecision(body.decision));
       setDecisionError(null);
     }
     const parsedModel = parseSelectedModel(body.selected_model);
@@ -357,18 +402,23 @@ export function useSessionRuntimeController({
       saveLastModel(parsedModel);
     }
     if (body.mode !== undefined) {
+      observeWorkflow('mode', parseSessionMode(body.mode));
       setSessionMode(parseSessionMode(body.mode));
     }
     if (body.active_plan !== undefined) {
+      observeWorkflow('activePlan', parsePlanEnvelope(body.active_plan));
       setActivePlan(parsePlanEnvelope(body.active_plan));
     }
     if (body.active_task !== undefined) {
+      observeWorkflow('activeTask', parseTaskExecution(body.active_task));
       setActiveTask(parseTaskExecution(body.active_task));
     }
     if (body.auto_state !== undefined) {
+      observeWorkflow('autoState', parseAutoState(body.auto_state));
       setAutoState(parseAutoState(body.auto_state));
     }
     if (body.mode_transitions !== undefined) {
+      observeWorkflow('modeTransitions', parseModeTransitions(body.mode_transitions));
       setModeTransitions(parseModeTransitions(body.mode_transitions));
     }
     if (body.computer_events !== undefined) {
@@ -442,7 +492,7 @@ export function useSessionRuntimeController({
       files: parseSessionFiles((filesPayload as { files?: unknown }).files),
       artifacts: parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
     });
-    setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
+    applyDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
     setDecisionError(null);
     setSessionSecuritySummary(securitySummary);
     setWorkspaceRoot(
@@ -502,7 +552,7 @@ export function useSessionRuntimeController({
       artifacts: parseSessionArtifacts((session as { artifacts?: unknown } | undefined)?.artifacts),
     });
     const sessionModel = parseSelectedModel(session?.selected_model);
-    setPendingDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
+    applyDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
     setDecisionError(null);
     setWorkspaceRoot(
       parseWorkspaceRoot((session as { workspace_root?: unknown } | undefined)?.workspace_root),
@@ -630,7 +680,7 @@ export function useSessionRuntimeController({
     const generation = beginConversationChange();
     setSelectedConversation(sessionId);
     transportRef.current?.clearConversationState();
-    setPendingDecision(null);
+    applyDecision(null);
     setDecisionError(null);
     try {
       await loadConversation(sessionId, generation);
@@ -691,7 +741,7 @@ export function useSessionRuntimeController({
         return;
       }
       setSelectedConversation(nextSession);
-      setPendingDecision(null);
+      applyDecision(null);
       setDecisionError(null);
       await loadConversation(nextSession, generation);
       if (!reconcileGuardRef.current.isCurrent(generation)) {
@@ -797,11 +847,21 @@ export function useSessionRuntimeController({
   const runWorkflowRequest = async (
     request: (sessionId: string) => Promise<WorkflowSnapshot & { decision?: UiDecision | null }>,
     fallbackError: string,
+    cancellation = false,
   ): Promise<void> => {
-    if (!selectedConversation || workflowRequestRef.current) return;
+    if (!selectedConversation || cancelRequestRef.current
+        || (!cancellation && (workflowRequestRef.current || decisionRequestRef.current))) return;
     const generation = reconcileGuardRef.current.snapshot();
     initialStateAbortRef.current?.abort();
     const token = Symbol('workflow-request');
+    const version = workflowVersionRef.current;
+    if (cancellation) {
+      cancelRequestRef.current = token;
+      decisionRequestRef.current = null;
+      setDecisionBusy(false);
+      setDecisionError(null);
+      setPlanCancelling(true);
+    }
     workflowRequestRef.current = token;
     const current = () => workflowRequestRef.current === token
       && reconcileGuardRef.current.isCurrent(generation);
@@ -810,8 +870,10 @@ export function useSessionRuntimeController({
     try {
       const updated = await request(selectedConversation);
       if (!current()) return;
-      applyWorkflowSnapshot(updated);
-      if ('decision' in updated) setPendingDecision(updated.decision ?? null);
+      if (canApplyWorkflow(updated, version)) {
+        applyWorkflowSnapshot(updated);
+        if ('decision' in updated) applyDecision(updated.decision ?? null);
+      }
     } catch (error) {
       if (!current()) return;
       const message = error instanceof Error ? error.message : fallbackError;
@@ -820,6 +882,10 @@ export function useSessionRuntimeController({
     } finally {
       if (current()) {
         workflowRequestRef.current = null;
+        if (cancelRequestRef.current === token) {
+          cancelRequestRef.current = null;
+          setPlanCancelling(false);
+        }
         setModeBusy(false);
       }
     }
@@ -838,7 +904,7 @@ export function useSessionRuntimeController({
     (sessionId) => executePlanRemote(sessionId, sessionHeader, plan), 'Failed to execute plan.',
   );
   const handlePlanCancel = (): Promise<void> => runWorkflowRequest(
-    (sessionId) => cancelPlanRemote(sessionId, sessionHeader), 'Failed to cancel plan.',
+    (sessionId) => cancelPlanRemote(sessionId, sessionHeader), 'Failed to cancel plan.', true,
   );
 
   const handleDecisionRespond = async (
@@ -847,9 +913,16 @@ export function useSessionRuntimeController({
     onResume?: (resume: unknown) => void,
     onRejected?: () => void,
   ) => {
-    if (!selectedConversation || !pendingDecision) {
+    if (!selectedConversation || !pendingDecision || decisionRequestRef.current || workflowRequestRef.current) {
       return;
     }
+    const generation = reconcileGuardRef.current.snapshot();
+    const token = Symbol('decision-request');
+    const version = workflowVersionRef.current;
+    decisionRequestRef.current = token;
+    initialStateAbortRef.current?.abort();
+    const current = () => decisionRequestRef.current === token
+      && reconcileGuardRef.current.isCurrent(generation);
     setDecisionBusy(true);
     setDecisionError(null);
     try {
@@ -868,16 +941,25 @@ export function useSessionRuntimeController({
         }),
       });
       const payload: unknown = await response.json();
+      if (!current()) return;
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to resolve decision.'));
       }
-      transportRef.current?.applySessionPayload(payload, { applyDisplay: false });
-      applyRuntimePayload(payload);
-      const resumedWorkspaceRoot = parseDecisionResumeWorkspaceRoot(
-        (payload as { resume?: unknown }).resume,
-      );
-      if (resumedWorkspaceRoot) {
-        setWorkspaceRoot(resumedWorkspaceRoot);
+      const body = payload as Record<string, unknown>;
+      const snapshot: Partial<WorkflowSnapshot & { decision: UiDecision | null }> = {};
+      if ('mode' in body) snapshot.mode = parseSessionMode(body.mode);
+      if ('active_plan' in body) snapshot.activePlan = parsePlanEnvelope(body.active_plan);
+      if ('active_task' in body) snapshot.activeTask = parseTaskExecution(body.active_task);
+      if ('auto_state' in body) snapshot.autoState = parseAutoState(body.auto_state);
+      if ('mode_transitions' in body) snapshot.modeTransitions = parseModeTransitions(body.mode_transitions);
+      if ('decision' in body) snapshot.decision = parseUiDecision(body.decision);
+      if (canApplyWorkflow(snapshot, version)) {
+        transportRef.current?.applySessionPayload(payload, { applyDisplay: false });
+        applyRuntimePayload(payload);
+        const resumedWorkspaceRoot = parseDecisionResumeWorkspaceRoot(
+          (payload as { resume?: unknown }).resume,
+        );
+        if (resumedWorkspaceRoot) setWorkspaceRoot(resumedWorkspaceRoot);
       }
       if (choice === 'reject') {
         onRejected?.();
@@ -885,10 +967,14 @@ export function useSessionRuntimeController({
       onResume?.((payload as { resume?: unknown }).resume);
       await loadSessions();
     } catch (error) {
+      if (!current()) return;
       const message = error instanceof Error ? error.message : 'Failed to resolve decision.';
       setDecisionError(message);
     } finally {
-      setDecisionBusy(false);
+      if (current()) {
+        decisionRequestRef.current = null;
+        setDecisionBusy(false);
+      }
     }
   };
 
@@ -926,7 +1012,7 @@ export function useSessionRuntimeController({
         setActivePlan(parsePlanEnvelope(snapshot.active_plan));
         setActiveTask(parseTaskExecution(snapshot.active_task));
         setAutoState(parseAutoState(snapshot.auto_state));
-        setPendingDecision(parseUiDecision(snapshot.pending_decision));
+        applyDecision(parseUiDecision(snapshot.pending_decision));
         setDecisionError(null);
       } catch {
         // Keep live session state; next event or manual action will recover.
@@ -941,6 +1027,33 @@ export function useSessionRuntimeController({
       if (initialStateAbortRef.current === controller) resyncFetchInFlightRef.current = false;
     };
   }, [selectedConversation]);
+
+  useEffect(() => {
+    if (!selectedConversation || !activePlan || !['completed', 'failed', 'cancelled'].includes(activePlan.status)) return;
+    const controller = new AbortController();
+    const generation = reconcileGuardRef.current.snapshot();
+    const version = workflowVersionRef.current;
+    const planId = activePlan.plan_id;
+    const planRevision = activePlan.plan_revision;
+    void (async () => {
+      try {
+        const response = await fetch(`/ui/api/sessions/${encodeURIComponent(selectedConversation)}`, {
+          signal: controller.signal, headers: { [sessionHeader]: selectedConversation },
+        });
+        const payload: unknown = await response.json();
+        if (!response.ok || controller.signal.aborted || !reconcileGuardRef.current.isCurrent(generation)
+            || workflowVersionRef.current !== version) return;
+        const session = (payload as { session?: { active_plan?: unknown; mode_transitions?: unknown } }).session;
+        const plan = parsePlanEnvelope(session?.active_plan);
+        if (plan?.plan_id === planId && plan.plan_revision === planRevision) {
+          setModeTransitions(parseModeTransitions(session?.mode_transitions));
+        }
+      } catch {
+        // The terminal state stays visible; a later session load refreshes transition permissions.
+      }
+    })();
+    return () => controller.abort();
+  }, [selectedConversation, activePlan?.plan_id, activePlan?.plan_revision, activePlan?.status]);
 
   useEffect(() => {
     return () => {
@@ -964,6 +1077,7 @@ export function useSessionRuntimeController({
     workspaceRoot,
     computerEvents,
     modeBusy,
+    planCancelling,
     modeError,
     handleSelectConversation,
     handleCreateConversation,
