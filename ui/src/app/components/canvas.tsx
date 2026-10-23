@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type ChangeEvent,
   type ClipboardEvent,
   type KeyboardEvent,
@@ -97,6 +98,7 @@ export async function deliverTranscription(
 }
 
 interface CanvasProps {
+  composerControls?: ReactNode;
   sessionId?: string | null;
   messages?: CanvasMessage[];
   pendingMessage?: CanvasMessage | null;
@@ -289,6 +291,7 @@ export function Canvas({
   decisionError = null,
   onDecisionRespond,
   runtimeMode = "ask",
+  composerControls,
 }: CanvasProps) {
   const [inputValue, setInputValue] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<
@@ -970,6 +973,7 @@ export function Canvas({
               ))}
             </div>
           ) : null}
+          {composerControls}
           <input
             ref={fileInputRef}
             type="file"

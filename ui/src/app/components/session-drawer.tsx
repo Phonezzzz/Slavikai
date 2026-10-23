@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'motion/react';
-import { ChevronRight, LoaderCircle, Play, Server, Shield, X } from 'lucide-react';
+import { Shield, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { ToggleSwitch } from './ui/toggle-switch';
@@ -9,7 +9,6 @@ import {
   SESSION_MODE_VALUES,
   SESSION_MODE_LABELS,
   type ModeTransitionsContract,
-  type ProviderModels,
   type SessionMode,
 } from '../types';
 
@@ -27,13 +26,7 @@ type SessionDrawerProps = {
   modeBusy?: boolean;
   onChangeMode: (mode: SessionMode) => Promise<void>;
   modelLabel: string;
-  providerModels: ProviderModels[];
   selectedModelValue: string | null;
-  modelsLoading?: boolean;
-  savingModel?: boolean;
-  onLoadProviderModels: (provider: string) => Promise<ProviderModels | null>;
-  onStartLocalOllama: () => Promise<ProviderModels | null>;
-  onSelectModel: (provider: string, model: string) => void;
 };
 
 type SessionSecurityState = {
@@ -86,15 +79,6 @@ const POLICY_OPTIONS: Array<{
 ];
 
 const DANGER_CONFIRMATION_PHRASE = 'YOLO';
-const PROVIDER_ORDER = ['local', 'xai', 'inception', 'deepseek', 'openrouter'];
-const PROVIDER_LABELS: Record<string, string> = {
-  local: 'Local',
-  xai: 'xAI',
-  inception: 'Inception',
-  deepseek: 'DeepSeek',
-  openrouter: 'OpenRouter',
-};
-
 const extractErrorMessage = (payload: unknown, fallback: string): string => {
   if (!payload || typeof payload !== 'object') {
     return fallback;
@@ -127,27 +111,6 @@ const buildSafetyPreset = (): Record<ToolKey, boolean> => ({
   tts: false,
   stt: false,
 });
-
-const sortProviders = (items: ProviderModels[]): ProviderModels[] => {
-  return [...items].sort((left, right) => {
-    const leftIndex = PROVIDER_ORDER.indexOf(left.provider);
-    const rightIndex = PROVIDER_ORDER.indexOf(right.provider);
-    const normalizedLeft = leftIndex === -1 ? PROVIDER_ORDER.length : leftIndex;
-    const normalizedRight = rightIndex === -1 ? PROVIDER_ORDER.length : rightIndex;
-    if (normalizedLeft !== normalizedRight) {
-      return normalizedLeft - normalizedRight;
-    }
-    return left.provider.localeCompare(right.provider);
-  });
-};
-
-const compactStatusText = (value: string): string => {
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= 96) {
-    return normalized;
-  }
-  return `${normalized.slice(0, 93)}...`;
-};
 
 const parseSecurityPayload = (payload: unknown): SessionSecurityState => {
   const defaults: SessionSecurityState = {
@@ -193,13 +156,7 @@ export function SessionDrawer({
   modeBusy = false,
   onChangeMode,
   modelLabel,
-  providerModels,
   selectedModelValue,
-  modelsLoading = false,
-  savingModel = false,
-  onLoadProviderModels,
-  onStartLocalOllama,
-  onSelectModel,
 }: SessionDrawerProps) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -208,26 +165,10 @@ export function SessionDrawer({
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('sandbox');
   const [dangerConfirmText, setDangerConfirmText] = useState('');
   const [dangerConfirmed, setDangerConfirmed] = useState(false);
-  const [activeProvider, setActiveProvider] = useState<string | null>(null);
-  const [manualModelId, setManualModelId] = useState('');
-  const [loadedProviders, setLoadedProviders] = useState<Set<string>>(() => new Set());
-  const [startingOllama, setStartingOllama] = useState(false);
-
   const panelRef = useRef<HTMLElement | null>(null);
   useFocusTrap(isOpen, panelRef);
-
   const requestHeaders = sessionId ? { [sessionHeader]: sessionId } : {};
   const safeModeEnabled = policyProfile !== 'yolo';
-  const sortedProviders = sortProviders(providerModels);
-  const currentProvider =
-    sortedProviders.find((item) => item.provider === activeProvider) ?? sortedProviders[0] ?? null;
-  const currentProviderName = currentProvider?.provider ?? null;
-  const currentProviderLoaded =
-    currentProviderName !== null && loadedProviders.has(currentProviderName);
-  const currentProviderError = currentProvider?.error ?? null;
-  const currentProviderModels = currentProvider?.models ?? [];
-  const manualModelAllowed = !modelsLoading && currentProviderName?.startsWith('custom-')
-    && (currentProvider?.status === 'models_unavailable' || currentProvider?.status === 'provider_unavailable');
 
   const loadControls = async (): Promise<void> => {
     if (!sessionId) {
@@ -261,7 +202,6 @@ export function SessionDrawer({
     }
     setDangerConfirmText('');
     setDangerConfirmed(false);
-    setActiveProvider((current) => current ?? sortedProviders[0]?.provider ?? null);
     void loadControls();
   }, [isOpen, sessionId]);
 
@@ -342,49 +282,6 @@ export function SessionDrawer({
     }
   };
 
-  const handleOpenProvider = async (provider: string) => {
-    setActiveProvider(provider);
-    setManualModelId('');
-    setStatus(null);
-    if (provider === 'local') {
-      return;
-    }
-    try {
-      const loaded = await onLoadProviderModels(provider);
-      if (loaded) {
-        setLoadedProviders((current) => {
-          const next = new Set(current);
-          next.add(provider);
-          return next;
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : `Failed to load ${provider} models.`;
-      setStatus(message);
-    }
-  };
-
-  const handleStartLocalOllama = async () => {
-    setStartingOllama(true);
-    setStatus(null);
-    setActiveProvider('local');
-    try {
-      const loaded = await onStartLocalOllama();
-      if (loaded) {
-        setLoadedProviders((current) => {
-          const next = new Set(current);
-          next.add('local');
-          return next;
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to start Local Ollama.';
-      setStatus(message);
-    } finally {
-      setStartingOllama(false);
-    }
-  };
-
   return (
     <AnimatePresence>
       {isOpen ? (
@@ -415,7 +312,7 @@ export function SessionDrawer({
                 </div>
                 <h2 className="mt-1 text-sm font-semibold text-zinc-100">Session Controls</h2>
                 <p className="mt-1 text-xs text-zinc-400">
-                  Model, mode, safety level, and tool access for the active session.
+                  Mode, safety level, and tool access for the active session. Choose the model by the message input.
                 </p>
               </div>
               <button
@@ -472,131 +369,6 @@ export function SessionDrawer({
                           </button>
                         );
                     })}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="text-xs font-medium text-zinc-300">Model</div>
-                  <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-2">
-                    <div className="mb-2 text-[11px] text-zinc-500">{modelLabel}</div>
-                    <div className="grid grid-cols-[132px,1fr] gap-2">
-                      <div className="space-y-1">
-                        {sortedProviders.map((provider) => {
-                          const isActive = provider.provider === currentProviderName;
-                          const label = provider.displayName ?? PROVIDER_LABELS[provider.provider] ?? provider.provider;
-                          return (
-                            <button
-                              key={provider.provider}
-                              type="button"
-                              onClick={() => {
-                                void handleOpenProvider(provider.provider);
-                              }}
-                              disabled={modelsLoading || savingModel || !sessionId}
-                              className={`flex w-full items-center justify-between rounded-md border px-2 py-2 text-left text-xs transition-colors ${
-                                isActive
-                                  ? 'border-zinc-700 bg-zinc-800 text-zinc-100'
-                                  : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:bg-zinc-800'
-                              } disabled:opacity-50`}
-                            >
-                              <span className="inline-flex min-w-0 items-center gap-1.5">
-                                <Server className="h-3.5 w-3.5 shrink-0" />
-                                <span className="truncate">{label}</span>
-                              </span>
-                              <ChevronRight className="h-3 w-3 shrink-0 text-zinc-500" />
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      <div className="min-h-[150px] rounded-md border border-zinc-800 bg-zinc-950 p-2">
-                        {currentProviderName === 'local' && currentProviderModels.length === 0 ? (
-                          <div className="flex h-full min-h-[132px] flex-col justify-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void handleStartLocalOllama();
-                              }}
-                              disabled={startingOllama || modelsLoading || savingModel || !sessionId}
-                              className="inline-flex items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-zinc-700 disabled:opacity-50"
-                            >
-                              {startingOllama ? (
-                                <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-                              ) : (
-                                <Play className="h-3.5 w-3.5" />
-                              )}
-                              Local Ollama
-                            </button>
-                            <div className="text-[11px] leading-4 text-zinc-500">
-                              Local models become selectable after Ollama responds with a model list.
-                            </div>
-                          </div>
-                        ) : null}
-
-                        {currentProviderName !== 'local'
-                        && !currentProviderLoaded
-                        && currentProviderModels.length === 0
-                        && !currentProviderError ? (
-                          <div className="flex h-full min-h-[132px] items-center justify-center text-xs text-zinc-500">
-                            Select provider to load its models.
-                          </div>
-                        ) : null}
-
-                        {currentProviderError ? (
-                          <div className="text-xs leading-5 text-amber-200">
-                            {compactStatusText(currentProviderError)}
-                          </div>
-                        ) : null}
-
-                        {currentProviderModels.length > 0 ? (
-                          <div className="max-h-56 space-y-1 overflow-y-auto pr-1" data-scrollbar="auto">
-                            {currentProviderModels.map((model) => {
-                              const value = `${currentProviderName}::${model}`;
-                              const selected = selectedModelValue === value;
-                              return (
-                                <button
-                                  key={value}
-                                  type="button"
-                                  onClick={() => {
-                                    if (currentProviderName) {
-                                      onSelectModel(currentProviderName, model);
-                                    }
-                                  }}
-                                  disabled={savingModel || !sessionId}
-                                  className={`w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors ${
-                                    selected
-                                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100'
-                                      : 'border-transparent bg-transparent text-zinc-300 hover:border-zinc-800 hover:bg-zinc-800'
-                                  } disabled:opacity-50`}
-                                >
-                                  <span className="block truncate">{model}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ) : null}
-                        {manualModelAllowed ? (
-                          <div className="mt-2 flex gap-2">
-                            <input
-                              aria-label="Manual model ID"
-                              placeholder="Enter model ID"
-                              value={manualModelId}
-                              onChange={(event) => setManualModelId(event.target.value)}
-                              className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (currentProviderName && manualModelId.trim()) onSelectModel(currentProviderName, manualModelId.trim());
-                              }}
-                              disabled={savingModel || !sessionId || !manualModelId.trim()}
-                              className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
-                            >
-                              Set
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
                   </div>
                 </div>
               </section>

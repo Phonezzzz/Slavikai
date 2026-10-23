@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { SessionDrawer } from '../components/session-drawer';
+import { SessionModelPicker } from '../components/session-model-picker';
 import type { ProviderModels } from '../types';
 
 afterEach(() => {
@@ -22,13 +22,8 @@ function renderPicker(result: ProviderModels, onSelectModel = vi.fn()) {
     const [providers, setProviders] = useState<ProviderModels[]>([
       { provider, displayName: 'Example', models: [], error: null },
     ]);
-    return <SessionDrawer
-    isOpen
-    onClose={() => undefined}
+    return <SessionModelPicker
     sessionId="session-test"
-    sessionHeader="X-Slavik-Session"
-    mode="ask"
-    onChangeMode={async () => undefined}
     modelLabel="Model not selected"
     providerModels={providers}
     selectedModelValue={null}
@@ -42,6 +37,7 @@ function renderPicker(result: ProviderModels, onSelectModel = vi.fn()) {
   />;
   }
   render(<Wrapper />);
+  fireEvent.click(screen.getByRole('button', { name: 'Выбрать модель' }));
   return { onLoadProviderModels, onSelectModel };
 }
 
@@ -55,6 +51,28 @@ describe('chat session model picker for generic providers', () => {
     expect(screen.queryByLabelText('Manual model ID')).toBeNull();
     fireEvent.click(await screen.findByRole('button', { name: 'opaque/model' }));
     expect(onSelectModel).toHaveBeenCalledWith(provider, 'opaque/model');
+  });
+
+  it('filters the discovered catalog without selecting a model or querying again', async () => {
+    const { onLoadProviderModels, onSelectModel } = renderPicker({
+      provider, displayName: 'Example', models: ['opaque/model', 'other/model'], error: null, status: 'ready',
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Example' }));
+    await screen.findByRole('button', { name: 'other/model' });
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Поиск модели' }), { target: { value: 'OPAQUE' } });
+    expect(screen.queryByRole('button', { name: 'other/model' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'opaque/model' })).toBeTruthy();
+    expect(onLoadProviderModels).toHaveBeenCalledTimes(1);
+    expect(onSelectModel).not.toHaveBeenCalled();
+  });
+
+  it('closes with Escape and returns focus without selecting a model', async () => {
+    const { onSelectModel } = renderPicker({ provider, models: ['opaque/model'], error: null });
+    const search = screen.getByRole('searchbox', { name: 'Поиск модели' });
+    fireEvent.keyDown(search, { key: 'Escape' });
+    expect(screen.queryByRole('region', { name: 'Выбор модели' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Выбрать модель' }));
+    expect(onSelectModel).not.toHaveBeenCalled();
   });
 
   it('offers manual ID in the picker when the catalog is unavailable', async () => {

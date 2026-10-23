@@ -1,4 +1,4 @@
-import type { ModeTransitionsContract, ProviderModels, SessionMode } from '../types';
+import type { ModeTransitionsContract, SessionMode } from '../types';
 import { SessionDrawer } from './session-drawer';
 
 type SessionControlShellProps = {
@@ -12,13 +12,7 @@ type SessionControlShellProps = {
   modeBusy: boolean;
   onChangeMode: (mode: SessionMode) => Promise<void>;
   modelLabel: string;
-  providerModels: ProviderModels[];
   selectedModelValue: string | null;
-  modelsLoading: boolean;
-  savingModel: boolean;
-  onLoadProviderModels: (provider: string) => Promise<ProviderModels | null>;
-  onStartLocalOllama: () => Promise<ProviderModels | null>;
-  onSelectModel: (provider: string, model: string) => void;
 };
 
 export function SessionControlShell({
@@ -32,13 +26,7 @@ export function SessionControlShell({
   modeBusy,
   onChangeMode,
   modelLabel,
-  providerModels,
   selectedModelValue,
-  modelsLoading,
-  savingModel,
-  onLoadProviderModels,
-  onStartLocalOllama,
-  onSelectModel,
 }: SessionControlShellProps) {
   return (
     <SessionDrawer
@@ -52,13 +40,7 @@ export function SessionControlShell({
       modeBusy={modeBusy}
       onChangeMode={onChangeMode}
       modelLabel={modelLabel}
-      providerModels={providerModels}
       selectedModelValue={selectedModelValue}
-      modelsLoading={modelsLoading}
-      savingModel={savingModel}
-      onLoadProviderModels={onLoadProviderModels}
-      onStartLocalOllama={onStartLocalOllama}
-      onSelectModel={onSelectModel}
     />
   );
 }

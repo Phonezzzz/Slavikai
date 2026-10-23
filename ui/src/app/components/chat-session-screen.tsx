@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { PanelRight } from 'lucide-react';
 
 import { ArtifactPanel } from './artifact-panel';
@@ -6,6 +7,7 @@ import type { Artifact } from './artifacts-sidebar';
 import type { DecisionRespondChoice, SessionMode, UiDecision } from '../types';
 
 type ChatSessionScreenProps = {
+  composerControls?: ReactNode;
   sessionId: string | null;
   messages: CanvasMessage[];
   pendingMessage: CanvasMessage | null;
@@ -42,6 +44,7 @@ type ChatSessionScreenProps = {
 };
 
 export function ChatSessionScreen({
+  composerControls,
   sessionId,
   messages,
   pendingMessage,
@@ -78,6 +81,7 @@ export function ChatSessionScreen({
       <div className="h-full min-h-0 min-w-0 flex-1">
         <Canvas
           className="h-full min-h-0"
+          composerControls={composerControls}
           sessionId={sessionId}
           messages={messages}
           pendingMessage={pendingMessage}
