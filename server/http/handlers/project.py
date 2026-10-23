@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Literal
+from typing import Literal, cast
 
 from aiohttp import web
 
@@ -15,7 +15,11 @@ from server.http.common.chat_payload import (
     _ui_messages_to_llm,
 )
 from server.http.common.responses import error_response, json_response
-from server.http.common.runtime_contract import SessionModelChangedError
+from server.http.common.runtime_contract import (
+    RuntimeModelStateProtocol,
+    SessionModelChangedError,
+    _resolve_runtime_main_for_session,
+)
 from server.http_api import (
     UI_GITHUB_REQUIRED_CATEGORIES,
     UI_PROJECT_COMMANDS,
@@ -109,6 +113,7 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         if resolved_session_id is None:
             return _session_forbidden_response()
         session_id = resolved_session_id
+        model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
         selected_model_metadata = await hub.get_session_model(session_id)
         try:
             await _sync_session_runtime_override(
@@ -116,6 +121,10 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 session_id,
                 selected_model_metadata,
             )
+            async with _agent_lock_for_request(request, session_id):
+                if await hub.get_session_model(session_id) != selected_model_metadata:
+                    raise SessionModelChangedError("Модель сессии изменилась. Повторите запрос.")
+                expected_model_revision = await model_state.get_session_revision(session_id)
             agent, selected_main_config = await _resolve_agent_for_ui_session(
                 request,
                 session_id,
@@ -345,6 +354,17 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         mwv_report: dict[str, JSONValue] | None = None
         ui_decision: dict[str, JSONValue] | None = None
         async with agent_lock:
+            if (
+                await model_state.get_session_revision(session_id) != expected_model_revision
+                or await _resolve_runtime_main_for_session(request, session_id)
+                != selected_main_config
+            ):
+                return error_response(
+                    status=409,
+                    message="Модель сессии изменилась. Повторите запрос.",
+                    error_type="conflict_error",
+                    code="session_model_changed",
+                )
             try:
                 model_config = _workspace_inception_runtime_config(selected_main_config)
                 api_key = _resolve_provider_api_key(selected_model["provider"])

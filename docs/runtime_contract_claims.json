@@ -407,6 +407,22 @@
         "ui/src/app/__tests__/settings-loading.test.tsx"
       ],
       "summary": "A nonblocking browser notice explains unavailable local semantic search. Verified owner eligibility exposes explicit confirmed download, cached activation or retry through the existing endpoint. File presence and loaded weights are distinct; GET never initializes the runtime. Absent libraries get manual server guidance without fake installer or agent repair. Unknown diagnostics fail closed, Chat remains usable, and refreshed or unmounted observers ignore stale responses."
+    },
+    {
+      "id": "runtime.session_model_switch",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_model_switch.py",
+        "ui/src/app/__tests__/root-reconcile.test.ts",
+        "server/http/handlers/sessions.py",
+        "server/http/handlers/plan.py",
+        "server/http/handlers/project.py"
+      ],
+      "summary": "Owned session model changes reject active Chat/Plan and pending decisions until cancellation settles. Scoped execution checks and model revisions fence stale catalog and Plan/project snapshots; request hydration cannot overwrite newer selection. UI manual and automatic restoration share generation/token ownership and ignore late results after conversation changes."
     }
   ]
 }

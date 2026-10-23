@@ -331,3 +331,75 @@ def test_other_principal_cannot_change_owned_session(monkeypatch, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["plan", "project"])
+@pytest.mark.parametrize("selection", ["session", "global"])
+def test_model_change_before_execution_lock_fences_old_request(
+    monkeypatch, tmp_path, kind, selection
+):
+    from server.http.handlers import plan, project
+
+    config, calls = setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        ui_settings, "_probe_openai_models", lambda *_: (["opaque", "other"], "ready", None)
+    )
+
+    async def run():
+        client, app, session, _ = await client_and_session(config)
+        hub = app["ui_hub"]
+        await hub.set_session_model(session, config.provider, config.model)
+        if selection == "global":
+            await app["runtime_model_state"].clear_session_override(session)
+            await hub.set_session_model(session, "", "")
+            await app["runtime_model_state"].set_global_main(config)
+        if kind == "plan":
+            await hub.set_session_workflow(session, mode="plan")
+        module = plan if kind == "plan" else project
+        name = "_resolve_agent" if kind == "plan" else "_resolve_agent_for_ui_session"
+        original = getattr(module, name)
+        entered, release = asyncio.Event(), asyncio.Event()
+        invocations = []
+
+        def forbidden(*args, **kwargs):
+            invocations.append(True)
+            raise RuntimeError("stale invocation")
+
+        async def hold(*args, **kwargs):
+            resolved = await original(*args, **kwargs)
+            agent = resolved if kind == "plan" else resolved[0]
+            monkeypatch.setattr(
+                agent, "compile_plan_steps" if kind == "plan" else "respond", forbidden
+            )
+            entered.set()
+            await release.wait()
+            return resolved
+
+        monkeypatch.setattr(module, name, hold)
+        headers = {"Cf-Access-Jwt-Assertion": "owner", api.UI_SESSION_HEADER: session}
+        endpoint = "/ui/api/plan/draft" if kind == "plan" else "/ui/api/tools/project"
+        payload = {"goal": "fixture"} if kind == "plan" else {"command": "find", "args": "fixture"}
+        pending = asyncio.create_task(client.post(endpoint, json=payload, headers=headers))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            if selection == "global":
+                from dataclasses import replace
+
+                await app["runtime_model_state"].set_global_main(replace(config, model="other"))
+            else:
+                changed = await client.post(
+                    "/ui/api/session-model",
+                    json={"provider": config.provider, "model": "other"},
+                    headers=headers,
+                )
+                assert changed.status == 200
+            release.set()
+            assert (await pending).status == 409
+            assert invocations == []
+            assert calls == []
+        finally:
+            release.set()
+            await asyncio.gather(pending, return_exceptions=True)
+            await client.close()
+
+    asyncio.run(run())

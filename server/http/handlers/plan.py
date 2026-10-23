@@ -17,7 +17,12 @@ from server.http.common.idempotency import (
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.responses import error_response, json_response
-from server.http.common.runtime_contract import AgentProtocol
+from server.http.common.runtime_contract import (
+    AgentProtocol,
+    RuntimeModelStateProtocol,
+    SessionModelChangedError,
+    _resolve_runtime_main_for_session,
+)
 from server.http_api import (
     UI_SESSION_HEADER,
     _agent_lock_for_request,
@@ -104,12 +109,20 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
             code="invalid_request_error",
         )
 
+    model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
+    expected_model_revision = await model_state.get_session_revision(session_id)
+    expected_model = await _resolve_runtime_main_for_session(request, session_id)
     try:
         agent = await _resolve_agent(request, session_id)
         if agent is None:
             return _model_not_selected_response()
         root = await _workspace_root_for_session(hub, session_id)
         async with _agent_lock_for_request(request, session_id):
+            if (
+                await model_state.get_session_revision(session_id) != expected_model_revision
+                or await _resolve_runtime_main_for_session(request, session_id) != expected_model
+            ):
+                raise SessionModelChangedError("Модель сессии изменилась. Повторите запрос.")
             await _apply_agent_runtime_state(agent=agent, hub=hub, session_id=session_id)
             audit_log, usage = _run_plan_readonly_audit(
                 root=root,
@@ -120,6 +133,10 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
                 ),
             )
             steps = await asyncio.to_thread(agent.compile_plan_steps, goal_raw.strip(), audit_log)
+    except SessionModelChangedError as exc:
+        return error_response(
+            status=409, message=str(exc), error_type="conflict_error", code="session_model_changed"
+        )
     except PlanCompilationError as exc:
         return error_response(
             status=409,

@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import type { MutableRefObject } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { loadLastModel, saveLastModel } from '../session-storage';
 import { DEFAULT_COMPOSER_SETTINGS } from '../session-payload';
 import type { SessionTransportBridge } from '../session-bridges';
 import type { SessionSummary } from '../types';
@@ -75,7 +76,10 @@ const sessionPayload = (sessionId: string, workspaceRoot: string) => ({
   },
 });
 
-const createHarness = () => {
+const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
+  const restoredModel = { provider: 'local', model: 'restored' };
+  vi.mocked(loadLastModel).mockReturnValue(restore ? restoredModel : null);
+  const availableModels = [{ provider: 'local', models: ['restored'], error: null }];
   const sessionRequests = new Map<string, Deferred<Response>>();
   const rootRequests = new Map<string, Deferred<Response>>();
   const modelRequests = new Map<string, Deferred<Response>>();
@@ -89,6 +93,10 @@ const createHarness = () => {
     const url = String(input);
     const headers = new Headers(init?.headers);
     const sessionId = headers.get('X-Test') ?? '';
+
+    if (url === '/ui/api/sessions' && init?.method === 'POST') {
+      return jsonResponse({ session_id: 'N', selected_model: null });
+    }
 
     if (url === '/ui/api/session-model') {
       const pending = modelRequests.get(sessionId);
@@ -137,16 +145,16 @@ const createHarness = () => {
   const hook = renderHook(() =>
     useSessionRuntimeController({
       sessionHeader: 'X-Test',
-      providerModels: [],
+      providerModels: restore ? availableModels : [],
       loadSessions: vi.fn(async () => sessions),
-      loadModels: vi.fn(async () => []),
+      loadModels: vi.fn(async () => restore === 'bootstrap' ? availableModels : []),
       loadComposerSettings: vi.fn(async () => DEFAULT_COMPOSER_SETTINGS),
       onStatusMessage,
       transportRef,
     }),
   );
 
-  return { ...hook, sessionRequests, rootRequests, modelRequests, onStatusMessage };
+  return { ...hook, sessionRequests, rootRequests, modelRequests, onStatusMessage, fetchMock };
 };
 
 afterEach(() => {
@@ -215,6 +223,32 @@ describe('useSessionRuntimeController root reconciliation', () => {
       expect(await request!).toBe(true);
     });
     expect(harness.result.current.selectedModel?.model).toBe('new');
+  });
+
+  it.each([['bootstrap', true], ['bootstrap', false], ['create', true], ['create', false]] as const)('fences late %s model restoration success=%s after chat switch', async (source, success) => {
+    const harness = createHarness(source);
+    const pending = deferred<Response>();
+    harness.modelRequests.set(source === 'bootstrap' ? 'C' : 'N', pending);
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));
+    let creation: Promise<void> | undefined;
+    if (source === 'create') {
+      act(() => { creation = harness.result.current.handleCreateConversation(); });
+    }
+    await waitFor(() => expect(harness.fetchMock).toHaveBeenCalledWith('/ui/api/session-model', expect.anything()));
+    await act(async () => { await harness.result.current.handleSelectConversation('B'); });
+    vi.mocked(saveLastModel).mockClear();
+    harness.onStatusMessage.mockClear();
+    await act(async () => {
+      pending.resolve(success
+        ? jsonResponse({ selected_model: { provider: 'local', model: 'restored' } })
+        : { ok: false, status: 409, json: async () => ({ error: { message: 'stale restore' } }) } as Response);
+      await creation;
+      await pending.promise;
+    });
+    expect(harness.result.current.selectedConversation).toBe('B');
+    expect(harness.result.current.selectedModel).toBeNull();
+    expect(saveLastModel).not.toHaveBeenCalled();
+    expect(harness.onStatusMessage).not.toHaveBeenCalled();
   });
 
   it('drops A reconcile as soon as switch to B begins, while B load is pending', async () => {

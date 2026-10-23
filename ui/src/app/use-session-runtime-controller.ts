@@ -504,6 +504,35 @@ export function useSessionRuntimeController({
     return { sessionId: nextSession, selectedModel: sessionModel };
   };
 
+  const applySessionModel = async (sessionId: string, generation: number, provider: string, model: string): Promise<boolean> => {
+    if (!reconcileGuardRef.current.isCurrent(generation) || modelRequestRef.current !== null) {
+      return false;
+    }
+    setSavingModel(true);
+    const request = Symbol();
+    modelRequestRef.current = request;
+    const isCurrent = () => modelRequestRef.current === request
+      && reconcileGuardRef.current.isCurrent(generation);
+    try {
+      const nextModel = await setSessionModelRemote(sessionId, sessionHeader, provider, model);
+      if (!isCurrent()) return false;
+      setSelectedModel(nextModel);
+      saveLastModel(nextModel);
+      onStatusMessage(null);
+      return true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      const message = error instanceof Error ? error.message : 'Failed to set model.';
+      onStatusMessage(message);
+      return false;
+    } finally {
+      if (isCurrent()) {
+        modelRequestRef.current = null;
+        setSavingModel(false);
+      }
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     const generation = beginConversationChange();
@@ -544,21 +573,11 @@ export function useSessionRuntimeController({
           if (nextSession && !selectedFromSession && !lastModelApplied) {
             const lastModel = loadLastModel();
             if (lastModel && isModelAvailable(lastModel, models)) {
-              try {
-                const applied = await setSessionModelRemote(
-                  nextSession,
-                  sessionHeader,
-                  lastModel.provider,
-                  lastModel.model,
-                );
-                setSelectedModel(applied);
-                saveLastModel(applied);
-                setLastModelApplied(true);
-              } catch (error) {
-                const message =
-                  error instanceof Error ? error.message : 'Failed to restore last model.';
-                onStatusMessage(message);
-              }
+              const applied = await applySessionModel(
+                nextSession, generation, lastModel.provider, lastModel.model,
+              );
+              if (!applied || !reconcileGuardRef.current.isCurrent(generation)) return;
+              setLastModelApplied(true);
             }
           }
           onStatusMessage(null);
@@ -668,21 +687,11 @@ export function useSessionRuntimeController({
       if (!created.selectedModel && providerModels.length > 0) {
         const lastModel = loadLastModel();
         if (lastModel && isModelAvailable(lastModel, providerModels)) {
-          try {
-            const applied = await setSessionModelRemote(
-              nextSession,
-              sessionHeader,
-              lastModel.provider,
-              lastModel.model,
-            );
-            setSelectedModel(applied);
-            saveLastModel(applied);
-            setLastModelApplied(true);
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : 'Failed to restore last model.';
-            onStatusMessage(message);
-          }
+          const applied = await applySessionModel(
+            nextSession, generation, lastModel.provider, lastModel.model,
+          );
+          if (!applied || !reconcileGuardRef.current.isCurrent(generation)) return;
+          setLastModelApplied(true);
         }
       }
       onStatusMessage(null);
@@ -754,33 +763,8 @@ export function useSessionRuntimeController({
   };
 
   const handleSetModel = async (provider: string, model: string): Promise<boolean> => {
-    if (!selectedConversation || savingModel || modelRequestRef.current !== null) {
-      return false;
-    }
-    setSavingModel(true);
-    const request = Symbol();
-    modelRequestRef.current = request;
-    const generation = reconcileGuardRef.current.snapshot();
-    const isCurrent = () => modelRequestRef.current === request
-      && reconcileGuardRef.current.isCurrent(generation);
-    try {
-      const nextModel = await setSessionModelRemote(selectedConversation, sessionHeader, provider, model);
-      if (!isCurrent()) return false;
-      setSelectedModel(nextModel);
-      saveLastModel(nextModel);
-      onStatusMessage(null);
-      return true;
-    } catch (error) {
-      if (!isCurrent()) return false;
-      const message = error instanceof Error ? error.message : 'Failed to set model.';
-      onStatusMessage(message);
-      return false;
-    } finally {
-      if (isCurrent()) {
-        modelRequestRef.current = null;
-        setSavingModel(false);
-      }
-    }
+    if (!selectedConversation || savingModel) return false;
+    return applySessionModel(selectedConversation, reconcileGuardRef.current.snapshot(), provider, model);
   };
 
   const applyWorkflowSnapshot = (snapshot: WorkflowSnapshot) => {
