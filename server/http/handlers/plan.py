@@ -22,6 +22,7 @@ from server.http.common.runtime_contract import (
     RuntimeModelStateProtocol,
     SessionModelChangedError,
     _resolve_runtime_main_for_session,
+    _set_model_bound_decision,
 )
 from server.http_api import (
     UI_SESSION_HEADER,
@@ -332,6 +333,7 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
         return session_error
     if session_id is None:
         return _session_forbidden_response()
+    decision_model = await _resolve_runtime_main_for_session(request, session_id)
     workflow = await hub.get_session_workflow(session_id)
     mode = _normalize_mode_value(workflow.get("mode"), default="ask")
     plan = _normalize_plan_payload(workflow.get("active_plan"))
@@ -494,7 +496,18 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             mode=mode,
             active_task=active_task,
         )
-        await hub.set_session_decision(session_id, decision)
+        decision_error = await _set_model_bound_decision(
+            request, session_id, decision, decision_model
+        )
+        if decision_error is not None:
+            if idempotency_key is not None and plan_fingerprint is not None:
+                await idempotency_store.abort(
+                    endpoint="ui.plan.execute",
+                    session_id=session_id,
+                    key=idempotency_key,
+                    fingerprint=plan_fingerprint,
+                )
+            return decision_error
         response_payload: dict[str, JSONValue] = {
             "error": {
                 "message": "Switch to Act required before execution.",

@@ -17,7 +17,7 @@ from llm.capabilities import NativeToolQualification
 from llm.stream_model import StreamEvent
 from llm.types import ModelConfig
 from server.agent_provider import AgentScope, ScopedAgentProvider
-from server.http.common.auth import _request_identity, _request_principal_id
+from server.http.common.auth import _ensure_session_owned, _request_identity, _request_principal_id
 from server.http.common.responses import error_response as _error_response
 from server.http.common.ui_settings import (
     CUSTOM_PROVIDER_PREFIX,
@@ -404,6 +404,29 @@ async def _sync_session_runtime_override(
             raise SessionModelChangedError("Модель сессии изменилась. Повторите запрос.")
         await store.set_session_override(session_id, main_config)
     return main_config
+
+
+async def _set_model_bound_decision(
+    request: web.Request,
+    session_id: str,
+    decision: dict[str, JSONValue] | None,
+    expected_model: ModelConfig | None,
+) -> web.Response | None:
+    """Публикует decision атомарно относительно scoped смены модели."""
+    hub = cast(UIHub, request.app["ui_hub"])
+    async with _agent_lock_for_request(request, session_id):
+        ownership_error = await _ensure_session_owned(request, hub, session_id)
+        if ownership_error is not None:
+            return ownership_error
+        if await _resolve_runtime_main_for_session(request, session_id) != expected_model:
+            return _error_response(
+                status=409,
+                message="Модель сессии изменилась. Повторите запрос.",
+                error_type="conflict_error",
+                code="session_model_changed",
+            )
+        await hub.set_session_decision(session_id, decision)
+    return None
 
 
 async def _resolve_runtime_main_for_session(

@@ -403,3 +403,160 @@ def test_model_change_before_execution_lock_fences_old_request(
             await client.close()
 
     asyncio.run(run())
+
+
+def test_deleted_session_during_catalog_is_not_recreated(monkeypatch, tmp_path):
+    config, calls = setup(monkeypatch, tmp_path)
+    entered, release = threading.Event(), threading.Event()
+
+    def catalog(*_):
+        entered.set()
+        assert release.wait(5)
+        return (["opaque", "other"], "ready", None)
+
+    monkeypatch.setattr(ui_settings, "_probe_openai_models", catalog)
+
+    async def run():
+        client, app, session, principal = await client_and_session(config)
+        await app["runtime_model_state"].clear_session_override(session)
+        await app["ui_hub"].set_session_model(session, config.provider, config.model)
+        headers = {"Cf-Access-Jwt-Assertion": "owner", api.UI_SESSION_HEADER: session}
+        pending = asyncio.create_task(
+            client.post(
+                "/ui/api/session-model",
+                json={"provider": config.provider, "model": "other"},
+                headers=headers,
+            )
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            deleted = await client.delete(f"/ui/api/sessions/{session}", headers=headers)
+            assert deleted.status == 200
+            release.set()
+            assert (await pending).status == 404
+            assert await app["ui_hub"].get_session_access(session, principal) == "missing"
+            assert await app["runtime_model_state"].get_session_override(session) is None
+            assert calls == []
+        finally:
+            release.set()
+            await asyncio.gather(pending, return_exceptions=True)
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_root_decision_and_model_change_are_serialized(monkeypatch, tmp_path):
+    from server.http.handlers import ui_chat
+
+    config, calls = setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        ui_settings, "_probe_openai_models", lambda *_: (["opaque", "other"], "ready", None)
+    )
+    monkeypatch.setattr(ui_chat, "_request_requires_root_gate", lambda **_: True)
+
+    async def run():
+        client, app, session, principal = await client_and_session(config)
+        hub = app["ui_hub"]
+        await hub.set_session_model(session, config.provider, config.model)
+        await hub.set_session_workflow(session, mode="auto")
+        entered, release_decision, checked, release_setter = [asyncio.Event() for _ in range(4)]
+        original_set, original_get = hub.set_session_decision, hub.get_session_decision
+        lock = app["agent_provider"].lock_for(AgentScope(principal, session))
+
+        async def hold_decision(session_id, decision):
+            if isinstance(decision, dict) and decision.get("blocking"):
+                entered.set()
+                await release_decision.wait()
+            await original_set(session_id, decision)
+
+        async def hold_setter_read(session_id):
+            value = await original_get(session_id)
+            if entered.is_set() and lock.locked() and not checked.is_set():
+                checked.set()
+                await release_setter.wait()
+            return value
+
+        monkeypatch.setattr(hub, "set_session_decision", hold_decision)
+        monkeypatch.setattr(hub, "get_session_decision", hold_setter_read)
+        headers = {"Cf-Access-Jwt-Assertion": "owner", api.UI_SESSION_HEADER: session}
+        chat = asyncio.create_task(
+            client.post("/ui/api/chat/send", json={"content": "fixture"}, headers=headers)
+        )
+        setter = None
+        observer = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            setter = asyncio.create_task(
+                client.post(
+                    "/ui/api/session-model",
+                    json={"provider": config.provider, "model": "other"},
+                    headers=headers,
+                )
+            )
+            observer = asyncio.create_task(checked.wait())
+            await asyncio.wait_for(
+                asyncio.wait([setter, observer], return_when=asyncio.FIRST_COMPLETED), 2
+            )
+            release_decision.set()
+            assert (await asyncio.wait_for(chat, 2)).status == 202
+            release_setter.set()
+            assert (await asyncio.wait_for(setter, 2)).status == 409
+            assert await app["runtime_model_resolver"].resolve_main(session) == config
+            assert calls == []
+        finally:
+            release_decision.set()
+            release_setter.set()
+            if observer:
+                observer.cancel()
+            await asyncio.gather(chat, *([setter] if setter else []), return_exceptions=True)
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_model_winner_rejects_stale_root_decision(monkeypatch, tmp_path):
+    from server.http.handlers import ui_chat
+
+    config, calls = setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        ui_settings, "_probe_openai_models", lambda *_: (["opaque", "other"], "ready", None)
+    )
+    monkeypatch.setattr(ui_chat, "_request_requires_root_gate", lambda **_: True)
+    original = ui_chat._set_model_bound_decision
+
+    async def run():
+        client, app, session, _ = await client_and_session(config)
+        hub = app["ui_hub"]
+        await hub.set_session_model(session, config.provider, config.model)
+        await hub.set_session_workflow(session, mode="auto")
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def hold(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(ui_chat, "_set_model_bound_decision", hold)
+        headers = {"Cf-Access-Jwt-Assertion": "owner", api.UI_SESSION_HEADER: session}
+        chat = asyncio.create_task(
+            client.post("/ui/api/chat/send", json={"content": "fixture"}, headers=headers)
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            changed = await client.post(
+                "/ui/api/session-model",
+                json={"provider": config.provider, "model": "other"},
+                headers=headers,
+            )
+            assert changed.status == 200
+            release.set()
+            assert (await chat).status == 409
+            assert await hub.get_session_decision(session) is None
+            assert (await app["runtime_model_resolver"].resolve_main(session)).model == "other"
+            assert calls == []
+        finally:
+            release.set()
+            await asyncio.gather(chat, return_exceptions=True)
+            await client.close()
+
+    asyncio.run(run())

@@ -83,6 +83,7 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
   const sessionRequests = new Map<string, Deferred<Response>>();
   const rootRequests = new Map<string, Deferred<Response>>();
   const modelRequests = new Map<string, Deferred<Response>>();
+  const createRequests: { current: Deferred<Response> | null } = { current: null };
   const roots = new Map([
     ['C', '/root-C'],
     ['A', '/root-A'],
@@ -95,6 +96,7 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
     const sessionId = headers.get('X-Test') ?? '';
 
     if (url === '/ui/api/sessions' && init?.method === 'POST') {
+      if (createRequests.current) return createRequests.current.promise;
       return jsonResponse({ session_id: 'N', selected_model: null });
     }
 
@@ -154,7 +156,7 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
     }),
   );
 
-  return { ...hook, sessionRequests, rootRequests, modelRequests, onStatusMessage, fetchMock };
+  return { ...hook, sessionRequests, rootRequests, modelRequests, onStatusMessage, fetchMock, createRequests };
 };
 
 afterEach(() => {
@@ -249,6 +251,27 @@ describe('useSessionRuntimeController root reconciliation', () => {
     expect(harness.result.current.selectedModel).toBeNull();
     expect(saveLastModel).not.toHaveBeenCalled();
     expect(harness.onStatusMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps a current model selection when New Chat fails', async () => {
+    const harness = createHarness();
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));
+    const model = deferred<Response>();
+    const creation = deferred<Response>();
+    harness.modelRequests.set('C', model);
+    harness.createRequests.current = creation;
+    let selection: Promise<boolean>;
+    let newChat: Promise<void>;
+    act(() => { selection = harness.result.current.handleSetModel('local', 'new'); });
+    act(() => { newChat = harness.result.current.handleCreateConversation(); });
+    await act(async () => {
+      creation.resolve({ ok: false, status: 500, json: async () => ({ error: { message: 'failed create' } }) } as Response);
+      await newChat!;
+      model.resolve(jsonResponse({ selected_model: { provider: 'local', model: 'new' } }));
+      expect(await selection!).toBe(true);
+    });
+    expect(harness.result.current.selectedConversation).toBe('C');
+    expect(harness.result.current.selectedModel?.model).toBe('new');
   });
 
   it('drops A reconcile as soon as switch to B begins, while B load is pending', async () => {

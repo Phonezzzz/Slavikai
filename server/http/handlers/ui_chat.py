@@ -46,6 +46,7 @@ from server.http.common.runtime_contract import (
     RuntimeModelResolverProtocol,
     SessionModelChangedError,
     _require_custom_provider_owner,
+    _set_model_bound_decision,
 )
 from server.http.common.session_end import begin_session_end, pending_session_end
 from server.http.common.ui_runtime import _decision_with_status
@@ -760,12 +761,17 @@ async def _handle_ui_send_impl(
                     if isinstance(item, dict) and item.get("action") in {"approve_once", "reject"}
                 ]
                 root_gate_decision["default_option_id"] = "approve_once"
+            decision_error = await _set_model_bound_decision(
+                request, session_id, root_gate_decision, selected_main_config
+            )
+            if decision_error is not None:
+                await _abort_idempotency()
+                return decision_error
             await _set_current_plan_step_status(
                 hub=hub,
                 session_id=session_id,
                 status="waiting_approval",
             )
-            await hub.set_session_decision(session_id, root_gate_decision)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,

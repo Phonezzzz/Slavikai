@@ -448,7 +448,8 @@ export function useSessionRuntimeController({
     return parsedSelectedModel;
   };
 
-  const createConversation = async (generation: number): Promise<{
+  const createConversation = async (generation: number, activateOnSuccess = false): Promise<{
+    generation: number;
     sessionId: string | null;
     selectedModel: SelectedModel | null;
   }> => {
@@ -471,12 +472,14 @@ export function useSessionRuntimeController({
         securitySummary = DEFAULT_SESSION_SECURITY_SUMMARY;
       }
     }
-    if (!reconcileGuardRef.current.isCurrent(generation)) {
+    if (!nextSession || !reconcileGuardRef.current.isCurrent(generation)) {
       return {
+        generation,
         sessionId: nextSession,
         selectedModel: parseSelectedModel(session?.selected_model),
       };
     }
+    if (activateOnSuccess) generation = beginConversationChange();
     transportRef.current?.applyLoadedConversation({
       chatMessages: parseMessages(session?.messages),
       outputContent: parseSessionOutput((session as { output?: unknown } | undefined)?.output).content,
@@ -501,7 +504,7 @@ export function useSessionRuntimeController({
     );
     setSelectedModel(sessionModel);
     setSessionSecuritySummary(securitySummary);
-    return { sessionId: nextSession, selectedModel: sessionModel };
+    return { generation, sessionId: nextSession, selectedModel: sessionModel };
   };
 
   const applySessionModel = async (sessionId: string, generation: number, provider: string, model: string): Promise<boolean> => {
@@ -660,9 +663,10 @@ export function useSessionRuntimeController({
   };
 
   const handleCreateConversation = async () => {
-    const generation = beginConversationChange();
+    let generation = reconcileGuardRef.current.snapshot();
     try {
-      const created = await createConversation(generation);
+      const created = await createConversation(generation, true);
+      generation = created.generation;
       if (!reconcileGuardRef.current.isCurrent(generation)) {
         return;
       }

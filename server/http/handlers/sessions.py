@@ -458,6 +458,9 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             code="model_change_busy",
         )
     async with model_lock:
+        ownership_error = await _ensure_session_owned(request, hub, session_id)
+        if ownership_error is not None:
+            return ownership_error
         if await runtime_model_state.get_session_revision(session_id) != expected_revision:
             return error_response(
                 status=409,
@@ -1123,21 +1126,25 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="unauthorized",
         )
-    terminal_manager = cast(TerminalTool, request.app["terminal_manager"])
-    await terminal_manager.delete_session(session_id)
-    deleted = await hub.delete_session(session_id)
-    if not deleted:
-        return error_response(
-            status=404,
-            message="Session not found.",
-            error_type="invalid_request_error",
-            code="session_not_found",
-        )
-    runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
-    await runtime_model_state.clear_session_override(session_id)
-    session_store = cast(SessionApprovalStore, request.app["session_store"])
-    scope = AgentScope(principal_id=principal_id, session_id=session_id)
-    await session_store.clear_session(scope)
+    async with _agent_lock_for_request(request, session_id):
+        ownership_error = await _ensure_session_owned(request, hub, session_id)
+        if ownership_error is not None:
+            return ownership_error
+        terminal_manager = cast(TerminalTool, request.app["terminal_manager"])
+        await terminal_manager.delete_session(session_id)
+        deleted = await hub.delete_session(session_id)
+        if not deleted:
+            return error_response(
+                status=404,
+                message="Session not found.",
+                error_type="invalid_request_error",
+                code="session_not_found",
+            )
+        runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
+        await runtime_model_state.clear_session_override(session_id)
+        session_store = cast(SessionApprovalStore, request.app["session_store"])
+        scope = AgentScope(principal_id=principal_id, session_id=session_id)
+        await session_store.clear_session(scope)
     provider = cast(ScopedAgentProvider[object], request.app["agent_provider"])
     await provider.release(scope)
     return json_response({"session_id": session_id, "deleted": True})

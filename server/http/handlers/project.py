@@ -19,6 +19,7 @@ from server.http.common.runtime_contract import (
     RuntimeModelStateProtocol,
     SessionModelChangedError,
     _resolve_runtime_main_for_session,
+    _set_model_bound_decision,
 )
 from server.http_api import (
     UI_GITHUB_REQUIRED_CATEGORIES,
@@ -224,12 +225,16 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                         active_task=active_task,
                     ),
                 )
+                decision_error = await _set_model_bound_decision(
+                    request, session_id, approval_decision, selected_main_config
+                )
+                if decision_error is not None:
+                    return decision_error
                 await _set_current_plan_step_status(
                     hub=hub,
                     session_id=session_id,
                     status="waiting_approval",
                 )
-                await hub.set_session_decision(session_id, approval_decision)
                 messages = await hub.get_messages(session_id, lane="chat")
                 workspace_messages = await hub.get_messages(session_id, lane="workspace")
                 current_decision = await hub.get_session_decision(session_id)
@@ -319,7 +324,11 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 ),
                 lane=WORKSPACE_LANE,
             )
-            await hub.set_session_decision(session_id, None)
+            decision_error = await _set_model_bound_decision(
+                request, session_id, None, selected_main_config
+            )
+            if decision_error is not None:
+                return decision_error
             messages = await hub.get_messages(session_id, lane="chat")
             workspace_messages = await hub.get_messages(session_id, lane="workspace")
             current_decision = await hub.get_session_decision(session_id)
@@ -435,12 +444,16 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 )
 
         if _decision_is_pending_blocking(ui_decision):
+            decision_error = await _set_model_bound_decision(
+                request, session_id, ui_decision, selected_main_config
+            )
+            if decision_error is not None:
+                return decision_error
             await _set_current_plan_step_status(
                 hub=hub,
                 session_id=session_id,
                 status="waiting_approval",
             )
-            await hub.set_session_decision(session_id, ui_decision)
             await _publish_agent_activity(
                 hub,
                 session_id=session_id,
@@ -488,7 +501,11 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             ),
             lane=WORKSPACE_LANE,
         )
-        await hub.set_session_decision(session_id, ui_decision)
+        decision_error = await _set_model_bound_decision(
+            request, session_id, ui_decision, selected_main_config
+        )
+        if decision_error is not None:
+            return decision_error
         messages = await hub.get_messages(session_id, lane="chat")
         workspace_messages = await hub.get_messages(session_id, lane="workspace")
         current_decision = await hub.get_session_decision(session_id)
