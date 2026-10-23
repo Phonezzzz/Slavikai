@@ -99,6 +99,7 @@ export async function deliverTranscription(
 
 interface CanvasProps {
   composerControls?: ReactNode;
+  workflowPanel?: ReactNode;
   sessionId?: string | null;
   messages?: CanvasMessage[];
   pendingMessage?: CanvasMessage | null;
@@ -292,6 +293,7 @@ export function Canvas({
   onDecisionRespond,
   runtimeMode = "ask",
   composerControls,
+  workflowPanel,
 }: CanvasProps) {
   const [inputValue, setInputValue] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<
@@ -814,7 +816,8 @@ export function Canvas({
 
       {/* Messages area */}
       <div className="min-h-0 flex-1 overflow-y-auto" data-scrollbar="auto">
-        {displayMessages.length === 0 ? (
+        {workflowPanel ? <div className="mx-auto max-w-5xl px-4">{workflowPanel}</div> : null}
+        {displayMessages.length === 0 && !workflowPanel ? (
           <div className="flex min-h-full flex-col items-center justify-center gap-3 px-6 py-12 text-center">
             <img
               src={BrainLogo}

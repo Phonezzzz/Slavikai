@@ -7,7 +7,6 @@ import { ModelQualification } from './model-qualification';
 import { useFocusTrap } from '../use-focus-trap';
 import {
   SESSION_MODE_LABELS,
-  type ModeTransitionsContract,
   type SessionMode,
 } from '../types';
 
@@ -21,9 +20,6 @@ type SessionDrawerProps = {
   sessionId: string | null;
   sessionHeader: string;
   mode: SessionMode;
-  modeTransitions?: ModeTransitionsContract | null;
-  modeBusy?: boolean;
-  onChangeMode: (mode: SessionMode) => Promise<void>;
   modelLabel: string;
   selectedModelValue: string | null;
 };
@@ -151,9 +147,6 @@ export function SessionDrawer({
   sessionId,
   sessionHeader,
   mode,
-  modeTransitions = null,
-  modeBusy = false,
-  onChangeMode,
   modelLabel,
   selectedModelValue,
 }: SessionDrawerProps) {
@@ -335,12 +328,6 @@ export function SessionDrawer({
                 )}
 
                 <p className="text-xs text-zinc-400">{SESSION_MODE_LABELS[mode]} · Режим выбирается у поля сообщения.</p>
-                {mode !== 'act' && modeTransitions?.targets.act.allowed ? <button
-                  type="button" disabled={!sessionId || modeBusy}
-                  onClick={() => { void onChangeMode('act'); }}
-                  className="rounded border border-zinc-700 px-3 py-2 text-xs text-zinc-200 disabled:opacity-50">
-                  Перейти к выполнению плана
-                </button> : null}
               </section>
 
               <section className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">

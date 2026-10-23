@@ -504,3 +504,109 @@ describe('useSessionRuntimeController root reconciliation', () => {
     expect(harness.result.current.workspaceRoot).toBe('/root-A-current');
   });
 });
+
+const decisionPayload = (id = 'D') => ({
+  id, kind: 'approval', decision_type: 'plan_execute', status: 'pending', blocking: true,
+  reason: 'plan', summary: 'Run plan', created_at: '', updated_at: '',
+});
+
+describe('plan card request ownership', () => {
+  it.each(['success', 'error'] as const)('ignores late decision %s in another chat', async (outcome) => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload() }));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
+    const resume = vi.fn(); const rejected = vi.fn();
+    let request: Promise<void>;
+    act(() => { request = h.result.current.handleDecisionRespond('reject', null, resume, rejected); });
+    await act(async () => { await h.result.current.handleSelectConversation('B'); });
+    expect(h.result.current.decisionBusy).toBe(false);
+    await act(async () => {
+      pending.resolve(outcome === 'success' ? jsonResponse({ mode: 'act', resume: { root_path: '/old' } })
+        : { ok: false, json: async () => ({ error: { message: 'old error' } }) } as Response);
+      await request!;
+    });
+    expect(h.result.current.sessionMode).toBe('ask');
+    expect(h.result.current.decisionError).toBeNull();
+    expect(resume).not.toHaveBeenCalled(); expect(rejected).not.toHaveBeenCalled();
+  });
+
+  it('sends one confirmation for synchronous duplicate clicks', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload() }));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
+    let first: Promise<void>; let duplicate: Promise<void>;
+    act(() => { first = h.result.current.handleDecisionRespond('approve_once'); duplicate = h.result.current.handleDecisionRespond('approve_once'); });
+    expect(h.fetchMock.mock.calls.filter(([url]) => url === '/ui/api/decision/respond')).toHaveLength(1);
+    await act(async () => { pending.resolve(jsonResponse({ mode: 'act' })); await Promise.all([first!, duplicate!]); });
+  });
+
+  it('keeps newer workflow events after a late HTTP execute snapshot', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/plan/execute', pending);
+    let request: Promise<void>;
+    act(() => { request = h.result.current.handlePlanExecute(reviewedPlan); });
+    act(() => h.result.current.applyRuntimePayload({ mode: 'act', active_plan: { ...reviewedPlan, status: 'completed', plan_revision: 9 } }));
+    await act(async () => { pending.resolve(jsonResponse({ mode: 'act', active_plan: { ...reviewedPlan, status: 'running', plan_revision: 8 } })); await request!; });
+    expect(h.result.current.activePlan?.status).toBe('completed');
+  });
+
+  it.each(['execute', 'decision'] as const)('can cancel during %s and ignore its late result', async (operation) => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload() }));
+    const pending = deferred<Response>(); const cancel = deferred<Response>();
+    const endpoint = operation === 'execute' ? '/ui/api/plan/execute' : '/ui/api/decision/respond';
+    h.workflowRequests.set(`C:${endpoint}`, pending); h.workflowRequests.set('C:/ui/api/plan/cancel', cancel);
+    const resume = vi.fn(); let request: Promise<void>; let cancellation: Promise<void>;
+    act(() => { request = operation === 'execute' ? h.result.current.handlePlanExecute(reviewedPlan)
+      : h.result.current.handleDecisionRespond('approve_once', null, resume); });
+    act(() => { cancellation = h.result.current.handlePlanCancel(); void h.result.current.handlePlanCancel(); });
+    expect(h.fetchMock.mock.calls.filter(([url]) => url === '/ui/api/plan/cancel')).toHaveLength(1);
+    await act(async () => {
+      cancel.resolve(jsonResponse({ mode: 'act', active_plan: { ...reviewedPlan, status: 'cancelled' } })); await cancellation!;
+      pending.resolve(jsonResponse({ mode: 'act', active_plan: { ...reviewedPlan, status: 'running' } })); await request!;
+    });
+    expect(h.result.current.activePlan?.status).toBe('cancelled'); expect(resume).not.toHaveBeenCalled();
+    expect(h.result.current.decisionBusy).toBe(false); expect(h.result.current.modeBusy).toBe(false);
+  });
+
+  it('does not apply the old decision response over a replacement decision', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload() }));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
+    const resume = vi.fn(); let request: Promise<void>;
+    act(() => { request = h.result.current.handleDecisionRespond('approve_once', null, resume); });
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload('new') }));
+    await act(async () => { pending.resolve(jsonResponse({ decision: null, mode: 'act' })); await request!; });
+    expect(h.result.current.pendingDecision?.id).toBe('new'); expect(resume).not.toHaveBeenCalled();
+    expect(h.result.current.decisionBusy).toBe(false);
+  });
+});
+
+
+it('retains response transition permissions when its workflow event arrived first', async () => {
+  const h = createHarness();
+  await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+  const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/plan/approve', pending);
+  let request: Promise<void>;
+  act(() => { request = h.result.current.handlePlanApprove(reviewedPlan); });
+  act(() => h.result.current.applyRuntimePayload({ mode: 'plan', active_plan: reviewedPlan, active_task: null }));
+  const mode_transitions = { current_mode: 'plan', targets: Object.fromEntries(['ask', 'plan', 'act', 'auto', 'desktop'].map(mode => [mode, { allowed: mode === 'act', requires_confirm: false }])) };
+  await act(async () => { pending.resolve(jsonResponse({ mode: 'plan', active_plan: reviewedPlan, active_task: null, mode_transitions })); await request!; });
+  expect(h.result.current.modeTransitions?.targets.act.allowed).toBe(true);
+});
+
+
+it('refreshes server transition permissions after a terminal plan event', async () => {
+  const h = createHarness();
+  await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+  const metadata = deferred<Response>(); h.sessionRequests.set('C', metadata);
+  act(() => h.result.current.applyRuntimePayload({ mode: 'act', active_plan: { ...reviewedPlan, status: 'completed', plan_revision: 9 } }));
+  const mode_transitions = { current_mode: 'act', targets: Object.fromEntries(['ask', 'plan', 'act', 'auto', 'desktop'].map(mode => [mode, { allowed: mode === 'ask', requires_confirm: false }])) };
+  await act(async () => { metadata.resolve(jsonResponse({ session: { active_plan: { ...reviewedPlan, status: 'completed', plan_revision: 9 }, mode_transitions } })); });
+  await waitFor(() => expect(h.result.current.modeTransitions?.targets.ask.allowed).toBe(true));
+});

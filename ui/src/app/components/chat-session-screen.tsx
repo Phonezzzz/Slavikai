@@ -8,6 +8,7 @@ import type { DecisionRespondChoice, SessionMode, UiDecision } from '../types';
 
 type ChatSessionScreenProps = {
   composerControls?: ReactNode;
+  workflowPanel?: ReactNode;
   sessionId: string | null;
   messages: CanvasMessage[];
   pendingMessage: CanvasMessage | null;
@@ -45,6 +46,7 @@ type ChatSessionScreenProps = {
 
 export function ChatSessionScreen({
   composerControls,
+  workflowPanel,
   sessionId,
   messages,
   pendingMessage,
@@ -82,6 +84,7 @@ export function ChatSessionScreen({
         <Canvas
           className="h-full min-h-0"
           composerControls={composerControls}
+          workflowPanel={workflowPanel}
           sessionId={sessionId}
           messages={messages}
           pendingMessage={pendingMessage}

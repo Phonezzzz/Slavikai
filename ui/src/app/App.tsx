@@ -1,3 +1,4 @@
+import { PlanPanel } from './components/plan-panel';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { Artifact } from './components/artifacts-sidebar';
@@ -633,12 +634,25 @@ export default function App() {
           <EmbeddingNotice key={settingsVersion} />
           <div className="min-h-0 flex-1">
           <ChatSessionScreen
+            workflowPanel={runtime.sessionMode === 'plan' || runtime.sessionMode === 'act' ? <PlanPanel
+              key={runtime.selectedConversation}
+              mode={runtime.sessionMode} plan={runtime.activePlan} task={runtime.activeTask}
+              modeTransitions={runtime.modeTransitions}
+              busy={runtime.modeBusy || runtime.decisionBusy || transport.sending || transport.cancelling}
+              cancelling={runtime.planCancelling}
+              blocked={runtime.pendingDecision?.blocking === true
+                && (runtime.pendingDecision.status === 'pending' || runtime.pendingDecision.status === 'executing')}
+              error={runtime.modeError}
+              onDraft={runtime.handlePlanDraft} onApprove={runtime.handlePlanApprove}
+              onExecute={runtime.handlePlanExecute} onCancel={runtime.handlePlanCancel}
+            /> : null}
             composerControls={<>
               <ComposerModes
                 sessionId={runtime.selectedConversation}
                 mode={runtime.sessionMode}
                 transitions={runtime.modeTransitions}
-                busy={runtime.modeBusy || transport.sending || transport.cancelling || runtime.decisionBusy}
+                busy={runtime.modeBusy || transport.sending || transport.cancelling || runtime.decisionBusy
+                  || runtime.activeTask?.status === 'running' || runtime.activePlan?.status === 'running'}
                 decision={runtime.pendingDecision}
                 onChangeMode={runtime.handleChangeMode}
               />
@@ -672,7 +686,7 @@ export default function App() {
             artifactViewerArtifactId={overlays.artifactViewerArtifactId}
             artifacts={transport.artifacts}
             decision={runtime.pendingDecision}
-            decisionBusy={runtime.decisionBusy}
+            decisionBusy={runtime.decisionBusy || runtime.modeBusy}
             decisionError={runtime.decisionError}
             runtimeMode={runtime.sessionMode}
             onSendMessage={transport.handleSendChat}
@@ -726,7 +740,7 @@ export default function App() {
               activeTask={runtime.activeTask}
               autoState={runtime.autoState}
               decision={runtime.pendingDecision}
-              decisionBusy={runtime.decisionBusy}
+              decisionBusy={runtime.decisionBusy || runtime.modeBusy}
               decisionError={runtime.decisionError}
               onDecisionRespond={(choice, editedAction) => {
                 void runtime.handleDecisionRespond(
@@ -780,9 +794,6 @@ export default function App() {
         sessionId={runtime.selectedConversation}
         sessionHeader={SESSION_HEADER}
         mode={runtime.sessionMode}
-        modeTransitions={runtime.modeTransitions}
-        modeBusy={runtime.modeBusy}
-        onChangeMode={runtime.handleChangeMode}
         modelLabel={modelLabel}
         selectedModelValue={selectedModelValue}
       />
