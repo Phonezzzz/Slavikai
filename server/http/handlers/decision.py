@@ -1127,6 +1127,24 @@ async def _complete_ui_decision(
         )
         if plan is None:
             return {"ok": False, "error": "plan_not_found"}
+        decision_context_raw = current_decision.get("context")
+        decision_context = decision_context_raw if isinstance(decision_context_raw, dict) else {}
+        resume_payload_raw = decision_context.get("resume_payload")
+        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
+        expected_revision = resume_payload.get("plan_revision")
+        if (
+            type(expected_revision) is not int
+            or expected_revision <= 0
+            or any(
+                not isinstance(resume_payload.get(key), str) or not resume_payload.get(key)
+                for key in ("plan_id", "plan_hash")
+            )
+            or any(
+                resume_payload.get(key) != plan.get(key)
+                for key in ("plan_id", "plan_hash", "plan_revision")
+            )
+        ):
+            return {"ok": False, "error": "plan_binding_mismatch"}
         if choice == "edit_plan":
             if mode != "plan":
                 return {"ok": False, "error": "mode_not_plan"}
@@ -1175,22 +1193,6 @@ async def _complete_ui_decision(
             if reason_code == "plan_not_approved":
                 return {"ok": False, "error": "plan_not_approved"}
             return {"ok": False, "error": "switch_to_act_required"}
-        decision_context_raw = current_decision.get("context")
-        decision_context = decision_context_raw if isinstance(decision_context_raw, dict) else {}
-        resume_payload_raw = decision_context.get("resume_payload")
-        resume_payload = resume_payload_raw if isinstance(resume_payload_raw, dict) else {}
-        expected_revision_raw = resume_payload.get("plan_revision")
-        if isinstance(expected_revision_raw, int) and expected_revision_raw > 0:
-            current_revision = _plan_revision_value(plan)
-            if expected_revision_raw != current_revision:
-                return {
-                    "ok": False,
-                    "error": "plan_revision_mismatch",
-                    "details": {
-                        "expected_revision": expected_revision_raw,
-                        "actual_revision": current_revision,
-                    },
-                }
         running_plan = _plan_with_status(plan, status="running")
         task_payload: dict[str, JSONValue] = {
             "task_id": f"task-{uuid.uuid4().hex}",
@@ -1731,6 +1733,7 @@ async def _complete_ui_decision(
         "chat_generation_in_progress",
         "resume_payload_missing",
         "plan_revision_mismatch",
+        "plan_binding_mismatch",
         "plan_not_approved",
         "switch_to_act_required",
         "task_already_running",
@@ -1767,6 +1770,7 @@ async def _complete_ui_decision(
         message_by_code = {
             "resume_payload_missing": "Невозможно продолжить: отсутствует resume_payload.",
             "plan_revision_mismatch": "План изменился, требуется обновление состояния.",
+            "plan_binding_mismatch": "План изменился; подтвердите актуальный план.",
             "plan_not_approved": "Сначала approve план.",
             "switch_to_act_required": "Для выполнения нужно перейти в act.",
             "task_already_running": "План уже выполняется.",

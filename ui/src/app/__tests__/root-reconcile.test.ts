@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadLastModel, saveLastModel } from '../session-storage';
 import { DEFAULT_COMPOSER_SETTINGS } from '../session-payload';
 import type { SessionTransportBridge } from '../session-bridges';
-import type { SessionSummary } from '../types';
+import type { PlanEnvelope, SessionSummary } from '../types';
 import { useSessionRuntimeController } from '../use-session-runtime-controller';
 
 vi.mock('../session-security', async (importOriginal) => {
@@ -47,6 +47,12 @@ const jsonResponse = (payload: unknown): Response =>
     headers: new Headers(),
     json: async () => payload,
   }) as Response;
+
+const reviewedPlan: PlanEnvelope = {
+  plan_id: 'shown-plan', plan_hash: 'shown-hash', plan_revision: 7, status: 'approved', goal: 'goal',
+  scope_in: [], scope_out: [], assumptions: [], inputs_needed: [], audit_log: [], steps: [], exit_criteria: [],
+  created_at: '', updated_at: '', approved_at: null, approved_by: null,
+};
 
 const sessionSummary = (sessionId: string): SessionSummary => ({
   session_id: sessionId,
@@ -181,6 +187,8 @@ describe('useSessionRuntimeController root reconciliation', () => {
   const invoke = (runtime: ReturnType<typeof useSessionRuntimeController>, action: WorkflowAction) => {
     if (action === 'handleChangeMode') return runtime.handleChangeMode('plan');
     if (action === 'handlePlanDraft') return runtime.handlePlanDraft('goal');
+    if (action === 'handlePlanApprove') return runtime.handlePlanApprove(reviewedPlan);
+    if (action === 'handlePlanExecute') return runtime.handlePlanExecute(reviewedPlan);
     return runtime[action]();
   };
   const workflowResponse = () => jsonResponse({ mode: 'auto', active_plan: null, active_task: null });
@@ -228,6 +236,20 @@ describe('useSessionRuntimeController root reconciliation', () => {
     act(() => { first = invoke(h.result.current, action); duplicate = invoke(h.result.current, action); });
     await act(async () => { pending.resolve(workflowResponse()); await Promise.all([first!, duplicate!]); });
     expect(h.fetchMock.mock.calls.filter(([url]) => url === endpoint)).toHaveLength(1);
+  });
+
+  it.each([['approve', '/ui/api/plan/approve'], ['execute', '/ui/api/plan/execute']] as const)('sends the displayed plan binding for %s', async (operation, endpoint) => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const pending = deferred<Response>(); h.workflowRequests.set(`C:${endpoint}`, pending);
+    let request: Promise<void>;
+    act(() => { request = operation === 'approve'
+      ? h.result.current.handlePlanApprove(reviewedPlan) : h.result.current.handlePlanExecute(reviewedPlan); });
+    const [, options] = h.fetchMock.mock.calls.find(([url]) => url === endpoint)!;
+    expect(JSON.parse(String(options?.body))).toEqual({ plan_id: 'shown-plan', plan_hash: 'shown-hash', plan_revision: 7 });
+    expect(new Headers(options?.headers).get('X-Test')).toBe('C');
+    if (operation === 'execute') expect(new Headers(options?.headers).get('Idempotency-Key')).toBeTruthy();
+    await act(async () => { pending.resolve(workflowResponse()); await request!; });
   });
 
   it('does not overwrite a completed mode change with the initial state response', async () => {
@@ -282,7 +304,7 @@ describe('useSessionRuntimeController root reconciliation', () => {
     await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
     const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/plan/execute', pending);
     let request: Promise<void>;
-    act(() => { request = h.result.current.handlePlanExecute(); });
+    act(() => { request = h.result.current.handlePlanExecute(reviewedPlan); });
     await act(async () => { await h.result.current.handleSelectConversation('B'); });
     await act(async () => {
       pending.resolve({ ok: false, status: 409, json: async () => ({

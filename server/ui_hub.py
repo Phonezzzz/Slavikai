@@ -1266,6 +1266,52 @@ class UIHub:
             }
         return succeeded, payload, reason
 
+    async def approve_plan_if_current(
+        self,
+        session_id: str,
+        *,
+        expected_plan: dict[str, JSONValue],
+        approved_plan: dict[str, JSONValue],
+    ) -> dict[str, JSONValue] | None:
+        async with self._lock:
+            previous = self._sessions.get(session_id)
+            if (
+                previous is None
+                or previous.mode != "plan"
+                or previous.active_plan != expected_plan
+                or expected_plan.get("status") != "draft"
+            ):
+                return None
+            next_state = replace(
+                previous,
+                active_plan=self._normalize_optional_object(approved_plan),
+                updated_at=_utc_iso_now(),
+            )
+            self._sessions[session_id] = next_state
+            try:
+                self._persist_session_locked(session_id)
+            except Exception:
+                self._sessions[session_id] = previous
+                raise
+            payload: dict[str, JSONValue] = {
+                "session_id": session_id,
+                "mode": next_state.mode,
+                "active_plan": next_state.active_plan,
+                "active_task": next_state.active_task,
+                "auto_state": next_state.auto_state,
+            }
+            event = self._build_event("session.workflow", payload)
+            subscribers = list(next_state.subscribers.values())
+            try:
+                self._append_event_record_locked(next_state, event)
+            except Exception:  # noqa: BLE001
+                logging.getLogger(__name__).exception("Committed plan approval buffering failed")
+        try:
+            self._publish_to_subscribers(subscribers, event)
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).exception("Committed plan approval delivery failed")
+        return payload
+
     async def set_session_workflow(
         self,
         session_id: str,

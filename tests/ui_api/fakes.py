@@ -970,6 +970,7 @@ async def _enter_act_mode(client: TestClient, session_id: str, *, goal: str = "t
     approve_resp = await client.post(
         "/ui/api/plan/approve",
         headers={"X-Slavik-Session": session_id},
+        json=_plan_binding(draft_plan),
     )
     assert approve_resp.status == 200
     approve_payload = await approve_resp.json()
@@ -981,7 +982,7 @@ async def _enter_act_mode(client: TestClient, session_id: str, *, goal: str = "t
     execute_resp = await client.post(
         "/ui/api/plan/execute",
         headers={"X-Slavik-Session": session_id},
-        json={"plan_revision": approved_revision},
+        json=_plan_binding(approved_plan),
     )
     assert execute_resp.status == 409
     execute_payload = await execute_resp.json()
@@ -1001,6 +1002,10 @@ async def _enter_act_mode(client: TestClient, session_id: str, *, goal: str = "t
     assert respond_resp.status == 200
     respond_payload = await respond_resp.json()
     assert respond_payload.get("mode") == "act"
+
+
+def _plan_binding(plan: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    return {key: plan[key] for key in ("plan_id", "plan_hash", "plan_revision")}
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -38,7 +38,7 @@ async def _prepare_approved_plan(
     session_id: str,
     *,
     switch_to_act: bool,
-) -> int:
+) -> dict[str, JSONValue]:
     mode_resp = await client.post(
         "/ui/api/mode",
         headers={"X-Slavik-Session": session_id},
@@ -52,10 +52,12 @@ async def _prepare_approved_plan(
         json={"goal": "Подготовка плана для execute"},
     )
     assert draft_resp.status == 200
+    draft_plan = (await draft_resp.json())["active_plan"]
 
     approve_resp = await client.post(
         "/ui/api/plan/approve",
         headers={"X-Slavik-Session": session_id},
+        json=_plan_binding(draft_plan),
     )
     assert approve_resp.status == 200
     approve_payload = await approve_resp.json()
@@ -71,7 +73,7 @@ async def _prepare_approved_plan(
             json={"mode": "act", "confirm": True},
         )
         assert to_act.status == 200
-    return plan_revision
+    return _plan_binding(active_plan)
 
 
 def test_ui_state_and_mode_transitions() -> None:
@@ -202,6 +204,7 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             approve_resp = await client.post(
                 "/ui/api/plan/approve",
                 headers={"X-Slavik-Session": session_id},
+                json=_plan_binding(plan_raw),
             )
             assert approve_resp.status == 200
             approve_payload = await approve_resp.json()
@@ -221,7 +224,7 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             execute_resp = await client.post(
                 "/ui/api/plan/execute",
                 headers={"X-Slavik-Session": session_id},
-                json={"plan_revision": approved_revision},
+                json=_plan_binding(approved_plan),
             )
             assert execute_resp.status == 409
             execute_payload = await execute_resp.json()
@@ -377,7 +380,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
             await _select_local_model(client, session_id)
             await client.server.app["ui_hub"].set_workspace_root(session_id, str(tmp_path))
 
-            revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+            binding = await _prepare_approved_plan(client, session_id, switch_to_act=True)
 
             if cleanup == "initial_model_conflict":
                 from server.agent_provider import AgentScope
@@ -494,7 +497,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
             execute_resp = await client.post(
                 "/ui/api/plan/execute",
                 headers={"X-Slavik-Session": session_id},
-                json={"plan_revision": revision},
+                json=binding,
             )
             assert execute_resp.status == 200
 
@@ -1357,12 +1360,12 @@ def test_ui_plan_execute_rejects_second_start_when_running(monkeypatch) -> None:
             session_id = status_payload.get("session_id")
             assert isinstance(session_id, str)
 
-            revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+            binding = await _prepare_approved_plan(client, session_id, switch_to_act=True)
 
             first = await client.post(
                 "/ui/api/plan/execute",
                 headers={"X-Slavik-Session": session_id},
-                json={"plan_revision": revision},
+                json=binding,
             )
             assert first.status == 200
             first_payload = await first.json()
@@ -1373,7 +1376,7 @@ def test_ui_plan_execute_rejects_second_start_when_running(monkeypatch) -> None:
             second = await client.post(
                 "/ui/api/plan/execute",
                 headers={"X-Slavik-Session": session_id},
-                json={"plan_revision": revision},
+                json=binding,
             )
             assert second.status == 409
             second_payload = await second.json()
@@ -1401,13 +1404,13 @@ def test_ui_plan_execute_parallel_race_allows_only_one_runner(monkeypatch) -> No
             session_id = status_payload.get("session_id")
             assert isinstance(session_id, str)
 
-            revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+            binding = await _prepare_approved_plan(client, session_id, switch_to_act=True)
 
             async def _execute_once():
                 return await client.post(
                     "/ui/api/plan/execute",
                     headers={"X-Slavik-Session": session_id},
-                    json={"plan_revision": revision},
+                    json=binding,
                 )
 
             first_resp, second_resp = await asyncio.gather(_execute_once(), _execute_once())
@@ -1446,7 +1449,7 @@ def test_ui_plan_execute_idempotency_key_matrix(monkeypatch) -> None:  # noqa: A
             session_id = status_payload.get("session_id")
             assert isinstance(session_id, str)
 
-            revision = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+            binding = await _prepare_approved_plan(client, session_id, switch_to_act=True)
             headers = {
                 "X-Slavik-Session": session_id,
                 "Idempotency-Key": "plan-exec-k1",
@@ -1455,7 +1458,7 @@ def test_ui_plan_execute_idempotency_key_matrix(monkeypatch) -> None:  # noqa: A
             first = await client.post(
                 "/ui/api/plan/execute",
                 headers=headers,
-                json={"plan_revision": revision},
+                json=binding,
             )
             assert first.status == 200
             first_payload = await first.json()
@@ -1467,7 +1470,7 @@ def test_ui_plan_execute_idempotency_key_matrix(monkeypatch) -> None:  # noqa: A
             replay = await client.post(
                 "/ui/api/plan/execute",
                 headers=headers,
-                json={"plan_revision": revision},
+                json=binding,
             )
             assert replay.status == 200
             replay_payload = await replay.json()
@@ -1478,7 +1481,7 @@ def test_ui_plan_execute_idempotency_key_matrix(monkeypatch) -> None:  # noqa: A
             conflict = await client.post(
                 "/ui/api/plan/execute",
                 headers=headers,
-                json={"plan_revision": revision, "client_nonce": "different"},
+                json={**binding, "client_nonce": "different"},
             )
             assert conflict.status == 409
             conflict_payload = await conflict.json()
@@ -1489,7 +1492,7 @@ def test_ui_plan_execute_idempotency_key_matrix(monkeypatch) -> None:  # noqa: A
             no_key = await client.post(
                 "/ui/api/plan/execute",
                 headers={"X-Slavik-Session": session_id},
-                json={"plan_revision": revision},
+                json=binding,
             )
             assert no_key.status == 409
             no_key_payload = await no_key.json()

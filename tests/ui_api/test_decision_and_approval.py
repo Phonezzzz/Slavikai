@@ -37,6 +37,7 @@ def test_ui_plan_edit_resets_approved_to_draft() -> None:
             approve_resp = await client.post(
                 "/ui/api/plan/approve",
                 headers={"X-Slavik-Session": session_id},
+                json=_plan_binding(plan_raw),
             )
             assert approve_resp.status == 200
             approve_payload = await approve_resp.json()

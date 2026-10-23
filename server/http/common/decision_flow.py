@@ -321,6 +321,8 @@ def build_plan_execute_decision(
     now = utc_now_iso()
     plan_id_raw = plan.get("plan_id")
     plan_id = plan_id_raw if isinstance(plan_id_raw, str) else ""
+    plan_hash_raw = plan.get("plan_hash")
+    plan_hash = plan_hash_raw if isinstance(plan_hash_raw, str) else ""
     revision = plan_revision_value_fn(plan)
     return {
         "id": f"decision-{uuid.uuid4().hex}",
@@ -332,6 +334,7 @@ def build_plan_execute_decision(
         "summary": "Для выполнения плана нужно подтверждение перехода в Act.",
         "proposed_action": {
             "plan_id": plan_id,
+            "plan_hash": plan_hash,
             "plan_revision": revision,
             "mode": mode,
         },
@@ -364,9 +367,11 @@ def build_plan_execute_decision(
             "decision_type": "plan_execute",
             "source_endpoint": "plan.execute",
             "plan_id": plan_id,
+            "plan_hash": plan_hash,
             "plan_revision": revision,
             "resume_payload": {
                 "plan_id": plan_id,
+                "plan_hash": plan_hash,
                 "plan_revision": revision,
             },
             "workflow": decision_workflow_context_fn(mode, plan, active_task),

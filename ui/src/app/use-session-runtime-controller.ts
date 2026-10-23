@@ -86,8 +86,8 @@ export type SessionRuntimeControllerResult = {
   handleSetModel: (provider: string, model: string) => Promise<boolean>;
   handleChangeMode: (mode: SessionMode) => Promise<void>;
   handlePlanDraft: (goal: string) => Promise<void>;
-  handlePlanApprove: () => Promise<void>;
-  handlePlanExecute: () => Promise<void>;
+  handlePlanApprove: (plan: PlanEnvelope) => Promise<void>;
+  handlePlanExecute: (plan: PlanEnvelope) => Promise<void>;
   handlePlanCancel: () => Promise<void>;
   handleDecisionRespond: (
     choice: DecisionRespondChoice,
@@ -187,12 +187,15 @@ const draftPlanRemote = async (
 const approvePlanRemote = async (
   sessionId: string,
   sessionHeader: string,
+  plan: PlanEnvelope,
 ): Promise<WorkflowSnapshot> => {
   const response = await fetch('/ui/api/plan/approve', {
     method: 'POST',
     headers: {
+      'Content-Type': 'application/json',
       [sessionHeader]: sessionId,
     },
+    body: JSON.stringify({ plan_id: plan.plan_id, plan_hash: plan.plan_hash, plan_revision: plan.plan_revision }),
   });
   const payload: unknown = await response.json();
   if (!response.ok) {
@@ -212,13 +215,16 @@ const approvePlanRemote = async (
 const executePlanRemote = async (
   sessionId: string,
   sessionHeader: string,
+  plan: PlanEnvelope,
 ): Promise<WorkflowSnapshot & { decision: UiDecision | null }> => {
   const response = await fetch('/ui/api/plan/execute', {
     method: 'POST',
     headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
       [sessionHeader]: sessionId,
     },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ plan_id: plan.plan_id, plan_hash: plan.plan_hash, plan_revision: plan.plan_revision }),
   });
   const payload: unknown = await response.json();
   if (!response.ok) {
@@ -825,11 +831,11 @@ export function useSessionRuntimeController({
   const handlePlanDraft = (goal: string): Promise<void> => runWorkflowRequest(
     (sessionId) => draftPlanRemote(sessionId, sessionHeader, goal), 'Failed to draft plan.',
   );
-  const handlePlanApprove = (): Promise<void> => runWorkflowRequest(
-    (sessionId) => approvePlanRemote(sessionId, sessionHeader), 'Failed to approve plan.',
+  const handlePlanApprove = (plan: PlanEnvelope): Promise<void> => runWorkflowRequest(
+    (sessionId) => approvePlanRemote(sessionId, sessionHeader, plan), 'Failed to approve plan.',
   );
-  const handlePlanExecute = (): Promise<void> => runWorkflowRequest(
-    (sessionId) => executePlanRemote(sessionId, sessionHeader), 'Failed to execute plan.',
+  const handlePlanExecute = (plan: PlanEnvelope): Promise<void> => runWorkflowRequest(
+    (sessionId) => executePlanRemote(sessionId, sessionHeader, plan), 'Failed to execute plan.',
   );
   const handlePlanCancel = (): Promise<void> => runWorkflowRequest(
     (sessionId) => cancelPlanRemote(sessionId, sessionHeader), 'Failed to cancel plan.',

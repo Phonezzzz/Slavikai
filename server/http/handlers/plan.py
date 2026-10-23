@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from copy import deepcopy
 from typing import cast
 
 from aiohttp import web
@@ -53,6 +54,42 @@ from server.http_api import (
 )
 from server.ui_hub import UIHub
 from shared.models import JSONValue
+
+
+def _plan_binding_error(
+    payload: dict[str, JSONValue], plan: dict[str, JSONValue] | None = None
+) -> web.Response | None:
+    keys = ("plan_id", "plan_hash", "plan_revision")
+    if any(key not in payload for key in keys):
+        return error_response(
+            status=428,
+            message="Нужны plan_id, plan_hash и plan_revision показанного плана.",
+            error_type="invalid_request_error",
+            code="plan_precondition_required",
+        )
+    revision = payload["plan_revision"]
+    if (
+        not isinstance(payload["plan_id"], str)
+        or not payload["plan_id"].strip()
+        or not isinstance(payload["plan_hash"], str)
+        or not payload["plan_hash"].strip()
+        or type(revision) is not int
+        or revision <= 0
+    ):
+        return error_response(
+            status=400,
+            message="Некорректная привязка версии плана.",
+            error_type="invalid_request_error",
+            code="invalid_plan_precondition",
+        )
+    if plan is not None and any(payload[key] != plan.get(key) for key in keys):
+        return error_response(
+            status=409,
+            message="План изменился. Проверьте актуальную версию перед действием.",
+            error_type="invalid_request_error",
+            code="plan_binding_mismatch",
+        )
+    return None
 
 
 def _mode_transitions_payload(workflow: dict[str, JSONValue]) -> dict[str, JSONValue]:
@@ -209,9 +246,37 @@ async def handle_ui_plan_approve(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="plan_not_draft",
         )
+    if not request.can_read_body:
+        payload: dict[str, JSONValue] = {}
+    else:
+        try:
+            raw_payload = await request.json()
+        except ValueError:
+            raw_payload = None
+        if not isinstance(raw_payload, dict):
+            return error_response(
+                status=400,
+                message="Ожидается JSON object с привязкой плана.",
+                error_type="invalid_request_error",
+                code="invalid_plan_precondition",
+            )
+        payload = {str(key): _normalize_json_value(value) for key, value in raw_payload.items()}
+    binding_error = _plan_binding_error(payload, plan)
+    if binding_error is not None:
+        return binding_error
+    raw_plan = workflow.get("active_plan")
+    assert isinstance(raw_plan, dict)
     approved = _plan_with_status(plan, status="approved")
-    await hub.set_session_workflow(session_id, active_plan=approved)
-    updated = await hub.get_session_workflow(session_id)
+    updated = await hub.approve_plan_if_current(
+        session_id, expected_plan=deepcopy(raw_plan), approved_plan=approved
+    )
+    if updated is None:
+        return error_response(
+            status=409,
+            message="План изменился до записи согласования.",
+            error_type="invalid_request_error",
+            code="plan_binding_mismatch",
+        )
     response = json_response(
         {
             "ok": True,
@@ -345,14 +410,27 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="plan_not_found",
         )
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    normalized_payload = {str(key): _normalize_json_value(value) for key, value in payload.items()}
-    expected_revision = payload.get("plan_revision")
+    if not request.can_read_body:
+        raw_payload = {}
+    else:
+        try:
+            raw_payload = await request.json()
+        except ValueError:
+            raw_payload = None
+    if not isinstance(raw_payload, dict):
+        return error_response(
+            status=400,
+            message="Ожидается JSON object с привязкой плана.",
+            error_type="invalid_request_error",
+            code="invalid_plan_precondition",
+        )
+    normalized_payload = {
+        str(key): _normalize_json_value(value) for key, value in raw_payload.items()
+    }
+    binding_error = _plan_binding_error(normalized_payload)
+    if binding_error is not None:
+        return binding_error
+    expected_revision = normalized_payload["plan_revision"]
     requested_revision = (
         expected_revision if isinstance(expected_revision, int) and expected_revision > 0 else None
     )
@@ -406,6 +484,9 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="task_already_running",
         )
+    binding_error = _plan_binding_error(normalized_payload, plan)
+    if binding_error is not None:
+        return binding_error
     if plan.get("status") != "approved":
         return error_response(
             status=409,
@@ -413,19 +494,6 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="plan_not_approved",
         )
-    if (
-        isinstance(expected_revision, int)
-        and expected_revision > 0
-        and expected_revision != actual_revision
-    ):
-        return error_response(
-            status=409,
-            message="plan_revision mismatch.",
-            error_type="invalid_request_error",
-            code="plan_revision_mismatch",
-            details={"expected_revision": expected_revision, "actual_revision": actual_revision},
-        )
-
     workflow_auto_state = workflow.get("auto_state")
     transition_contract = build_mode_transitions(
         current_mode=mode,

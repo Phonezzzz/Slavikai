@@ -425,6 +425,24 @@
         "server/http/handlers/workspace.py"
       ],
       "summary": "Owned session model changes reject active Chat/Plan and pending decisions until cancellation settles. Scoped execution locks cover model-bound decision creation, plan publication and project history/result publication. Approval steps enter waiting before decision visibility. Model revisions fence stale catalog and request snapshots; hydration cannot overwrite newer selection. UI manual and automatic restoration share generation/token ownership, preserving the current model request when New Chat fails."
+    },
+    {
+      "id": "runtime.plan_consent_binding",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_plan_binding.py",
+        "tests/ui_api/test_modes_and_plan.py",
+        "ui/src/app/__tests__/root-reconcile.test.ts",
+        "server/http/handlers/plan.py",
+        "server/http/common/decision_flow.py",
+        "server/http/handlers/decision.py",
+        "server/ui_hub.py"
+      ],
+      "summary": "Plan approve and execute require the displayed plan identity, hash and revision. UIHub atomically approves only the captured draft in Plan mode, rolls back storage failure and publishes after commit. Fresh execution validates the full binding; accepted idempotent replay retains its original binding during running revisions. Structured execution decisions capture and revalidate the full binding before execution or edits, rejecting replaced plans even at the same revision. Typed browser helpers take an explicit PlanEnvelope. Plan-card UI readiness is not claimed."
     }
   ]
 }
