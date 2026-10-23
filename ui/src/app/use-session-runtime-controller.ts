@@ -280,8 +280,12 @@ export function useSessionRuntimeController({
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [savingModel, setSavingModel] = useState(false);
   const modelRequestRef = useRef<symbol | null>(null);
+  const workflowRequestRef = useRef<symbol | null>(null);
   const beginConversationChange = () => {
     modelRequestRef.current = null;
+    workflowRequestRef.current = null;
+    setModeBusy(false);
+    setModeError(null);
     setSavingModel(false);
     return reconcileGuardRef.current.begin();
   };
@@ -779,92 +783,51 @@ export function useSessionRuntimeController({
     setModeTransitions(snapshot.modeTransitions);
   };
 
-  const handleChangeMode = async (mode: SessionMode): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
+  const runWorkflowRequest = async (
+    request: (sessionId: string) => Promise<WorkflowSnapshot & { decision?: UiDecision | null }>,
+    fallbackError: string,
+  ): Promise<void> => {
+    if (!selectedConversation || workflowRequestRef.current) return;
+    const generation = reconcileGuardRef.current.snapshot();
+    const token = Symbol('workflow-request');
+    workflowRequestRef.current = token;
+    const current = () => workflowRequestRef.current === token
+      && reconcileGuardRef.current.isCurrent(generation);
     setModeBusy(true);
     setModeError(null);
     try {
-      applyWorkflowSnapshot(await setSessionModeRemote(selectedConversation, sessionHeader, mode));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to change mode.';
-      setModeError(message);
-      onStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
-
-  const handlePlanDraft = async (goal: string): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      applyWorkflowSnapshot(await draftPlanRemote(selectedConversation, sessionHeader, goal));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to draft plan.';
-      setModeError(message);
-      onStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
-
-  const handlePlanApprove = async (): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      applyWorkflowSnapshot(await approvePlanRemote(selectedConversation, sessionHeader));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to approve plan.';
-      setModeError(message);
-      onStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
-
-  const handlePlanExecute = async (): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      const updated = await executePlanRemote(selectedConversation, sessionHeader);
+      const updated = await request(selectedConversation);
+      if (!current()) return;
       applyWorkflowSnapshot(updated);
-      setPendingDecision(updated.decision);
+      if ('decision' in updated) setPendingDecision(updated.decision ?? null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to execute plan.';
+      if (!current()) return;
+      const message = error instanceof Error ? error.message : fallbackError;
       setModeError(message);
       onStatusMessage(message);
     } finally {
-      setModeBusy(false);
+      if (current()) {
+        workflowRequestRef.current = null;
+        setModeBusy(false);
+      }
     }
   };
 
-  const handlePlanCancel = async (): Promise<void> => {
-    if (!selectedConversation || modeBusy) {
-      return;
-    }
-    setModeBusy(true);
-    setModeError(null);
-    try {
-      applyWorkflowSnapshot(await cancelPlanRemote(selectedConversation, sessionHeader));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to cancel plan.';
-      setModeError(message);
-      onStatusMessage(message);
-    } finally {
-      setModeBusy(false);
-    }
-  };
+  const handleChangeMode = (mode: SessionMode): Promise<void> => runWorkflowRequest(
+    (sessionId) => setSessionModeRemote(sessionId, sessionHeader, mode), 'Failed to change mode.',
+  );
+  const handlePlanDraft = (goal: string): Promise<void> => runWorkflowRequest(
+    (sessionId) => draftPlanRemote(sessionId, sessionHeader, goal), 'Failed to draft plan.',
+  );
+  const handlePlanApprove = (): Promise<void> => runWorkflowRequest(
+    (sessionId) => approvePlanRemote(sessionId, sessionHeader), 'Failed to approve plan.',
+  );
+  const handlePlanExecute = (): Promise<void> => runWorkflowRequest(
+    (sessionId) => executePlanRemote(sessionId, sessionHeader), 'Failed to execute plan.',
+  );
+  const handlePlanCancel = (): Promise<void> => runWorkflowRequest(
+    (sessionId) => cancelPlanRemote(sessionId, sessionHeader), 'Failed to cancel plan.',
+  );
 
   const handleDecisionRespond = async (
     choice: DecisionRespondChoice,

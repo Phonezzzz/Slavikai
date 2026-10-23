@@ -83,6 +83,7 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
   const sessionRequests = new Map<string, Deferred<Response>>();
   const rootRequests = new Map<string, Deferred<Response>>();
   const modelRequests = new Map<string, Deferred<Response>>();
+  const workflowRequests = new Map<string, Deferred<Response>>();
   const createRequests: { current: Deferred<Response> | null } = { current: null };
   const roots = new Map([
     ['C', '/root-C'],
@@ -99,6 +100,9 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
       if (createRequests.current) return createRequests.current.promise;
       return jsonResponse({ session_id: 'N', selected_model: null });
     }
+
+    const workflowPending = workflowRequests.get(`${sessionId}:${url}`);
+    if (workflowPending) return workflowPending.promise;
 
     if (url === '/ui/api/session-model') {
       const pending = modelRequests.get(sessionId);
@@ -156,7 +160,7 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null) => {
     }),
   );
 
-  return { ...hook, sessionRequests, rootRequests, modelRequests, onStatusMessage, fetchMock, createRequests };
+  return { ...hook, sessionRequests, rootRequests, modelRequests, workflowRequests, onStatusMessage, fetchMock, createRequests };
 };
 
 afterEach(() => {
@@ -165,6 +169,118 @@ afterEach(() => {
 });
 
 describe('useSessionRuntimeController root reconciliation', () => {
+  const workflowActions = [
+    ['handleChangeMode', '/ui/api/mode'],
+    ['handlePlanDraft', '/ui/api/plan/draft'],
+    ['handlePlanApprove', '/ui/api/plan/approve'],
+    ['handlePlanExecute', '/ui/api/plan/execute'],
+    ['handlePlanCancel', '/ui/api/plan/cancel'],
+  ] as const;
+  type WorkflowAction = typeof workflowActions[number][0];
+  const invoke = (runtime: ReturnType<typeof useSessionRuntimeController>, action: WorkflowAction) => {
+    if (action === 'handleChangeMode') return runtime.handleChangeMode('plan');
+    if (action === 'handlePlanDraft') return runtime.handlePlanDraft('goal');
+    return runtime[action]();
+  };
+  const workflowResponse = () => jsonResponse({ mode: 'auto', active_plan: null, active_task: null });
+
+  it.each(workflowActions)('fences late %s success and finally from the next chat request', async (action, endpoint) => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const old = deferred<Response>(); h.workflowRequests.set(`C:${endpoint}`, old);
+    let first: Promise<void>;
+    act(() => { first = invoke(h.result.current, action); });
+    await act(async () => { await h.result.current.handleSelectConversation('B'); });
+    expect(h.result.current.modeBusy).toBe(false);
+    const next = deferred<Response>(); h.workflowRequests.set(`B:${endpoint}`, next);
+    let second: Promise<void>;
+    act(() => { second = invoke(h.result.current, action); });
+    await act(async () => { old.resolve(workflowResponse()); await first!; });
+    expect(h.result.current.sessionMode).toBe('ask');
+    expect(h.result.current.modeBusy).toBe(true);
+    await act(async () => { next.resolve(workflowResponse()); await second!; });
+    expect(h.result.current.sessionMode).toBe('auto');
+    expect(h.result.current.modeBusy).toBe(false);
+  });
+
+  it.each(workflowActions)('fences late %s error after returning to the same chat', async (action, endpoint) => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const old = deferred<Response>(); h.workflowRequests.set(`C:${endpoint}`, old);
+    let first: Promise<void>;
+    act(() => { first = invoke(h.result.current, action); });
+    await act(async () => { await h.result.current.handleSelectConversation('B'); await h.result.current.handleSelectConversation('C'); });
+    h.onStatusMessage.mockClear();
+    await act(async () => {
+      old.resolve({ ok: false, status: 409, json: async () => ({ error: { message: 'stale workflow' } }) } as Response);
+      await first!;
+    });
+    expect(h.result.current.modeError).toBeNull();
+    expect(h.onStatusMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(workflowActions)('submits %s only once before React renders', async (action, endpoint) => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const pending = deferred<Response>(); h.workflowRequests.set(`C:${endpoint}`, pending);
+    let first: Promise<void>; let duplicate: Promise<void>;
+    act(() => { first = invoke(h.result.current, action); duplicate = invoke(h.result.current, action); });
+    await act(async () => { pending.resolve(workflowResponse()); await Promise.all([first!, duplicate!]); });
+    expect(h.fetchMock.mock.calls.filter(([url]) => url === endpoint)).toHaveLength(1);
+  });
+
+  it('keeps an in-flight workflow request owned when New Chat fails', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/mode', pending);
+    let request: Promise<void>;
+    act(() => { request = h.result.current.handleChangeMode('plan'); });
+    h.createRequests.current = deferred<Response>();
+    let creation: Promise<void>;
+    act(() => { creation = h.result.current.handleCreateConversation(); });
+    await act(async () => {
+      h.createRequests.current!.resolve({ ok: false, status: 500, json: async () => ({}) } as Response);
+      await creation!;
+      pending.resolve(workflowResponse()); await request!;
+    });
+    expect(h.result.current.selectedConversation).toBe('C');
+    expect(h.result.current.sessionMode).toBe('auto');
+    expect(h.result.current.modeBusy).toBe(false);
+  });
+
+  it('does not publish a workflow error after unmount', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/mode', pending);
+    let request: Promise<void>;
+    act(() => { request = h.result.current.handleChangeMode('plan'); });
+    h.onStatusMessage.mockClear();
+    h.unmount();
+    await act(async () => {
+      pending.resolve({ ok: false, status: 409, json: async () => ({ error: { message: 'unmounted' } }) } as Response);
+      await request!;
+    });
+    expect(h.onStatusMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not publish an old plan execute confirmation in the next chat', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/plan/execute', pending);
+    let request: Promise<void>;
+    act(() => { request = h.result.current.handlePlanExecute(); });
+    await act(async () => { await h.result.current.handleSelectConversation('B'); });
+    await act(async () => {
+      pending.resolve({ ok: false, status: 409, json: async () => ({
+        mode: 'plan', error: { code: 'switch_to_act_required' },
+        decision: { id: 'old-plan', kind: 'approval', status: 'pending', reason: 'plan', summary: 'old', created_at: '', updated_at: '' },
+      }) } as Response);
+      await request!;
+    });
+    expect(h.result.current.sessionMode).toBe('ask');
+    expect(h.result.current.pendingDecision).toBeNull();
+  });
+
   it('ignores late model success and keeps the next chat request busy', async () => {
     const harness = createHarness();
     await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));
