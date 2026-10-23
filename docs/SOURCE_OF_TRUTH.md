@@ -143,6 +143,18 @@ ModelConfig и persisted JSON не содержат proof. Эта capability adm
 ToolGateway, policy, approvals или запрет members использовать owner custom credentials.
 Точный flow и ограничения: `docs/architecture/GENERIC_PROVIDER_ONBOARDING.md`.
 
+## Смена модели сессии
+
+Browser setter проверяет owned session, активные Chat/Plan execution и pending
+решения под scoped Agent lock. Выполняющийся запрос или ожидающее подтверждение
+возвращают 409 с предложением дождаться завершения либо воспользоваться существующей
+отменой. Сам сигнал отмены не разрешает смену до settlement worker. Проверка
+revision отклоняет поздний результат model catalog после другого переключения,
+включая A → B → A. Request-time синхронизация не может записать устаревший снимок
+модели поверх нового выбора. Эти guards не изменяют grants, policy или ToolGateway.
+Frontend привязывает результат выбора к текущему поколению чата: поздний success,
+error или cleanup не изменяет другой чат и не снимает busy у нового запроса.
+
 ## Change protocol
 
 1. Найти claim и его owner в `docs/runtime_contract_claims.json`.

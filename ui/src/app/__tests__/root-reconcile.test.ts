@@ -78,6 +78,7 @@ const sessionPayload = (sessionId: string, workspaceRoot: string) => ({
 const createHarness = () => {
   const sessionRequests = new Map<string, Deferred<Response>>();
   const rootRequests = new Map<string, Deferred<Response>>();
+  const modelRequests = new Map<string, Deferred<Response>>();
   const roots = new Map([
     ['C', '/root-C'],
     ['A', '/root-A'],
@@ -88,6 +89,11 @@ const createHarness = () => {
     const url = String(input);
     const headers = new Headers(init?.headers);
     const sessionId = headers.get('X-Test') ?? '';
+
+    if (url === '/ui/api/session-model') {
+      const pending = modelRequests.get(sessionId);
+      if (pending) return pending.promise;
+    }
 
     if (url === '/ui/api/workspace/root') {
       const pending = rootRequests.get(sessionId);
@@ -127,6 +133,7 @@ const createHarness = () => {
     current: transport,
   };
   const sessions = ['C', 'A', 'B'].map(sessionSummary);
+  const onStatusMessage = vi.fn();
   const hook = renderHook(() =>
     useSessionRuntimeController({
       sessionHeader: 'X-Test',
@@ -134,12 +141,12 @@ const createHarness = () => {
       loadSessions: vi.fn(async () => sessions),
       loadModels: vi.fn(async () => []),
       loadComposerSettings: vi.fn(async () => DEFAULT_COMPOSER_SETTINGS),
-      onStatusMessage: vi.fn(),
+      onStatusMessage,
       transportRef,
     }),
   );
 
-  return { ...hook, sessionRequests, rootRequests };
+  return { ...hook, sessionRequests, rootRequests, modelRequests, onStatusMessage };
 };
 
 afterEach(() => {
@@ -148,6 +155,68 @@ afterEach(() => {
 });
 
 describe('useSessionRuntimeController root reconciliation', () => {
+  it('ignores late model success and keeps the next chat request busy', async () => {
+    const harness = createHarness();
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));
+    const oldModel = deferred<Response>();
+    harness.modelRequests.set('C', oldModel);
+    let oldRequest: Promise<boolean>;
+    act(() => { oldRequest = harness.result.current.handleSetModel('local', 'old'); });
+    await act(async () => { await harness.result.current.handleSelectConversation('B'); });
+    expect(harness.result.current.savingModel).toBe(false);
+    const newModel = deferred<Response>();
+    harness.modelRequests.set('B', newModel);
+    let newRequest: Promise<boolean>;
+    act(() => { newRequest = harness.result.current.handleSetModel('local', 'new'); });
+    await act(async () => {
+      oldModel.resolve(jsonResponse({ selected_model: { provider: 'local', model: 'old' } }));
+      expect(await oldRequest!).toBe(false);
+    });
+    expect(harness.result.current.selectedModel).toBeNull();
+    expect(harness.result.current.savingModel).toBe(true);
+    await act(async () => {
+      newModel.resolve(jsonResponse({ selected_model: { provider: 'local', model: 'new' } }));
+      expect(await newRequest!).toBe(true);
+    });
+    expect(harness.result.current.selectedModel?.model).toBe('new');
+    expect(harness.result.current.savingModel).toBe(false);
+  });
+  it('ignores a late error after returning to the original chat', async () => {
+    const harness = createHarness();
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));
+    const pending = deferred<Response>();
+    harness.modelRequests.set('C', pending);
+    let request: Promise<boolean>;
+    act(() => { request = harness.result.current.handleSetModel('local', 'old'); });
+    await act(async () => { await harness.result.current.handleSelectConversation('B'); });
+    await act(async () => { await harness.result.current.handleSelectConversation('C'); });
+    harness.onStatusMessage.mockClear();
+    await act(async () => {
+      pending.resolve({ ok: false, status: 409, json: async () => ({ error: { message: 'stale error' } }) } as Response);
+      expect(await request!).toBe(false);
+    });
+    expect(harness.onStatusMessage).not.toHaveBeenCalled();
+    expect(harness.result.current.savingModel).toBe(false);
+    expect(harness.result.current.selectedModel).toBeNull();
+  });
+
+  it('does not submit the same model action twice before React renders', async () => {
+    const harness = createHarness();
+    await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));
+    const pending = deferred<Response>();
+    harness.modelRequests.set('C', pending);
+    let request: Promise<boolean>;
+    await act(async () => {
+      request = harness.result.current.handleSetModel('local', 'new');
+      expect(await harness.result.current.handleSetModel('local', 'duplicate')).toBe(false);
+    });
+    await act(async () => {
+      pending.resolve(jsonResponse({ selected_model: { provider: 'local', model: 'new' } }));
+      expect(await request!).toBe(true);
+    });
+    expect(harness.result.current.selectedModel?.model).toBe('new');
+  });
+
   it('drops A reconcile as soon as switch to B begins, while B load is pending', async () => {
     const harness = createHarness();
     await waitFor(() => expect(harness.result.current.selectedConversation).toBe('C'));

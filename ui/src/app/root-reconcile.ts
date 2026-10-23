@@ -13,4 +13,8 @@ export class RootReconcileGuard {
   isCurrent(generation: number): boolean {
     return generation === this.generation;
   }
+
+  snapshot(): number {
+    return this.generation;
+  }
 }

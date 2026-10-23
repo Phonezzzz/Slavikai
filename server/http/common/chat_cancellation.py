@@ -57,6 +57,11 @@ class ChatCancellationRegistry:
             close_errors=tuple(close_errors),
         )
 
+    async def is_active(self, session_id: str) -> bool:
+        async with self._lock:
+            generation = self._active.get(session_id)
+            return generation is not None and not generation.finished.is_set()
+
     async def finish(self, generation: ActiveChatGeneration) -> None:
         async with self._lock:
             current = self._active.get(generation.session_id)

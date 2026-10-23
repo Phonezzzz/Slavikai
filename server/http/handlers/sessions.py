@@ -17,7 +17,9 @@ from server import http_api as api
 from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.http.common import ui_settings
 from server.http.common.auth import _require_owner
-from server.http.common.mode_transitions import build_mode_transitions
+from server.http.common.chat_cancellation import ChatCancellationRegistry
+from server.http.common.mode_transitions import _auto_run_active, build_mode_transitions
+from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
     AgentProtocol,
@@ -385,6 +387,19 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
     session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
     if session_error is not None or session_id is None:
         return session_error or _session_forbidden_response()
+    model_lock = _agent_lock_for_request(request, session_id)
+    generations = cast(ChatCancellationRegistry, request.app["chat_cancellation_registry"])
+    plans = cast(PlanCancellationRegistry, request.app["plan_cancellation_registry"])
+    scope = _agent_scope(request, session_id)
+    if model_lock.locked() or await generations.is_active(session_id) or plans.is_active(scope):
+        return error_response(
+            status=409,
+            message="Сессия выполняет запрос. Дождитесь завершения или отмените его.",
+            error_type="conflict_error",
+            code="model_change_busy",
+        )
+    runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
+    expected_revision = await runtime_model_state.get_session_revision(session_id)
     if instance is not None:
         key = api._resolve_provider_api_key(provider)
         if not key:
@@ -435,8 +450,50 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             details=details,
         )
     model_config = api._build_model_config(provider, model_raw)
-    runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
-    async with _agent_lock_for_request(request, session_id):
+    if model_lock.locked():
+        return error_response(
+            status=409,
+            message="Сессия выполняет запрос. Дождитесь завершения или отмените его.",
+            error_type="conflict_error",
+            code="model_change_busy",
+        )
+    async with model_lock:
+        if await runtime_model_state.get_session_revision(session_id) != expected_revision:
+            return error_response(
+                status=409,
+                message="Модель сессии уже изменилась. Повторите выбор.",
+                error_type="conflict_error",
+                code="session_model_changed",
+            )
+        if await generations.is_active(session_id) or plans.is_active(scope):
+            return error_response(
+                status=409,
+                message="Дождитесь завершения запроса или его отмены.",
+                error_type="conflict_error",
+                code="model_change_busy",
+            )
+        decision = await hub.get_session_decision(session_id)
+        workflow = await hub.get_session_workflow(session_id)
+        auto = workflow.get("auto_state")
+        task = workflow.get("active_task")
+        if (
+            (
+                isinstance(decision, dict)
+                and decision.get("blocking") is True
+                and decision.get("status") in {"pending", "executing"}
+            )
+            or _auto_run_active(auto if isinstance(auto, dict) else None)
+            or (
+                isinstance(task, dict)
+                and task.get("status") in {"running", "queued", "waiting_approval"}
+            )
+        ):
+            return error_response(
+                status=409,
+                message="Сначала завершите выполнение или ожидающее решение в этой сессии.",
+                error_type="conflict_error",
+                code="model_change_pending_execution",
+            )
         agents = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
         selected = await _resolve_runtime_main_for_session(request, session_id)
         if not agents.is_static and selected != model_config:

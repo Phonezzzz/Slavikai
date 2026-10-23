@@ -25,6 +25,7 @@ from server.http.common.ui_settings import (
     _load_provider_instance,
     _resolve_provider_api_key,
 )
+from server.ui_hub import UIHub
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
 from shared.task_run import TaskRun
@@ -259,6 +260,8 @@ class RuntimeModelStateProtocol(Protocol):
 
     async def set_session_override(self, session_id: str, main: ModelConfig | None) -> None: ...
 
+    async def get_session_revision(self, session_id: str) -> int: ...
+
     async def clear_session_override(self, session_id: str) -> None: ...
 
 
@@ -377,6 +380,10 @@ def _require_custom_provider_owner(
             raise ValueError("Custom provider endpoint differs from saved configuration.")
 
 
+class SessionModelChangedError(RuntimeError):
+    """The request model snapshot no longer belongs to the current session state."""
+
+
 async def _sync_session_runtime_override(
     request: web.Request,
     session_id: str,
@@ -391,7 +398,11 @@ async def _sync_session_runtime_override(
     _require_custom_provider_owner(request, provider)
     main_config = _build_model_config(provider, model_id)
     store = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
-    await store.set_session_override(session_id, main_config)
+    hub = cast(UIHub, request.app["ui_hub"])
+    async with _agent_lock_for_request(request, session_id):
+        if await hub.get_session_model(session_id) != selected_model:
+            raise SessionModelChangedError("Модель сессии изменилась. Повторите запрос.")
+        await store.set_session_override(session_id, main_config)
     return main_config
 
 

@@ -279,6 +279,12 @@ export function useSessionRuntimeController({
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [savingModel, setSavingModel] = useState(false);
+  const modelRequestRef = useRef<symbol | null>(null);
+  const beginConversationChange = () => {
+    modelRequestRef.current = null;
+    setSavingModel(false);
+    return reconcileGuardRef.current.begin();
+  };
   const [pendingDecision, setPendingDecision] = useState<UiDecision | null>(null);
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [decisionError, setDecisionError] = useState<string | null>(null);
@@ -500,7 +506,7 @@ export function useSessionRuntimeController({
 
   useEffect(() => {
     let cancelled = false;
-    const generation = reconcileGuardRef.current.begin();
+    const generation = beginConversationChange();
 
     const bootstrap = async () => {
       try {
@@ -584,7 +590,7 @@ export function useSessionRuntimeController({
     if (!sessionId || sessionId === selectedConversation) {
       return;
     }
-    const generation = reconcileGuardRef.current.begin();
+    const generation = beginConversationChange();
     setSelectedConversation(sessionId);
     transportRef.current?.clearConversationState();
     setPendingDecision(null);
@@ -635,7 +641,7 @@ export function useSessionRuntimeController({
   };
 
   const handleCreateConversation = async () => {
-    const generation = reconcileGuardRef.current.begin();
+    const generation = beginConversationChange();
     try {
       const created = await createConversation(generation);
       if (!reconcileGuardRef.current.isCurrent(generation)) {
@@ -708,7 +714,7 @@ export function useSessionRuntimeController({
       if (selectedConversation === sessionId) {
         if (updatedSessions.length > 0) {
           const nextSession = updatedSessions[0].session_id;
-          const generation = reconcileGuardRef.current.begin();
+          const generation = beginConversationChange();
           setSelectedConversation(nextSession);
           await loadConversation(nextSession, generation);
           if (!reconcileGuardRef.current.isCurrent(generation)) {
@@ -716,7 +722,7 @@ export function useSessionRuntimeController({
           }
           saveLastSessionId(nextSession);
         } else {
-          const generation = reconcileGuardRef.current.begin();
+          const generation = beginConversationChange();
           const created = await createConversation(generation);
           if (!reconcileGuardRef.current.isCurrent(generation)) {
             return;
@@ -748,22 +754,32 @@ export function useSessionRuntimeController({
   };
 
   const handleSetModel = async (provider: string, model: string): Promise<boolean> => {
-    if (!selectedConversation || savingModel) {
+    if (!selectedConversation || savingModel || modelRequestRef.current !== null) {
       return false;
     }
     setSavingModel(true);
+    const request = Symbol();
+    modelRequestRef.current = request;
+    const generation = reconcileGuardRef.current.snapshot();
+    const isCurrent = () => modelRequestRef.current === request
+      && reconcileGuardRef.current.isCurrent(generation);
     try {
       const nextModel = await setSessionModelRemote(selectedConversation, sessionHeader, provider, model);
+      if (!isCurrent()) return false;
       setSelectedModel(nextModel);
       saveLastModel(nextModel);
       onStatusMessage(null);
       return true;
     } catch (error) {
+      if (!isCurrent()) return false;
       const message = error instanceof Error ? error.message : 'Failed to set model.';
       onStatusMessage(message);
       return false;
     } finally {
-      setSavingModel(false);
+      if (isCurrent()) {
+        modelRequestRef.current = null;
+        setSavingModel(false);
+      }
     }
   };
 

@@ -39,6 +39,9 @@ class PlanCancellationRegistry:
                 self._active.pop(scope)
             execution.finished.set()
 
+    def is_active(self, scope: AgentScope) -> bool:
+        return scope in self._active
+
     def request_cancel(self, scope: AgentScope, task_id: str) -> bool:
         execution = self._active.get(scope)
         if execution is None or execution.task_id != task_id:

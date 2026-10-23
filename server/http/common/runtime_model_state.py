@@ -17,6 +17,7 @@ class RuntimeModelStateStore:
     def __init__(self, global_main: ModelConfig | None = None) -> None:
         self._global_main = global_main
         self._session_overrides: dict[str, ModelConfig] = {}
+        self._session_revisions: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
     def peek_global_main(self) -> ModelConfig | None:
@@ -37,11 +38,17 @@ class RuntimeModelStateStore:
         async with self._lock:
             return self._session_overrides.get(normalized)
 
+    async def get_session_revision(self, session_id: str) -> int:
+        async with self._lock:
+            return self._session_revisions.get(session_id.strip(), 0)
+
     async def set_session_override(self, session_id: str, main: ModelConfig | None) -> None:
         normalized = _normalize_session_id(session_id)
         if normalized is None:
             return
         async with self._lock:
+            if self._session_overrides.get(normalized) != main:
+                self._session_revisions[normalized] = self._session_revisions.get(normalized, 0) + 1
             if main is None:
                 self._session_overrides.pop(normalized, None)
             else:
@@ -51,8 +58,7 @@ class RuntimeModelStateStore:
         normalized = _normalize_session_id(session_id)
         if normalized is None:
             return
-        async with self._lock:
-            self._session_overrides.pop(normalized, None)
+        await self.set_session_override(normalized, None)
 
 
 class RuntimeModelResolver:

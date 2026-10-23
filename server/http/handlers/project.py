@@ -15,6 +15,7 @@ from server.http.common.chat_payload import (
     _ui_messages_to_llm,
 )
 from server.http.common.responses import error_response, json_response
+from server.http.common.runtime_contract import SessionModelChangedError
 from server.http_api import (
     UI_GITHUB_REQUIRED_CATEGORIES,
     UI_PROJECT_COMMANDS,
@@ -118,6 +119,13 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
             agent, selected_main_config = await _resolve_agent_for_ui_session(
                 request,
                 session_id,
+            )
+        except SessionModelChangedError as exc:
+            return error_response(
+                status=409,
+                message=str(exc),
+                error_type="conflict_error",
+                code="session_model_changed",
             )
         except PermissionError:
             return error_response(

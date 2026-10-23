@@ -44,6 +44,7 @@ from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
     AgentProtocol,
     RuntimeModelResolverProtocol,
+    SessionModelChangedError,
     _require_custom_provider_owner,
 )
 from server.http.common.session_end import begin_session_end, pending_session_end
@@ -625,6 +626,14 @@ async def _handle_ui_send_impl(
             agent, selected_main_config = await _resolve_agent_for_ui_session(
                 request,
                 session_id,
+            )
+        except SessionModelChangedError as exc:
+            await _abort_idempotency()
+            return error_response(
+                status=409,
+                message=str(exc),
+                error_type="conflict_error",
+                code="session_model_changed",
             )
         except PermissionError:
             await _abort_idempotency()
