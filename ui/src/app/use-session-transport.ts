@@ -226,7 +226,7 @@ export function useSessionTransport({
 
   const applySessionPayload = (
     payload: unknown,
-    options: { applyDisplay: boolean },
+    options: { applyDisplay: boolean; applyRuntime?: boolean },
   ): { lane: MessageLane } => {
     const body = payload as {
       messages?: unknown;
@@ -309,7 +309,7 @@ export function useSessionTransport({
       }
     }
 
-    onRuntimePayload(payload);
+    if (options.applyRuntime !== false) onRuntimePayload(payload);
     return { lane };
   };
 

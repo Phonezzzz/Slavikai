@@ -964,7 +964,7 @@ export function useSessionRuntimeController({
       if ('mode_transitions' in body) snapshot.modeTransitions = parseModeTransitions(body.mode_transitions);
       if ('decision' in body) snapshot.decision = parseUiDecision(body.decision);
       // Результат действия принадлежит текущему запросу; SSE может опережать только его workflow.
-      transportRef.current?.applySessionPayload(payload, { applyDisplay: false });
+      transportRef.current?.applySessionPayload(payload, { applyDisplay: false, applyRuntime: false });
       if (canApplyWorkflow(snapshot, version)) applyRuntimePayload(payload);
       const resumedWorkspaceRoot = parseDecisionResumeWorkspaceRoot(
         (payload as { resume?: unknown }).resume,

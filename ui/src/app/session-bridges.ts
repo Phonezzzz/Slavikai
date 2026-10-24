@@ -33,7 +33,7 @@ export type SessionTransportBridge = {
   }) => void;
   applySessionPayload: (
     payload: unknown,
-    options: { applyDisplay: boolean },
+    options: { applyDisplay: boolean; applyRuntime?: boolean },
   ) => { lane: MessageLane };
   clearConversationState: () => void;
 };

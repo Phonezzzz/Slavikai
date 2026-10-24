@@ -7,6 +7,7 @@ import { DEFAULT_COMPOSER_SETTINGS } from '../session-payload';
 import type { SessionTransportBridge } from '../session-bridges';
 import type { PlanEnvelope, SessionSummary } from '../types';
 import { useSessionRuntimeController } from '../use-session-runtime-controller';
+import { useSessionTransport } from '../use-session-transport';
 
 vi.mock('../session-security', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../session-security')>();
@@ -167,7 +168,20 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null, initialSta
     }),
   );
 
-  return { ...hook, sessionRequests, rootRequests, modelRequests, workflowRequests, onStatusMessage, fetchMock, createRequests, transport };
+  return { ...hook, sessionRequests, rootRequests, modelRequests, workflowRequests, onStatusMessage, fetchMock, createRequests, transport, transportRef };
+};
+
+const connectRealTransport = (h: ReturnType<typeof createHarness>) => {
+  vi.stubGlobal('EventSource', class { close() {} });
+  const transport = renderHook(() => useSessionTransport({
+    sessionHeader: 'X-Test', selectedConversation: h.result.current.selectedConversation,
+    forceCanvasNext: false, consumeForceCanvasNext: vi.fn(), onSessionIdChange: vi.fn(),
+    onStatusMessage: vi.fn(), onStreamWarning: vi.fn(),
+    onRuntimePayload: (payload) => h.result.current.applyRuntimePayload(payload),
+    onOpenStreamedArtifact: vi.fn(), setArtifactViewerArtifactId: vi.fn(), loadSessions: async () => [],
+  }));
+  h.transportRef.current = transport.result.current.bridge;
+  return transport;
 };
 
 afterEach(() => {
@@ -511,6 +525,25 @@ const decisionPayload = (id = 'D') => ({
 });
 
 describe('plan card request ownership', () => {
+  it('keeps terminal SSE state while publishing decision results through the real transport callback', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const transport = connectRealTransport(h);
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload() }));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
+    let request: Promise<void>;
+    act(() => { request = h.result.current.handleDecisionRespond('approve_once'); });
+    act(() => h.result.current.applyRuntimePayload({ mode: 'act', active_plan: { ...reviewedPlan, status: 'completed', plan_revision: 9 } }));
+    await act(async () => {
+      pending.resolve(jsonResponse({ mode: 'act', active_plan: { ...reviewedPlan, status: 'running', plan_revision: 8 },
+        messages: [{ message_id: 'done', role: 'assistant', content: 'Result', created_at: '2026-10-24T18:29:00Z', trace_id: null, parent_user_message_id: null }] }));
+      await request!;
+    });
+    expect(h.result.current.activePlan?.status).toBe('completed');
+    expect(h.result.current.activePlan?.plan_revision).toBe(9);
+    expect(transport.result.current.chatMessages[0]?.content).toBe('Result');
+  });
+
   it('clears the previous plan while the selected chat workflow is loading', async () => {
     const h = createHarness();
     await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
@@ -540,15 +573,16 @@ describe('plan card request ownership', () => {
   it('publishes action results when an executing decision event precedes its HTTP reply', async () => {
     const h = createHarness();
     await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const transport = connectRealTransport(h);
     const decision = { ...decisionPayload(), decision_type: 'project.command/github_import' };
     act(() => h.result.current.applyRuntimePayload({ decision }));
     const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
     const resume = vi.fn(); let request: Promise<void>;
     act(() => { request = h.result.current.handleDecisionRespond('approve_once', null, resume); });
     act(() => h.result.current.applyRuntimePayload({ decision: { ...decision, status: 'executing' } }));
-    const payload = { decision: { ...decision, status: 'resolved' }, messages: [{ message_id: 'import-done', role: 'assistant', content: 'Imported' }], resume: { source_endpoint: 'project.command', data: { root_applied: '/imported-project' } } };
+    const payload = { decision: { ...decision, status: 'resolved' }, messages: [{ message_id: 'import-done', role: 'assistant', content: 'Imported', created_at: '2026-10-24T18:29:00Z', trace_id: null, parent_user_message_id: null }], resume: { source_endpoint: 'project.command', data: { root_applied: '/imported-project' } } };
     await act(async () => { pending.resolve(jsonResponse(payload)); await request!; });
-    expect(h.transport.applySessionPayload).toHaveBeenCalledWith(payload, { applyDisplay: false });
+    expect(transport.result.current.chatMessages[0]?.content).toBe('Imported');
     expect(h.result.current.workspaceRoot).toBe('/imported-project');
     expect(h.result.current.pendingDecision?.status).toBe('executing');
     expect(h.result.current.decisionBusy).toBe(false);
