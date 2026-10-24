@@ -1050,19 +1050,20 @@ export function useSessionRuntimeController({
           signal: controller.signal, headers: { [sessionHeader]: selectedConversation },
         });
         const payload: unknown = await response.json();
-        if (!response.ok || controller.signal.aborted || !reconcileGuardRef.current.isCurrent(generation)
-            || workflowVersionRef.current !== version) return;
+        if (!response.ok || controller.signal.aborted || !reconcileGuardRef.current.isCurrent(generation)) return;
         const session = (payload as { session?: { active_plan?: unknown; mode_transitions?: unknown } }).session;
         const plan = parsePlanEnvelope(session?.active_plan);
-        if (plan?.plan_id === planId && plan.plan_revision === planRevision) {
-          setModeTransitions(parseModeTransitions(session?.mode_transitions));
+        const transitions = parseModeTransitions(session?.mode_transitions);
+        if (plan?.plan_id === planId && plan.plan_revision === planRevision
+            && canApplyWorkflow({ modeTransitions: transitions }, version)) {
+          setModeTransitions(transitions);
         }
       } catch {
         // The terminal state stays visible; a later session load refreshes transition permissions.
       }
     })();
     return () => controller.abort();
-  }, [selectedConversation, activePlan?.plan_id, activePlan?.plan_revision, activePlan?.status]);
+  }, [selectedConversation, sessionMode, activePlan?.plan_id, activePlan?.plan_revision, activePlan?.status, activeTask, autoState]);
 
   useEffect(() => {
     return () => {

@@ -713,12 +713,49 @@ it('applies an explicit auto_state reset in a workflow HTTP response', async () 
 });
 
 
-it('refreshes server transition permissions after a terminal plan event', async () => {
+it.each(['none', 'decision', 'workflow-replay'])('refreshes server permissions after a terminal plan despite a later %s event', async (laterEvent) => {
   const h = createHarness();
   await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
   const metadata = deferred<Response>(); h.sessionRequests.set('C', metadata);
   act(() => h.result.current.applyRuntimePayload({ mode: 'act', active_plan: { ...reviewedPlan, status: 'completed', plan_revision: 9 } }));
+  if (laterEvent !== 'none') act(() => h.result.current.applyRuntimePayload({
+    decision: { ...decisionPayload(), status: 'resolved' },
+    ...(laterEvent === 'workflow-replay' ? { mode: 'act', active_plan: { ...reviewedPlan, status: 'completed', plan_revision: 9 } } : {}),
+  }));
   const mode_transitions = { current_mode: 'act', targets: Object.fromEntries(['ask', 'plan', 'act', 'auto', 'desktop'].map(mode => [mode, { allowed: mode === 'ask', requires_confirm: false }])) };
   await act(async () => { metadata.resolve(jsonResponse({ session: { active_plan: { ...reviewedPlan, status: 'completed', plan_revision: 9 }, mode_transitions } })); });
   await waitFor(() => expect(h.result.current.modeTransitions?.targets.ask.allowed).toBe(true));
+});
+
+it('does not overwrite newer transition permissions with terminal metadata', async () => {
+  const h = createHarness();
+  await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+  const metadata = deferred<Response>(); h.sessionRequests.set('C', metadata);
+  const plan = { ...reviewedPlan, status: 'completed', plan_revision: 9 };
+  const permissions = (allowed: boolean) => ({ current_mode: 'act', targets: Object.fromEntries(['ask', 'plan', 'act', 'auto', 'desktop'].map(mode => [mode, { allowed: mode === 'ask' && allowed, requires_confirm: false }])) });
+  act(() => h.result.current.applyRuntimePayload({ mode: 'act', active_plan: plan }));
+  act(() => h.result.current.applyRuntimePayload({ mode_transitions: permissions(false) }));
+  await act(async () => { metadata.resolve(jsonResponse({ session: { active_plan: plan, mode_transitions: permissions(true) } })); });
+  expect(h.result.current.modeTransitions?.targets.ask.allowed).toBe(false);
+});
+
+it('restarts terminal permissions loading after a mode change and rejects the old reply', async () => {
+  const h = createHarness();
+  await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+  const oldMetadata = deferred<Response>(); h.sessionRequests.set('C', oldMetadata);
+  const plan = { ...reviewedPlan, status: 'completed', plan_revision: 9 };
+  const permissions = (mode: string) => ({ current_mode: mode, targets: Object.fromEntries(['ask', 'plan', 'act', 'auto', 'desktop'].map(target => [target, { allowed: target !== mode, requires_confirm: false }])) });
+  act(() => h.result.current.applyRuntimePayload({ mode: 'act', active_plan: plan }));
+  const metadataCalls = h.fetchMock.mock.calls.filter(([url]) => url === `/ui/api/sessions/${h.result.current.selectedConversation}`);
+  const oldSignal = metadataCalls[metadataCalls.length - 1]?.[1]?.signal;
+  const nextMetadata = deferred<Response>(); h.sessionRequests.set('C', nextMetadata);
+  act(() => h.result.current.applyRuntimePayload({ mode: 'ask' }));
+  expect(oldSignal?.aborted).toBe(true);
+  await act(async () => {
+    nextMetadata.resolve(jsonResponse({ session: { active_plan: plan, mode_transitions: permissions('ask') } }));
+    await nextMetadata.promise;
+  });
+  await act(async () => { oldMetadata.resolve(jsonResponse({ session: { active_plan: plan, mode_transitions: permissions('act') } })); });
+  expect(h.result.current.modeTransitions?.currentMode).toBe('ask');
+  expect(h.result.current.modeTransitions?.targets.ask.allowed).toBe(false);
 });
