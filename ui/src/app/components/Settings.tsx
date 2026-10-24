@@ -1,5 +1,4 @@
 import {
-  Activity,
   Bot,
   BrainCircuit,
   Database,
@@ -24,7 +23,7 @@ interface SettingsProps {
   onSaved?: () => void;
 }
 
-type SettingsTab = 'api' | 'assistant' | 'appearance' | 'composer' | 'memory' | 'data' | 'diagnostics';
+type SettingsTab = 'api' | 'assistant' | 'appearance' | 'composer' | 'memory' | 'data';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai' | 'deepseek';
 type ModelProvider = string;
 type ApiKeySource = 'env' | 'file' | 'missing';
@@ -174,13 +173,12 @@ const RESPONSE_STYLE_OPTIONS = [
 ];
 
 const TAB_ITEMS: Array<{ id: SettingsTab; title: string }> = [
-  { id: 'api', title: 'API Keys' },
+  { id: 'api', title: 'Models and connections' },
   { id: 'assistant', title: 'Assistant' },
   { id: 'appearance', title: 'Appearance' },
   { id: 'composer', title: 'Composer' },
   { id: 'memory', title: 'Memory' },
   { id: 'data', title: 'Data' },
-  { id: 'diagnostics', title: 'Diagnostics' },
 ];
 
 const TAB_ICONS: Record<SettingsTab, typeof KeyRound> = {
@@ -190,7 +188,6 @@ const TAB_ICONS: Record<SettingsTab, typeof KeyRound> = {
   composer: TextCursorInput,
   memory: BrainCircuit,
   data: Database,
-  diagnostics: Activity,
 };
 
 const THRESHOLD_PRESETS = [8000, 12000, 25000];
@@ -740,6 +737,57 @@ function Row({
   );
 }
 
+function ProviderConnectionStatus({ provider, runtime, loading, error }: {
+  provider: ProviderSettings;
+  runtime: ProviderRuntimeState | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  const runtimeLabel = loading
+    ? 'checking'
+    : runtime?.catalogSource === 'not_checked'
+      ? 'not checked'
+      : runtime?.error
+        ? 'models error'
+      : runtime && runtime.modelsCount > 0
+        ? `${runtime.modelsCount} models`
+        : runtime
+          ? '0 models'
+          : error
+            ? 'probe failed'
+            : 'unknown';
+  const runtimeTone: StatusTone = loading
+    ? 'neutral'
+    : runtime?.error || error
+      ? 'error'
+      : runtime && runtime.modelsCount > 0 && runtime.catalogSource === 'endpoint'
+        ? 'success'
+        : 'waiting';
+  const runtimeDetail = runtime?.error ?? error;
+
+  return (
+    <div className="mt-2 space-y-2 text-xs text-zinc-500">
+      <div className="flex flex-wrap gap-2">
+        <StatusBadge tone={provider.api_key_valid === true ? 'success' : provider.api_key_valid === false ? 'error' : 'neutral'}>
+          {provider.api_key_valid === true ? 'key valid' : provider.api_key_valid === false ? 'key invalid' : 'unchecked'}
+        </StatusBadge>
+        {isModelProvider(provider.provider) ? <StatusBadge tone={runtimeTone}>{runtimeLabel}</StatusBadge> : null}
+      </div>
+      {runtime ? <div>Catalog source: {CATALOG_SOURCE_LABELS[runtime.catalogSource]}</div>
+        : isModelProvider(provider.provider) ? <div>Catalog source: {error ? 'Unverified' : 'Not checked'}</div> : null}
+      {isModelProvider(provider.provider) && runtimeDetail ? <div className="text-rose-300">Runtime: {runtimeDetail}</div> : null}
+      <details>
+        <summary className="cursor-pointer text-zinc-400">Connection details</summary>
+        <div className="mt-2 space-y-1">
+          <div className="break-all">Endpoint: {provider.endpoint}</div>
+          <div>Credential variable: {provider.api_key_env}</div>
+          {provider.last_checked_at ? <div>Last key check: {provider.last_checked_at}</div> : null}
+        </div>
+      </details>
+    </div>
+  );
+}
+
 export function Settings({
   isOpen,
   onClose,
@@ -855,7 +903,7 @@ export function Settings({
       dirtyFields.current.clear();
     }
     if (!parsed.canManageInstallation) {
-      setActiveTab((tab) => ['api', 'memory', 'diagnostics'].includes(tab) ? 'assistant' : tab);
+      setActiveTab((tab) => ['api', 'memory'].includes(tab) ? 'assistant' : tab);
       setApiKeys({ ...EMPTY_API_KEYS });
       setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
     }
@@ -1612,7 +1660,7 @@ export function Settings({
               <div className="flex min-h-0 flex-1 overflow-hidden">
                 <nav className="w-48 shrink-0 border-r border-zinc-800 p-2.5">
                   <div className="space-y-0.5">
-                    {TAB_ITEMS.filter((tab) => canManageInstallation || !['api', 'memory', 'diagnostics'].includes(tab.id)).map((tab) => (
+                    {TAB_ITEMS.filter((tab) => canManageInstallation || !['api', 'memory'].includes(tab.id)).map((tab) => (
                       <button
                         key={tab.id}
                         type="button"
@@ -1646,8 +1694,31 @@ export function Settings({
                   {canManageInstallation && settingsReady && !loading && activeTab === 'api' ? (
                     <div>
                       <SectionCard
-                        title="Provider API keys"
-                        description="Keys are validated before they are saved to config/api_keys.json. Environment variables always take priority."
+                        title="Connection checks"
+                        description="Connection status for providers and audio backends."
+                        scope="Read only"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-xs text-zinc-500">
+                            Runtime checks use environment keys first, then saved provider keys.
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void loadProviderDiagnostics();
+                              void loadCredentialDiagnostics();
+                              void refreshEmbeddingRuntime(true);
+                            }}
+                            className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800"
+                          >
+                            <RefreshCcw className="h-4 w-4" />
+                            Recheck connections
+                          </button>
+                        </div>
+                      </SectionCard>
+                      <SectionCard
+                        title="Provider connections"
+                        description="Manage credentials and inspect catalog evidence for each connection. Key and catalog checks do not verify inference or tool support."
                         scope="Global"
                       >
                         <p className="mb-3 text-xs text-zinc-500">
@@ -1658,6 +1729,8 @@ export function Settings({
                           {providers.map((provider) => (
                             <div
                               key={provider.provider}
+                              role="group"
+                              aria-label={`${PROVIDER_LABELS[provider.provider]} connection`}
                               className="border-b border-zinc-800/60 py-3 first:pt-0 last:border-b-0 last:pb-0"
                             >
                               <div className="flex items-center justify-between gap-3">
@@ -1727,6 +1800,12 @@ export function Settings({
                                   {provider.api_key_env} overrides any saved file key.
                                 </div>
                               ) : null}
+                              <ProviderConnectionStatus
+                                provider={provider}
+                                runtime={isModelProvider(provider.provider) ? providerRuntime[provider.provider] : null}
+                                loading={providerRuntimeLoading}
+                                error={providerRuntimeError}
+                              />
                               {provider.last_check_error ? (
                                 <div className="mt-1.5 text-xs text-rose-300">
                                   {provider.last_check_error}
@@ -2298,32 +2377,8 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {canManageInstallation && settingsReady && !loading && activeTab === 'diagnostics' ? (
+                  {canManageInstallation && settingsReady && !loading && activeTab === 'api' ? (
                     <div>
-                      <SectionCard
-                        title="Read-only diagnostics"
-                        description="Connection status for providers and audio backends."
-                        scope="Read only"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs text-zinc-500">
-                            Runtime checks use environment keys first, then keys saved under API Keys.
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              void loadProviderDiagnostics();
-                              void loadCredentialDiagnostics();
-                              void refreshEmbeddingRuntime(true);
-                            }}
-                            className="inline-flex shrink-0 items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800"
-                          >
-                            <RefreshCcw className="h-4 w-4" />
-                            Recheck connections
-                          </button>
-                        </div>
-                      </SectionCard>
-
                       <SectionCard
                         title="Speech backend"
                         description="Status for the text-to-speech backend configured from environment variables."
@@ -2358,97 +2413,6 @@ export function Settings({
                               Format: <span className="font-mono text-zinc-300">{ttsBackend.format}</span>
                             </div>
                           </div>
-                        </div>
-                      </SectionCard>
-
-                      <SectionCard
-                        title="Provider status"
-                        description="Key validation and catalog checks only. Inference and tool support have not been tested."
-                        scope="Read only"
-                      >
-                        <div>
-                          {providers.map((provider) => {
-                            const runtime = isModelProvider(provider.provider)
-                              ? providerRuntime[provider.provider]
-                              : null;
-                            const runtimeLabel = providerRuntimeLoading
-                              ? 'checking'
-                              : runtime?.catalogSource === 'not_checked'
-                                ? 'not checked'
-                                : runtime?.error
-                                  ? 'models error'
-                                : runtime && runtime.modelsCount > 0
-                                  ? `${runtime.modelsCount} models`
-                                  : runtime
-                                    ? '0 models'
-                                    : providerRuntimeError
-                                      ? 'probe failed'
-                                      : 'unknown';
-                            const runtimeTone: StatusTone = providerRuntimeLoading
-                              ? 'neutral'
-                              : runtime?.error || providerRuntimeError
-                                ? 'error'
-                                : runtime && runtime.modelsCount > 0 && runtime.catalogSource === 'endpoint'
-                                  ? 'success'
-                                  : 'waiting';
-                            const runtimeDetail = runtime?.error ?? providerRuntimeError;
-
-                            return (
-                              <div
-                                key={provider.provider}
-                                className="border-b border-zinc-800/60 py-3 first:pt-0 last:border-b-0 last:pb-0"
-                              >
-                                <div className="flex items-center justify-between gap-3">
-                                  <div className="flex min-w-0 items-center gap-2">
-                                    <span className="text-[13px] font-medium text-zinc-100">
-                                      {PROVIDER_LABELS[provider.provider]}
-                                    </span>
-                                    <span className="font-mono text-[11px] text-zinc-500">
-                                      {provider.api_key_env}
-                                    </span>
-                                  </div>
-                                  <div className="flex shrink-0 items-center gap-2">
-                                    <StatusBadge
-                                      tone={provider.api_key_set ? 'success' : 'waiting'}
-                                    >
-                                      {provider.api_key_set ? 'key set' : 'key missing'}
-                                    </StatusBadge>
-                                    <StatusBadge
-                                      tone={
-                                        provider.api_key_valid === true
-                                          ? 'success'
-                                          : provider.api_key_valid === false
-                                            ? 'error'
-                                            : 'neutral'
-                                      }
-                                    >
-                                      {provider.api_key_valid === true
-                                        ? 'key valid'
-                                        : provider.api_key_valid === false
-                                          ? 'key invalid'
-                                          : 'unchecked'}
-                                    </StatusBadge>
-                                    {isModelProvider(provider.provider) ? (
-                                      <StatusBadge tone={runtimeTone}>{runtimeLabel}</StatusBadge>
-                                    ) : null}
-                                  </div>
-                                </div>
-                                <div className="mt-1 space-y-1 text-xs text-zinc-500">
-                                  <div className="break-all">Endpoint: {provider.endpoint}</div>
-                                  {runtime ? (
-                                    <div>Catalog source: {CATALOG_SOURCE_LABELS[runtime.catalogSource]}</div>
-                                  ) : isModelProvider(provider.provider) ? <div>Catalog source: {providerRuntimeError ? 'Unverified' : 'Not checked'}</div> : null}
-                                  {provider.last_checked_at ? <div>Last key check: {provider.last_checked_at}</div> : null}
-                                  {provider.last_check_error ? (
-                                    <div className="text-rose-300">Validation: {provider.last_check_error}</div>
-                                  ) : null}
-                                  {isModelProvider(provider.provider) && runtimeDetail ? (
-                                    <div className="text-rose-300">Runtime: {runtimeDetail}</div>
-                                  ) : null}
-                                </div>
-                              </div>
-                            );
-                          })}
                         </div>
                       </SectionCard>
                     </div>

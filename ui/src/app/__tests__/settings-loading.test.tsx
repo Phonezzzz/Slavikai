@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Settings } from '../components/Settings';
@@ -105,7 +105,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     const input = await editInstructions('unsaved draft');
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findAllByText('checking');
     fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
@@ -115,7 +115,7 @@ describe('Settings loading isolation', () => {
     await act(async () => { probe.resolve(json({ providers: [{ provider: 'deepseek', models: ['m1', 'm2'], error: null }] })); });
     expect(settingsGets).toBe(2);
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('unsaved draft');
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     await screen.findByText('2 models');
   });
 
@@ -128,7 +128,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('keep this draft');
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findAllByText('Runtime: Provider offline');
     fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
@@ -231,7 +231,7 @@ describe('Settings loading isolation', () => {
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await vi.waitFor(() => expect(probes).toBe(1));
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
@@ -305,7 +305,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('keep draft during retry');
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
     await screen.findByText('rechecked-model is available locally.');
@@ -331,7 +331,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('local unsaved instructions');
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     expect(screen.getByText('Not configured')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findByText('Configured');
@@ -364,7 +364,7 @@ describe('Settings loading isolation', () => {
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await vi.waitFor(() => expect(gets).toBe(2));
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
@@ -389,7 +389,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('preserve after credential failure');
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findByText('Credential check: Snapshot offline');
     fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
@@ -423,16 +423,16 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await vi.waitFor(() => expect(signals).toHaveLength(1));
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement-test-key' } });
     fireEvent.click(screen.getByRole('button', { name: action }));
     await screen.findByText(action === 'Save changes' ? 'Settings saved.' : 'Loaded 1 deepseek models.');
     expect(posts[0]?.providers).toEqual({ deepseek: { api_key: 'replacement-test-key' } });
     expect(signals[0]?.aborted).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     await act(async () => {
       oldBody.resolve(status === 200
         ? { providers: [{ provider: 'deepseek', models: ['old1', 'old2', 'old3'] }] }
@@ -471,11 +471,11 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement-test-key' } });
     fireEvent.click(screen.getByRole('button', { name: action }));
     await vi.waitFor(() => expect(posts).toBe(1));
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await act(async () => { await Promise.resolve(); });
     expect(probeSignals).toHaveLength(0);
@@ -545,7 +545,7 @@ describe('Settings loading isolation', () => {
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'test-key' } });
     fireEvent.click(screen.getByRole('button', { name: action }));
     await vi.waitFor(() => expect(posts).toBe(1));
@@ -626,7 +626,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('preference-only change');
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await vi.waitFor(() => expect(probes).toBe(1));
     const result = { providers: [{ provider: 'deepseek', models: ['one', 'two'] }] };
@@ -673,7 +673,7 @@ describe('Settings loading isolation', () => {
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('button', { name: 'Show advanced editor' });
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'first-key' } });
     fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
     await vi.waitFor(() => expect(posts).toBe(1));
@@ -686,7 +686,7 @@ describe('Settings loading isolation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await screen.findByText('Settings saved.');
     expect(readSignals[2]?.aborted).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     await screen.findByText('Configured');
     await act(async () => { oldBody.resolve(snapshot(false)); });
     expect(screen.getByText('Configured')).toBeTruthy();
@@ -709,7 +709,7 @@ describe('Settings loading isolation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
     fireEvent.click(screen.getByRole('button', { name: 'Download model' }));
     const readsBeforeRecheck = reads;
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await act(async () => { await Promise.resolve(); });
     expect(reads).toBe(readsBeforeRecheck);
@@ -742,7 +742,7 @@ describe('Settings loading isolation', () => {
     rerender(<Settings isOpen onClose={() => undefined} />);
     await screen.findByDisplayValue('before');
     if (control === 'provider') {
-      fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
       fireEvent.change(screen.getByLabelText('Provider display name'), { target: { value: 'draft provider' } });
     } else {
       fireEvent.click(screen.getByRole('button', { name: 'Data' }));
@@ -786,7 +786,7 @@ describe('Settings loading isolation', () => {
     rerender(<Settings isOpen onClose={() => undefined} />);
     const input = await screen.findByDisplayValue('before');
     if (editDraft) fireEvent.change(input, { target: { value: 'unsaved draft' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'new-key' } });
     fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
     await vi.waitFor(() => expect(posts).toBe(2));
@@ -826,7 +826,7 @@ describe('Settings loading isolation', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('keep these instructions');
     expect(fetchMock.mock.calls.some(([url]) => url.startsWith('/ui/api/models'))).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     await screen.findByText('Configured');
     expect(screen.getByText('Key source: Environment')).toBeTruthy();
     expect(screen.getByText('Speech inference has not been tested.')).toBeTruthy();
@@ -867,7 +867,7 @@ describe('principal preferences', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('member private draft');
-    expect(screen.queryByRole('button', { name: 'API Keys' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Models and connections' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Memory' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await screen.findByText('Settings saved.');
@@ -914,7 +914,7 @@ describe('settings scope transactions', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
     await editInstructions('private pending draft');
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await screen.findByText('Installation settings saved. Preferences were not saved: Preferences changed.');
@@ -942,7 +942,7 @@ describe('settings scope transactions', () => {
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('owner unsaved private');
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await vi.waitFor(() => expect(writes).toHaveLength(1));
@@ -972,7 +972,7 @@ describe('review regressions', () => {
     rerender(<Settings isOpen onClose={() => undefined} />);
     await screen.findByText('Identity settings unavailable');
     expect(screen.queryByDisplayValue('old private draft')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'API Keys' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Models and connections' })).toBeNull();
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(true);
   });
 
@@ -991,7 +991,7 @@ describe('review regressions', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
     await editInstructions('new private draft');
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await vi.waitFor(() => expect(writes).toBe(2));
@@ -999,5 +999,30 @@ describe('review regressions', () => {
     await act(async () => personal.resolve(json(settings('new private draft'))));
     await screen.findByText('Settings saved.');
     expect(onSaved).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('provider connection cards', () => {
+  it('keeps credential editing and explicit catalog evidence in one owner card', async () => {
+    const snapshot = settings();
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === SETTINGS_URL) return json(snapshot);
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      if (url === MODELS_URL) return json({ providers: [{ provider: 'deepseek', models: ['m1', 'm2'], catalog_source: 'endpoint' }] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Settings isOpen onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
+    const card = within(screen.getByRole('group', { name: 'DeepSeek connection' }));
+    expect(card.getByLabelText('DeepSeek API key')).toBeTruthy();
+    expect(card.getByText('unchecked')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Diagnostics' })).toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => url === MODELS_URL)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
+    await card.findByText('2 models');
+    expect(card.getByText('Catalog source: API response')).toBeTruthy();
+    expect(screen.queryByText('Provider status')).toBeNull();
   });
 });

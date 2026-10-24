@@ -55,7 +55,7 @@ describe('generic provider onboarding', () => {
     const onSaved = vi.fn();
     render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     await screen.findByRole('button', { name: 'Test connection' });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test/' } });
@@ -93,7 +93,7 @@ describe('generic provider onboarding', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Show advanced editor' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Custom instructions' }), { target: { value: 'unsaved value' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
@@ -114,7 +114,7 @@ describe('generic provider onboarding', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Unsaved' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'unsaved-secret' } });
@@ -147,7 +147,7 @@ describe('generic provider onboarding', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
@@ -193,7 +193,7 @@ describe('generic provider onboarding', () => {
       fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
     };
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     await fillOnboardingFields();
     fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     await vi.waitFor(() => expect(probeResolvers.length).toBe(1));
@@ -251,7 +251,7 @@ describe('generic provider onboarding', () => {
       fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
     };
     const { rerender } = render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     await fillOnboardingFields('Old');
     fireEvent.click(screen.getByRole('button', { name: 'Save provider' }));
     await vi.waitFor(() => expect(saveResolvers.length).toBe(1));
@@ -318,7 +318,7 @@ describe('generic provider onboarding', () => {
     }));
 
     const { rerender } = render(<Settings isOpen onClose={() => undefined} onSaved={onSaved} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Old' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Provider Base URL' }), { target: { value: 'https://example.test' } });
     fireEvent.change(screen.getByLabelText('New provider API key'), { target: { value: 'secret' } });
@@ -361,10 +361,10 @@ describe('generic provider onboarding', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'API Keys' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     await screen.findByRole('textbox', { name: 'Provider display name' });
     expect(requestedUrls).not.toContain('/ui/api/models?skip_custom_probe=1&discovery_only=1');
-    fireEvent.click(screen.getByRole('button', { name: 'Diagnostics' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findByText('2 models');
     expect(requestedUrls).toContain('/ui/api/models?skip_custom_probe=1&discovery_only=1');
