@@ -655,15 +655,46 @@ describe('plan card request ownership', () => {
     expect(h.result.current.decisionBusy).toBe(false); expect(h.result.current.modeBusy).toBe(false);
   });
 
-  it('does not apply the old decision response over a replacement decision', async () => {
+  it('completes the current decision callback when its response clears the decision', async () => {
     const h = createHarness();
     await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
     act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload() }));
     const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
     const resume = vi.fn(); let request: Promise<void>;
     act(() => { request = h.result.current.handleDecisionRespond('approve_once', null, resume); });
+    await act(async () => { pending.resolve(jsonResponse({ decision: null, resume: { output: 'done' } })); await request!; });
+    expect(h.result.current.pendingDecision).toBeNull();
+    expect(resume).toHaveBeenCalledWith({ output: 'done' });
+    expect(h.result.current.decisionBusy).toBe(false);
+  });
+
+  it('does not attach an old request error to the next decision', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload() }));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
+    let request: Promise<void>;
+    act(() => { request = h.result.current.handleDecisionRespond('approve_once'); });
     act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload('new') }));
-    await act(async () => { pending.resolve(jsonResponse({ decision: null, mode: 'act' })); await request!; });
+    expect(h.result.current.decisionBusy).toBe(true);
+    await act(async () => { pending.resolve({ ok: false, json: async () => ({ error: { message: 'old error' } }) } as Response); await request!; });
+    expect(h.result.current.pendingDecision?.id).toBe('new');
+    expect(h.result.current.decisionError).toBeNull();
+    expect(h.result.current.decisionBusy).toBe(false);
+  });
+
+  it('publishes completed action results without overwriting the next decision', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const transport = connectRealTransport(h);
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload() }));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
+    const resume = vi.fn(); let request: Promise<void>;
+    act(() => { request = h.result.current.handleDecisionRespond('approve_once', null, resume); });
+    act(() => h.result.current.applyRuntimePayload({ decision: decisionPayload('new') }));
+    await act(async () => { pending.resolve(jsonResponse({ decision: null, mode: 'act', messages: [{ message_id: 'continued', role: 'assistant', content: 'Continuation result', created_at: '2026-10-24T20:42:00Z', trace_id: null, parent_user_message_id: null }] })); await request!; });
+    expect(transport.result.current.chatMessages[0]?.content).toBe('Continuation result');
+    expect(h.result.current.sessionMode).toBe('ask');
     expect(h.result.current.pendingDecision?.id).toBe('new'); expect(resume).not.toHaveBeenCalled();
     expect(h.result.current.decisionBusy).toBe(false);
   });

@@ -327,10 +327,6 @@ export function useSessionRuntimeController({
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [decisionError, setDecisionError] = useState<string | null>(null);
   const applyDecision = (decision: UiDecision | null) => {
-    if (decisionIdentityRef.current !== (decision?.id ?? null)) {
-      decisionRequestRef.current = null;
-      setDecisionBusy(false);
-    }
     decisionIdentityRef.current = decision?.id ?? null;
     setPendingDecision(decision);
   };
@@ -927,6 +923,7 @@ export function useSessionRuntimeController({
       return;
     }
     const generation = reconcileGuardRef.current.snapshot();
+    const decisionId = pendingDecision.id;
     const token = Symbol('decision-request');
     const version = workflowVersionRef.current;
     decisionRequestRef.current = token;
@@ -955,6 +952,7 @@ export function useSessionRuntimeController({
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to resolve decision.'));
       }
+      const sameDecision = decisionIdentityRef.current === decisionId;
       const body = payload as Record<string, unknown>;
       const snapshot: Partial<WorkflowSnapshot & { decision: UiDecision | null }> = {};
       if ('mode' in body) snapshot.mode = parseSessionMode(body.mode);
@@ -970,13 +968,14 @@ export function useSessionRuntimeController({
         (payload as { resume?: unknown }).resume,
       );
       if (resumedWorkspaceRoot) setWorkspaceRoot(resumedWorkspaceRoot);
-      if (choice === 'reject') {
-        onRejected?.();
+      if (sameDecision) {
+        if (choice === 'reject') onRejected?.();
+        onResume?.((payload as { resume?: unknown }).resume);
       }
-      onResume?.((payload as { resume?: unknown }).resume);
       await loadSessions();
     } catch (error) {
       if (!current()) return;
+      if (decisionIdentityRef.current !== decisionId) return;
       const message = error instanceof Error ? error.message : 'Failed to resolve decision.';
       setDecisionError(message);
     } finally {
