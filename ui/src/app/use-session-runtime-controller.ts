@@ -49,7 +49,7 @@ type WorkflowSnapshot = {
   mode: SessionMode;
   activePlan: PlanEnvelope | null;
   activeTask: TaskExecutionState | null;
-  autoState: AutoState | null;
+  autoState?: AutoState | null;
   modeTransitions: ModeTransitionsContract | null;
 };
 
@@ -107,6 +107,11 @@ export type SessionRuntimeControllerResult = {
 const isModelAvailable = (model: SelectedModel, providers: ProviderModels[]) =>
   providers.some((provider) => provider.provider === model.provider && provider.models.includes(model.model));
 
+const parseProvidedAutoState = (payload: unknown): Pick<WorkflowSnapshot, 'autoState'> => {
+  const body = payload as { auto_state?: unknown };
+  return body.auto_state === undefined ? {} : { autoState: parseAutoState(body.auto_state) };
+};
+
 const setSessionModelRemote = async (
   sessionId: string,
   sessionHeader: string,
@@ -153,7 +158,7 @@ const setSessionModeRemote = async (
     mode: parseSessionMode((payload as { mode?: unknown }).mode),
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-    autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    ...parseProvidedAutoState(payload),
     modeTransitions: parseModeTransitions(
       (payload as { mode_transitions?: unknown }).mode_transitions,
     ),
@@ -181,7 +186,7 @@ const draftPlanRemote = async (
     mode: parseSessionMode((payload as { mode?: unknown }).mode),
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-    autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    ...parseProvidedAutoState(payload),
     modeTransitions: parseModeTransitions(
       (payload as { mode_transitions?: unknown }).mode_transitions,
     ),
@@ -209,7 +214,7 @@ const approvePlanRemote = async (
     mode: parseSessionMode((payload as { mode?: unknown }).mode),
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-    autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    ...parseProvidedAutoState(payload),
     modeTransitions: parseModeTransitions(
       (payload as { mode_transitions?: unknown }).mode_transitions,
     ),
@@ -242,7 +247,7 @@ const executePlanRemote = async (
     mode: parseSessionMode((payload as { mode?: unknown }).mode),
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-    autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    ...parseProvidedAutoState(payload),
     modeTransitions: parseModeTransitions(
       (payload as { mode_transitions?: unknown }).mode_transitions,
     ),
@@ -268,7 +273,7 @@ const cancelPlanRemote = async (
     mode: parseSessionMode((payload as { mode?: unknown }).mode),
     activePlan: parsePlanEnvelope((payload as { active_plan?: unknown }).active_plan),
     activeTask: parseTaskExecution((payload as { active_task?: unknown }).active_task),
-    autoState: parseAutoState((payload as { auto_state?: unknown }).auto_state),
+    ...parseProvidedAutoState(payload),
     modeTransitions: parseModeTransitions(
       (payload as { mode_transitions?: unknown }).mode_transitions,
     ),
@@ -845,7 +850,7 @@ export function useSessionRuntimeController({
     setSessionMode(snapshot.mode);
     setActivePlan(snapshot.activePlan);
     setActiveTask(snapshot.activeTask);
-    setAutoState(snapshot.autoState);
+    if (snapshot.autoState !== undefined) setAutoState(snapshot.autoState);
     setModeTransitions(snapshot.modeTransitions);
   };
 

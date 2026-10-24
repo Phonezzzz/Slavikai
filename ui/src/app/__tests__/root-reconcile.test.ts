@@ -648,6 +648,36 @@ it('retains response transition permissions when its workflow event arrived firs
   expect(h.result.current.modeTransitions?.targets.act.allowed).toBe(true);
 });
 
+it.each([false, true])('preserves completed Auto state and approve permissions when HTTP omits auto_state (SSE first: %s)', async (eventFirst) => {
+  const h = createHarness();
+  await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+  const auto_state = { run_id: 'completed-auto', status: 'completed', goal: 'previous goal', started_at: '', updated_at: '' };
+  const transitions = (allowed: boolean) => ({ current_mode: 'plan', targets: Object.fromEntries(['ask', 'plan', 'act', 'auto', 'desktop'].map(mode => [mode, { allowed: mode === 'act' && allowed, requires_confirm: false }])) });
+  act(() => h.result.current.applyRuntimePayload({ mode: 'plan', auto_state, mode_transitions: transitions(false) }));
+  const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/plan/approve', pending);
+  let request: Promise<void>;
+  act(() => { request = h.result.current.handlePlanApprove(reviewedPlan); });
+  if (eventFirst) act(() => h.result.current.applyRuntimePayload({ mode: 'plan', active_plan: reviewedPlan, active_task: null, auto_state }));
+  await act(async () => {
+    pending.resolve(jsonResponse({ mode: 'plan', active_plan: reviewedPlan, active_task: null, mode_transitions: transitions(true) }));
+    await request!;
+  });
+  expect(h.result.current.modeTransitions?.targets.act.allowed).toBe(true);
+  expect(h.result.current.autoState?.run_id).toBe('completed-auto');
+  expect(h.result.current.activePlan?.status).toBe('approved');
+});
+
+it('applies an explicit auto_state reset in a workflow HTTP response', async () => {
+  const h = createHarness();
+  await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+  act(() => h.result.current.applyRuntimePayload({ auto_state: { run_id: 'completed-auto', status: 'completed', goal: 'previous goal', started_at: '', updated_at: '' } }));
+  const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/mode', pending);
+  let request: Promise<void>;
+  act(() => { request = h.result.current.handleChangeMode('auto'); });
+  await act(async () => { pending.resolve(jsonResponse({ mode: 'auto', auto_state: null })); await request!; });
+  expect(h.result.current.autoState).toBeNull();
+});
+
 
 it('refreshes server transition permissions after a terminal plan event', async () => {
   const h = createHarness();
