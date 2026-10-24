@@ -307,6 +307,11 @@ export function useSessionRuntimeController({
     setDecisionError(null);
     setPlanCancelling(false);
     initialStateAbortRef.current?.abort();
+    workflowEvidenceRef.current.clear();
+    setSessionMode('ask');
+    setActivePlan(null);
+    setActiveTask(null);
+    setAutoState(null);
     setModeTransitions(null);
     setModeBusy(false);
     setModeError(null);
@@ -953,14 +958,13 @@ export function useSessionRuntimeController({
       if ('auto_state' in body) snapshot.autoState = parseAutoState(body.auto_state);
       if ('mode_transitions' in body) snapshot.modeTransitions = parseModeTransitions(body.mode_transitions);
       if ('decision' in body) snapshot.decision = parseUiDecision(body.decision);
-      if (canApplyWorkflow(snapshot, version)) {
-        transportRef.current?.applySessionPayload(payload, { applyDisplay: false });
-        applyRuntimePayload(payload);
-        const resumedWorkspaceRoot = parseDecisionResumeWorkspaceRoot(
-          (payload as { resume?: unknown }).resume,
-        );
-        if (resumedWorkspaceRoot) setWorkspaceRoot(resumedWorkspaceRoot);
-      }
+      // Результат действия принадлежит текущему запросу; SSE может опережать только его workflow.
+      transportRef.current?.applySessionPayload(payload, { applyDisplay: false });
+      if (canApplyWorkflow(snapshot, version)) applyRuntimePayload(payload);
+      const resumedWorkspaceRoot = parseDecisionResumeWorkspaceRoot(
+        (payload as { resume?: unknown }).resume,
+      );
+      if (resumedWorkspaceRoot) setWorkspaceRoot(resumedWorkspaceRoot);
       if (choice === 'reject') {
         onRejected?.();
       }

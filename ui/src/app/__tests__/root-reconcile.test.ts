@@ -167,7 +167,7 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null, initialSta
     }),
   );
 
-  return { ...hook, sessionRequests, rootRequests, modelRequests, workflowRequests, onStatusMessage, fetchMock, createRequests };
+  return { ...hook, sessionRequests, rootRequests, modelRequests, workflowRequests, onStatusMessage, fetchMock, createRequests, transport };
 };
 
 afterEach(() => {
@@ -511,6 +511,54 @@ const decisionPayload = (id = 'D') => ({
 });
 
 describe('plan card request ownership', () => {
+  it('clears the previous plan while the selected chat workflow is loading', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    act(() => h.result.current.applyRuntimePayload({ mode: 'act', active_plan: { ...reviewedPlan, status: 'running' }, active_task: { task_id: 'task-C', plan_id: reviewedPlan.plan_id, plan_hash: reviewedPlan.plan_hash, status: 'running', started_at: '', updated_at: '' }, auto_state: { run_id: 'run-C', status: 'coding', goal: 'goal-C', started_at: '', updated_at: '' } }));
+    expect(h.result.current.activePlan?.status).toBe('running');
+    expect(h.result.current.activeTask?.task_id).toBe('task-C');
+    expect(h.result.current.autoState?.run_id).toBe('run-C');
+    const session = deferred<Response>(); h.sessionRequests.set('B', session);
+    const state = deferred<Response>(); h.workflowRequests.set('B:/ui/api/state', state);
+    let selection: Promise<void>;
+    act(() => { selection = h.result.current.handleSelectConversation('B'); });
+    expect(h.result.current.selectedConversation).toBe('B');
+    expect(h.result.current.sessionMode).toBe('ask');
+    expect(h.result.current.activePlan).toBeNull();
+    expect(h.result.current.activeTask).toBeNull();
+    expect(h.result.current.autoState).toBeNull();
+    await act(async () => {
+      const workflow = { mode: 'act', active_plan: { ...reviewedPlan, plan_id: 'plan-B', status: 'running' } };
+      session.resolve(jsonResponse({ session: { ...sessionPayload('B', '/root-B').session, ...workflow } }));
+      state.resolve(jsonResponse(workflow));
+      await selection!;
+    });
+    expect(h.result.current.activePlan?.plan_id).toBe('plan-B');
+    expect(h.result.current.sessionMode).toBe('act');
+  });
+
+  it('publishes action results when an executing decision event precedes its HTTP reply', async () => {
+    const h = createHarness();
+    await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+    const decision = { ...decisionPayload(), decision_type: 'project.command/github_import' };
+    act(() => h.result.current.applyRuntimePayload({ decision }));
+    const pending = deferred<Response>(); h.workflowRequests.set('C:/ui/api/decision/respond', pending);
+    const resume = vi.fn(); let request: Promise<void>;
+    act(() => { request = h.result.current.handleDecisionRespond('approve_once', null, resume); });
+    act(() => h.result.current.applyRuntimePayload({ decision: { ...decision, status: 'executing' } }));
+    const payload = { decision: { ...decision, status: 'resolved' }, messages: [{ message_id: 'import-done', role: 'assistant', content: 'Imported' }], resume: { source_endpoint: 'project.command', data: { root_applied: '/imported-project' } } };
+    await act(async () => { pending.resolve(jsonResponse(payload)); await request!; });
+    expect(h.transport.applySessionPayload).toHaveBeenCalledWith(payload, { applyDisplay: false });
+    expect(h.result.current.workspaceRoot).toBe('/imported-project');
+    expect(h.result.current.pendingDecision?.status).toBe('executing');
+    expect(h.result.current.decisionBusy).toBe(false);
+    expect(resume).toHaveBeenCalledWith(payload.resume);
+    // Позднее terminal-событие содержит только workflow и не восстанавливает потерянный результат действия.
+    act(() => h.result.current.applyRuntimePayload({ decision: { ...decision, status: 'resolved' } }));
+    expect(h.result.current.workspaceRoot).toBe('/imported-project');
+    expect(h.result.current.pendingDecision?.status).toBe('resolved');
+  });
+
   it.each(['success', 'error'] as const)('ignores late decision %s in another chat', async (outcome) => {
     const h = createHarness();
     await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
