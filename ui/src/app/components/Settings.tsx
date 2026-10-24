@@ -4,9 +4,7 @@ import {
   Database,
   Download,
   KeyRound,
-  Palette,
   RefreshCcw,
-  TextCursorInput,
   Upload,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
@@ -23,7 +21,7 @@ interface SettingsProps {
   onSaved?: () => void;
 }
 
-type SettingsTab = 'api' | 'assistant' | 'appearance' | 'composer' | 'memory' | 'data';
+type SettingsTab = 'api' | 'personal' | 'memory' | 'data';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai' | 'deepseek';
 type ModelProvider = string;
 type ApiKeySource = 'env' | 'file' | 'missing';
@@ -174,18 +172,14 @@ const RESPONSE_STYLE_OPTIONS = [
 
 const TAB_ITEMS: Array<{ id: SettingsTab; title: string }> = [
   { id: 'api', title: 'Models and connections' },
-  { id: 'assistant', title: 'Assistant' },
-  { id: 'appearance', title: 'Appearance' },
-  { id: 'composer', title: 'Composer' },
+  { id: 'personal', title: 'Conversation and interface' },
   { id: 'memory', title: 'Memory' },
   { id: 'data', title: 'Data' },
 ];
 
 const TAB_ICONS: Record<SettingsTab, typeof KeyRound> = {
   api: KeyRound,
-  assistant: Bot,
-  appearance: Palette,
-  composer: TextCursorInput,
+  personal: Bot,
   memory: BrainCircuit,
   data: Database,
 };
@@ -793,7 +787,7 @@ export function Settings({
   onClose,
   onSaved,
 }: SettingsProps) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>('assistant');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('personal');
   const [canManageInstallation, setCanManageInstallation] = useState(false);
   const [settingsReady, setSettingsReady] = useState(false);
   const preferencesEtag = useRef<string | null>(null);
@@ -824,7 +818,7 @@ export function Settings({
   const [appearanceTheme, setAppearanceTheme] = useState<AppearanceTheme>(
     DEFAULT_APPEARANCE_THEME,
   );
-  const [showAssistantAdvanced, setShowAssistantAdvanced] = useState(false);
+  const [showInputAdvanced, setShowInputAdvanced] = useState(false);
   const [longPasteToFileEnabled, setLongPasteToFileEnabled] = useState(DEFAULT_LONG_PASTE_TO_FILE_ENABLED);
   const [longPasteThresholdChars, setLongPasteThresholdChars] = useState(DEFAULT_LONG_PASTE_THRESHOLD_CHARS);
   const [memoryInboxMaxItems, setMemoryInboxMaxItems] = useState(DEFAULT_MEMORY_INBOX_MAX_ITEMS);
@@ -903,7 +897,7 @@ export function Settings({
       dirtyFields.current.clear();
     }
     if (!parsed.canManageInstallation) {
-      setActiveTab((tab) => ['api', 'memory'].includes(tab) ? 'assistant' : tab);
+      setActiveTab((tab) => ['api', 'memory'].includes(tab) ? 'personal' : tab);
       setApiKeys({ ...EMPTY_API_KEYS });
       setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
     }
@@ -1107,6 +1101,7 @@ export function Settings({
   useEffect(() => {
     if (!isOpen) {
       setSettingsReady(false);
+      setShowInputAdvanced(false);
       setCanManageInstallation(false);
       preferencesEtag.current = null;
       setTone('balanced');
@@ -1943,7 +1938,7 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {settingsReady && !loading && activeTab === 'assistant' ? (
+                  {settingsReady && !loading && activeTab === 'personal' ? (
                     <div>
                       <SectionCard
                         title="Response style"
@@ -1989,41 +1984,27 @@ export function Settings({
                       </SectionCard>
 
                       <SectionCard
-                        title="Advanced assistant behavior"
+                        title="Your instructions"
                         description="Private instructions for your next browser chat request. System policy and approvals still apply."
                         scope="You"
                       >
-                        <button
-                          type="button"
-                          onClick={() => setShowAssistantAdvanced((current) => !current)}
-                          className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-900"
-                        >
-                          {showAssistantAdvanced ? 'Hide advanced editor' : 'Show advanced editor'}
-                        </button>
-                        {showAssistantAdvanced ? (
-                          <div className="mt-4 space-y-3">
-                            <div className="rounded-xl border border-amber-500/30 bg-amber-950/10 px-4 py-3 text-xs text-amber-100/90">
-                              These instructions apply to your browser chats, below system policy. They do not grant tool permissions or replace task approvals.
-                            </div>
-                            <label className="block">
-                              <span className="mb-2 block text-sm font-medium text-zinc-300">Custom instructions</span>
-                              <textarea
-                                data-settings-field="systemPrompt"
-                                value={systemPrompt}
-                                onChange={(event) => setSystemPrompt(event.target.value)}
-                                rows={8}
-                                className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
-                                placeholder="Save your private instructions..."
-                              />
-                            </label>
+                        <div className="mt-4 space-y-3">
+                          <div className="rounded-xl border border-amber-500/30 bg-amber-950/10 px-4 py-3 text-xs text-amber-100/90">
+                            These instructions apply to your browser chats, below system policy. They do not grant tool permissions or replace task approvals.
                           </div>
-                        ) : null}
+                          <label className="block">
+                            <span className="mb-2 block text-sm font-medium text-zinc-300">Custom instructions</span>
+                            <textarea
+                              data-settings-field="systemPrompt"
+                              value={systemPrompt}
+                              onChange={(event) => setSystemPrompt(event.target.value)}
+                              rows={8}
+                              className="w-full resize-none rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-500 focus:outline-none"
+                              placeholder="Save your private instructions..."
+                            />
+                          </label>
+                        </div>
                       </SectionCard>
-                    </div>
-                  ) : null}
-
-                  {settingsReady && !loading && activeTab === 'appearance' ? (
-                    <div>
                       <SectionCard
                         title="Theme"
                         description="Choose the app background style."
@@ -2055,11 +2036,6 @@ export function Settings({
                           }
                         </p>
                       </SectionCard>
-                    </div>
-                  ) : null}
-
-                  {settingsReady && !loading && activeTab === 'composer' ? (
-                    <div>
                       <SectionCard
                         title="Long paste handling"
                         description="Decide when large pasted text should become a file attachment in the message composer."
@@ -2075,47 +2051,58 @@ export function Settings({
                             }}
                           />
                         </Row>
-                        <div className="border-t border-zinc-800/60 pt-3">
-                          <div className="mb-2 text-[13px] text-zinc-200">
-                            Treat pasted text as a file when longer than
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <div className="flex flex-wrap gap-1">
-                              {THRESHOLD_PRESETS.map((preset) => (
-                                <button
-                                  key={preset}
-                                  type="button"
-                                  data-edits-settings
-                                  data-settings-field="longPasteThresholdChars"
-                                  onClick={() => setLongPasteThresholdChars(preset)}
-                                  className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
-                                    longPasteThresholdChars === preset
-                                      ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
-                                      : 'border-zinc-700 text-zinc-400 hover:bg-zinc-900'
-                                  }`}
-                                >
-                                  {formatThresholdPreset(preset)}
-                                </button>
-                              ))}
+                        <button
+                          type="button"
+                          aria-expanded={showInputAdvanced}
+                          onClick={() => setShowInputAdvanced((current) => !current)}
+                          className="mt-3 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-900"
+                        >
+                          Advanced input settings
+                        </button>
+                        {showInputAdvanced ? (
+                          <div className="border-t border-zinc-800/60 pt-3">
+                            <div className="mb-2 text-[13px] text-zinc-200">
+                              Treat pasted text as a file when longer than
                             </div>
-                            <input
-                              type="number"
-                              min={1000}
-                              max={80000}
-                              data-settings-field="longPasteThresholdChars"
-                              value={longPasteThresholdChars}
-                              onChange={(event) => {
-                                const next = Number.parseInt(event.target.value, 10);
-                                if (!Number.isNaN(next)) {
-                                  setLongPasteThresholdChars(next);
-                                }
-                              }}
-                              className={`w-28 rounded-md border bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:outline-none ${
-                                presetIsCustom ? 'border-zinc-500' : 'border-zinc-700'
-                              }`}
-                            />
+                            <div className="flex items-center gap-2">
+                              <div className="flex flex-wrap gap-1">
+                                {THRESHOLD_PRESETS.map((preset) => (
+                                  <button
+                                    key={preset}
+                                    type="button"
+                                    data-edits-settings
+                                    data-settings-field="longPasteThresholdChars"
+                                    onClick={() => setLongPasteThresholdChars(preset)}
+                                    className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                                      longPasteThresholdChars === preset
+                                        ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
+                                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-900'
+                                    }`}
+                                  >
+                                    {formatThresholdPreset(preset)}
+                                  </button>
+                                ))}
+                              </div>
+                              <input
+                                type="number"
+                                min={1000}
+                                max={80000}
+                                aria-label="Long paste threshold (characters)"
+                                data-settings-field="longPasteThresholdChars"
+                                value={longPasteThresholdChars}
+                                onChange={(event) => {
+                                  const next = Number.parseInt(event.target.value, 10);
+                                  if (!Number.isNaN(next)) {
+                                    setLongPasteThresholdChars(next);
+                                  }
+                                }}
+                                className={`w-28 rounded-md border bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:outline-none ${
+                                  presetIsCustom ? 'border-zinc-500' : 'border-zinc-700'
+                                }`}
+                              />
+                            </div>
                           </div>
-                        </div>
+                        ) : null}
                       </SectionCard>
                     </div>
                   ) : null}

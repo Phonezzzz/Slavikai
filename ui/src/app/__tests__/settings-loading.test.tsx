@@ -26,7 +26,7 @@ function settings(prompt = 'saved instructions') {
 }
 
 async function editInstructions(value: string): Promise<HTMLTextAreaElement> {
-  fireEvent.click(await screen.findByRole('button', { name: 'Show advanced editor' }));
+  await screen.findByRole('textbox', { name: 'Custom instructions' });
   const input = screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' });
   fireEvent.change(input, { target: { value } });
   return input;
@@ -45,7 +45,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
     await screen.findByText(/Local embeddings library is missing/);
     expect(screen.queryByRole('button', { name: 'Download model' })).toBeNull();
@@ -62,7 +62,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
     await screen.findByText('local is available locally.');
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
@@ -108,7 +108,7 @@ describe('Settings loading isolation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findAllByText('checking');
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     expect(input.value).toBe('unsaved draft');
     expect(screen.queryByText('Loading settings...')).toBeNull();
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
@@ -131,7 +131,7 @@ describe('Settings loading isolation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findAllByText('Runtime: Provider offline');
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('keep this draft');
     expect(screen.queryByText('Provider offline')).toBeNull();
   });
@@ -196,7 +196,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await vi.waitFor(() => expect(gets).toBe(2));
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
@@ -205,7 +205,7 @@ describe('Settings loading isolation', () => {
     expect(screen.getByText('Loading settings...')).toBeTruthy();
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(true);
     await act(async () => { second.resolve(json(settings('newest refresh'))); });
-    fireEvent.click(await screen.findByRole('button', { name: 'Show advanced editor' }));
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('newest refresh');
   });
 
@@ -230,7 +230,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await vi.waitFor(() => expect(probes).toBe(1));
@@ -273,7 +273,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
     rerender(<Settings isOpen onClose={() => undefined} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Memory' }));
@@ -312,7 +312,7 @@ describe('Settings loading isolation', () => {
     expect(signals[0]?.aborted).toBe(true);
     await act(async () => { oldBody.resolve({ model: 'stale-model', state: 'missing' }); });
     expect(screen.getByText('rechecked-model is available locally.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('keep draft during retry');
   });
 
@@ -335,7 +335,7 @@ describe('Settings loading isolation', () => {
     expect(screen.getByText('Not configured')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findByText('Configured');
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('local unsaved instructions');
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
   });
@@ -363,7 +363,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await vi.waitFor(() => expect(gets).toBe(2));
@@ -392,7 +392,7 @@ describe('Settings loading isolation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await screen.findByText('Credential check: Snapshot offline');
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     expect(screen.queryByText(/Snapshot offline/)).toBeNull();
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('preserve after credential failure');
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
@@ -422,7 +422,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
     await vi.waitFor(() => expect(signals).toHaveLength(1));
@@ -470,7 +470,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'replacement-test-key' } });
     fireEvent.click(screen.getByRole('button', { name: action }));
@@ -511,7 +511,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
     fireEvent.change(screen.getByDisplayValue('old-model'), { target: { value: 'new-model' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
@@ -544,14 +544,14 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'test-key' } });
     fireEvent.click(screen.getByRole('button', { name: action }));
     await vi.waitFor(() => expect(posts).toBe(1));
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
     rerender(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     await editInstructions('reopened unsaved draft');
     await act(async () => { oldBody.resolve(settings('stale saved snapshot')); });
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('reopened unsaved draft');
@@ -582,7 +582,7 @@ describe('Settings loading isolation', () => {
     if (edit === 'text') fireEvent.change(input, { target: { value: 'new unsaved draft' } });
     if (edit === 'button') fireEvent.click(screen.getByRole('button', { name: /Professional/ }));
     if (edit === 'switch') {
-      fireEvent.click(screen.getByRole('button', { name: 'Composer' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
       fireEvent.click(screen.getByRole('switch', { name: 'Convert long paste to file' }));
     }
     await act(async () => {
@@ -596,7 +596,7 @@ describe('Settings loading isolation', () => {
       await screen.findByText(/Your draft was kept/);
       if (edit === 'switch') {
         expect(screen.getByRole('switch', { name: 'Convert long paste to file' }).getAttribute('aria-checked')).toBe('false');
-        fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
       }
       expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value)
         .toBe(edit === 'text' ? 'new unsaved draft' : 'committed instructions');
@@ -672,7 +672,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     const { rerender } = render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(screen.getByLabelText('DeepSeek API key'), { target: { value: 'first-key' } });
     fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
@@ -705,7 +705,7 @@ describe('Settings loading isolation', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    await screen.findByRole('button', { name: 'Show advanced editor' });
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
     fireEvent.click(screen.getByRole('button', { name: 'Download model' }));
     const readsBeforeRecheck = reads;
@@ -749,7 +749,7 @@ describe('Settings loading isolation', () => {
       fireEvent.change(screen.getByRole('combobox', { name: 'Mode' }), { target: { value: 'replace' } });
     }
     await act(async () => { committed = true; post.resolve(json(settings('committed'))); });
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     await screen.findByDisplayValue('committed');
     expect(screen.queryByText(/Your draft was kept/)).toBeNull();
   });
@@ -794,7 +794,7 @@ describe('Settings loading isolation', () => {
     await vi.waitFor(() => expect(gets).toBeGreaterThanOrEqual(3));
     if (status === 200) await screen.findByRole('option', { name: 'test-model' });
     else await vi.waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Load models' }).disabled).toBe(false));
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     const reconciled = await screen.findByDisplayValue(editDraft ? 'unsaved draft' : 'committed');
     fireEvent.change(reconciled, { target: { value: 'next local preference' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
@@ -923,7 +923,7 @@ describe('settings scope transactions', () => {
     expect(writes[0].body).not.toHaveProperty('personalization');
     expect(writes[1].body).not.toHaveProperty('providers');
     expect(writes[1].etag).toBe('"preferences-fixture-0"');
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Custom instructions' }).value).toBe('private pending draft');
   });
 
@@ -1024,5 +1024,51 @@ describe('provider connection cards', () => {
     await card.findByText('2 models');
     expect(card.getByText('Catalog source: API response')).toBeTruthy();
     expect(screen.queryByText('Provider status')).toBeNull();
+  });
+});
+
+
+describe('personal settings grouping', () => {
+  it.each([false, true])('keeps personal fields together and saves only their groups (owner=%s)', async (owner) => {
+    const writes: Array<{ body: unknown; etag: string | null }> = [];
+    const snapshot = { settings: { ...settings().settings, can_manage_installation: owner,
+      preferences_etag: '"personal-0"', composer: { long_paste_to_file_enabled: true, long_paste_threshold_chars: 19000 } } };
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === SETTINGS_URL) {
+        if (init?.method === 'POST') writes.push({ body: JSON.parse(String(init.body)), etag: new Headers(init.headers).get('If-Match') });
+        return json(snapshot);
+      }
+      if (url === EMBEDDINGS_URL) return json({ state: 'ready' });
+      throw new Error(`Unexpected URL: ${url}`);
+    }));
+    render(<Settings isOpen onClose={() => undefined} />);
+    await screen.findByRole('button', { name: 'Conversation and interface' });
+    const instructions = await screen.findByRole('textbox', { name: 'Custom instructions' });
+    expect(screen.getByRole('button', { name: 'OLED' })).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Convert long paste to file' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Appearance' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Composer' })).toBeNull();
+    const advanced = screen.getByRole('button', { name: 'Advanced input settings' });
+    expect(advanced.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('spinbutton', { name: 'Long paste threshold (characters)' })).toBeNull();
+    fireEvent.click(advanced);
+    expect((screen.getByRole('spinbutton', { name: 'Long paste threshold (characters)' }) as HTMLInputElement).value).toBe('19000');
+    fireEvent.click(advanced);
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('No changes to save.');
+    expect(writes).toEqual([]);
+    fireEvent.change(instructions, { target: { value: 'personal instructions' } });
+    fireEvent.click(screen.getByRole('button', { name: /Professional/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'OLED' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Convert long paste to file' }));
+    fireEvent.click(advanced);
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Long paste threshold (characters)' }), { target: { value: '23000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await screen.findByText('Settings saved.');
+    expect(writes).toEqual([{ etag: '"personal-0"', body: {
+      personalization: { tone: 'professional', system_prompt: 'personal instructions' },
+      appearance: { theme: 'oled' },
+      composer: { long_paste_to_file_enabled: false, long_paste_threshold_chars: 23000 },
+    } }]);
   });
 });

@@ -91,7 +91,7 @@ describe('generic provider onboarding', () => {
       throw new Error(`Unexpected URL: ${url}`);
     }));
     render(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Show advanced editor' }));
+    await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.change(screen.getByRole('textbox', { name: 'Custom instructions' }), { target: { value: 'unsaved value' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
     fireEvent.change(await screen.findByRole('textbox', { name: 'Provider display name' }), { target: { value: 'Example' } });
@@ -101,7 +101,7 @@ describe('generic provider onboarding', () => {
     await screen.findByText('Connected. Found 1 models.');
     fireEvent.click(screen.getByRole('button', { name: 'Save provider' }));
     await screen.findByText('Provider saved. Select it in the chat model picker when ready.');
-    fireEvent.click(screen.getByRole('button', { name: 'Assistant' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation and interface' }));
     expect((screen.getByRole('textbox', { name: 'Custom instructions' }) as HTMLTextAreaElement).value).toBe('unsaved value');
   });
 
