@@ -487,6 +487,21 @@
         "tests/ui_api/test_memory_management.py"
       ],
       "summary": "Settings reads paged owned canonical Memory independently of models/chats and previews one exact-revision deletion before explicit confirmation through the existing API. Account/operation/epoch fences reject mismatched and late responses; reopened panels wait for known confirmations before listing. No bulk wipe or false erasure claim. UI fixtures and temporary-store HTTP evidence do not establish deployed Access/provider behavior."
+    },
+    {
+      "id": "settings.context_budget_read_view",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_context_budget_view.py",
+        "ui/src/app/__tests__/context-budget-view.test.tsx",
+        "server/http/common/settings_runtime.py",
+        "ui/src/app/components/context-budget-view.tsx"
+      ],
+      "summary": "Owner Settings projects twelve configured ContextBudgetConfig values through a narrow separate read-only GET field and Advanced table. Member has no projection; writes to diagnostics or nested context_budget are rejected before settings mutation. No duplicated React defaults, per-field provenance, running Agent effective snapshot, token window or Auto enforcement claim."
     }
   ]
 }

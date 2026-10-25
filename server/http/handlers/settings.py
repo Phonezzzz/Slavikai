@@ -235,7 +235,9 @@ def _settings_response(request: web.Request) -> web.Response:
     if principal is None:
         raise RuntimeError("Request principal is unavailable")
     owner = _require_owner(request) is None
-    payload = api._build_settings_payload(include_custom_providers=owner)
+    payload = api._build_settings_payload(
+        include_custom_providers=owner, include_context_budget=owner
+    )
     settings = cast(dict[str, JSONValue], payload["settings"])
     snapshot = cast(PreferencesStore, request.app["preferences_store"]).get(principal)
     settings.update(snapshot.value.to_dict())
@@ -323,6 +325,16 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
     owner_error = _require_owner(request)
     if owner_error is not None:
         return owner_error
+    memory_input = payload.get("memory")
+    if set(payload) & {"context_budget_snapshot", "context_budget"} or (
+        isinstance(memory_input, dict) and "context_budget" in memory_input
+    ):
+        return error_response(
+            status=400,
+            message="Бюджеты контекста доступны только для чтения.",
+            error_type="invalid_request_error",
+            code="context_budget_read_only",
+        )
     forbidden_key = api._user_plane_forbidden_settings_key(payload)
     if forbidden_key is not None:
         return error_response(

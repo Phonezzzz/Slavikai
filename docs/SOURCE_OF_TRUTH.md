@@ -166,6 +166,17 @@ Settings snapshot; чужие/поздние ответы отбрасывают
 Удаление не очищает уже переданный модели context или сохранённую историю.
 Новая destructive capability модели не предоставляется.
 
+## Настроенные budgets контекста
+
+Owner Settings → Memory and data → Advanced показывает read-only snapshot12 полей
+ContextBudgetConfig из существующего server loader. GET settings отдаёт отдельное
+`context_budget_snapshot` только owner, вне editable `memory`. POST snapshot либо
+`memory.context_budget` отклоняется без записи. Значения загружаются при refresh,
+источник — Memory configuration с server defaults; per-field file/default provenance
+не заявляется. Running Agent может хранить более ранний snapshot. Это chars/items
+контекстной сборки, не model token window и не гарантия Auto execution budgets.
+Member diagnostics не получает; React не дублирует значения по умолчанию.
+
 ## Custom native tool protocol admission
 
 Custom route начинается Chat-only. Только явная verified owner/session проверка

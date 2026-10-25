@@ -158,7 +158,7 @@ class SettingsRuntimeBindings:
         ui_settings._save_default_model(config, model_config_path=self._model_config_path())
 
     def build_settings_payload(
-        self, *, include_custom_providers: bool = True
+        self, *, include_custom_providers: bool = True, include_context_budget: bool = False
     ) -> dict[str, JSONValue]:
         policy_profile, yolo_armed, yolo_armed_at = self.load_policy_settings()
         memory_config = self.load_memory_config_fn()
@@ -181,6 +181,20 @@ class SettingsRuntimeBindings:
         return {
             "settings": {
                 "model": default_model_payload,
+                **(
+                    {
+                        "context_budget_snapshot": {
+                            "values": {
+                                key: value
+                                for key, value in memory_config.context_budget.to_dict().items()
+                            },
+                            "basis": "server_configuration_at_refresh",
+                            "source": "Memory configuration with server defaults",
+                        }
+                    }
+                    if include_context_budget
+                    else {}
+                ),
                 "memory": {
                     "inbox_max_items": memory_config.inbox_max_items,
                     "inbox_ttl_days": memory_config.inbox_ttl_days,

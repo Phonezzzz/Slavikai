@@ -12,6 +12,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import type { ChangeEvent, ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 
+import { ContextBudgetView } from './context-budget-view';
 import { MemoryItems, type MemoryWrites } from './memory-items';
 import { StatusBadge, type StatusTone } from './ui/status-badge';
 import { ToggleSwitch } from './ui/toggle-switch';
@@ -90,6 +91,7 @@ type ParsedSettings = {
   longPasteToFileEnabled: boolean;
   longPasteThresholdChars: number;
   memorySettingsProvided: boolean;
+  contextBudgetSnapshot: unknown;
   memoryInboxMaxItems: number;
   memoryInboxTtlDays: number;
   memoryInboxWritesPerMinute: number;
@@ -346,6 +348,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     longPasteToFileEnabled: DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
     longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
     memorySettingsProvided: false,
+    contextBudgetSnapshot: null,
     memoryInboxMaxItems: DEFAULT_MEMORY_INBOX_MAX_ITEMS,
     memoryInboxTtlDays: DEFAULT_MEMORY_INBOX_TTL_DAYS,
     memoryInboxWritesPerMinute: DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE,
@@ -544,11 +547,12 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
-  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown };
+  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown };
   return {
     preferencesEtag: typeof metadata.preferences_etag === 'string' ? metadata.preferences_etag : null,
     preferencesSubject: typeof metadata.preferences_subject === 'string' ? metadata.preferences_subject : null,
     canManageInstallation: metadata.can_manage_installation === true,
+    contextBudgetSnapshot: metadata.context_budget_snapshot ?? null,
     providers,
     providerInstances,
     ttsBackend,
@@ -835,6 +839,7 @@ export function Settings({
   const [showInputAdvanced, setShowInputAdvanced] = useState(false);
   const [longPasteToFileEnabled, setLongPasteToFileEnabled] = useState(DEFAULT_LONG_PASTE_TO_FILE_ENABLED);
   const [longPasteThresholdChars, setLongPasteThresholdChars] = useState(DEFAULT_LONG_PASTE_THRESHOLD_CHARS);
+  const [contextBudgetSnapshot, setContextBudgetSnapshot] = useState<unknown>(null);
   const [memorySettingsProvided, setMemorySettingsProvided] = useState(false);
   const [memoryInboxMaxItems, setMemoryInboxMaxItems] = useState(DEFAULT_MEMORY_INBOX_MAX_ITEMS);
   const [memoryInboxTtlDays, setMemoryInboxTtlDays] = useState(DEFAULT_MEMORY_INBOX_TTL_DAYS);
@@ -933,6 +938,7 @@ export function Settings({
     }
     setSettingsReady(true);
     setMemorySettingsProvided(parsed.memorySettingsProvided);
+    setContextBudgetSnapshot(parsed.contextBudgetSnapshot);
     setCanManageInstallation(parsed.canManageInstallation);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
@@ -1132,6 +1138,7 @@ export function Settings({
   useEffect(() => {
     if (!isOpen) {
       setSettingsReady(false);
+      setContextBudgetSnapshot(null);
       setDeveloperView(false);
       setShowMemoryAdvanced(false);
       setActiveTab((tab) => tab === 'developer' ? 'personal' : tab);
@@ -2391,6 +2398,7 @@ export function Settings({
                             />
                             </Row>
                           )}
+                          <ContextBudgetView snapshot={contextBudgetSnapshot} />
                         </SectionCard>
                       ) : null}
                     </div>
