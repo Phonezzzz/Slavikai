@@ -307,6 +307,12 @@ class DesktopPolicyStore:
             normalized_subject = subject_principal_id.strip()
             return [rule for rule in rules if rule.subject_principal_id == normalized_subject]
 
+    def inspect_rules(self, *, subject_principal_id: str) -> list[DesktopApprovalRule]:
+        with self._lock:
+            rules = self._load_locked(persist_legacy_mapping=False)
+            subject = subject_principal_id.strip()
+            return [rule for rule in rules if rule.subject_principal_id == subject]
+
     def list_load_errors(self) -> list[str]:
         with self._lock:
             return list(self._load_errors)
@@ -375,7 +381,7 @@ class DesktopPolicyStore:
             self._load_errors = []
             return errors
 
-    def _load_locked(self) -> list[DesktopApprovalRule]:
+    def _load_locked(self, *, persist_legacy_mapping: bool = True) -> list[DesktopApprovalRule]:
         self._load_errors = []
         if not self.path.exists():
             return []
@@ -410,7 +416,7 @@ class DesktopPolicyStore:
             raise ValueError(
                 "Desktop approval store contains invalid rules: " + "; ".join(self._load_errors)
             )
-        if migrated and not self._load_errors:
+        if migrated and not self._load_errors and persist_legacy_mapping:
             self._write_locked(rules)
         return rules
 

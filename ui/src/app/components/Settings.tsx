@@ -12,6 +12,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import type { ChangeEvent, ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 
+import { DesktopApprovalsPanel } from '../../features/desktop/desktop-approvals-panel';
 import { ModelConfigView } from './model-config-view';
 import { ContextBudgetView } from './context-budget-view';
 import { MemoryItems, type MemoryWrites } from './memory-items';
@@ -809,6 +810,7 @@ export function Settings({
   const [activeTab, setActiveTab] = useState<SettingsTab>('personal');
   const [developerView, setDeveloperView] = useState(false);
   const [showModelAdvanced, setShowModelAdvanced] = useState(false);
+  const [showDesktopRules, setShowDesktopRules] = useState(false);
   const [modelConfigSnapshot, setModelConfigSnapshot] = useState<unknown>(null);
   const [showMemoryAdvanced, setShowMemoryAdvanced] = useState(false);
   const [canManageInstallation, setCanManageInstallation] = useState(false);
@@ -926,6 +928,7 @@ export function Settings({
       setDeveloperView(false);
       setShowMemoryAdvanced(false);
       setShowModelAdvanced(false);
+      setShowDesktopRules(false);
       setActiveTab((tab) => tab === 'developer' ? 'personal' : tab);
       clearImportPreview();
       onboardingEpoch.current += 1;
@@ -1151,6 +1154,7 @@ export function Settings({
       setDeveloperView(false);
       setShowMemoryAdvanced(false);
       setShowModelAdvanced(false);
+      setShowDesktopRules(false);
       setActiveTab((tab) => tab === 'developer' ? 'personal' : tab);
       setShowInputAdvanced(false);
       setCanManageInstallation(false);
@@ -1765,6 +1769,7 @@ export function Settings({
                   ) : null}
 
                   {settingsReady && !loading && activeTab === 'access' ? (
+                    <>
                     <SectionCard title="Chat access and environment" description="Permissions belong to the selected chat and its execution environment." scope="Current chat">
                       <p className="mb-3 text-xs text-zinc-400">Use the existing chat controls to inspect tools, policy and model qualification. Opening this screen does not grant access or approve a task.</p>
                       <p className="mb-3 text-xs text-zinc-400">Task approvals stay with the action in the chat. Desktop is an explicit host environment with its own policy and approvals.</p>
@@ -1774,6 +1779,13 @@ export function Settings({
                       >Open chat controls</button>
                       {!onOpenSessionControls ? <p className="mt-2 text-xs text-zinc-500">Choose a chat first to use its controls.</p> : null}
                     </SectionCard>
+                    {canManageInstallation ? <SectionCard title="Saved Desktop rules" description="Inspect your saved Desktop policy without changing access." scope="Your saved rules">
+                      <button type="button" aria-expanded={showDesktopRules} onClick={() => setShowDesktopRules(value => !value)}
+                        className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300"
+                      >{showDesktopRules ? 'Hide saved Desktop rules' : 'Show saved Desktop rules'}</button>
+                      {showDesktopRules ? <DesktopApprovalsPanel key={preferencesSubject.current} subject={preferencesSubject.current ?? ''} /> : null}
+                    </SectionCard> : null}
+                    </>
                   ) : null}
                   {settingsReady && !loading && developerView && activeTab === 'developer' ? (
                     <div>

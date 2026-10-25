@@ -9,10 +9,14 @@ from core.desktop_policy import (
     PolicyEffect,
 )
 from server.http.common.auth import _request_principal_id, _require_owner
+from server.http.common.desktop_approval_read_view import project_saved_desktop_rule
 from server.http.common.responses import error_response, json_response
+from shared.identity import principal_subject
 
 
 async def handle_desktop_approval_rules_list(request: web.Request) -> web.Response:
+    if "view" in request.query:
+        return _settings_read_view(request)
     owner_error = _require_owner(request)
     if owner_error is not None:
         return owner_error
@@ -40,6 +44,50 @@ async def handle_desktop_approval_rules_list(request: web.Request) -> web.Respon
             "rules": [rule.to_dict() for rule in rules],
             "load_warnings": store.list_load_errors(),
         }
+    )
+
+
+def _settings_read_view(request: web.Request) -> web.Response:
+    def private(response: web.Response) -> web.Response:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "Cookie, Cf-Access-Jwt-Assertion, Authorization"
+        return response
+
+    owner_error = _require_owner(request)
+    if owner_error is not None:
+        return private(owner_error)
+    if request.query.get("view") != "settings":
+        return private(
+            error_response(
+                status=400,
+                message="Unknown Desktop rules view.",
+                error_type="invalid_request_error",
+                code="invalid_desktop_rules_view",
+            )
+        )
+    principal = _request_principal_id(request)
+    if principal is None:
+        raise RuntimeError("Owner request has no principal")
+    store: DesktopPolicyStore = request.app["desktop_policy_store"]
+    try:
+        rules = store.inspect_rules(subject_principal_id=principal)
+    except (OSError, ValueError):
+        return private(
+            error_response(
+                status=409,
+                message="Saved Desktop rules are unavailable.",
+                error_type="invalid_request_error",
+                code="desktop_approval_store_invalid",
+            )
+        )
+    return private(
+        json_response(
+            {
+                "basis": "saved_desktop_rules_at_refresh",
+                "preferences_subject": principal_subject(principal),
+                "rules": [project_saved_desktop_rule(rule) for rule in rules],
+            }
+        )
     )
 
 

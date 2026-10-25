@@ -549,6 +549,21 @@
         "ui/src/app/components/session-drawer.tsx"
       ],
       "summary": "Browser validates the existing owned session security snapshot before showing known policy/safe-mode or editable controls. Malformed, foreign, missing and failed reads remain unavailable. Epoch and conversation guards reject late read/save completions; reopening waits for known pending writes then reads, with no automatic POST retry. Save settlement separately refreshes the still-selected saved session summary even after the panel closes; other sessions are ignored. Existing explicit save and YOLO confirmations are preserved. No server authorization, grant provenance/revision/revoke, Desktop approval or instant identity fencing claim."
+    },
+    {
+      "id": "settings.saved_desktop_rules_read_view",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_desktop_approval_read_view.py",
+        "ui/src/app/__tests__/desktop-approvals-panel.test.tsx",
+        "server/http/common/desktop_approval_read_view.py",
+        "ui/src/features/desktop/desktop-approvals-panel.tsx"
+      ],
+      "summary": "Owner Settings reads a narrow principal-bound saved Desktop rule projection through the existing shared store. Inspection never rewrites the rule file; existing runtime/list/mutation behavior is preserved. Sensitive command/description/ID/email/error contents are omitted; non-file and command/risk restrictions remain explicitly hidden. Captured-subject/epoch guards reject foreign and late responses; read failure is not an empty list, UI has no mutators. No new grant authority, revoke, effective-action permission, transient approval or host lease claim."
     }
   ]
 }

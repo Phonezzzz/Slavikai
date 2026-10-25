@@ -287,3 +287,20 @@ profile/tools_state не становится Sandbox либо safe-mode ON/OFF.
 включая закрытую панель. Существующий explicit save,
 YOLO confirmations и server enforcement не меняются. Это UI read-state contract,
 не authoritative unified grant/source/revision/revoke или Desktop approval view.
+
+## Сохранённые Desktop rules в Settings
+
+Owner Access → Show saved Desktop rules показывает отдельную read-only projection
+существующего Desktop store через GET `/ui/api/desktop/approvals?view=settings`.
+Rules ограничены текущим verified owner; member не получает view. Opaque
+preferences_subject связывает ответ с Settings principal, ответы private/no-store.
+Неверный или повреждённый snapshot означает Unavailable, а не пустой список.
+
+View не переписывает rule file, включая существующую интерпретацию legacy subject.
+Текущие runtime matching, list_rules, write routes и persisted schema не меняются.
+Projection не передаёт description, command contents, email, raw rule IDs либо raw
+load errors. File target path показывает сохранённую область; non-file target и
+command/risk restrictions помечаются как скрытые. Saved effect/source не являются
+обещанием effective permission: transient once/session approvals и текущий host
+lease здесь не перечисляются, DENY сохраняет precedence. UI не изменяет/revokes
+rules и не предлагает reset-invalid. Source и lifetime — saved policy при refresh.
