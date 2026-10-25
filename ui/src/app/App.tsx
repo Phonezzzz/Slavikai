@@ -787,11 +787,9 @@ export default function App() {
       <SessionControlShell
         isOpen={overlays.sessionDrawerOpen}
         onClose={() => overlays.setSessionDrawerOpen(false)}
-        onSaved={() => {
-          setStatusMessage('Session controls updated.');
-          void runtime.refreshSessionSecuritySummary().catch(() => {
-            setStatusMessage('Session controls updated, but session summary refresh failed.');
-          });
+        onSaveSettled={(savedSessionId) => {
+          // Ошибка refresh уже оставляет сводку явно недоступной.
+          void runtime.refreshSessionSecuritySummary(savedSessionId).catch(() => undefined);
         }}
         sessionId={runtime.selectedConversation}
         sessionHeader={SESSION_HEADER}

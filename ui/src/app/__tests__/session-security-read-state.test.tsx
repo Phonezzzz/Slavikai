@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { StrictMode } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { WorkspaceToolbar } from '../../features/workspace/workspace-toolbar';
-import { SessionDrawer } from '../components/session-drawer';
+import { SessionControlShell as SessionDrawer } from '../components/session-control-shell';
 import { loadSessionSecuritySummary, parseSessionSecuritySummary } from '../session-security';
 const payload = (id = 'A', profile = 'sandbox') => ({ session_id: id, policy: { profile }, tools_state: { fs: true, shell: false, web: false, project: false, img: false, tts: false, stt: false, safe_mode: profile !== 'yolo' } });
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -54,16 +54,16 @@ it('waits for a pending explicit save before reading a reopened panel without re
     if (init?.method === 'POST') { posts++; return saved.promise; }
     gets++; return json(payload('A'));
   }));
-  const h = render(<SessionDrawer {...props} onSaved={onSaved} />);
+  const h = render(<SessionDrawer {...props} onSaveSettled={onSaved} />);
   await screen.findByText('Session controls ready.');
   fireEvent.click(screen.getByRole('button', { name: 'Save session controls' }));
-  h.rerender(<SessionDrawer {...props} isOpen={false} onSaved={onSaved} />);
-  h.rerender(<SessionDrawer {...props} onSaved={onSaved} />);
+  h.rerender(<SessionDrawer {...props} isOpen={false} onSaveSettled={onSaved} />);
+  h.rerender(<SessionDrawer {...props} onSaveSettled={onSaved} />);
   expect((screen.getByRole('button', { name: 'Save session controls' }) as HTMLButtonElement).disabled).toBe(true);
   expect(gets).toBe(1);
   await act(async () => { saved.resolve(json(payload('A'))); });
   await screen.findByText('Session controls ready.');
-  expect(gets).toBe(2); expect(posts).toBe(1); expect(onSaved).not.toHaveBeenCalled();
+  expect(gets).toBe(2); expect(posts).toBe(1); expect(onSaved).toHaveBeenCalledWith('A');
 });
 it('keeps the existing two explicit confirmations for an unrestricted profile', async () => {
   const posts: RequestInit[] = [];
@@ -102,12 +102,12 @@ it('does not apply a late save response or callback to the next session', async 
     if (init?.method === 'POST') { writes.push(id); return old.promise; }
     return json(payload(id, id === 'A' ? 'sandbox' : 'index'));
   }));
-  const h = render(<SessionDrawer {...props} onSaved={onSaved} />);
+  const h = render(<SessionDrawer {...props} onSaveSettled={onSaved} />);
   await screen.findByText('Session controls ready.');
   fireEvent.click(screen.getByRole('button', { name: 'Save session controls' }));
-  h.rerender(<SessionDrawer {...props} sessionId="B" onSaved={onSaved} />);
+  h.rerender(<SessionDrawer {...props} sessionId="B" onSaveSettled={onSaved} />);
   await screen.findByText('Session controls ready.');
   await act(async () => { old.resolve(json(payload('A', 'yolo'))); });
-  expect(screen.queryByText('Danger zone')).toBeNull(); expect(onSaved).not.toHaveBeenCalled();
+  expect(screen.queryByText('Danger zone')).toBeNull(); expect(onSaved).toHaveBeenCalledWith('A');
   expect(writes).toEqual(['A']);
 });

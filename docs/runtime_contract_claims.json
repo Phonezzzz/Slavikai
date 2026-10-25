@@ -548,7 +548,7 @@
         "ui/src/app/session-security.ts",
         "ui/src/app/components/session-drawer.tsx"
       ],
-      "summary": "Browser validates the existing owned session security snapshot before showing known policy/safe-mode or editable controls. Malformed, foreign, missing and failed reads remain unavailable. Epoch and conversation guards reject late read/save completions; reopening waits for known pending writes then reads, with no automatic POST retry. Existing explicit save and YOLO confirmations are preserved. No server authorization, grant provenance/revision/revoke, Desktop approval or instant identity fencing claim."
+      "summary": "Browser validates the existing owned session security snapshot before showing known policy/safe-mode or editable controls. Malformed, foreign, missing and failed reads remain unavailable. Epoch and conversation guards reject late read/save completions; reopening waits for known pending writes then reads, with no automatic POST retry. Save settlement separately refreshes the still-selected saved session summary even after the panel closes; other sessions are ignored. Existing explicit save and YOLO confirmations are preserved. No server authorization, grant provenance/revision/revoke, Desktop approval or instant identity fencing claim."
     }
   ]
 }

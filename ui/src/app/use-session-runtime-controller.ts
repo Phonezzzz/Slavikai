@@ -101,7 +101,7 @@ export type SessionRuntimeControllerResult = {
     onRejected?: () => void,
   ) => Promise<void>;
   applyWorkspaceRoot: (workspaceRoot: string) => void;
-  refreshSessionSecuritySummary: () => Promise<void>;
+  refreshSessionSecuritySummary: (sessionId?: string | null) => Promise<void>;
   applyRuntimePayload: (payload: unknown) => void;
 };
 

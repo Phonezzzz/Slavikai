@@ -282,6 +282,8 @@ profile/tools_state не становится Sandbox либо safe-mode ON/OFF.
 
 Смена/закрытие панели отбрасывает поздние reads и completions прежней панели.
 Повторное открытие той же сессии ждёт известный отправленный POST и затем читает
-состояние заново; POST автоматически не повторяется. Существующий explicit save,
+состояние заново; POST автоматически не повторяется. Завершение отправленного save
+запускает отдельное чтение сводки только если сохранённая сессия всё ещё выбрана,
+включая закрытую панель. Существующий explicit save,
 YOLO confirmations и server enforcement не меняются. Это UI read-state contract,
 не authoritative unified grant/source/revision/revoke или Desktop approval view.

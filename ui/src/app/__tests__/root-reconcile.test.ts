@@ -807,3 +807,18 @@ it('does not publish a late session security refresh into a different conversati
   await act(async () => { old.resolve({ policyLabel: 'YOLO', safeMode: false, yoloActive: true }); await pending; });
   expect(h.result.current.sessionSecuritySummary).toEqual(DEFAULT_SESSION_SECURITY_SUMMARY);
 });
+
+it('reconciles a closed save for the selected session and ignores a different saved session', async () => {
+  const h = createHarness();
+  await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+  const reload = vi.mocked(loadSessionSecuritySummary);
+  reload.mockResolvedValueOnce({ policyLabel: 'YOLO', safeMode: false, yoloActive: true });
+  await act(async () => { await h.result.current.refreshSessionSecuritySummary('C'); });
+  expect(h.result.current.sessionSecuritySummary.yoloActive).toBe(true);
+  const oldRefresh = h.result.current.refreshSessionSecuritySummary;
+  await act(async () => { await h.result.current.handleSelectConversation('B'); });
+  const count = reload.mock.calls.length;
+  await act(async () => { await oldRefresh('C'); });
+  expect(reload.mock.calls).toHaveLength(count);
+  expect(h.result.current.sessionSecuritySummary.yoloActive).toBe(false);
+});

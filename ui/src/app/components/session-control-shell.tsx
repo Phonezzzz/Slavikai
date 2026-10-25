@@ -4,7 +4,7 @@ import { SessionDrawer } from './session-drawer';
 type SessionControlShellProps = {
   isOpen: boolean;
   onClose: () => void;
-  onSaved: () => void;
+  onSaveSettled?: (sessionId: string) => void;
   sessionId: string | null;
   sessionHeader: string;
   mode: SessionMode;
@@ -15,7 +15,7 @@ type SessionControlShellProps = {
 export function SessionControlShell({
   isOpen,
   onClose,
-  onSaved,
+  onSaveSettled,
   sessionId,
   sessionHeader,
   mode,
@@ -26,7 +26,7 @@ export function SessionControlShell({
     <SessionDrawer
       isOpen={isOpen}
       onClose={onClose}
-      onSaved={onSaved}
+      onSaveSettled={onSaveSettled}
       sessionId={sessionId}
       sessionHeader={sessionHeader}
       mode={mode}

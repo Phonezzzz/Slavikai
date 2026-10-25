@@ -14,7 +14,7 @@ import {
 type SessionDrawerProps = {
   isOpen: boolean;
   onClose: () => void;
-  onSaved?: () => void;
+  onSaveSettled?: (sessionId: string) => void;
   sessionId: string | null;
   sessionHeader: string;
   mode: SessionMode;
@@ -81,7 +81,7 @@ const buildSafetyPreset = (): Record<ToolKey, boolean> => ({
 export function SessionDrawer({
   isOpen,
   onClose,
-  onSaved,
+  onSaveSettled,
   sessionId,
   sessionHeader,
   mode,
@@ -217,11 +217,11 @@ export function SessionDrawer({
         setToolsState(parsed.toolsState);
         setPolicyProfile(parsed.policyProfile);
         setStatus('Session controls updated.');
-        onSaved?.();
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to save session controls.';
         if (current()) { setLoadedSession(null); setStatus(message); }
       } finally {
+        onSaveSettled?.(sessionId);
         if (current()) setSaving(false);
       }
     })();
