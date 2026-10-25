@@ -1,3 +1,5 @@
+import { useBrowserSubject } from '../../app/browser-subject';
+import { readBrowserHint, writeBrowserHint } from '../../app/session-storage';
 import { useEffect, useRef, useState } from 'react';
 import { Folder, FolderOpen, X, ArrowUp, ChevronRight } from 'lucide-react';
 import {
@@ -18,9 +20,9 @@ type ProjectPickerProps = {
 const RECENT_ROOTS_KEY = 'slavik.project-picker.recent-roots';
 const MAX_RECENT_ROOTS = 10;
 
-const loadRecentRoots = (): string[] => {
+const loadRecentRoots = (subject: string | null): string[] => {
   try {
-    const raw = localStorage.getItem(RECENT_ROOTS_KEY);
+    const raw = readBrowserHint(subject, RECENT_ROOTS_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (Array.isArray(parsed)) {
@@ -32,12 +34,12 @@ const loadRecentRoots = (): string[] => {
   return [];
 };
 
-const saveRecentRoot = (rootPath: string): void => {
-  const current = loadRecentRoots();
+const saveRecentRoot = (subject: string | null, rootPath: string): void => {
+  const current = loadRecentRoots(subject);
   const filtered = current.filter((r) => r !== rootPath);
   const next = [rootPath, ...filtered].slice(0, MAX_RECENT_ROOTS);
   try {
-    localStorage.setItem(RECENT_ROOTS_KEY, JSON.stringify(next));
+    writeBrowserHint(subject, RECENT_ROOTS_KEY, JSON.stringify(next));
   } catch {
     // ignore
   }
@@ -51,13 +53,14 @@ export function ProjectPicker({
   onApplyRoot,
   onClose,
 }: ProjectPickerProps) {
+  const browserSubject = useBrowserSubject();
   const [browsePath, setBrowsePath] = useState(workspaceRoot || '');
   const [browseResult, setBrowseResult] = useState<BrowseResult | null>(null);
   const [browseError, setBrowseError] = useState<string | null>(null);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [recentRoots] = useState<string[]>(() => loadRecentRoots());
+  const [recentRoots] = useState<string[]>(() => loadRecentRoots(browserSubject));
   const listRef = useRef<HTMLDivElement>(null);
 
   const requestHeaders: Record<string, string> = sessionId
@@ -121,13 +124,13 @@ export function ProjectPicker({
   const handleApplyCurrent = () => {
     const root = browsePath.trim();
     if (root) {
-      saveRecentRoot(root);
+      saveRecentRoot(browserSubject, root);
       onApplyRoot(root);
     }
   };
 
   const handleRecentClick = (recentPath: string) => {
-    saveRecentRoot(recentPath);
+    saveRecentRoot(browserSubject, recentPath);
     onApplyRoot(recentPath);
   };
 

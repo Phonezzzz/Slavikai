@@ -11,6 +11,8 @@ from server.http.common.auth import (
     _ui_auth_cookie_value,
 )
 from server.http.common.responses import error_response, json_response
+from shared.identity import principal_subject
+from shared.models import JSONValue
 
 _COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
 
@@ -20,11 +22,33 @@ def _secure_cookie_required(request: web.Request) -> bool:
     return request.secure or forwarded_proto.lower() == "https"
 
 
+def _auth_status_response(request: web.Request, payload: dict[str, JSONValue]) -> web.Response:
+    config: HttpAuthConfig = request.app["auth_config"]
+    identity = _request_identity(request)
+    principal = identity.principal_id if identity is not None else None
+    if identity is None and (config.allow_unauth_local or config.browser_auth_mode == "token"):
+        principal = _resolve_request_principal_id(request, config)
+    payload["browser_subject"] = (
+        principal_subject(principal)
+        if principal is not None
+        and (
+            payload.get("authenticated") is True
+            or (config.allow_unauth_local and payload.get("auth_required") is False)
+        )
+        else None
+    )
+    response = json_response(payload)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Cf-Access-Jwt-Assertion, Cookie"
+    return response
+
+
 async def handle_ui_auth_status(request: web.Request) -> web.Response:
     auth_config: HttpAuthConfig = request.app["auth_config"]
     if auth_config.allow_unauth_local:
         identity = _request_identity(request)
-        return json_response(
+        return _auth_status_response(
+            request,
             {
                 "ok": True,
                 "authenticated": identity is not None,
@@ -32,11 +56,12 @@ async def handle_ui_auth_status(request: web.Request) -> web.Response:
                 "auth_method": "local",
                 "principal_id": identity.principal_id if identity is not None else None,
                 "role": identity.role if identity is not None else None,
-            }
+            },
         )
     if auth_config.browser_auth_mode == "cloudflare":
         identity = _request_identity(request)
-        return json_response(
+        return _auth_status_response(
+            request,
             {
                 "ok": True,
                 "authenticated": identity is not None,
@@ -45,15 +70,16 @@ async def handle_ui_auth_status(request: web.Request) -> web.Response:
                 "principal_id": identity.principal_id if identity is not None else None,
                 "email": identity.email if identity is not None else None,
                 "role": identity.role if identity is not None else None,
-            }
+            },
         )
-    return json_response(
+    return _auth_status_response(
+        request,
         {
             "ok": True,
             "authenticated": _resolve_request_principal_id(request, auth_config) is not None,
             "auth_required": not auth_config.allow_unauth_local,
             "auth_method": "token",
-        }
+        },
     )
 
 

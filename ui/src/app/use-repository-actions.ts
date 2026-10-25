@@ -1,3 +1,4 @@
+import { useBrowserSubject } from './browser-subject';
 import { useEffect, useState } from 'react';
 
 import type { SessionTransportBridge } from './session-bridges';
@@ -42,6 +43,7 @@ export function useRepositoryActions({
   onSessionIdChange,
   onStatusMessage,
 }: UseRepositoryActionsOptions): RepositoryActionsResult {
+  const browserSubject = useBrowserSubject();
   const [workspaceRefreshToken, setWorkspaceRefreshToken] = useState(0);
   const [gitDecisionOutcome, setGitDecisionOutcome] = useState<GitDecisionOutcome | null>(null);
 
@@ -98,7 +100,7 @@ export function useRepositoryActions({
     if (nextSession !== sessionId) {
       onSessionIdChange(nextSession);
     }
-    saveLastSessionId(nextSession);
+    saveLastSessionId(browserSubject, nextSession);
 
     transportRef.current?.applySessionPayload(payload, { applyDisplay: false });
     applyRuntimePayload(payload);

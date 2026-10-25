@@ -101,6 +101,27 @@ Balanced + пустые инструкции сохраняют прежний r
 сохраняет исходные messages даже после изменения Settings. Bearer `/v1` использует defaults
 и не импортирует browser preferences.
 
+## Browser hints
+
+Auth status отдаёт opaque `browser_subject` для подтверждённого browser principal,
+с no-store/Vary. AuthGate передаёт этот subject через immutable React context до
+App bootstrap. Last session/model, explorer visibility и recent roots читаются и
+пишутся только в subject namespace; unscoped legacy values не читаются и не мигрируются.
+Без валидного subject persistence выключена, hints получают defaults. Ошибка browser
+storage не мешает работе App и не создаёт unscoped fallback.
+
+После login subject читается из нового status, не выводится из token в браузере.
+Focus/visibility проверка с epoch/abort отбрасывает старые ответы; подтверждённая смена
+subject remounts private App. Прежний async callback сохраняет захваченный subject.
+Transient background status failure сохраняет ранее подтверждённый App/draft и сообщает
+об ошибке; initial failure блокирует bootstrap, HTTP401/403 скрывает private App.
+Это не мгновенный identity switch detector и не замена server-side authorization.
+
+Browser hints не grants и не persisted preferences. Existing pending-send protocol
+identity/hash остаётся отдельным session-bound lifecycle state и этим срезом не меняется.
+Unimported legacy Sidebar.tsx не является production folders UI; server-owned folders
+в HistorySidebar сохраняют существующий principal scope.
+
 ## Embeddings defaults и загрузка моделей
 
 Неявный embeddings provider всегда `local`: отсутствие файла, пустой `memory`,

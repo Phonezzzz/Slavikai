@@ -1,5 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import type { MutableRefObject } from 'react';
+import { createElement, type MutableRefObject, type ReactNode } from 'react';
+import { BrowserSubjectProvider } from '../browser-subject';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { loadLastModel, saveLastModel } from '../session-storage';
@@ -8,6 +9,8 @@ import type { SessionTransportBridge } from '../session-bridges';
 import type { PlanEnvelope, SessionSummary } from '../types';
 import { useSessionRuntimeController } from '../use-session-runtime-controller';
 import { useSessionTransport } from '../use-session-transport';
+
+const browserWrapper = ({ children }: { children: ReactNode }) => createElement(BrowserSubjectProvider, { subject: 'a'.repeat(64), children });
 
 vi.mock('../session-security', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../session-security')>();
@@ -166,6 +169,7 @@ const createHarness = (restore: 'bootstrap' | 'create' | null = null, initialSta
       onStatusMessage,
       transportRef,
     }),
+    { wrapper: browserWrapper },
   );
 
   return { ...hook, sessionRequests, rootRequests, modelRequests, workflowRequests, onStatusMessage, fetchMock, createRequests, transport, transportRef };
@@ -179,7 +183,7 @@ const connectRealTransport = (h: ReturnType<typeof createHarness>) => {
     onStatusMessage: vi.fn(), onStreamWarning: vi.fn(),
     onRuntimePayload: (payload) => h.result.current.applyRuntimePayload(payload),
     onOpenStreamedArtifact: vi.fn(), setArtifactViewerArtifactId: vi.fn(), loadSessions: async () => [],
-  }));
+  }), { wrapper: browserWrapper });
   h.transportRef.current = transport.result.current.bridge;
   return transport;
 };

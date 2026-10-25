@@ -1,3 +1,4 @@
+import { useBrowserSubject } from './browser-subject';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { PendingSendConflict, acknowledgeClientSend, markClientSendRegenerated, prepareClientSend } from './client-send-request';
@@ -172,6 +173,7 @@ export function useSessionTransport({
   setArtifactViewerArtifactId,
   loadSessions,
 }: UseSessionTransportOptions): SessionTransportResult {
+  const browserSubject = useBrowserSubject();
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [messageRuntimeMetaById, setMessageRuntimeMetaById] = useState<
     Record<string, MessageRuntimeMeta>
@@ -592,7 +594,7 @@ export function useSessionTransport({
       if (nextSession !== selectedConversation) {
         onSessionIdChange(nextSession);
       }
-      saveLastSessionId(nextSession);
+      saveLastSessionId(browserSubject, nextSession);
 
       setPendingUserMessage(null);
       setPendingSessionId(null);

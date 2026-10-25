@@ -1,3 +1,4 @@
+import { useBrowserSubject } from './browser-subject';
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 
 import { RootReconcileGuard } from './root-reconcile';
@@ -289,6 +290,7 @@ export function useSessionRuntimeController({
   onStatusMessage,
   transportRef,
 }: UseSessionRuntimeControllerOptions): SessionRuntimeControllerResult {
+  const browserSubject = useBrowserSubject();
   const resyncFetchInFlightRef = useRef(false);
   const reconcileGuardRef = useRef(new RootReconcileGuard());
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
@@ -405,7 +407,7 @@ export function useSessionRuntimeController({
     const parsedModel = parseSelectedModel(body.selected_model);
     if (parsedModel) {
       setSelectedModel(parsedModel);
-      saveLastModel(parsedModel);
+      saveLastModel(browserSubject, parsedModel);
     }
     if (body.mode !== undefined) {
       observeWorkflow('mode', parseSessionMode(body.mode));
@@ -591,7 +593,7 @@ export function useSessionRuntimeController({
       const nextModel = await setSessionModelRemote(sessionId, sessionHeader, provider, model);
       if (!isCurrent()) return false;
       setSelectedModel(nextModel);
-      saveLastModel(nextModel);
+      saveLastModel(browserSubject, nextModel);
       onStatusMessage(null);
       return true;
     } catch (error) {
@@ -617,7 +619,7 @@ export function useSessionRuntimeController({
         const composerPromise = loadComposerSettings().catch(() => null);
         const listedSessions = await loadSessions();
 
-        const storedSession = loadLastSessionId();
+        const storedSession = loadLastSessionId(browserSubject);
         const storedExists =
           storedSession && listedSessions.some((session) => session.session_id === storedSession);
         let nextSession = storedExists ? storedSession : null;
@@ -637,7 +639,7 @@ export function useSessionRuntimeController({
             if (!reconcileGuardRef.current.isCurrent(generation)) {
               return;
             }
-            saveLastSessionId(nextSession);
+            saveLastSessionId(browserSubject, nextSession);
           }
           const models = await modelsPromise;
           await composerPromise;
@@ -645,7 +647,7 @@ export function useSessionRuntimeController({
             return;
           }
           if (nextSession && !selectedFromSession && !lastModelApplied) {
-            const lastModel = loadLastModel();
+            const lastModel = loadLastModel(browserSubject);
             if (lastModel && isModelAvailable(lastModel, models)) {
               const applied = await applySessionModel(
                 nextSession, generation, lastModel.provider, lastModel.model,
@@ -693,7 +695,7 @@ export function useSessionRuntimeController({
       if (!reconcileGuardRef.current.isCurrent(generation)) {
         return;
       }
-      saveLastSessionId(sessionId);
+      saveLastSessionId(browserSubject, sessionId);
       onStatusMessage(null);
       void _reconcileWorkspaceRoot(sessionId, generation);
     } catch (error) {
@@ -753,14 +755,14 @@ export function useSessionRuntimeController({
       if (!reconcileGuardRef.current.isCurrent(generation)) {
         return;
       }
-      saveLastSessionId(nextSession);
+      saveLastSessionId(browserSubject, nextSession);
       void _reconcileWorkspaceRoot(nextSession, generation);
       await loadSessions();
       if (!reconcileGuardRef.current.isCurrent(generation)) {
         return;
       }
       if (!created.selectedModel && providerModels.length > 0) {
-        const lastModel = loadLastModel();
+        const lastModel = loadLastModel(browserSubject);
         if (lastModel && isModelAvailable(lastModel, providerModels)) {
           const applied = await applySessionModel(
             nextSession, generation, lastModel.provider, lastModel.model,
@@ -804,7 +806,7 @@ export function useSessionRuntimeController({
           if (!reconcileGuardRef.current.isCurrent(generation)) {
             return;
           }
-          saveLastSessionId(nextSession);
+          saveLastSessionId(browserSubject, nextSession);
         } else {
           const generation = beginConversationChange();
           const created = await createConversation(generation);
@@ -818,12 +820,12 @@ export function useSessionRuntimeController({
               return;
             }
             await loadSessions();
-            saveLastSessionId(created.sessionId);
+            saveLastSessionId(browserSubject, created.sessionId);
           } else {
             setSelectedConversation(null);
             transportRef.current?.clearConversationState();
             setSelectedModel(null);
-            saveLastSessionId(null);
+            saveLastSessionId(browserSubject, null);
           }
         }
       }

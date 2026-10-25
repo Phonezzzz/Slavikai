@@ -1,3 +1,4 @@
+import { useBrowserSubject } from './browser-subject';
 import { PlanPanel } from './components/plan-panel';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
@@ -54,6 +55,7 @@ const upsertProviderModels = (
 };
 
 export default function App() {
+  const browserSubject = useBrowserSubject();
   const transportRef = useRef<SessionTransportBridge | null>(null);
   const [activeView, setActiveView] = useState<AppView>(() => {
     if (typeof window === 'undefined') {
@@ -62,7 +64,7 @@ export default function App() {
     return viewFromPathname(window.location.pathname);
   });
   const [workspaceExplorerVisible] = useState<boolean>(() =>
-    loadWorkspaceExplorerVisible(),
+    loadWorkspaceExplorerVisible(browserSubject),
   );
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [folders, setFolders] = useState<FolderSummary[]>([]);
@@ -322,7 +324,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    saveWorkspaceExplorerVisible(workspaceExplorerVisible);
+    saveWorkspaceExplorerVisible(browserSubject, workspaceExplorerVisible);
   }, [workspaceExplorerVisible]);
 
   const setView = (view: AppView) => {
