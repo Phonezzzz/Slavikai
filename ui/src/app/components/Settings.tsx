@@ -1,6 +1,5 @@
 import {
   Bot,
-  BrainCircuit,
   Database,
   Download,
   KeyRound,
@@ -21,7 +20,7 @@ interface SettingsProps {
   onSaved?: () => void;
 }
 
-type SettingsTab = 'api' | 'personal' | 'memory' | 'data';
+type SettingsTab = 'api' | 'personal' | 'data';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai' | 'deepseek';
 type ModelProvider = string;
 type ApiKeySource = 'env' | 'file' | 'missing';
@@ -86,6 +85,7 @@ type ParsedSettings = {
   appearanceTheme: AppearanceTheme;
   longPasteToFileEnabled: boolean;
   longPasteThresholdChars: number;
+  memorySettingsProvided: boolean;
   memoryInboxMaxItems: number;
   memoryInboxTtlDays: number;
   memoryInboxWritesPerMinute: number;
@@ -173,14 +173,12 @@ const RESPONSE_STYLE_OPTIONS = [
 const TAB_ITEMS: Array<{ id: SettingsTab; title: string }> = [
   { id: 'api', title: 'Models and connections' },
   { id: 'personal', title: 'Conversation and interface' },
-  { id: 'memory', title: 'Memory' },
-  { id: 'data', title: 'Data' },
+  { id: 'data', title: 'Memory and data' },
 ];
 
 const TAB_ICONS: Record<SettingsTab, typeof KeyRound> = {
   api: KeyRound,
   personal: Bot,
-  memory: BrainCircuit,
   data: Database,
 };
 
@@ -339,6 +337,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     appearanceTheme: DEFAULT_APPEARANCE_THEME,
     longPasteToFileEnabled: DEFAULT_LONG_PASTE_TO_FILE_ENABLED,
     longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
+    memorySettingsProvided: false,
     memoryInboxMaxItems: DEFAULT_MEMORY_INBOX_MAX_ITEMS,
     memoryInboxTtlDays: DEFAULT_MEMORY_INBOX_TTL_DAYS,
     memoryInboxWritesPerMinute: DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE,
@@ -407,6 +406,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
+  let memorySettingsProvided = false;
   let memoryInboxMaxItems = defaults.memoryInboxMaxItems;
   let memoryInboxTtlDays = defaults.memoryInboxTtlDays;
   let memoryInboxWritesPerMinute = defaults.memoryInboxWritesPerMinute;
@@ -435,6 +435,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
       const openaiModelRaw = (embeddingsRaw as { openai_model?: unknown }).openai_model;
       if (isEmbeddingsProvider(providerRaw)) {
         embeddingsProvider = providerRaw;
+        memorySettingsProvided = typeof inboxTtlDaysRaw === 'number' && Number.isFinite(inboxTtlDaysRaw) && inboxTtlDaysRaw > 0;
       }
       if (typeof localModelRaw === 'string' && localModelRaw.trim()) {
         embeddingsLocalModel = localModelRaw.trim();
@@ -548,6 +549,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     appearanceTheme,
     longPasteToFileEnabled,
     longPasteThresholdChars,
+    memorySettingsProvided,
     memoryInboxMaxItems,
     memoryInboxTtlDays,
     memoryInboxWritesPerMinute,
@@ -821,6 +823,7 @@ export function Settings({
   const [showInputAdvanced, setShowInputAdvanced] = useState(false);
   const [longPasteToFileEnabled, setLongPasteToFileEnabled] = useState(DEFAULT_LONG_PASTE_TO_FILE_ENABLED);
   const [longPasteThresholdChars, setLongPasteThresholdChars] = useState(DEFAULT_LONG_PASTE_THRESHOLD_CHARS);
+  const [memorySettingsProvided, setMemorySettingsProvided] = useState(false);
   const [memoryInboxMaxItems, setMemoryInboxMaxItems] = useState(DEFAULT_MEMORY_INBOX_MAX_ITEMS);
   const [memoryInboxTtlDays, setMemoryInboxTtlDays] = useState(DEFAULT_MEMORY_INBOX_TTL_DAYS);
   const [memoryInboxWritesPerMinute, setMemoryInboxWritesPerMinute] = useState(DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE);
@@ -840,6 +843,10 @@ export function Settings({
   const [exportingChats, setExportingChats] = useState(false);
   const [importingChats, setImportingChats] = useState(false);
   const [importMode, setImportMode] = useState<ImportMode>('merge');
+  const [replaceImportConfirmed, setReplaceImportConfirmed] = useState(false);
+  const importFileVersion = useRef(0);
+  const importRequest = useRef<symbol | null>(null);
+  const exportRequest = useRef<symbol | null>(null);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [importPayloadText, setImportPayloadText] = useState<string | null>(null);
 
@@ -882,10 +889,18 @@ export function Settings({
     setTtsBackend(parsed.ttsBackend);
   };
 
+  const clearImportPreview = () => {
+    importFileVersion.current += 1;
+    setImportPayloadText(null);
+    setImportPreview(null);
+    setReplaceImportConfirmed(false);
+  };
+
   const applyParsedSettings = (parsed: ParsedSettings, providerRevisionAtRequestStart: number, preserveDraft = false): void => {
     const subjectChanged = preferencesSubject.current !== null && preferencesSubject.current !== parsed.preferencesSubject;
     preferencesSubject.current = parsed.preferencesSubject;
     if (subjectChanged) {
+      clearImportPreview();
       onboardingEpoch.current += 1;
       invalidateDiagnostics();
       setNewProviderName('');
@@ -897,11 +912,12 @@ export function Settings({
       dirtyFields.current.clear();
     }
     if (!parsed.canManageInstallation) {
-      setActiveTab((tab) => ['api', 'memory'].includes(tab) ? 'personal' : tab);
+      setActiveTab((tab) => ['api'].includes(tab) ? 'personal' : tab);
       setApiKeys({ ...EMPTY_API_KEYS });
       setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
     }
     setSettingsReady(true);
+    setMemorySettingsProvided(parsed.memorySettingsProvided);
     setCanManageInstallation(parsed.canManageInstallation);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
@@ -1111,8 +1127,8 @@ export function Settings({
       setLongPasteThresholdChars(DEFAULT_LONG_PASTE_THRESHOLD_CHARS);
       setApiKeys({ ...EMPTY_API_KEYS });
       setProviderDirty({ ...EMPTY_PROVIDER_DIRTY });
-      setImportPayloadText(null);
-      setImportPreview(null);
+      clearImportPreview();
+      setImportMode('merge');
       dirtyFields.current.clear();
       onboardingEpoch.current += 1;
       // Release the busy state owned by the invalidated operation so a
@@ -1477,14 +1493,16 @@ export function Settings({
   };
 
   const handleExportChats = async () => {
-    if (exportingChats) {
-      return;
-    }
+    if (exportRequest.current) return;
+    const token = Symbol('export-request');
+    exportRequest.current = token;
+    const epoch = onboardingEpoch.current;
     setExportingChats(true);
     setStatus(null);
     try {
       const response = await fetch('/ui/api/settings/chats/export');
       const payload: unknown = await response.json();
+      if (epoch !== onboardingEpoch.current) return;
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to export chats.'));
       }
@@ -1497,10 +1515,14 @@ export function Settings({
       window.URL.revokeObjectURL(url);
       setStatus('Chats export downloaded.');
     } catch (error) {
+      if (epoch !== onboardingEpoch.current) return;
       const message = error instanceof Error ? error.message : 'Failed to export chats.';
       setStatus(message);
     } finally {
-      setExportingChats(false);
+      if (exportRequest.current === token) {
+        exportRequest.current = null;
+        setExportingChats(false);
+      }
     }
   };
 
@@ -1510,11 +1532,14 @@ export function Settings({
 
   const handleImportFileSelected = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
+    if (!file || importRequest.current) return;
+    clearImportPreview();
+    const version = importFileVersion.current;
+    const epoch = onboardingEpoch.current;
+    const current = () => version === importFileVersion.current && epoch === onboardingEpoch.current;
     try {
       const text = await file.text();
+      if (!current()) return;
       const parsed = parseImportPayloadText(text);
       setImportPayloadText(text);
       setImportPreview({
@@ -1524,19 +1549,24 @@ export function Settings({
       });
       setStatus(`Loaded import file: ${file.name}`);
     } catch (error) {
+      if (!current()) return;
       setImportPayloadText(null);
       setImportPreview(null);
       const message = error instanceof Error ? error.message : 'Failed to read import file.';
       setStatus(message);
     } finally {
-      event.target.value = '';
+      if (current()) event.target.value = '';
     }
   };
 
   const handleImportChats = async () => {
-    if (importingChats || !importPayloadText) {
+    if (importRequest.current || !importPayloadText || (importMode === 'replace' && !replaceImportConfirmed)) {
       return;
     }
+    const token = Symbol('import-request');
+    importRequest.current = token;
+    const epoch = onboardingEpoch.current;
+    setReplaceImportConfirmed(false);
     setImportingChats(true);
     setStatus(null);
     try {
@@ -1552,6 +1582,7 @@ export function Settings({
         }),
       });
       const payload: unknown = await response.json();
+      if (epoch !== onboardingEpoch.current) return;
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to import chats.'));
       }
@@ -1568,10 +1599,14 @@ export function Settings({
       );
       onSaved?.();
     } catch (error) {
+      if (epoch !== onboardingEpoch.current) return;
       const message = error instanceof Error ? error.message : 'Failed to import chats.';
       setStatus(message);
     } finally {
-      setImportingChats(false);
+      if (importRequest.current === token) {
+        importRequest.current = null;
+        setImportingChats(false);
+      }
     }
   };
 
@@ -1655,7 +1690,7 @@ export function Settings({
               <div className="flex min-h-0 flex-1 overflow-hidden">
                 <nav className="w-48 shrink-0 border-r border-zinc-800 p-2.5">
                   <div className="space-y-0.5">
-                    {TAB_ITEMS.filter((tab) => canManageInstallation || !['api', 'memory'].includes(tab.id)).map((tab) => (
+                    {TAB_ITEMS.filter((tab) => canManageInstallation || !['api'].includes(tab.id)).map((tab) => (
                       <button
                         key={tab.id}
                         type="button"
@@ -2107,7 +2142,25 @@ export function Settings({
                     </div>
                   ) : null}
 
-                  {canManageInstallation && settingsReady && !loading && activeTab === 'memory' ? (
+                  {settingsReady && !loading && activeTab === 'data' ? (
+                    <SectionCard title="Memory and privacy" description="Installation processing settings and your chat data have separate scopes." scope="Read only">
+                      <p className="mb-2 text-xs text-zinc-400">Memory writes require a preview and a separate explicit confirmation in the chat.</p>
+                      {memorySettingsProvided ? (
+                        <div className="space-y-2 text-xs text-zinc-400">
+                          <div>{embeddingsProvider === 'local' ? 'Local embeddings' : 'Remote embeddings: OpenAI'}</div>
+                          <div>{embeddingsProvider === 'local'
+                            ? 'Processes embeddings locally using downloaded model files. Chat remains available without semantic search.'
+                            : 'Sends text for indexing and search queries to OpenAI.'}</div>
+                          <div>{memoryInboxTtlDays} days applies only to inbox entries, not chat history, confirmed Memory, or vectors.</div>
+                          {canManageInstallation ? <div>Selections below take effect after saving.</div>
+                            : <div>The owner manages installation settings. You can export and import your own chats below.</div>}
+                        </div>
+                      ) : <p className="text-xs text-zinc-400">Memory processing settings are unavailable.</p>}
+                      <p className="mt-3 text-xs text-zinc-500">Viewing and deleting all confirmed Memory is not available in this screen.</p>
+                    </SectionCard>
+                  ) : null}
+
+                  {canManageInstallation && settingsReady && !loading && activeTab === 'data' ? (
                     <div>
                       <SectionCard
                         title="Memory behavior"
@@ -2171,11 +2224,7 @@ export function Settings({
                         </Row>
                       </SectionCard>
 
-                      <SectionCard
-                        title="Advanced indexing"
-                        description="Embedding provider and model used for indexing and semantic retrieval."
-                        scope="Advanced"
-                      >
+                      <SectionCard title="Semantic search processing" description="Choose local processing or explicitly opt in to remote embeddings." scope="Installation">
                         <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-900 p-0.5">
                           {(['local', 'openai'] as EmbeddingsProvider[]).map((provider) => (
                             <button
@@ -2200,6 +2249,13 @@ export function Settings({
                             : 'Sends text for indexing and search queries to OpenAI. Select and save this provider to enable remote embeddings using your configured OpenAI key.'}
                         </p>
 
+                      </SectionCard>
+
+                      <SectionCard
+                        title="Advanced indexing"
+                        description="Embedding provider and model used for indexing and semantic retrieval."
+                        scope="Advanced"
+                      >
                         {embeddingsProvider === 'local' ? (
                           <div className="mt-3 space-y-3">
                             <Row label="Local embedding model">
@@ -2284,12 +2340,12 @@ export function Settings({
                     <div>
                       <SectionCard
                         title="Export chats"
-                        description="Download the current chat database as JSON."
-                        scope="Global"
+                        description="Download your chats and saved session data as JSON."
+                        scope="You"
                       >
                         <div className="flex items-center justify-between gap-4">
                           <div className="text-xs text-zinc-500">
-                            Export includes session history and message data available to this UI principal.
+                            Export includes your chats and saved session data, not confirmed Memory or the semantic index. Exported conversations may contain private information.
                           </div>
                           <button
                             type="button"
@@ -2307,11 +2363,12 @@ export function Settings({
 
                       <SectionCard
                         title="Import chats"
-                        description="Load a previously exported chats JSON file."
-                        scope="Global"
+                        description="Import a chats JSON file into your account. Merge updates matching chat IDs; Replace first removes your existing chats."
+                        scope="You"
                       >
                         <input
                           ref={fileInputRef}
+                          aria-label="Chat import file"
                           type="file"
                           accept="application/json,.json"
                           onChange={(event) => {
@@ -2323,6 +2380,7 @@ export function Settings({
                           <button
                             type="button"
                             onClick={handlePickImportFile}
+                            disabled={importingChats}
                             className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800"
                           >
                             <Upload className="h-4 w-4" />
@@ -2332,7 +2390,11 @@ export function Settings({
                             <span>Mode</span>
                             <select
                               value={importMode}
-                              onChange={(event) => setImportMode(event.target.value as ImportMode)}
+                              disabled={importingChats}
+                              onChange={(event) => {
+                                setImportMode(event.target.value as ImportMode);
+                                setReplaceImportConfirmed(false);
+                              }}
                               className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
                             >
                               <option value="merge">Merge</option>
@@ -2344,13 +2406,21 @@ export function Settings({
                             onClick={() => {
                               void handleImportChats();
                             }}
-                            disabled={!importPayloadText || importingChats}
+                            disabled={!importPayloadText || importingChats || (importMode === 'replace' && !replaceImportConfirmed)}
                             className="rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
                           >
                             {importingChats ? 'Importing...' : 'Import chats'}
                           </button>
                         </div>
 
+                        {importMode === 'replace' ? (
+                          <label className="mt-3 flex items-start gap-2 text-xs text-amber-200">
+                            <input type="checkbox" checked={replaceImportConfirmed} disabled={!importPayloadText || importingChats}
+                              onChange={(event) => setReplaceImportConfirmed(event.target.checked)} />
+                            I understand that Replace removes my existing chats before importing this file. Export a backup first if needed.
+                          </label>
+                        ) : null}
+                        <p className="mt-3 text-xs text-zinc-500">Importing history does not guarantee that interrupted execution can resume. Confirmed Memory and semantic indexes are not imported.</p>
                         {importPreview ? (
                           <div className="mt-3 text-xs text-zinc-400">
                             <div className="font-medium text-zinc-200">{importPreview.fileName}</div>

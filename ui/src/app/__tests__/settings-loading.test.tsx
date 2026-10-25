@@ -46,7 +46,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('textbox', { name: 'Custom instructions' });
-    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
     await screen.findByText(/Local embeddings library is missing/);
     expect(screen.queryByRole('button', { name: 'Download model' })).toBeNull();
   });
@@ -63,7 +63,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('textbox', { name: 'Custom instructions' });
-    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
     await screen.findByText('local is available locally.');
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await screen.findByText('cached files invalid');
@@ -146,7 +146,7 @@ describe('Settings loading isolation', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('keep despite embedding failure');
     expect(screen.queryByText('Embedding status offline')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
     await screen.findByText('Embedding status offline');
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
   });
@@ -276,7 +276,7 @@ describe('Settings loading isolation', () => {
     await screen.findByRole('textbox', { name: 'Custom instructions' });
     rerender(<Settings isOpen={false} onClose={() => undefined} />);
     rerender(<Settings isOpen onClose={() => undefined} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Memory' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Memory and data' }));
     await screen.findByText('fresh-model is available locally.');
     expect(signals[0]?.aborted).toBe(true);
     await act(async () => { oldBody.resolve({ error: { message: 'Old embedding check failed' } }); });
@@ -307,7 +307,7 @@ describe('Settings loading isolation', () => {
     await editInstructions('keep draft during retry');
     fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
     fireEvent.click(screen.getByRole('button', { name: 'Recheck connections' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
     await screen.findByText('rechecked-model is available locally.');
     expect(signals[0]?.aborted).toBe(true);
     await act(async () => { oldBody.resolve({ model: 'stale-model', state: 'missing' }); });
@@ -512,7 +512,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('textbox', { name: 'Custom instructions' });
-    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
     fireEvent.change(screen.getByDisplayValue('old-model'), { target: { value: 'new-model' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await screen.findByText('new-model is available locally.');
@@ -706,7 +706,7 @@ describe('Settings loading isolation', () => {
     }));
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('textbox', { name: 'Custom instructions' });
-    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
     fireEvent.click(screen.getByRole('button', { name: 'Download model' }));
     const readsBeforeRecheck = reads;
     fireEvent.click(screen.getByRole('button', { name: 'Models and connections' }));
@@ -718,7 +718,7 @@ describe('Settings loading isolation', () => {
       download.resolve(json({ model: 'local', state: 'downloading' }));
     });
     await vi.waitFor(() => expect(reads).toBe(readsBeforeRecheck + 1));
-    fireEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
     await screen.findByText('downloading');
   });
 
@@ -745,7 +745,7 @@ describe('Settings loading isolation', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
       fireEvent.change(screen.getByLabelText('Provider display name'), { target: { value: 'draft provider' } });
     } else {
-      fireEvent.click(screen.getByRole('button', { name: 'Data' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
       fireEvent.change(screen.getByRole('combobox', { name: 'Mode' }), { target: { value: 'replace' } });
     }
     await act(async () => { committed = true; post.resolve(json(settings('committed'))); });
@@ -868,7 +868,10 @@ describe('principal preferences', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     await editInstructions('member private draft');
     expect(screen.queryByRole('button', { name: 'Models and connections' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Memory' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
+    expect(screen.queryByRole('button', { name: 'Local' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'OpenAI' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Download model' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await screen.findByText('Settings saved.');
     expect(writes).toEqual([{ body: { personalization: { tone: 'balanced', system_prompt: 'member private draft' } }, etag: '"member-0"' }]);
