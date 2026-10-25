@@ -133,6 +133,24 @@ POST повторно проверяет owner и сохранённую мод�
 После Settings refresh/close уведомление читает новый status; старые async responses
 при размонтировании игнорируются. Dismiss не меняет config и не запускает инструменты.
 
+## Canonical Memory storage prerequisite
+
+Canonical atoms имеют opaque server revision. Existing principal-scoped stores используют
+attached SQLite transaction для exact-revision vector publication и очистки canonical/atoms
+vector при подтверждённой storage operation. Encoding выполняется до короткой транзакции;
+поздний результат не публикуется после смены revision или удаления. Ошибка encoding сохраняет
+предыдущий vector; canonical save по-прежнему может сообщать index_status=partial.
+Deprecated pinned atoms исключены из pinned retrieval.
+
+Atomic mutation требует двух file-backed SQLite DB с rollback journal (DELETE/PERSIST/TRUNCATE)
+и synchronous >= FULL на соединении операции. WAL/неподдерживаемый режим отклоняется до
+изменения данных; journal mode автоматически не переключается. Delete storage primitive
+удаляет только выбранный canonical atom и его vector в namespace atoms, сохраняет bounded
+receipt без текста (до 24 часов, максимум1024 операции) и проверяет revision при повторе.
+История чатов, inbox, preferences и traces не удаляются; secure disk/backups erase не заявляется.
+Это storage prerequisite: пользовательский paged Memory list/delete API и Settings UI ещё
+не реализованы, новая destructive capability модели не предоставляется.
+
 ## Custom native tool protocol admission
 
 Custom route начинается Chat-only. Только явная verified owner/session проверка

@@ -2,39 +2,38 @@ from __future__ import annotations
 
 import json
 
+from memory.canonical_atom_store import CanonicalAtomStore
 from memory.vector_index import VectorIndex
 from shared.canonical_atom_models import AtomStatus, CanonicalAtom
 
 
 class AtomEmbeddingIndex:
-    def __init__(self, vector_index: VectorIndex, *, namespace: str = "atoms") -> None:
+    def __init__(self, vector_index: VectorIndex, store: CanonicalAtomStore) -> None:
         self._vector_index = vector_index
-        self._namespace = namespace
+        self._store = store
+        store.bind_vectors(vector_index.db_path)
 
     @property
     def namespace(self) -> str:
-        return self._namespace
+        return "atoms"
 
-    def sync_atom(self, atom: CanonicalAtom) -> None:
-        if atom.status is AtomStatus.DEPRECATED:
-            self._vector_index.delete_path(atom.stable_key, namespace=self._namespace)
-            return
-        text = self._embedding_text(atom)
-        self._vector_index.upsert_text(
-            atom.stable_key,
-            text,
-            namespace=self._namespace,
-            meta={
-                "stable_key": atom.stable_key,
-                "claim_type": atom.claim_type.value,
-                "status": atom.status.value,
-                "confidence": atom.confidence,
-                "last_seen_at": atom.last_seen_at,
-            },
+    def sync_atom(self, atom: CanonicalAtom) -> bool:
+        # Encoding never holds a database transaction; publication revalidates revision.
+        embedding = (
+            b""
+            if atom.status is AtomStatus.DEPRECATED
+            else self._vector_index.encode_text(self._embedding_text(atom))
+        )
+        return self._store.publish_vector(
+            atom,
+            embedding,
+            content=self._embedding_text(atom),
+            namespace="atoms",
+            max_records=self._vector_index.max_records,
+            max_total_records=self._vector_index.max_total_records,
         )
 
     def rebuild(self, atoms: list[CanonicalAtom]) -> None:
-        self._vector_index.clear_namespace(self._namespace)
         for atom in atoms:
             self.sync_atom(atom)
 

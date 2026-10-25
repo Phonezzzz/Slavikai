@@ -62,6 +62,7 @@ class CanonicalAtom:
     status: AtomStatus
     summary_text: str
     pinned: bool = False
+    revision: str = ""
 
     def __post_init__(self) -> None:
         if not self.atom_id.strip():

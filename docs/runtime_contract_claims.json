@@ -443,6 +443,21 @@
         "server/ui_hub.py"
       ],
       "summary": "Plan approve and execute require the displayed plan identity, hash and revision. UIHub atomically approves only the captured draft in Plan mode, rolls back storage failure and publishes after commit. Fresh execution validates the full binding; accepted idempotent replay retains its original binding during running revisions. Structured execution decisions capture and revalidate the full binding before execution or edits, rejecting replaced plans even at the same revision. Typed browser helpers take an explicit PlanEnvelope. Plan-card UI readiness is not claimed."
+    },
+    {
+      "id": "memory.atomic_storage",
+      "scope": "memory",
+      "status": "implemented",
+      "owner": "memory",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_memory_storage_atomic.py",
+        "tests/test_agent_canonical_memory.py",
+        "memory/canonical_atom_store.py",
+        "memory/atom_embedding_index.py"
+      ],
+      "summary": "Canonical revisions fence late vector publication. Bound principal stores atomically delete exact canonical/atoms vector rows with bounded idempotency receipts on supported rollback-journal file DBs. Deprecated pins are excluded. Storage prerequisite only; no browser delete API/UI or new model capability. Encoding errors preserve prior vector and explicit partial-index save semantics."
     }
   ]
 }

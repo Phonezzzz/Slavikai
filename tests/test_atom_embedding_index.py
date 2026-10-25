@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from memory.atom_embedding_index import AtomEmbeddingIndex
+from memory.canonical_atom_store import CanonicalAtomStore
 from memory.vector_index import VectorIndex
 from shared.canonical_atom_models import AtomStatus, CanonicalAtom, ClaimType
 
@@ -34,13 +35,18 @@ def test_atom_embedding_index_sync_upsert_and_delete(tmp_path, monkeypatch) -> N
         lambda _self, _name: DummyModel(),
     )
     vectors = VectorIndex(str(db_path))
-    index = AtomEmbeddingIndex(vectors)
+    store = CanonicalAtomStore(str(tmp_path / "atoms.db"))
+    index = AtomEmbeddingIndex(vectors, store)
 
-    index.sync_atom(_atom(status=AtomStatus.ACTIVE))
+    index.sync_atom(store.upsert(_atom(status=AtomStatus.ACTIVE)))
     results = vectors.search("response", namespace="atoms", top_k=5)
     assert len(results) == 1
     assert results[0].path == "preference:response_length"
 
-    index.sync_atom(_atom(status=AtomStatus.DEPRECATED))
+    index.sync_atom(
+        store.resolve_conflict(
+            stable_key="preference:response_length", resolution=AtomStatus.DEPRECATED
+        )
+    )
     after = vectors.search("response", namespace="atoms", top_k=5)
     assert after == []

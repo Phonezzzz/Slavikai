@@ -396,7 +396,10 @@ class AgentMemoryMixin:
         index_errors: list[dict[str, JSONValue]] = []
         for atom in atoms:
             try:
-                self._atom_embedding_index.sync_atom(atom)
+                if not self._atom_embedding_index.sync_atom(atom):
+                    index_errors.append(
+                        {"stable_key": atom.stable_key, "code": "canonical_revision_changed"}
+                    )
             except Exception:  # noqa: BLE001
                 self.logger.exception(
                     "Confirmed Memory vector sync failed for %s",

@@ -119,6 +119,9 @@ class VectorIndex:
     ) -> None:
         self._store_text(path, content, namespace, meta, replace_existing=False)
 
+    def encode_text(self, text: str) -> bytes:
+        return bytes(self._encode_texts([text])[0].astype(np.float32).tobytes())
+
     def _store_text(
         self,
         path: str,
@@ -134,7 +137,7 @@ class VectorIndex:
             return
         if meta is not None and not isinstance(meta, dict):
             raise ValueError("meta для VectorIndex должно быть словарём")
-        embedding = self._encode_texts([content])[0].astype(np.float32).tobytes()
+        embedding = self.encode_text(content)
         with self.conn:
             if replace_existing:
                 self.conn.execute(

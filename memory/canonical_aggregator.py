@@ -13,12 +13,10 @@ class CanonicalAggregator:
         self._store = store
 
     def upsert_claim(self, claim: Claim) -> CanonicalAtom:
-        existing = self._store.get_by_stable_key(claim.stable_key)
-        atom = self._merge_claim(existing, claim)
-        return self._store.upsert(atom)
+        return self.upsert_claims([claim])[0]
 
     def upsert_claims(self, claims: list[Claim]) -> list[CanonicalAtom]:
-        with self._store.conn.transaction(immediate=True):
+        with self._store.transaction():
             pending: dict[str, CanonicalAtom] = {}
             order: list[str] = []
             for claim in claims:
@@ -51,6 +49,7 @@ class CanonicalAggregator:
                 AtomStatus.ACTIVE if existing.status is AtomStatus.CONFLICT else existing.status
             )
             return CanonicalAtom(
+                revision=existing.revision,
                 atom_id=existing.atom_id,
                 stable_key=existing.stable_key,
                 claim_type=existing.claim_type,
@@ -65,6 +64,7 @@ class CanonicalAggregator:
 
         downgraded_confidence = max(0.0, min(existing.confidence, claim.confidence) - 0.15)
         return CanonicalAtom(
+            revision=existing.revision,
             atom_id=existing.atom_id,
             stable_key=existing.stable_key,
             claim_type=existing.claim_type,
@@ -85,34 +85,36 @@ class CanonicalAggregator:
         value_json: JSONValue | None = None,
         summary_text: str | None = None,
     ) -> CanonicalAtom | None:
-        current = self._store.get_by_stable_key(stable_key)
-        if current is None:
-            return None
-        if action == "activate":
-            return self._store.resolve_conflict(
-                stable_key=stable_key,
-                resolution=AtomStatus.ACTIVE,
-                value_json=current.value_json,
-                summary_text=summary_text
-                or _deterministic_summary(current.stable_key, current.value_json),
-            )
-        if action == "deprecate":
-            return self._store.resolve_conflict(
-                stable_key=stable_key,
-                resolution=AtomStatus.DEPRECATED,
-                value_json=current.value_json,
-                summary_text=summary_text or current.summary_text,
-            )
-        if action == "set_value":
-            if value_json is None:
-                raise ValueError("value_json обязателен для action=set_value")
-            return self._store.resolve_conflict(
-                stable_key=stable_key,
-                resolution=AtomStatus.ACTIVE,
-                value_json=value_json,
-                summary_text=summary_text or _deterministic_summary(current.stable_key, value_json),
-            )
-        raise ValueError(f"Неизвестный action: {action}")
+        with self._store.transaction():
+            current = self._store.get_by_stable_key(stable_key)
+            if current is None:
+                return None
+            if action == "activate":
+                return self._store.resolve_conflict(
+                    stable_key=stable_key,
+                    resolution=AtomStatus.ACTIVE,
+                    value_json=current.value_json,
+                    summary_text=summary_text
+                    or _deterministic_summary(current.stable_key, current.value_json),
+                )
+            if action == "deprecate":
+                return self._store.resolve_conflict(
+                    stable_key=stable_key,
+                    resolution=AtomStatus.DEPRECATED,
+                    value_json=current.value_json,
+                    summary_text=summary_text or current.summary_text,
+                )
+            if action == "set_value":
+                if value_json is None:
+                    raise ValueError("value_json обязателен для action=set_value")
+                return self._store.resolve_conflict(
+                    stable_key=stable_key,
+                    resolution=AtomStatus.ACTIVE,
+                    value_json=value_json,
+                    summary_text=summary_text
+                    or _deterministic_summary(current.stable_key, value_json),
+                )
+            raise ValueError(f"Неизвестный action: {action}")
 
 
 def _values_equal(left: object, right: object) -> bool:

@@ -32,7 +32,7 @@ def test_retrieval_filter_rank_pack_excludes_conflicts(tmp_path, monkeypatch) ->
 
     store = CanonicalAtomStore(str(atoms_db))
     vectors = VectorIndex(str(vectors_db))
-    atom_index = AtomEmbeddingIndex(vectors)
+    atom_index = AtomEmbeddingIndex(vectors, store)
 
     active = store.create_atom(
         atom_id="a1",

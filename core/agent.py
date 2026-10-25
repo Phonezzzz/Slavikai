@@ -285,7 +285,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             brain=self.brain,
         )
         self._canonical_aggregator = CanonicalAggregator(self._canonical_store)
-        self._atom_embedding_index = AtomEmbeddingIndex(self.vectors)
+        self._atom_embedding_index = AtomEmbeddingIndex(self.vectors, self._canonical_store)
         self._session_summarizer = SessionSummarizer(self.brain)
         self._retrieval_config = RetrievalConfig()
         self.skill_index = SkillIndex.load_default()
@@ -769,7 +769,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             openai_model=normalized_openai_model,
             openai_api_key=openai_api_key,
         )
-        self._atom_embedding_index = AtomEmbeddingIndex(self.vectors)
+        self._atom_embedding_index = AtomEmbeddingIndex(self.vectors, self._canonical_store)
         self.tracer.log(
             "embeddings_model_updated",
             "Embeddings model updated",
