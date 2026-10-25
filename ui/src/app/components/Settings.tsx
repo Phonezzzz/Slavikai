@@ -1566,6 +1566,7 @@ export function Settings({
     const token = Symbol('import-request');
     importRequest.current = token;
     const epoch = onboardingEpoch.current;
+    const subject = preferencesSubject.current;
     setReplaceImportConfirmed(false);
     setImportingChats(true);
     setStatus(null);
@@ -1582,6 +1583,7 @@ export function Settings({
         }),
       });
       const payload: unknown = await response.json();
+      if (response.ok && subject !== null && preferencesSubject.current === subject) onSaved?.();
       if (epoch !== onboardingEpoch.current) return;
       if (!response.ok) {
         throw new Error(extractErrorMessage(payload, 'Failed to import chats.'));
@@ -1597,7 +1599,6 @@ export function Settings({
           ? `Imported ${importedCount} session${importedCount === 1 ? '' : 's'}.`
           : 'Chats imported.',
       );
-      onSaved?.();
     } catch (error) {
       if (epoch !== onboardingEpoch.current) return;
       const message = error instanceof Error ? error.message : 'Failed to import chats.';

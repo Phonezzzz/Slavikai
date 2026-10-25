@@ -143,7 +143,7 @@ describe('Memory and data settings', () => {
     h.rerender(<Settings isOpen onClose={() => undefined} onSaved={saved} />);
     await openData();
     await act(async () => { reply.resolve(ok ? json({ imported: 0 }) : new Response(JSON.stringify({ error: { message: 'Old import error' } }), { status: 503 })); });
-    expect(saved).not.toHaveBeenCalled();
+    expect(saved).toHaveBeenCalledTimes(ok ? 1 : 0);
     expect(screen.queryByText('Imported 0 sessions.')).toBeNull();
     expect(screen.queryByText('Old import error')).toBeNull();
     expect(screen.queryByText('old.json')).toBeNull();
@@ -162,6 +162,40 @@ describe('Memory and data settings', () => {
     await act(async () => { old.resolve('{"sessions":[]}'); });
     expect(screen.queryByText('old-subject.json')).toBeNull();
     expect((screen.getByRole('button', { name: 'Import chats' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+
+  it('refreshes chat consumers after a successful import while Settings stays closed', async () => {
+    const reply = deferred<Response>();
+    setup(async url => { if (url === importUrl) return reply.promise; throw new Error(url); });
+    const saved = vi.fn();
+    const h = render(<Settings isOpen onClose={() => undefined} onSaved={saved} />);
+    await openData();
+    fireEvent.change(input(h.container), { target: { files: [file('import.json')] } });
+    await screen.findByText('import.json');
+    fireEvent.click(screen.getByRole('button', { name: 'Import chats' }));
+    h.rerender(<Settings isOpen={false} onClose={() => undefined} onSaved={saved} />);
+    await act(async () => { reply.resolve(json({ imported: 1 })); });
+    expect(saved).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not notify the new principal about an old principal import', async () => {
+    const reply = deferred<Response>();
+    const value = snapshot();
+    setup(async url => { if (url === importUrl) return reply.promise; throw new Error(url); }, value);
+    const saved = vi.fn();
+    const h = render(<Settings isOpen onClose={() => undefined} onSaved={saved} />);
+    await openData();
+    fireEvent.change(input(h.container), { target: { files: [file('old-principal.json')] } });
+    await screen.findByText('old-principal.json');
+    fireEvent.click(screen.getByRole('button', { name: 'Import chats' }));
+    value.settings.preferences_subject = 'other-principal';
+    h.rerender(<Settings isOpen={false} onClose={() => undefined} onSaved={saved} />);
+    h.rerender(<Settings isOpen onClose={() => undefined} onSaved={saved} />);
+    await openData();
+    await act(async () => { reply.resolve(json({ imported: 1 })); });
+    expect(saved).not.toHaveBeenCalled();
+    expect(screen.queryByText('Imported 1 session.')).toBeNull();
   });
 
 });
