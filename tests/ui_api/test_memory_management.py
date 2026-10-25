@@ -413,3 +413,69 @@ def test_simple_cross_site_posts_do_not_create_or_confirm_deletion(monkeypatch, 
             await client.close()
 
     asyncio.run(run())
+
+
+def test_action_log_records_rejected_and_successful_delete_outcomes(monkeypatch, tmp_path):
+    import json
+    import time
+    from dataclasses import replace
+
+    _isolate(monkeypatch, tmp_path)
+    atom = _seed(tmp_path, "member")
+
+    async def run():
+        client = await _start()
+        h = {"Cf-Access-Jwt-Assertion": "member"}
+        route = "/ui/api/memory/delete/confirm"
+
+        async def preview(current):
+            response = await client.post(
+                "/ui/api/memory/delete/preview",
+                headers=h,
+                json={"atom_id": current.atom_id, "revision": current.revision},
+            )
+            assert response.status == 200
+            return (await response.json())["operation_id"]
+
+        try:
+            unknown = await client.post(
+                route, headers=h, json={"operation_id": "unknown", "confirm": True}
+            )
+            assert unknown.status == 404
+            stale_op = await preview(atom)
+            store = CanonicalAtomStore(str(_paths(tmp_path, "member").canonical_atoms_db))
+            current = store.upsert(replace(atom, summary_text="changed"))
+            stale = await client.post(
+                route, headers=h, json={"operation_id": stale_op, "confirm": True}
+            )
+            assert stale.status == 409
+            expired_op = await preview(current)
+            store.conn.execute(
+                "UPDATE atom_delete_preview SET expires_at = ? WHERE operation_id = ?",
+                (time.time() - 1, expired_op),
+            )
+            store.conn.commit()
+            expired = await client.post(
+                route, headers=h, json={"operation_id": expired_op, "confirm": True}
+            )
+            assert expired.status == 410
+            valid_op = await preview(current)
+            done = await client.post(
+                route, headers=h, json={"operation_id": valid_op, "confirm": True}
+            )
+            assert done.status == 200
+            store.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+    path = _paths(tmp_path, "member").canonical_atoms_db.with_name("memory_tool_calls.jsonl")
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(e["ok"], (e.get("meta") or {}).get("status")) for e in entries] == [
+        (False, "not_found"),
+        (False, "conflict"),
+        (False, "expired"),
+        (True, "deleted"),
+    ]
+    assert all(set(e["args"]) == {"operation_id"} for e in entries)
+    assert "member_PRIVATE" not in path.read_text()

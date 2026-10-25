@@ -98,17 +98,12 @@ async def _handle(
             if not isinstance(operation_id, str):
                 raise ValueError("memory_payload_invalid")
             result = service.confirm(operation_id)
-            if not result.ok:
-                raise ValueError("memory_storage_unavailable")
             status = result.data.get("status")
-            if status != "deleted":
-                code = (
-                    "memory_delete_" + status
-                    if isinstance(status, str) and status in {"not_found", "conflict", "expired"}
-                    else "memory_storage_unavailable"
-                )
-                raise ValueError(code)
-            return {"status": "deleted", "subject": service.subject}
+            if result.ok and status == "deleted":
+                return {"status": "deleted", "subject": service.subject}
+            if isinstance(status, str) and status in {"not_found", "conflict", "expired"}:
+                raise ValueError("memory_delete_" + status)
+            raise ValueError("memory_storage_unavailable")
         finally:
             service.close()
 

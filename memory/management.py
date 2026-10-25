@@ -123,6 +123,12 @@ class MemoryManagement:
         try:
             self.store.bind_vectors(vectors.db_path)
             status = self.store.confirm_delete_preview(operation_id)
-            return ToolResult.success({"status": status})
+            if status == "deleted":
+                return ToolResult.success({"status": status}, meta={"status": status})
+            return ToolResult.failure(
+                "Подтверждение удаления Memory отклонено.",
+                data={"status": status},
+                meta={"status": status},
+            )
         finally:
             vectors.close()
