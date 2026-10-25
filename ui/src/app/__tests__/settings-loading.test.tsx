@@ -513,6 +513,7 @@ describe('Settings loading isolation', () => {
     render(<Settings isOpen onClose={() => undefined} />);
     await screen.findByRole('textbox', { name: 'Custom instructions' });
     fireEvent.click(screen.getByRole('button', { name: 'Memory and data' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced memory settings' }));
     fireEvent.change(screen.getByDisplayValue('old-model'), { target: { value: 'new-model' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await screen.findByText('new-model is available locally.');

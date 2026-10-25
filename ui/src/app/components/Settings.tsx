@@ -3,6 +3,8 @@ import {
   Database,
   Download,
   KeyRound,
+  Shield,
+  Code2,
   RefreshCcw,
   Upload,
 } from 'lucide-react';
@@ -18,9 +20,10 @@ interface SettingsProps {
   isOpen: boolean;
   onClose: () => void;
   onSaved?: () => void;
+  onOpenSessionControls?: () => void;
 }
 
-type SettingsTab = 'api' | 'personal' | 'data';
+type SettingsTab = 'api' | 'personal' | 'data' | 'access' | 'developer';
 type ApiKeyProvider = 'xai' | 'openrouter' | 'local' | 'inception' | 'openai' | 'deepseek';
 type ModelProvider = string;
 type ApiKeySource = 'env' | 'file' | 'missing';
@@ -174,12 +177,16 @@ const TAB_ITEMS: Array<{ id: SettingsTab; title: string }> = [
   { id: 'api', title: 'Models and connections' },
   { id: 'personal', title: 'Conversation and interface' },
   { id: 'data', title: 'Memory and data' },
+  { id: 'access', title: 'Access and environment' },
+  { id: 'developer', title: 'Developer' },
 ];
 
 const TAB_ICONS: Record<SettingsTab, typeof KeyRound> = {
   api: KeyRound,
   personal: Bot,
   data: Database,
+  access: Shield,
+  developer: Code2,
 };
 
 const THRESHOLD_PRESETS = [8000, 12000, 25000];
@@ -788,8 +795,11 @@ export function Settings({
   isOpen,
   onClose,
   onSaved,
+  onOpenSessionControls,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('personal');
+  const [developerView, setDeveloperView] = useState(false);
+  const [showMemoryAdvanced, setShowMemoryAdvanced] = useState(false);
   const [canManageInstallation, setCanManageInstallation] = useState(false);
   const [settingsReady, setSettingsReady] = useState(false);
   const preferencesEtag = useRef<string | null>(null);
@@ -900,6 +910,9 @@ export function Settings({
     const subjectChanged = preferencesSubject.current !== null && preferencesSubject.current !== parsed.preferencesSubject;
     preferencesSubject.current = parsed.preferencesSubject;
     if (subjectChanged) {
+      setDeveloperView(false);
+      setShowMemoryAdvanced(false);
+      setActiveTab((tab) => tab === 'developer' ? 'personal' : tab);
       clearImportPreview();
       onboardingEpoch.current += 1;
       invalidateDiagnostics();
@@ -1117,6 +1130,9 @@ export function Settings({
   useEffect(() => {
     if (!isOpen) {
       setSettingsReady(false);
+      setDeveloperView(false);
+      setShowMemoryAdvanced(false);
+      setActiveTab((tab) => tab === 'developer' ? 'personal' : tab);
       setShowInputAdvanced(false);
       setCanManageInstallation(false);
       preferencesEtag.current = null;
@@ -1691,7 +1707,7 @@ export function Settings({
               <div className="flex min-h-0 flex-1 overflow-hidden">
                 <nav className="w-48 shrink-0 border-r border-zinc-800 p-2.5">
                   <div className="space-y-0.5">
-                    {TAB_ITEMS.filter((tab) => canManageInstallation || !['api'].includes(tab.id)).map((tab) => (
+                    {TAB_ITEMS.filter((tab) => (canManageInstallation || tab.id !== 'api') && (tab.id !== 'developer' || developerView)).map((tab) => (
                       <button
                         key={tab.id}
                         type="button"
@@ -1710,6 +1726,13 @@ export function Settings({
                       </button>
                     ))}
                   </div>
+                  <button type="button" aria-pressed={developerView}
+                    onClick={() => {
+                      setDeveloperView((current) => !current);
+                      if (activeTab === 'developer') setActiveTab('personal');
+                    }}
+                    className="mt-4 w-full rounded-md border border-zinc-800 px-2.5 py-2 text-left text-xs text-zinc-400 hover:bg-zinc-900"
+                  >Developer view</button>
                 </nav>
 
                 <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5" data-scrollbar="auto">
@@ -1720,6 +1743,48 @@ export function Settings({
                   ) : null}
                   {loading ? (
                     <div className="text-sm text-zinc-400">Loading settings...</div>
+                  ) : null}
+
+                  {settingsReady && !loading && activeTab === 'access' ? (
+                    <SectionCard title="Chat access and environment" description="Permissions belong to the selected chat and its execution environment." scope="Current chat">
+                      <p className="mb-3 text-xs text-zinc-400">Use the existing chat controls to inspect tools, policy and model qualification. Opening this screen does not grant access or approve a task.</p>
+                      <p className="mb-3 text-xs text-zinc-400">Task approvals stay with the action in the chat. Desktop is an explicit host environment with its own policy and approvals.</p>
+                      <button type="button" disabled={!onOpenSessionControls}
+                        onClick={() => { onClose(); onOpenSessionControls?.(); }}
+                        className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 disabled:opacity-40"
+                      >Open chat controls</button>
+                      {!onOpenSessionControls ? <p className="mt-2 text-xs text-zinc-500">Choose a chat first to use its controls.</p> : null}
+                    </SectionCard>
+                  ) : null}
+                  {settingsReady && !loading && developerView && activeTab === 'developer' ? (
+                    <div>
+                      <SectionCard title="Developer presentation" description="This view does not change tools, policy, models or grants." scope="Presentation only">
+                        <p className="text-xs text-zinc-400">Connection evidence remains in Models and connections; task details remain in Computer. Runtime budgets and their enforcement are owned by the runtime, not this display toggle.</p>
+                      </SectionCard>
+                      {canManageInstallation ? (
+                        <SectionCard title="Operational memory settings" description="Owner-only installation configuration. Save changes to apply an edited value." scope="Installation">
+                          <Row
+                            label="Write rate limit"
+                            description="Maximum memory writes allowed per minute."
+                          >
+                            <input
+                              type="number"
+                              min={1}
+                              aria-label="Write rate limit"
+                              data-settings-field="memoryInboxWritesPerMinute"
+                              value={memoryInboxWritesPerMinute}
+                              onChange={(event) => {
+                                const next = Number.parseInt(event.target.value, 10);
+                                if (!Number.isNaN(next)) {
+                                  setMemoryInboxWritesPerMinute(next);
+                                }
+                              }}
+                              className="w-28 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                            />
+                          </Row>
+                        </SectionCard>
+                      ) : <p className="text-xs text-zinc-400">Only the owner can edit installation operational settings.</p>}
+                    </div>
                   ) : null}
 
                   {canManageInstallation && settingsReady && !loading && activeTab === 'api' ? (
@@ -2172,21 +2237,7 @@ export function Settings({
                           Slavik previews each requested Memory change. Nothing is saved until
                           you confirm or edit it.
                         </p>
-                        <Row label="Inbox size" description="Maximum items kept in the inbox.">
-                          <input
-                            type="number"
-                            min={1}
-                            data-settings-field="memoryInboxMaxItems"
-                            value={memoryInboxMaxItems}
-                            onChange={(event) => {
-                              const next = Number.parseInt(event.target.value, 10);
-                              if (!Number.isNaN(next)) {
-                                setMemoryInboxMaxItems(next);
-                              }
-                            }}
-                            className="w-28 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
-                          />
-                        </Row>
+
                         <Row
                           label="Inbox retention window"
                           description="Applies only to inbox entries, not chat history, confirmed Memory, or vectors."
@@ -2205,24 +2256,7 @@ export function Settings({
                             className="w-28 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
                           />
                         </Row>
-                        <Row
-                          label="Write rate limit"
-                          description="Maximum memory writes allowed per minute."
-                        >
-                          <input
-                            type="number"
-                            min={1}
-                            data-settings-field="memoryInboxWritesPerMinute"
-                            value={memoryInboxWritesPerMinute}
-                            onChange={(event) => {
-                              const next = Number.parseInt(event.target.value, 10);
-                              if (!Number.isNaN(next)) {
-                                setMemoryInboxWritesPerMinute(next);
-                              }
-                            }}
-                            className="w-28 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
-                          />
-                        </Row>
+
                       </SectionCard>
 
                       <SectionCard title="Semantic search processing" description="Choose local processing or explicitly opt in to remote embeddings." scope="Installation">
@@ -2252,88 +2286,108 @@ export function Settings({
 
                       </SectionCard>
 
-                      <SectionCard
-                        title="Advanced indexing"
-                        description="Embedding provider and model used for indexing and semantic retrieval."
-                        scope="Advanced"
-                      >
-                        {embeddingsProvider === 'local' ? (
-                          <div className="mt-3 space-y-3">
+                      {embeddingsProvider === 'local' ? (
+                        <SectionCard title="Local model availability" description="Availability checks and explicit download remain separate from model configuration." scope="Installation">
+                          <Row
+                            label="Model files"
+                            description={
+                              embeddingRuntimeError ||
+                                (embeddingRuntime.state === 'package_missing'
+                                  ? 'Local embeddings library is missing. On the SlavikAI server, run make install-beta, restart the server, then recheck. Automatic installation is unavailable.'
+                                  : embeddingRuntime.error) ||
+                                (embeddingRuntime.state === 'ready'
+                                  ? `${embeddingRuntime.model} is available locally.`
+                                  : 'Save the model name first, then download it once.')
+                            }
+                          >
+                            <StatusBadge
+                              tone={
+                                embeddingRuntimeLoading
+                                  ? 'neutral'
+                                  : embeddingRuntimeError
+                                    ? 'error'
+                                    : embeddingRuntime.state === 'ready'
+                                      ? 'success'
+                                      : embeddingRuntime.state === 'error' ||
+                                          embeddingRuntime.state === 'package_missing'
+                                        ? 'error'
+                                        : 'waiting'
+                              }
+                            >
+                              {embeddingRuntimeLoading
+                                ? 'checking'
+                                : embeddingRuntimeError
+                                  ? 'error'
+                                  : embeddingRuntime.state.replace('_', ' ')}
+                            </StatusBadge>
+                            {embeddingRuntime.state !== 'package_missing' ? <button
+                              type="button"
+                              onClick={() => {
+                                void handleDownloadEmbeddings();
+                              }}
+                              disabled={
+                                embeddingRuntime.state === 'downloading' ||
+                                !embeddingsLocalModel.trim()
+                              }
+                              className="ml-3 inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              {embeddingRuntime.state === 'downloading'
+                                ? 'Downloading...'
+                                : embeddingRuntime.state === 'ready'
+                                  ? 'Check again'
+                                  : 'Download model'}
+                            </button> : null}
+                          </Row>
+                        </SectionCard>
+                      ) : null}
+                      <button type="button" aria-expanded={showMemoryAdvanced}
+                        onClick={() => setShowMemoryAdvanced((current) => !current)}
+                        className="mb-4 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900"
+                      >Advanced memory settings</button>
+                      {showMemoryAdvanced ? (
+                        <SectionCard title="Advanced memory settings" description="Inbox capacity and the indexing model. Changing these values does not rebuild the index automatically." scope="Advanced">
+                          <Row label="Inbox size" description="Maximum items kept in the inbox.">
+                            <input
+                              type="number"
+                              min={1}
+                              aria-label="Inbox size"
+                              data-settings-field="memoryInboxMaxItems"
+                              value={memoryInboxMaxItems}
+                              onChange={(event) => {
+                                const next = Number.parseInt(event.target.value, 10);
+                                if (!Number.isNaN(next)) {
+                                  setMemoryInboxMaxItems(next);
+                                }
+                              }}
+                              className="w-28 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
+                            />
+                          </Row>
+                          {embeddingsProvider === 'local' ? (
                             <Row label="Local embedding model">
                               <input
                                 type="text"
+                                aria-label="Local embedding model"
                                 data-settings-field="embeddingsLocalModel"
                                 value={embeddingsLocalModel}
                                 onChange={(event) => setEmbeddingsLocalModel(event.target.value)}
                                 className="w-64 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
                               />
                             </Row>
-                            <Row
-                              label="Model files"
-                              description={
-                                embeddingRuntimeError ||
-                                  (embeddingRuntime.state === 'package_missing'
-                                    ? 'Local embeddings library is missing. On the SlavikAI server, run make install-beta, restart the server, then recheck. Automatic installation is unavailable.'
-                                    : embeddingRuntime.error) ||
-                                  (embeddingRuntime.state === 'ready'
-                                    ? `${embeddingRuntime.model} is available locally.`
-                                    : 'Save the model name first, then download it once.')
-                              }
-                            >
-                              <StatusBadge
-                                tone={
-                                  embeddingRuntimeLoading
-                                    ? 'neutral'
-                                    : embeddingRuntimeError
-                                      ? 'error'
-                                      : embeddingRuntime.state === 'ready'
-                                        ? 'success'
-                                        : embeddingRuntime.state === 'error' ||
-                                            embeddingRuntime.state === 'package_missing'
-                                          ? 'error'
-                                          : 'waiting'
-                                }
-                              >
-                                {embeddingRuntimeLoading
-                                  ? 'checking'
-                                  : embeddingRuntimeError
-                                    ? 'error'
-                                    : embeddingRuntime.state.replace('_', ' ')}
-                              </StatusBadge>
-                              {embeddingRuntime.state !== 'package_missing' ? <button
-                                type="button"
-                                onClick={() => {
-                                  void handleDownloadEmbeddings();
-                                }}
-                                disabled={
-                                  embeddingRuntime.state === 'downloading' ||
-                                  !embeddingsLocalModel.trim()
-                                }
-                                className="ml-3 inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-100 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-                              >
-                                <Download className="h-3.5 w-3.5" />
-                                {embeddingRuntime.state === 'downloading'
-                                  ? 'Downloading...'
-                                  : embeddingRuntime.state === 'ready'
-                                    ? 'Check again'
-                                    : 'Download model'}
-                              </button> : null}
-                            </Row>
-                          </div>
-                        ) : (
-                          <div className="mt-3">
+                          ) : (
                             <Row label="OpenAI embedding model">
                             <input
                               type="text"
+                              aria-label="OpenAI embedding model"
                               data-settings-field="embeddingsOpenaiModel"
                               value={embeddingsOpenaiModel}
                               onChange={(event) => setEmbeddingsOpenaiModel(event.target.value)}
                                 className="w-64 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 focus:border-zinc-500 focus:outline-none"
                             />
                             </Row>
-                          </div>
-                        )}
-                      </SectionCard>
+                          )}
+                        </SectionCard>
+                      ) : null}
                     </div>
                   ) : null}
 

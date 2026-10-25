@@ -807,6 +807,7 @@ export default function App() {
         onSaved={() => {
           void handleSettingsSaved();
         }}
+        onOpenSessionControls={runtime.selectedConversation ? () => overlays.setSessionDrawerOpen(true) : undefined}
       />
     </div>
   );
