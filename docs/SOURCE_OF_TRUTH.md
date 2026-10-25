@@ -271,3 +271,17 @@ idempotency: replay принятого запроса относится к ис
 Typed browser helpers передают явно выбранный
 PlanEnvelope, без неявной подстановки текущего плана. Готовность карточки плана
 этот API-контракт сам по себе не доказывает.
+
+## Чтение session security в браузере
+
+Session Controls и Computer используют проверенный snapshot существующего owned
+session/security endpoint. Отсутствующий, неполный, неизвестный или противоречивый
+profile/tools_state не становится Sandbox либо safe-mode ON/OFF. При неизвестном
+состоянии Computer показывает Unavailable, а controls не предлагают редактирование
+выдуманных defaults. Ответ обязан совпадать с requested session_id.
+
+Смена/закрытие панели отбрасывает поздние reads и completions прежней панели.
+Повторное открытие той же сессии ждёт известный отправленный POST и затем читает
+состояние заново; POST автоматически не повторяется. Существующий explicit save,
+YOLO confirmations и server enforcement не меняются. Это UI read-state contract,
+не authoritative unified grant/source/revision/revoke или Desktop approval view.

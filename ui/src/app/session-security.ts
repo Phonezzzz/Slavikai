@@ -3,13 +3,13 @@ import { policyLabel as formatPolicyLabel } from '../features/workspace/workspac
 export type SessionSecuritySummary = {
   policyLabel: string;
   yoloActive: boolean;
-  safeMode: boolean;
+  safeMode: boolean | null;
 };
 
 export const DEFAULT_SESSION_SECURITY_SUMMARY: SessionSecuritySummary = {
-  policyLabel: 'Sandbox',
+  policyLabel: 'Unavailable',
   yoloActive: false,
-  safeMode: true,
+  safeMode: null,
 };
 
 const extractErrorMessage = (payload: unknown, fallback: string): string => {
@@ -23,27 +23,31 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
   return fallback;
 };
 
-export const parseSessionSecuritySummary = (value: unknown): SessionSecuritySummary => {
-  if (!value || typeof value !== 'object') {
-    return DEFAULT_SESSION_SECURITY_SUMMARY;
-  }
-  const policyRaw = (value as { policy?: unknown }).policy;
-
-  let nextPolicyLabel = DEFAULT_SESSION_SECURITY_SUMMARY.policyLabel;
-  let nextYoloActive = DEFAULT_SESSION_SECURITY_SUMMARY.yoloActive;
-  let nextSafeMode = DEFAULT_SESSION_SECURITY_SUMMARY.safeMode;
-
-  if (policyRaw && typeof policyRaw === 'object') {
-    const profile = (policyRaw as { profile?: unknown }).profile;
-    nextPolicyLabel = formatPolicyLabel(profile);
-    nextYoloActive = profile === 'yolo';
-    nextSafeMode = profile !== 'yolo';
-  }
-
+export const SESSION_TOOL_KEYS = ['fs', 'shell', 'web', 'project', 'img', 'tts', 'stt'] as const;
+export type ToolKey = typeof SESSION_TOOL_KEYS[number];
+export type PolicyProfile = 'sandbox' | 'index' | 'yolo';
+export type SessionSecurityState = { toolsState: Record<ToolKey, boolean>; policyProfile: PolicyProfile };
+const record = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value);
+export const parseSessionSecurityState = (value: unknown, sessionId?: string): SessionSecurityState | null => {
+  if (!record(value) || (sessionId !== undefined && value.session_id !== sessionId)
+    || !record(value.policy) || !record(value.tools_state)) return null;
+  const profile = value.policy.profile;
+  if (profile !== 'sandbox' && profile !== 'index' && profile !== 'yolo') return null;
+  const tools = value.tools_state;
+  if (tools.safe_mode !== (profile !== 'yolo') || !SESSION_TOOL_KEYS.every(key => typeof tools[key] === 'boolean')) return null;
   return {
-    policyLabel: nextPolicyLabel,
-    yoloActive: nextYoloActive,
-    safeMode: nextSafeMode,
+    policyProfile: profile,
+    toolsState: Object.fromEntries(SESSION_TOOL_KEYS.map(key => [key, tools[key]])) as Record<ToolKey, boolean>,
+  };
+};
+export const parseSessionSecuritySummary = (value: unknown): SessionSecuritySummary => {
+  const state = parseSessionSecurityState(value);
+  if (!state) return DEFAULT_SESSION_SECURITY_SUMMARY;
+  return {
+    policyLabel: formatPolicyLabel(state.policyProfile),
+    yoloActive: state.policyProfile === 'yolo',
+    safeMode: state.policyProfile !== 'yolo',
   };
 };
 
@@ -60,5 +64,6 @@ export const loadSessionSecuritySummary = async (
   if (!response.ok) {
     throw new Error(extractErrorMessage(payload, 'Failed to load session controls.'));
   }
+  if (!parseSessionSecurityState(payload, sessionId)) throw new Error('Session controls are unavailable or belong to another session.');
   return parseSessionSecuritySummary(payload);
 };

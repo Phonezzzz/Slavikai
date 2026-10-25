@@ -492,6 +492,9 @@ def test_ui_session_security_get_and_post_updates_state() -> None:
             assert get_tools.get("shell") is True
             assert get_tools.get("web") is True
             assert get_tools.get("safe_mode") is True
+            assert get_payload.get("session_id") == session_id
+            for key in ("fs", "shell", "web", "project", "img", "tts", "stt", "safe_mode"):
+                assert isinstance(get_tools.get(key), bool)
             get_policy = get_payload.get("policy")
             assert isinstance(get_policy, dict)
             assert get_policy.get("profile") == "sandbox"

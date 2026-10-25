@@ -8,7 +8,7 @@ type WorkspaceToolbarProps = {
   workspaceRoot: string;
   sessionPolicyLabel: string;
   sessionYoloActive: boolean;
-  sessionSafeMode: boolean;
+  sessionSafeMode: boolean | null;
   statusMessage: string | null | undefined;
   onBackToChat: () => void;
   onOpenSessionDrawer: () => void;
@@ -91,8 +91,8 @@ export function WorkspaceToolbar({
           <span className={`text-xs ${policyClass}`}>
             {policyBadge}
           </span>
-          <span className={`text-xs ${sessionSafeMode ? 'text-amber-300' : 'text-emerald-300'}`}>
-            Session safe mode: {sessionSafeMode ? 'ON' : 'OFF'}
+          <span className={`text-xs ${sessionSafeMode === null ? 'text-zinc-500' : sessionSafeMode ? 'text-amber-300' : 'text-emerald-300'}`}>
+            Session safe mode: {sessionSafeMode === null ? 'Unavailable' : sessionSafeMode ? 'ON' : 'OFF'}
           </span>
           <button
             onClick={onOpenRepositoryPanel}

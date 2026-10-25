@@ -3,6 +3,7 @@ import { createElement, type MutableRefObject, type ReactNode } from 'react';
 import { BrowserSubjectProvider } from '../browser-subject';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { loadSessionSecuritySummary, DEFAULT_SESSION_SECURITY_SUMMARY } from '../session-security';
 import { loadLastModel, saveLastModel } from '../session-storage';
 import { DEFAULT_COMPOSER_SETTINGS } from '../session-payload';
 import type { SessionTransportBridge } from '../session-bridges';
@@ -793,4 +794,16 @@ it('restarts terminal permissions loading after a mode change and rejects the ol
   await act(async () => { oldMetadata.resolve(jsonResponse({ session: { active_plan: plan, mode_transitions: permissions('act') } })); });
   expect(h.result.current.modeTransitions?.currentMode).toBe('ask');
   expect(h.result.current.modeTransitions?.targets.ask.allowed).toBe(false);
+});
+
+it('does not publish a late session security refresh into a different conversation', async () => {
+  const h = createHarness();
+  await waitFor(() => expect(h.result.current.selectedConversation).toBe('C'));
+  const old = deferred<typeof DEFAULT_SESSION_SECURITY_SUMMARY>();
+  vi.mocked(loadSessionSecuritySummary).mockImplementationOnce(() => old.promise);
+  let pending!: Promise<void>;
+  act(() => { pending = h.result.current.refreshSessionSecuritySummary(); });
+  await act(async () => { await h.result.current.handleSelectConversation('B'); });
+  await act(async () => { old.resolve({ policyLabel: 'YOLO', safeMode: false, yoloActive: true }); await pending; });
+  expect(h.result.current.sessionSecuritySummary).toEqual(DEFAULT_SESSION_SECURITY_SUMMARY);
 });

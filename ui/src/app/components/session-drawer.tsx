@@ -4,14 +4,12 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ToggleSwitch } from './ui/toggle-switch';
 import { ModelQualification } from './model-qualification';
+import { parseSessionSecurityState, type ToolKey, type PolicyProfile } from '../session-security';
 import { useFocusTrap } from '../use-focus-trap';
 import {
   SESSION_MODE_LABELS,
   type SessionMode,
 } from '../types';
-
-type ToolKey = 'fs' | 'shell' | 'web' | 'project' | 'img' | 'tts' | 'stt';
-type PolicyProfile = 'sandbox' | 'index' | 'yolo';
 
 type SessionDrawerProps = {
   isOpen: boolean;
@@ -22,21 +20,6 @@ type SessionDrawerProps = {
   mode: SessionMode;
   modelLabel: string;
   selectedModelValue: string | null;
-};
-
-type SessionSecurityState = {
-  toolsState: Record<ToolKey, boolean>;
-  policyProfile: PolicyProfile;
-};
-
-const DEFAULT_TOOLS_STATE: Record<ToolKey, boolean> = {
-  fs: true,
-  shell: false,
-  web: false,
-  project: false,
-  img: false,
-  tts: false,
-  stt: false,
 };
 
 const SAFE_MODE_BLOCKED_TOOLS = new Set<ToolKey>(['web', 'shell', 'project', 'tts', 'stt']);
@@ -85,18 +68,6 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
   return fallback;
 };
 
-const isToolKey = (value: unknown): value is ToolKey =>
-  value === 'fs'
-  || value === 'shell'
-  || value === 'web'
-  || value === 'project'
-  || value === 'img'
-  || value === 'tts'
-  || value === 'stt';
-
-const isPolicyProfile = (value: unknown): value is PolicyProfile =>
-  value === 'sandbox' || value === 'index' || value === 'yolo';
-
 const buildSafetyPreset = (): Record<ToolKey, boolean> => ({
   fs: true,
   shell: false,
@@ -106,39 +77,6 @@ const buildSafetyPreset = (): Record<ToolKey, boolean> => ({
   tts: false,
   stt: false,
 });
-
-const parseSecurityPayload = (payload: unknown): SessionSecurityState => {
-  const defaults: SessionSecurityState = {
-    toolsState: { ...DEFAULT_TOOLS_STATE },
-    policyProfile: 'sandbox',
-  };
-  if (!payload || typeof payload !== 'object') {
-    return defaults;
-  }
-  const toolsStateRaw = (payload as { tools_state?: unknown }).tools_state;
-  const policyRaw = (payload as { policy?: unknown }).policy;
-  const nextToolsState = { ...DEFAULT_TOOLS_STATE };
-  if (toolsStateRaw && typeof toolsStateRaw === 'object') {
-    for (const [key, value] of Object.entries(toolsStateRaw as Record<string, unknown>)) {
-      if (isToolKey(key) && typeof value === 'boolean') {
-        nextToolsState[key] = value;
-      }
-    }
-  }
-
-  let policyProfile: PolicyProfile = defaults.policyProfile;
-  if (policyRaw && typeof policyRaw === 'object') {
-    const profileRaw = (policyRaw as { profile?: unknown }).profile;
-    if (isPolicyProfile(profileRaw)) {
-      policyProfile = profileRaw;
-    }
-  }
-
-  return {
-    toolsState: nextToolsState,
-    policyProfile,
-  };
-};
 
 export function SessionDrawer({
   isOpen,
@@ -153,49 +91,55 @@ export function SessionDrawer({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const [toolsState, setToolsState] = useState<Record<ToolKey, boolean>>({ ...DEFAULT_TOOLS_STATE });
+  const [toolsState, setToolsState] = useState<Record<ToolKey, boolean>>(buildSafetyPreset());
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('sandbox');
   const [dangerConfirmText, setDangerConfirmText] = useState('');
   const [dangerConfirmed, setDangerConfirmed] = useState(false);
   const panelRef = useRef<HTMLElement | null>(null);
   useFocusTrap(isOpen, panelRef);
+  const epoch = useRef(0);
+  const pendingWrites = useRef(new Map<string, Promise<void>>());
+  const [loadedSession, setLoadedSession] = useState<string | null>(null);
+  const ready = !!sessionId && loadedSession === `${sessionHeader}:${sessionId}`;
   const requestHeaders = sessionId ? { [sessionHeader]: sessionId } : {};
   const safeModeEnabled = policyProfile !== 'yolo';
 
-  const loadControls = async (): Promise<void> => {
-    if (!sessionId) {
-      setStatus('Select an active session to edit session controls.');
-      setToolsState({ ...DEFAULT_TOOLS_STATE });
-      setPolicyProfile('sandbox');
-      return;
-    }
-    setLoading(true);
-    setStatus(null);
-    try {
-      const response = await fetch('/ui/api/session/security', { headers: requestHeaders });
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, 'Failed to load session controls.'));
-      }
-      const parsed = parseSecurityPayload(payload);
-      setToolsState(parsed.toolsState);
-      setPolicyProfile(parsed.policyProfile);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load session controls.';
-      setStatus(message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
+    const generation = ++epoch.current;
+    const abort = new AbortController();
+    setLoadedSession(null);
+    setSaving(false);
     setDangerConfirmText('');
     setDangerConfirmed(false);
-    void loadControls();
-  }, [isOpen, sessionId]);
+    if (!isOpen || !sessionId) {
+      setLoading(false);
+      setStatus(sessionId ? null : 'Select an active session to edit session controls.');
+      return () => { ++epoch.current; abort.abort(); };
+    }
+    const current = () => epoch.current === generation && !abort.signal.aborted;
+    setLoading(true);
+    setStatus(null);
+    void (async () => {
+      try {
+        await pendingWrites.current.get(sessionId);
+        if (!current()) return;
+        const response = await fetch('/ui/api/session/security', { headers: { [sessionHeader]: sessionId }, signal: abort.signal });
+        const payload: unknown = await response.json();
+        if (!current()) return;
+        if (!response.ok) throw new Error(extractErrorMessage(payload, 'Failed to load session controls.'));
+        const parsed = parseSessionSecurityState(payload, sessionId);
+        if (!parsed) throw new Error('Session controls are unavailable or belong to another session.');
+        setToolsState(parsed.toolsState);
+        setPolicyProfile(parsed.policyProfile);
+        setLoadedSession(`${sessionHeader}:${sessionId}`);
+      } catch (error) {
+        if (current()) setStatus(error instanceof Error ? error.message : 'Failed to load session controls.');
+      } finally {
+        if (current()) setLoading(false);
+      }
+    })();
+    return () => { ++epoch.current; abort.abort(); };
+  }, [isOpen, sessionId, sessionHeader]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -225,7 +169,7 @@ export function SessionDrawer({
   };
 
   const handleSave = async () => {
-    if (!sessionId || saving) {
+    if (!sessionId || !ready || saving || pendingWrites.current.has(sessionId)) {
       return;
     }
     const wantsDangerousMode = policyProfile === 'yolo';
@@ -237,41 +181,52 @@ export function SessionDrawer({
       setStatus('Confirm that you understand this session will run with reduced safeguards.');
       return;
     }
+    const generation = epoch.current;
+    const current = () => epoch.current === generation;
     setSaving(true);
     setStatus(null);
-    try {
-      const response = await fetch('/ui/api/session/security', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...requestHeaders,
-        },
-        body: JSON.stringify({
-          policy: {
-            profile: policyProfile,
-            yolo_confirm: wantsDangerousMode,
-            yolo_confirm_text: wantsDangerousMode ? DANGER_CONFIRMATION_PHRASE : '',
+    const operation = (async () => {
+      try {
+        const response = await fetch('/ui/api/session/security', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...requestHeaders,
           },
-          tools: {
-            state: toolsState,
-          },
-        }),
-      });
-      const payload: unknown = await response.json();
-      if (!response.ok) {
-        throw new Error(extractErrorMessage(payload, 'Failed to save session controls.'));
+          body: JSON.stringify({
+            policy: {
+              profile: policyProfile,
+              yolo_confirm: wantsDangerousMode,
+              yolo_confirm_text: wantsDangerousMode ? DANGER_CONFIRMATION_PHRASE : '',
+            },
+            tools: {
+              state: toolsState,
+            },
+          }),
+        });
+        const payload: unknown = await response.json();
+        if (!response.ok) {
+          throw new Error(extractErrorMessage(payload, 'Failed to save session controls.'));
+        }
+        if (!current()) return;
+        const parsed = parseSessionSecurityState(payload, sessionId);
+        if (!parsed) {
+          setLoadedSession(null);
+          throw new Error('The update response is unavailable. Reopen controls to read the current state before another change.');
+        }
+        setToolsState(parsed.toolsState);
+        setPolicyProfile(parsed.policyProfile);
+        setStatus('Session controls updated.');
+        onSaved?.();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to save session controls.';
+        if (current()) { setLoadedSession(null); setStatus(message); }
+      } finally {
+        if (current()) setSaving(false);
       }
-      const parsed = parseSecurityPayload(payload);
-      setToolsState(parsed.toolsState);
-      setPolicyProfile(parsed.policyProfile);
-      setStatus('Session controls updated.');
-      onSaved?.();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to save session controls.';
-      setStatus(message);
-    } finally {
-      setSaving(false);
-    }
+    })();
+    pendingWrites.current.set(sessionId, operation);
+    try { await operation; } finally { pendingWrites.current.delete(sessionId); }
   };
 
   return (
@@ -330,6 +285,7 @@ export function SessionDrawer({
                 <p className="text-xs text-zinc-400">{SESSION_MODE_LABELS[mode]} · Режим выбирается у поля сообщения.</p>
               </section>
 
+              {ready ? <fieldset disabled={saving} className="contents">
               <section className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
                 <div className="space-y-1">
                   <div className="text-[11px] uppercase tracking-[0.16em] text-zinc-500">Safety</div>
@@ -456,6 +412,7 @@ export function SessionDrawer({
                   })}
                 </div>
               </section>
+              </fieldset> : <p className="text-sm text-zinc-400">{loading ? 'Loading session access settings...' : 'Session access settings are unavailable. Close and reopen this panel to retry.'}</p>}
             </div>
 
             <div className="border-t border-zinc-800 px-5 py-4">
@@ -468,7 +425,7 @@ export function SessionDrawer({
                 <div className="text-xs text-zinc-500">
                   {loading
                     ? 'Loading session controls...'
-                    : policyProfile === 'yolo'
+                    : !ready ? 'Session controls unavailable.' : policyProfile === 'yolo'
                       ? 'Unrestricted session profile selected.'
                       : 'Session controls ready.'}
                 </div>
@@ -485,7 +442,7 @@ export function SessionDrawer({
                     onClick={() => {
                       void handleSave();
                     }}
-                    disabled={saving || loading || !sessionId}
+                    disabled={saving || loading || !ready}
                     className="rounded-md border border-zinc-700 bg-zinc-100 px-3 py-2 text-sm font-medium text-zinc-950 hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {saving ? 'Saving...' : 'Save session controls'}

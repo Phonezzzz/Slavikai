@@ -294,6 +294,8 @@ export function useSessionRuntimeController({
   const resyncFetchInFlightRef = useRef(false);
   const reconcileGuardRef = useRef(new RootReconcileGuard());
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
+  const securitySessionRef = useRef(selectedConversation);
+  securitySessionRef.current = selectedConversation;
   const [selectedModel, setSelectedModel] = useState<SelectedModel | null>(null);
   const [savingModel, setSavingModel] = useState(false);
   const modelRequestRef = useRef<symbol | null>(null);
@@ -305,7 +307,10 @@ export function useSessionRuntimeController({
   const decisionIdentityRef = useRef<string | null>(null);
   const [planCancelling, setPlanCancelling] = useState(false);
   const initialStateAbortRef = useRef<AbortController | null>(null);
+  const securityRequestRef = useRef<symbol | null>(null);
   const beginConversationChange = () => {
+    setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
+    securityRequestRef.current = null;
     modelRequestRef.current = null;
     workflowRequestRef.current = null;
     decisionRequestRef.current = null;
@@ -440,8 +445,17 @@ export function useSessionRuntimeController({
       setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
       return;
     }
-    const summary = await loadSessionSecuritySummary(activeSessionId, sessionHeader);
-    setSessionSecuritySummary(summary);
+    if (activeSessionId !== securitySessionRef.current) return;
+    const generation = reconcileGuardRef.current.snapshot();
+    const request = Symbol();
+    securityRequestRef.current = request;
+    setSessionSecuritySummary(DEFAULT_SESSION_SECURITY_SUMMARY);
+    try {
+      const summary = await loadSessionSecuritySummary(activeSessionId, sessionHeader);
+      if (reconcileGuardRef.current.isCurrent(generation) && securityRequestRef.current === request) setSessionSecuritySummary(summary);
+    } finally {
+      if (securityRequestRef.current === request) securityRequestRef.current = null;
+    }
   };
 
   const loadConversation = async (
@@ -484,7 +498,10 @@ export function useSessionRuntimeController({
       throw new Error(extractErrorMessage(filesPayload, 'Failed to load session files.'));
     }
 
+    if (!reconcileGuardRef.current.isCurrent(generation)) return null;
     const session = (sessionPayload as { session?: { selected_model?: unknown } }).session;
+    const securityRequest = Symbol();
+    securityRequestRef.current = securityRequest;
     let securitySummary = DEFAULT_SESSION_SECURITY_SUMMARY;
     try {
       securitySummary = await loadSessionSecuritySummary(sessionId, sessionHeader);
@@ -502,7 +519,7 @@ export function useSessionRuntimeController({
     });
     applyDecision(parseUiDecision((session as { decision?: unknown } | undefined)?.decision));
     setDecisionError(null);
-    setSessionSecuritySummary(securitySummary);
+    if (securityRequestRef.current === securityRequest) setSessionSecuritySummary(securitySummary);
     setWorkspaceRoot(
       parseWorkspaceRoot((session as { workspace_root?: unknown } | undefined)?.workspace_root),
     );
@@ -537,6 +554,11 @@ export function useSessionRuntimeController({
     const payloadSession = extractSessionIdFromPayload(payload);
     const nextSession = (headerSession && headerSession.trim()) || payloadSession || null;
     const session = (payload as { session?: { messages?: unknown; selected_model?: unknown } }).session;
+    if (!nextSession || !reconcileGuardRef.current.isCurrent(generation)) {
+      return { generation, sessionId: nextSession, selectedModel: parseSelectedModel(session?.selected_model) };
+    }
+    const securityRequest = Symbol();
+    securityRequestRef.current = securityRequest;
     let securitySummary = DEFAULT_SESSION_SECURITY_SUMMARY;
     if (nextSession) {
       try {
@@ -552,7 +574,10 @@ export function useSessionRuntimeController({
         selectedModel: parseSelectedModel(session?.selected_model),
       };
     }
-    if (activateOnSuccess) generation = beginConversationChange();
+    if (activateOnSuccess) {
+      generation = beginConversationChange();
+      securityRequestRef.current = securityRequest;
+    }
     transportRef.current?.applyLoadedConversation({
       chatMessages: parseMessages(session?.messages),
       outputContent: parseSessionOutput((session as { output?: unknown } | undefined)?.output).content,
@@ -576,7 +601,7 @@ export function useSessionRuntimeController({
       parseComputerEvents((session as { computer_events?: unknown } | undefined)?.computer_events),
     );
     setSelectedModel(sessionModel);
-    setSessionSecuritySummary(securitySummary);
+    if (securityRequestRef.current === securityRequest) setSessionSecuritySummary(securitySummary);
     return { generation, sessionId: nextSession, selectedModel: sessionModel };
   };
 

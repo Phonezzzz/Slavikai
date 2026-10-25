@@ -59,7 +59,7 @@ type WorkspaceIdeProps = {
   workspaceRoot: string;
   sessionPolicyLabel: string;
   sessionYoloActive: boolean;
-  sessionSafeMode: boolean;
+  sessionSafeMode: boolean | null;
   messages: CanvasMessage[];
   computerEvents?: ComputerActivityEvent[];
   statusMessage?: string | null;
