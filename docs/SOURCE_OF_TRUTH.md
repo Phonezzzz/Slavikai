@@ -148,8 +148,17 @@ Atomic mutation требует двух file-backed SQLite DB с rollback journa
 удаляет только выбранный canonical atom и его vector в namespace atoms, сохраняет bounded
 receipt без текста (до 24 часов, максимум1024 операции) и проверяет revision при повторе.
 История чатов, inbox, preferences и traces не удаляются; secure disk/backups erase не заявляется.
-Это storage prerequisite: пользовательский paged Memory list/delete API и Settings UI ещё
-не реализованы, новая destructive capability модели не предоставляется.
+Browser Memory management API читает principal-owned canonical atoms без выбранной модели
+или chat session: GET `/ui/api/memory/items` использует bounded keyset pagination.
+POST `/ui/api/memory/delete/preview` принимает точные atom_id/revision и создаёт
+principal-local opaque operation binding на 300 секунд (не более1024 previews, без текста).
+POST `/ui/api/memory/delete/confirm` требует operation_id + confirm=true и вызывает existing
+ToolGateway с server-only confirmed_decision_only tool; модель этот tool не получает.
+Preview и receipt переживают restart; foreign/stale/expired bindings не применяются.
+Browser identity остаётся verified Access JWT; Bearer `/v1` не получает browser Memory API.
+Private ответы имеют no-store; POST требует JSON и отклоняет cross-site fetch metadata.
+Action journal содержит только opaque operation ID и outcome.
+Settings list/delete UI ещё не реализован, новая destructive capability модели не предоставляется.
 
 ## Custom native tool protocol admission
 

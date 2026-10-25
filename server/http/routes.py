@@ -13,6 +13,7 @@ def register_routes(app: web.Application) -> None:
         events,
         health,
         memory,
+        memory_management,
         models,
         plan,
         project,
@@ -66,6 +67,13 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/provider-instances", settings.handle_ui_provider_create)
     app.router.add_get("/ui/api/embeddings/status", embeddings.handle_embeddings_status)
     app.router.add_post("/ui/api/embeddings/download", embeddings.handle_embeddings_download)
+    app.router.add_get("/ui/api/memory/items", memory_management.handle_memory_items)
+    app.router.add_post(
+        "/ui/api/memory/delete/preview", memory_management.handle_memory_delete_preview
+    )
+    app.router.add_post(
+        "/ui/api/memory/delete/confirm", memory_management.handle_memory_delete_confirm
+    )
     app.router.add_get("/ui/api/memory/conflicts", memory.handle_ui_memory_conflicts)
     app.router.add_get("/ui/api/memory/pinned", memory.handle_ui_memory_pinned)
     app.router.add_post("/ui/api/memory/pin", memory.handle_ui_memory_pin)

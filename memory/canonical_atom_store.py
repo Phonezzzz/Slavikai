@@ -79,6 +79,12 @@ class CanonicalAtomStore:
             "item_hash TEXT NOT NULL, revision TEXT NOT NULL, expires_at REAL NOT NULL)"
         )
 
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS atom_delete_preview (operation_id TEXT PRIMARY KEY, "
+            "atom_id TEXT NOT NULL, item_hash TEXT NOT NULL, revision TEXT NOT NULL, "
+            "expires_at REAL NOT NULL)"
+        )
+
     def _ensure_pinned_column(self) -> None:
         columns = {
             str(row["name"])
@@ -487,3 +493,77 @@ class CanonicalAtomStore:
                 "OFFSET 1024)"
             )
             return "deleted"
+
+    def list_page(self, *, after: str | None, limit: int) -> tuple[list[CanonicalAtom], str | None]:
+        if not 1 <= limit <= 100:
+            raise ValueError("memory_page_limit_invalid")
+        rows = self.conn.execute(
+            "SELECT * FROM canonical_atom WHERE atom_id > ? ORDER BY atom_id LIMIT ?",
+            (after or "", limit + 1),
+        ).fetchall()
+        atoms = [self._row_to_atom(row) for row in rows[:limit]]
+        return atoms, atoms[-1].atom_id if len(rows) > limit else None
+
+    def preview_delete(self, atom_id: str, revision: str) -> tuple[str, CanonicalAtom, float]:
+        with self.transaction():
+            atom = self.get_by_id(atom_id)
+            if atom is None:
+                raise ValueError("memory_item_not_found")
+            if atom.revision != revision:
+                raise ValueError("memory_revision_conflict")
+            now = time.time()
+            self.conn.execute("DELETE FROM atom_delete_preview WHERE expires_at <= ?", (now,))
+            operation_id = uuid.uuid4().hex
+            expires_at = now + 300
+            self.conn.execute(
+                "INSERT INTO atom_delete_preview VALUES (?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    atom.atom_id,
+                    hashlib.sha256(atom.stable_key.encode()).hexdigest(),
+                    revision,
+                    expires_at,
+                ),
+            )
+            self.conn.execute(
+                "DELETE FROM atom_delete_preview WHERE operation_id IN (SELECT operation_id "
+                "FROM atom_delete_preview ORDER BY expires_at DESC, operation_id LIMIT -1 "
+                "OFFSET 1024)"
+            )
+            return operation_id, atom, expires_at
+
+    def confirm_delete_preview(
+        self, operation_id: str
+    ) -> Literal["deleted", "conflict", "not_found", "expired"]:
+        with self.transaction():
+            preview = self.conn.execute(
+                "SELECT * FROM atom_delete_preview WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if preview is None:
+                return "not_found"
+            if preview["expires_at"] <= time.time():
+                return "expired"
+            receipt = self.conn.execute(
+                "SELECT * FROM atom_delete_receipt WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if receipt is not None:
+                return (
+                    "deleted"
+                    if receipt["item_hash"] == preview["item_hash"]
+                    and receipt["revision"] == preview["revision"]
+                    else "conflict"
+                )
+            atom = self.get_by_id(str(preview["atom_id"]))
+            if atom is None:
+                return "not_found"
+            if (
+                atom.revision != preview["revision"]
+                or hashlib.sha256(atom.stable_key.encode()).hexdigest() != preview["item_hash"]
+            ):
+                return "conflict"
+            return self.delete_confirmed(
+                atom.stable_key,
+                atom.revision,
+                operation_id,
+                expires_at=float(preview["expires_at"]),
+            )
