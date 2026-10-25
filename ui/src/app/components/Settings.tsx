@@ -12,6 +12,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import type { ChangeEvent, ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 
+import { ModelConfigView } from './model-config-view';
 import { ContextBudgetView } from './context-budget-view';
 import { MemoryItems, type MemoryWrites } from './memory-items';
 import { StatusBadge, type StatusTone } from './ui/status-badge';
@@ -92,6 +93,7 @@ type ParsedSettings = {
   longPasteThresholdChars: number;
   memorySettingsProvided: boolean;
   contextBudgetSnapshot: unknown;
+  modelConfigSnapshot: unknown;
   memoryInboxMaxItems: number;
   memoryInboxTtlDays: number;
   memoryInboxWritesPerMinute: number;
@@ -349,6 +351,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     longPasteThresholdChars: DEFAULT_LONG_PASTE_THRESHOLD_CHARS,
     memorySettingsProvided: false,
     contextBudgetSnapshot: null,
+    modelConfigSnapshot: null,
     memoryInboxMaxItems: DEFAULT_MEMORY_INBOX_MAX_ITEMS,
     memoryInboxTtlDays: DEFAULT_MEMORY_INBOX_TTL_DAYS,
     memoryInboxWritesPerMinute: DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE,
@@ -547,12 +550,13 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
-  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown };
+  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown };
   return {
     preferencesEtag: typeof metadata.preferences_etag === 'string' ? metadata.preferences_etag : null,
     preferencesSubject: typeof metadata.preferences_subject === 'string' ? metadata.preferences_subject : null,
     canManageInstallation: metadata.can_manage_installation === true,
     contextBudgetSnapshot: metadata.context_budget_snapshot ?? null,
+    modelConfigSnapshot: metadata.model_config_snapshot ?? null,
     providers,
     providerInstances,
     ttsBackend,
@@ -804,6 +808,8 @@ export function Settings({
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('personal');
   const [developerView, setDeveloperView] = useState(false);
+  const [showModelAdvanced, setShowModelAdvanced] = useState(false);
+  const [modelConfigSnapshot, setModelConfigSnapshot] = useState<unknown>(null);
   const [showMemoryAdvanced, setShowMemoryAdvanced] = useState(false);
   const [canManageInstallation, setCanManageInstallation] = useState(false);
   const [settingsReady, setSettingsReady] = useState(false);
@@ -919,6 +925,7 @@ export function Settings({
     if (subjectChanged) {
       setDeveloperView(false);
       setShowMemoryAdvanced(false);
+      setShowModelAdvanced(false);
       setActiveTab((tab) => tab === 'developer' ? 'personal' : tab);
       clearImportPreview();
       onboardingEpoch.current += 1;
@@ -939,6 +946,7 @@ export function Settings({
     setSettingsReady(true);
     setMemorySettingsProvided(parsed.memorySettingsProvided);
     setContextBudgetSnapshot(parsed.contextBudgetSnapshot);
+    setModelConfigSnapshot(parsed.modelConfigSnapshot);
     setCanManageInstallation(parsed.canManageInstallation);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
@@ -1139,8 +1147,10 @@ export function Settings({
     if (!isOpen) {
       setSettingsReady(false);
       setContextBudgetSnapshot(null);
+      setModelConfigSnapshot(null);
       setDeveloperView(false);
       setShowMemoryAdvanced(false);
+      setShowModelAdvanced(false);
       setActiveTab((tab) => tab === 'developer' ? 'personal' : tab);
       setShowInputAdvanced(false);
       setCanManageInstallation(false);
@@ -2044,6 +2054,11 @@ export function Settings({
                         <p className="mt-3 text-xs text-zinc-500">
                           A newly entered provider key is validated and saved automatically when you load models.
                         </p>
+                        <button type="button" aria-expanded={showModelAdvanced}
+                          onClick={() => setShowModelAdvanced(current => !current)}
+                          className="mt-3 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900"
+                        >Advanced saved model options</button>
+                        {showModelAdvanced ? <ModelConfigView snapshot={modelConfigSnapshot} /> : null}
                       </SectionCard>
                     </div>
                   ) : null}

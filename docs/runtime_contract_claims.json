@@ -518,6 +518,21 @@
         "ui/src/app/__tests__/root-reconcile.test.ts"
       ],
       "summary": "Verified auth metadata binds immutable browser subject context before bootstrap. Reachable last session/model/explorer/recent-root hints use explicit captured subjects; legacy values are not read/migrated and unavailable storage or subject disables persistence. Identity refresh is epoch fenced; subject changes remount private App, same-subject/transient failures preserve drafts, explicit denial removes App. No server auth authority change, instantaneous identity fencing or pending-send protocol claim; local/token tests do not re-enable legacy production auth."
+    },
+    {
+      "id": "settings.model_config_read_view",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_model_config_view.py",
+        "ui/src/app/__tests__/model-config-view.test.tsx",
+        "server/http/common/model_config_snapshot.py",
+        "ui/src/app/components/model-config-view.tsx"
+      ],
+      "summary": "Owner Settings exposes a separate read-only saved default model projection from the existing loader. Finite safe numerics, known enums, bools and null are sanitized; sensitive overrides expose presence only. Members omit diagnostics and POST is rejected. No React defaults, model probes, editor, active-chat capability or credential precedence claim. The existing web_search_enabled loader gap remains explicitly unsupported; runtime/parser/schema are unchanged."
     }
   ]
 }

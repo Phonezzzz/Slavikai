@@ -198,6 +198,21 @@ ContextBudgetConfig из существующего server loader. GET settings 
 контекстной сборки, не model token window и не гарантия Auto execution budgets.
 Member diagnostics не получает; React не дублирует значения по умолчанию.
 
+## Сохранённые параметры default model
+
+Owner Settings → Models and connections → Advanced показывает отдельный read-only
+`model_config_snapshot` из уже загруженной default ModelConfig. Числа ограничены
+конечными JS-safe значениями, enums — известными значениями; неверные типы получают
+Unavailable, отсутствие — Not set. Содержимое api_key, base_url, extra_headers и
+system_prompt не передаётся: показывается только наличие override. Member snapshot
+не получает, POST диагностического поля отклоняется без записи.
+
+Источник — сохранённая default configuration с defaults существующего loader при
+Settings refresh, отдельно от несохранённого выбора. Это не effective snapshot
+работающего чата, проверка provider capability или credential precedence. Известный
+loader gap web_search_enabled обозначен без придумывания активного значения;
+parser/runtime этим read-only срезом не изменяются.
+
 ## Custom native tool protocol admission
 
 Custom route начинается Chat-only. Только явная verified owner/session проверка
