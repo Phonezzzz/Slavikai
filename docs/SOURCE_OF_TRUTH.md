@@ -158,7 +158,13 @@ Preview и receipt переживают restart; foreign/stale/expired bindings 
 Browser identity остаётся verified Access JWT; Bearer `/v1` не получает browser Memory API.
 Private ответы имеют no-store; POST требует JSON и отклоняет cross-site fetch metadata.
 Action journal содержит только opaque operation ID и outcome.
-Settings list/delete UI ещё не реализован, новая destructive capability модели не предоставляется.
+Settings → Memory and data показывает собственные canonical items с полной пагинацией,
+значением/status и отдельным preview/Confirm delete для одной exact revision.
+Memory responses включают preferences_subject того же verified principal для связи с
+Settings snapshot; чужие/поздние ответы отбрасываются. Закрытие не отменяет отправленное
+подтверждение: повторно открытый список ждёт завершения известной операции этого subject.
+Удаление не очищает уже переданный модели context или сохранённую историю.
+Новая destructive capability модели не предоставляется.
 
 ## Custom native tool protocol admission
 

@@ -12,6 +12,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import type { ChangeEvent, ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 
+import { MemoryItems, type MemoryWrites } from './memory-items';
 import { StatusBadge, type StatusTone } from './ui/status-badge';
 import { ToggleSwitch } from './ui/toggle-switch';
 import { useFocusTrap } from '../use-focus-trap';
@@ -804,6 +805,7 @@ export function Settings({
   const [settingsReady, setSettingsReady] = useState(false);
   const preferencesEtag = useRef<string | null>(null);
   const preferencesSubject = useRef<string | null>(null);
+  const pendingMemoryWrites = useRef<MemoryWrites>(new Map());
   const [providers, setProviders] = useState<ProviderSettings[]>(DEFAULT_PROVIDER_SETTINGS);
   const [providerInstances, setProviderInstances] = useState<ProviderInstance[]>([]);
   const [newProviderName, setNewProviderName] = useState('');
@@ -2222,8 +2224,11 @@ export function Settings({
                             : <div>The owner manages installation settings. You can export and import your own chats below.</div>}
                         </div>
                       ) : <p className="text-xs text-zinc-400">Memory processing settings are unavailable.</p>}
-                      <p className="mt-3 text-xs text-zinc-500">Viewing and deleting all confirmed Memory is not available in this screen.</p>
                     </SectionCard>
+                  ) : null}
+
+                  {settingsReady && !loading && activeTab === 'data' && preferencesSubject.current ? (
+                    <MemoryItems key={preferencesSubject.current} subject={preferencesSubject.current} pendingWrites={pendingMemoryWrites.current} />
                   ) : null}
 
                   {canManageInstallation && settingsReady && !loading && activeTab === 'data' ? (

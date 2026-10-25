@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -8,6 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
+from shared.identity import principal_subject
 from shared.models import JSONValue
 
 PERSONAL_FIELDS = frozenset({"personalization", "appearance", "composer", "reset_preferences"})
@@ -91,7 +91,7 @@ class PreferencesSnapshot:
 
     @property
     def subject(self) -> str:
-        return hashlib.sha256(self.principal_id.encode()).hexdigest()
+        return principal_subject(self.principal_id)
 
     @property
     def etag(self) -> str:

@@ -79,6 +79,8 @@ def test_owned_list_preview_confirm_without_model_or_session(monkeypatch, tmp_pa
             assert response.headers["Cache-Control"] == "no-store"
             assert [i["value_json"] for i in data["items"]] == [{"text": "member_PRIVATE"}]
             assert data["next_cursor"] is None and data["subject"]
+            settings = await (await client.get("/ui/api/settings", headers=h)).json()
+            assert data["preferences_subject"] == settings["settings"]["preferences_subject"]
             forbidden = await client.post(
                 "/ui/api/memory/delete/preview",
                 headers=h,
@@ -92,6 +94,7 @@ def test_owned_list_preview_confirm_without_model_or_session(monkeypatch, tmp_pa
             )
             assert preview.status == 200
             binding = await preview.json()
+            assert binding["preferences_subject"] == data["preferences_subject"]
             op = binding["operation_id"]
             no = await client.post(
                 "/ui/api/memory/delete/confirm",
@@ -104,7 +107,10 @@ def test_owned_list_preview_confirm_without_model_or_session(monkeypatch, tmp_pa
                 headers=h,
                 json={"operation_id": op, "confirm": True},
             )
-            assert yes.status == 200 and (await yes.json())["status"] == "deleted"
+            assert yes.status == 200
+            result = await yes.json()
+            assert result["preferences_subject"] == data["preferences_subject"]
+            assert result["status"] == "deleted"
             again = await client.post(
                 "/ui/api/memory/delete/confirm",
                 headers=h,

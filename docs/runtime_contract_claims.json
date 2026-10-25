@@ -449,7 +449,7 @@
       "scope": "memory",
       "status": "implemented",
       "owner": "memory",
-      "version": 2,
+      "version": 3,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/test_memory_storage_atomic.py",
@@ -457,21 +457,36 @@
         "memory/canonical_atom_store.py",
         "memory/atom_embedding_index.py"
       ],
-      "summary": "Canonical revisions fence late vector publication. Bound principal stores atomically delete exact canonical/atoms vector rows with bounded idempotency receipts on supported rollback-journal file DBs. Deprecated pins are excluded. Storage boundary only; browser API is tracked separately by memory.browser_management_api. No Settings delete UI or new model capability. Encoding errors preserve prior vector and explicit partial-index save semantics."
+      "summary": "Canonical revisions fence late vector publication. Bound principal stores atomically delete exact canonical/atoms vector rows with bounded idempotency receipts on supported rollback-journal file DBs. Deprecated pins are excluded. Storage boundary only; browser API is tracked separately by memory.browser_management_api. No new model capability; Settings UI tracked separately. Encoding errors preserve prior vector and explicit partial-index save semantics."
     },
     {
       "id": "memory.browser_management_api",
       "scope": "memory",
       "status": "implemented",
       "owner": "memory",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/ui_api/test_memory_management.py",
         "memory/management.py",
         "server/http/handlers/memory_management.py"
       ],
-      "summary": "Verified browser principal gets model/session-independent canonical pagination and exact-revision delete preview/explicit confirmation through an existing confirmed-only, non-model-exposed gateway tool. Bounded persisted opaque bindings survive restart; foreign/stale/expired/rebound operations fail closed, private responses are no-store and logs contain no Memory plaintext. UI not yet implemented; auth tests use post-verifier identity fixtures, not deployed Access proof."
+      "summary": "Verified browser principal gets model/session-independent canonical pagination and exact-revision delete preview/explicit confirmation through an existing confirmed-only, non-model-exposed gateway tool. Bounded persisted opaque bindings survive restart; foreign/stale/expired/rebound operations fail closed, private responses are no-store and logs contain no Memory plaintext. Additive preferences_subject binds responses to the Settings account without changing Memory cursor subjects. UI tracked separately; auth tests use post-verifier identity fixtures, not deployed Access proof."
+    },
+    {
+      "id": "memory.browser_management_ui",
+      "scope": "memory",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "ui/src/app/__tests__/settings-memory.test.tsx",
+        "ui/src/app/components/memory-items.tsx",
+        "ui/src/app/components/Settings.tsx",
+        "tests/ui_api/test_memory_management.py"
+      ],
+      "summary": "Settings reads paged owned canonical Memory independently of models/chats and previews one exact-revision deletion before explicit confirmation through the existing API. Account/operation/epoch fences reject mismatched and late responses; reopened panels wait for known confirmations before listing. No bulk wipe or false erasure claim. UI fixtures and temporary-store HTTP evidence do not establish deployed Access/provider behavior."
     }
   ]
 }

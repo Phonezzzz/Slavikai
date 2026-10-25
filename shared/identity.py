@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 
 def normalize_email(value: object) -> str | None:
     if not isinstance(value, str):
@@ -18,3 +20,7 @@ def principal_id_for_email(email: str) -> str:
     if normalized is None:
         raise ValueError("email must be valid")
     return f"email:{normalized}"
+
+
+def principal_subject(principal_id: str) -> str:
+    return hashlib.sha256(principal_id.encode()).hexdigest()

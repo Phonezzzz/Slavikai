@@ -12,6 +12,7 @@ from server import http_api as api
 from server.http.common.auth import _owner_principal_id, _request_principal_id
 from server.http.common.responses import error_response, json_response
 from server.principal_storage import principal_storage_paths
+from shared.identity import principal_subject
 from shared.models import JSONValue
 
 _STATUS = {
@@ -117,6 +118,7 @@ async def _handle(
         )
     except (sqlite3.Error, OSError):
         return _error("memory_storage_unavailable", 503)
+    data["preferences_subject"] = principal_subject(principal)
     return json_response(data)
 
 
