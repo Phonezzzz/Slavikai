@@ -299,7 +299,10 @@ preferences_subject связывает ответ с Settings principal, отв�
 View не переписывает rule file, включая существующую интерпретацию legacy subject.
 Текущие runtime matching, list_rules, write routes и persisted schema не меняются.
 Projection не передаёт description, command contents, email, raw rule IDs либо raw
-load errors. File target path показывает сохранённую область; non-file target и
+load errors. File target path показывается только для известных файловых tool/action ролей
+существующего structured request path, включая browser download_destination;
+XPath, GUI targets и неизвестные роли остаются скрытыми независимо от `/` prefix.
+Non-file target и
 command/risk restrictions помечаются как скрытые. Saved effect/source не являются
 обещанием effective permission: transient once/session approvals и текущий host
 lease здесь не перечисляются, DENY сохраняет precedence. UI не изменяет/revokes

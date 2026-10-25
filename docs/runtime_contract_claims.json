@@ -563,7 +563,7 @@
         "server/http/common/desktop_approval_read_view.py",
         "ui/src/features/desktop/desktop-approvals-panel.tsx"
       ],
-      "summary": "Owner Settings reads a narrow principal-bound saved Desktop rule projection through the existing shared store. Inspection never rewrites the rule file; existing runtime/list/mutation behavior is preserved. Sensitive command/description/ID/email/error contents are omitted; non-file and command/risk restrictions remain explicitly hidden. Captured-subject/epoch guards reject foreign and late responses; read failure is not an empty list, UI has no mutators. No new grant authority, revoke, effective-action permission, transient approval or host lease claim."
+      "summary": "Owner Settings reads a narrow principal-bound saved Desktop rule projection through the existing shared store. Inspection never rewrites the rule file; existing runtime/list/mutation behavior is preserved. Sensitive command/description/ID/email/error contents are omitted; only known typed file-target tool/action roles expose paths, including separate download destinations. XPath/GUI/unknown targets and command/risk restrictions remain explicitly hidden. Captured-subject/epoch guards reject foreign and late responses; read failure is not an empty list, UI has no mutators. No new grant authority, revoke, effective-action permission, transient approval or host lease claim."
     }
   ]
 }
