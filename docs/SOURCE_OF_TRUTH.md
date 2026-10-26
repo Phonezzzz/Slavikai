@@ -221,6 +221,17 @@ model/override precedence сохраняется, наследование defau
 True выбирает существующие web-search consumers; их prompts, tools, qualification и
 policy/approval boundaries этим prerequisite не переписываются.
 
+## Диагностика лимитов вложений
+
+Owner Settings → Developer показывает read-only `attachment_limits_snapshot` из
+констант существующего server attachment validator при Settings refresh. Это максимум
+вложений, Unicode code points одного content и суммарного content в одном chat request.
+Encoded image data URL считается текстом, не исходными file bytes или model tokens.
+Browser preparation может иметь другие ограничения; snapshot не доказывает image support
+или provider capability. Member snapshot не получает; POST диагностического поля
+отклоняется до записи. UI не содержит копии numeric defaults и не меняет caps/send path.
+Отсутствующий или malformed snapshot отображается как unavailable.
+
 ## Custom native tool protocol admission
 
 Custom route начинается Chat-only. Только явная verified owner/session проверка

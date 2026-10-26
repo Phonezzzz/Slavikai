@@ -9,7 +9,7 @@ from config.memory_config import MemoryConfig
 from config.tools_config import DEFAULT_TOOLS_STATE, ToolsConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from llm.types import ModelConfig
-from server.http.common import ui_settings
+from server.http.common import chat_payload, ui_settings
 from server.http.common.model_config_snapshot import build_model_config_snapshot
 from shared.models import JSONValue
 
@@ -164,6 +164,7 @@ class SettingsRuntimeBindings:
         include_custom_providers: bool = True,
         include_context_budget: bool = False,
         include_model_config: bool = False,
+        include_attachment_limits: bool = False,
     ) -> dict[str, JSONValue]:
         policy_profile, yolo_armed, yolo_armed_at = self.load_policy_settings()
         memory_config = self.load_memory_config_fn()
@@ -203,6 +204,20 @@ class SettingsRuntimeBindings:
                         }
                     }
                     if include_context_budget
+                    else {}
+                ),
+                **(
+                    {
+                        "attachment_limits_snapshot": {
+                            "basis": "server_request_validation_at_refresh",
+                            "values": {
+                                "max_items": chat_payload.MAX_ATTACHMENTS_PER_MESSAGE,
+                                "max_item_code_points": chat_payload.MAX_ATTACHMENT_CHARS,
+                                "max_total_code_points": chat_payload.MAX_TOTAL_ATTACHMENTS_CHARS,
+                            },
+                        }
+                    }
+                    if include_attachment_limits
                     else {}
                 ),
                 "memory": {

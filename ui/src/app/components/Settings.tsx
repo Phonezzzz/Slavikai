@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { DesktopApprovalsPanel } from '../../features/desktop/desktop-approvals-panel';
 import { ModelConfigView } from './model-config-view';
+import { AttachmentLimitsView } from './attachment-limits-view';
 import { ContextBudgetView } from './context-budget-view';
 import { MemoryItems, type MemoryWrites } from './memory-items';
 import { StatusBadge, type StatusTone } from './ui/status-badge';
@@ -95,6 +96,7 @@ type ParsedSettings = {
   memorySettingsProvided: boolean;
   contextBudgetSnapshot: unknown;
   modelConfigSnapshot: unknown;
+  attachmentLimitsSnapshot: unknown;
   memoryInboxMaxItems: number;
   memoryInboxTtlDays: number;
   memoryInboxWritesPerMinute: number;
@@ -353,6 +355,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     memorySettingsProvided: false,
     contextBudgetSnapshot: null,
     modelConfigSnapshot: null,
+    attachmentLimitsSnapshot: null,
     memoryInboxMaxItems: DEFAULT_MEMORY_INBOX_MAX_ITEMS,
     memoryInboxTtlDays: DEFAULT_MEMORY_INBOX_TTL_DAYS,
     memoryInboxWritesPerMinute: DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE,
@@ -551,13 +554,14 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
-  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown };
+  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown };
   return {
     preferencesEtag: typeof metadata.preferences_etag === 'string' ? metadata.preferences_etag : null,
     preferencesSubject: typeof metadata.preferences_subject === 'string' ? metadata.preferences_subject : null,
     canManageInstallation: metadata.can_manage_installation === true,
     contextBudgetSnapshot: metadata.context_budget_snapshot ?? null,
     modelConfigSnapshot: metadata.model_config_snapshot ?? null,
+    attachmentLimitsSnapshot: metadata.attachment_limits_snapshot ?? null,
     providers,
     providerInstances,
     ttsBackend,
@@ -811,6 +815,7 @@ export function Settings({
   const [developerView, setDeveloperView] = useState(false);
   const [showModelAdvanced, setShowModelAdvanced] = useState(false);
   const [showDesktopRules, setShowDesktopRules] = useState(false);
+  const [attachmentLimitsSnapshot, setAttachmentLimitsSnapshot] = useState<unknown>(null);
   const [modelConfigSnapshot, setModelConfigSnapshot] = useState<unknown>(null);
   const [showMemoryAdvanced, setShowMemoryAdvanced] = useState(false);
   const [canManageInstallation, setCanManageInstallation] = useState(false);
@@ -950,6 +955,7 @@ export function Settings({
     setMemorySettingsProvided(parsed.memorySettingsProvided);
     setContextBudgetSnapshot(parsed.contextBudgetSnapshot);
     setModelConfigSnapshot(parsed.modelConfigSnapshot);
+    setAttachmentLimitsSnapshot(parsed.attachmentLimitsSnapshot);
     setCanManageInstallation(parsed.canManageInstallation);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
@@ -1792,6 +1798,7 @@ export function Settings({
                       <SectionCard title="Developer presentation" description="This view does not change tools, policy, models or grants." scope="Presentation only">
                         <p className="text-xs text-zinc-400">Connection evidence remains in Models and connections; task details remain in Computer. Runtime budgets and their enforcement are owned by the runtime, not this display toggle.</p>
                       </SectionCard>
+                      {canManageInstallation ? <AttachmentLimitsView snapshot={attachmentLimitsSnapshot} /> : null}
                       {canManageInstallation ? (
                         <SectionCard title="Operational memory settings" description="Owner-only installation configuration. Save changes to apply an edited value." scope="Installation">
                           <Row

@@ -635,6 +635,21 @@
         "tests/ui_api/test_model_config_view.py"
       ],
       "summary": "ModelConfig load preserves only JSON bool web_search_enabled; absent stays False and malformed non-bools raise without value echo. File reload/cold hydration and inert existing xAI request-path tests preserve session override precedence and distinguish saved configuration from active runtime. No new search executor, provider qualification, tools, grants, prompt strings, editor or live activation."
+    },
+    {
+      "id": "settings.attachment_limits_read_view",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_attachment_limits_view.py",
+        "ui/src/app/__tests__/attachment-limits-view.test.tsx",
+        "server/http/common/settings_runtime.py",
+        "ui/src/app/components/attachment-limits-view.tsx"
+      ],
+      "summary": "Owner-only no-store Settings snapshot projects existing server attachment validator constants; Developer displays items and Unicode code points per item/total without numeric React defaults. Member omits diagnostics, POST rejects before writes, malformed/missing metadata stays unavailable. No caps, parser, send, upload, model/provider capability or permission changes."
     }
   ]
 }

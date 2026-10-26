@@ -236,7 +236,10 @@ def _settings_response(request: web.Request) -> web.Response:
         raise RuntimeError("Request principal is unavailable")
     owner = _require_owner(request) is None
     payload = api._build_settings_payload(
-        include_custom_providers=owner, include_context_budget=owner, include_model_config=owner
+        include_custom_providers=owner,
+        include_context_budget=owner,
+        include_model_config=owner,
+        include_attachment_limits=owner,
     )
     settings = cast(dict[str, JSONValue], payload["settings"])
     snapshot = cast(PreferencesStore, request.app["preferences_store"]).get(principal)
