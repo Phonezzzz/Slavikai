@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from 'react';
 import { DesktopApprovalsPanel } from '../../features/desktop/desktop-approvals-panel';
 import { ModelConfigView } from './model-config-view';
 import { AttachmentLimitsView } from './attachment-limits-view';
+import { RuntimeContextLimitsView } from './runtime-context-limits-view';
 import { ContextBudgetView } from './context-budget-view';
 import { MemoryItems, type MemoryWrites } from './memory-items';
 import { StatusBadge, type StatusTone } from './ui/status-badge';
@@ -97,6 +98,7 @@ type ParsedSettings = {
   contextBudgetSnapshot: unknown;
   modelConfigSnapshot: unknown;
   attachmentLimitsSnapshot: unknown;
+  runtimeContextLimitsSnapshot: unknown;
   memoryInboxMaxItems: number;
   memoryInboxTtlDays: number;
   memoryInboxWritesPerMinute: number;
@@ -356,6 +358,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     contextBudgetSnapshot: null,
     modelConfigSnapshot: null,
     attachmentLimitsSnapshot: null,
+    runtimeContextLimitsSnapshot: null,
     memoryInboxMaxItems: DEFAULT_MEMORY_INBOX_MAX_ITEMS,
     memoryInboxTtlDays: DEFAULT_MEMORY_INBOX_TTL_DAYS,
     memoryInboxWritesPerMinute: DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE,
@@ -554,7 +557,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
-  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown };
+  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown; runtime_context_limits_snapshot?: unknown };
   return {
     preferencesEtag: typeof metadata.preferences_etag === 'string' ? metadata.preferences_etag : null,
     preferencesSubject: typeof metadata.preferences_subject === 'string' ? metadata.preferences_subject : null,
@@ -562,6 +565,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     contextBudgetSnapshot: metadata.context_budget_snapshot ?? null,
     modelConfigSnapshot: metadata.model_config_snapshot ?? null,
     attachmentLimitsSnapshot: metadata.attachment_limits_snapshot ?? null,
+    runtimeContextLimitsSnapshot: metadata.runtime_context_limits_snapshot ?? null,
     providers,
     providerInstances,
     ttsBackend,
@@ -815,6 +819,7 @@ export function Settings({
   const [developerView, setDeveloperView] = useState(false);
   const [showModelAdvanced, setShowModelAdvanced] = useState(false);
   const [showDesktopRules, setShowDesktopRules] = useState(false);
+  const [runtimeContextLimitsSnapshot, setRuntimeContextLimitsSnapshot] = useState<unknown>(null);
   const [attachmentLimitsSnapshot, setAttachmentLimitsSnapshot] = useState<unknown>(null);
   const [modelConfigSnapshot, setModelConfigSnapshot] = useState<unknown>(null);
   const [showMemoryAdvanced, setShowMemoryAdvanced] = useState(false);
@@ -956,6 +961,7 @@ export function Settings({
     setContextBudgetSnapshot(parsed.contextBudgetSnapshot);
     setModelConfigSnapshot(parsed.modelConfigSnapshot);
     setAttachmentLimitsSnapshot(parsed.attachmentLimitsSnapshot);
+    setRuntimeContextLimitsSnapshot(parsed.runtimeContextLimitsSnapshot);
     setCanManageInstallation(parsed.canManageInstallation);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
@@ -2433,6 +2439,7 @@ export function Settings({
                             </Row>
                           )}
                           <ContextBudgetView snapshot={contextBudgetSnapshot} />
+                          <RuntimeContextLimitsView snapshot={runtimeContextLimitsSnapshot} />
                         </SectionCard>
                       ) : null}
                     </div>

@@ -240,6 +240,7 @@ def _settings_response(request: web.Request) -> web.Response:
         include_context_budget=owner,
         include_model_config=owner,
         include_attachment_limits=owner,
+        include_runtime_context_limits=owner,
     )
     settings = cast(dict[str, JSONValue], payload["settings"])
     snapshot = cast(PreferencesStore, request.app["preferences_store"]).get(principal)

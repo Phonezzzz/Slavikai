@@ -232,6 +232,20 @@ Browser preparation может иметь другие ограничения; s
 отклоняется до записи. UI не содержит копии numeric defaults и не меняет caps/send path.
 Отсутствующий или malformed snapshot отображается как unavailable.
 
+## Short-term и summary input limits
+
+Owner Settings → Memory and data → Advanced показывает отдельный read-only
+`runtime_context_limits_snapshot` из существующих short-term/summarizer constants
+при Settings refresh. Short-term buffer ограничивает transient user/assistant entries,
+не сохранённую историю и не каждый model request. Browser session-summary preview
+читает сохранённую Hub history отдельно: последние непустые user/assistant messages
+и ограниченный content каждого, включая serialized attachment text. Unicode code points
+content не включают дополнительные role prefixes. Это input slices, не retention,
+model token window, remaining capacity или гарантия полноты summary.
+Member snapshot не получает; POST отклоняется до записи. Missing/malformed metadata
+остаётся unavailable без numeric defaults в React. Этот read view не вызывает summary,
+не создаёт Agent и не меняет summary prompt, close lifecycle или отдельный Memory confirm.
+
 ## Custom native tool protocol admission
 
 Custom route начинается Chat-only. Только явная verified owner/session проверка

@@ -650,6 +650,21 @@
         "ui/src/app/components/attachment-limits-view.tsx"
       ],
       "summary": "Owner-only no-store Settings snapshot projects existing server attachment validator constants; Developer displays items and Unicode code points per item/total without numeric React defaults. Member omits diagnostics, POST rejects before writes, malformed/missing metadata stays unavailable. No caps, parser, send, upload, model/provider capability or permission changes."
+    },
+    {
+      "id": "settings.runtime_context_limits_read_view",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_runtime_context_limits_view.py",
+        "ui/src/app/__tests__/runtime-context-limits-view.test.tsx",
+        "server/http/common/settings_runtime.py",
+        "ui/src/app/components/runtime-context-limits-view.tsx"
+      ],
+      "summary": "Owner-only no-store Settings projects existing short-term and summary input constants. Memory Advanced distinguishes transient user/assistant entries from saved-history summary messages and Unicode content slices, not retention, token window or remaining capacity. Member omits snapshot, POST rejects, missing/malformed values unavailable without React defaults. No Agent creation, summary generation, prompts, limits or Memory confirmation/lifecycle changes."
     }
   ]
 }

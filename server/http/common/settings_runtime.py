@@ -8,7 +8,9 @@ from typing import Literal
 from config.memory_config import MemoryConfig
 from config.tools_config import DEFAULT_TOOLS_STATE, ToolsConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
+from core import agent_tools
 from llm.types import ModelConfig
+from memory import session_summarizer
 from server.http.common import chat_payload, ui_settings
 from server.http.common.model_config_snapshot import build_model_config_snapshot
 from shared.models import JSONValue
@@ -165,6 +167,7 @@ class SettingsRuntimeBindings:
         include_context_budget: bool = False,
         include_model_config: bool = False,
         include_attachment_limits: bool = False,
+        include_runtime_context_limits: bool = False,
     ) -> dict[str, JSONValue]:
         policy_profile, yolo_armed, yolo_armed_at = self.load_policy_settings()
         memory_config = self.load_memory_config_fn()
@@ -218,6 +221,22 @@ class SettingsRuntimeBindings:
                         }
                     }
                     if include_attachment_limits
+                    else {}
+                ),
+                **(
+                    {
+                        "runtime_context_limits_snapshot": {
+                            "basis": "runtime_context_constants_at_refresh",
+                            "values": {
+                                "short_term_max_messages": agent_tools.MAX_SHORT_TERM_MESSAGES,
+                                "summary_max_messages": session_summarizer.MAX_SUMMARY_MESSAGES,
+                                "summary_message_code_points": (
+                                    session_summarizer.MAX_TRANSCRIPT_MESSAGE_CHARS
+                                ),
+                            },
+                        }
+                    }
+                    if include_runtime_context_limits
                     else {}
                 ),
                 "memory": {
