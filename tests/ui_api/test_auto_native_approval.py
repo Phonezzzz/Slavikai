@@ -7,6 +7,7 @@ from core.agent_tools import ChatApprovalUnavailable
 from llm.brain_base import Brain
 from llm.types import LLMResult, ToolCall
 from shared.models import ToolResult
+from tests.ui_api.fakes import _session_security_headers
 
 from .fakes import _create_client, _select_local_model
 
@@ -89,7 +90,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
             if cleanup in {"security", "security_writer"}:
                 enabled = await client.post(
                     "/ui/api/session/security",
-                    headers=headers,
+                    headers=await _session_security_headers(client, headers),
                     json={"tools": {"state": {"web": True}}},
                 )
                 assert enabled.status == 200
@@ -180,7 +181,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 writer = asyncio.create_task(
                     client.post(
                         "/ui/api/session/security",
-                        headers=headers,
+                        headers=await _session_security_headers(client, headers),
                         json={"tools": {"state": {"web": False}}},
                     )
                 )
@@ -240,7 +241,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
             if cleanup == "security":
                 disabled = await client.post(
                     "/ui/api/session/security",
-                    headers=headers,
+                    headers=await _session_security_headers(client, headers),
                     json={"tools": {"state": {"web": False}}},
                 )
                 assert disabled.status == 200

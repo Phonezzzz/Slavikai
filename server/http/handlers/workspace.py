@@ -8,7 +8,7 @@ from aiohttp import web
 from config.tools_config import DEFAULT_TOOLS_STATE
 from core.approval_policy import ApprovalCategory, ApprovalRequired
 from server import http_api as api
-from server.http.common.auth import _owner_principal_id
+from server.http.common.auth import _owner_principal_id, _request_principal_id
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
     AgentProtocol,
@@ -47,7 +47,7 @@ from server.http_api import (
     _workspace_root_for_session,
 )
 from server.principal_storage import principal_storage_paths
-from server.ui_hub import UIHub
+from server.ui_hub import SessionSecuritySnapshot, UIHub
 from shared.models import JSONValue, ToolRequest, ToolResult
 from tools.workspace_tools import (
     ListFilesTool,
@@ -1492,21 +1492,12 @@ async def handle_ui_workspace_root_get(request: web.Request) -> web.Response:
     return response
 
 
-async def handle_ui_session_security_get(request: web.Request) -> web.Response:
-    hub: UIHub = request.app["ui_hub"]
-    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
-    if session_error is not None:
-        return session_error
-    if session_id is None:
-        return _session_forbidden_response()
-    workspace_root = await _workspace_root_for_session(hub, session_id)
-    configuration = await hub.get_session_security_configuration(session_id)
-    if configuration is None:
-        return _session_forbidden_response()
-    profile, overrides = configuration
+def _session_security_response(
+    session_id: str, snapshot: SessionSecuritySnapshot, workspace_root: Path
+) -> web.Response:
+    profile, overrides = snapshot.profile, snapshot.tools_state
     effective_tools = _build_effective_tools_state(session_override=overrides)
     effective_tools["safe_mode"] = derive_safe_mode_from_policy_profile(profile)
-    effective_policy: dict[str, JSONValue] = {"profile": profile}
     sources: dict[str, JSONValue] = {
         key: "session_override"
         if overrides is not None and key in overrides
@@ -1517,16 +1508,33 @@ async def handle_ui_session_security_get(request: web.Request) -> web.Response:
     response = json_response(
         {
             "session_id": session_id,
+            "security_revision": snapshot.revision,
             "tools_state": effective_tools,
             "tool_sources": {"basis": "configuration_at_refresh", "fields": sources},
-            "policy": effective_policy,
+            "policy": {"profile": profile},
             "workspace_root": str(workspace_root),
         }
     )
+    response.headers["ETag"] = f'"{snapshot.revision}"'
     response.headers["Cache-Control"] = "no-store"
     response.headers["Vary"] = "Cookie, Cf-Access-Jwt-Assertion, Authorization"
     response.headers[UI_SESSION_HEADER] = session_id
     return response
+
+
+async def handle_ui_session_security_get(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
+    if session_error is not None:
+        return session_error
+    principal_id = _request_principal_id(request)
+    if session_id is None or principal_id is None:
+        return _session_forbidden_response()
+    snapshot = await hub.get_session_security_snapshot(session_id, principal_id=principal_id)
+    if snapshot is None:
+        return _session_forbidden_response()
+    workspace_root = await _workspace_root_for_session(hub, session_id)
+    return _session_security_response(session_id, snapshot, workspace_root)
 
 
 async def handle_ui_session_security_post(request: web.Request) -> web.Response:
@@ -1535,6 +1543,29 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
     if session_error is not None:
         return session_error
     if session_id is None:
+        return _session_forbidden_response()
+    if "If-Match" not in request.headers:
+        return error_response(
+            status=428,
+            message="Для сохранения требуется revision прочитанной конфигурации чата.",
+            error_type="invalid_request_error",
+            code="session_security_precondition_required",
+        )
+    expected_etag = request.headers["If-Match"].strip()
+    if (
+        len(expected_etag) != 34
+        or expected_etag[0] != '"'
+        or expected_etag[-1] != '"'
+        or any(char not in "0123456789abcdef" for char in expected_etag[1:-1])
+    ):
+        return error_response(
+            status=400,
+            message="If-Match должен содержать точную revision конфигурации чата.",
+            error_type="invalid_request_error",
+            code="invalid_session_security_precondition",
+        )
+    principal_id = _request_principal_id(request)
+    if principal_id is None:
         return _session_forbidden_response()
     try:
         payload = await request.json()
@@ -1697,28 +1728,23 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                     error_type="invalid_request_error",
                     code="invalid_request_error",
                 )
-        # Все части payload проверены до первой записи.
-        if "policy" in payload:
-            await hub.set_session_policy(session_id, profile=profile)
-        if normalized_tools is not None:
-            await hub.set_session_tools_state(
+        # Все части payload проверены до единой CAS-записи.
+        try:
+            snapshot = await hub.compare_and_set_session_security(
                 session_id,
+                principal_id=principal_id,
+                expected_revision=expected_etag[1:-1],
+                profile=profile,
                 tools_state=normalized_tools,
-                merge=True,
             )
-
-        effective_tools, effective_policy = await _load_effective_session_security(
-            hub=hub,
-            session_id=session_id,
-        )
+        except PermissionError:
+            return _session_forbidden_response()
+        except ValueError:
+            return error_response(
+                status=409,
+                message="Конфигурация чата изменилась. Прочитайте её заново перед сохранением.",
+                error_type="invalid_request_error",
+                code="session_security_revision_conflict",
+            )
         workspace_root = await _workspace_root_for_session(hub, session_id)
-        response = json_response(
-            {
-                "session_id": session_id,
-                "tools_state": effective_tools,
-                "policy": effective_policy,
-                "workspace_root": str(workspace_root),
-            }
-        )
-        response.headers[UI_SESSION_HEADER] = session_id
-        return response
+        return _session_security_response(session_id, snapshot, workspace_root)

@@ -286,8 +286,18 @@ restore отдельно разрешает прежнюю нормализац�
 owner и обрезку пробелов. Этот trusted restore сохраняет revision и её проверку; обычные
 writers не получают права менять principal, именованный чужой principal не переназначается.
 
-Это storage primitive для следующего HTTP/UI среза: текущий session/security POST
-ещё не требует revision и не защищён от lost update двух browser clients.
+Owned GET session/security возвращает `security_revision` и quoted `ETag` одного
+captured snapshot policy/raw overrides. POST требует точный `If-Match`: отсутствие —
+428, неверная форма — 400, устаревшая/чужая binding — 409 без сохранения. Ownership
+проверяется независимо. После полной validation payload/root/YOLO под existing
+scoped agent lock вызывается одна UIHub CAS operation. Ответ содержит value/source/revision
+результата этой операции, private/no-store. Token покрывает только сохранённую session
+configuration, не installation defaults и не effective running permissions.
+
+Session Controls разрешает Save только после чтения валидной revision выбранного чата
+и отправляет captured token. Conflict блокирует Save до нового чтения при повторном
+открытии панели и отдельного явного сохранения; автоматического POST retry нет.
+Existing epoch/session/pending-write fences и два YOLO подтверждения сохранены.
 Storage-fault проверки покрывают отказ до commit и rollback transaction; неопределённый
 результат после commit/crash не получает новой recovery гарантии. Installation defaults,
 grants, running execution snapshot, reset и live revoke этой revision не покрываются.
@@ -338,7 +348,8 @@ Owned GET session/security возвращает отдельный `tool_sources
 такого override и загрузку из существующего installation loader, включая его defaults.
 Policy и raw overrides захватываются одним чтением UIHub под существующим lock;
 значения и источники tools строятся из одной captured карты. GET private/no-store,
-не создаёт grant и не пишет session state. Runtime consumers и POST не меняются.
+не создаёт grant и не пишет session state. Runtime consumers не меняются; POST
+возвращает source metadata из своего committed snapshot вместе с новой revision.
 
 Session Controls показывает источник сохранённой configuration при refresh.
 Редактирование tool toggle или применение preset сбрасывает source labels; POST без
@@ -349,7 +360,7 @@ metadata оставляет источник unavailable до нового чт�
 capability, effective action permission, approval lifetime/revision или revoke.
 
 
-Session/security POST проверяет весь combined payload policy/tools до первого setter
+Session/security POST проверяет весь combined payload policy/tools до единой CAS-записи
 под существующим scoped agent lock. Неверный tools после корректного policy не
 сохраняет policy. Existing YOLO/root/ownership guards и valid update semantics
 сохраняются. Это отказ до записей при validation error, не CAS/revision и не новая

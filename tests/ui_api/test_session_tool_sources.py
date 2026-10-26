@@ -2,6 +2,7 @@ import asyncio
 
 from config.tools_config import DEFAULT_TOOLS_STATE
 from shared.identity import principal_id_for_email
+from tests.ui_api.fakes import _session_security_headers
 from tests.ui_api.test_memory_management import _isolate, _start
 
 
@@ -40,7 +41,9 @@ def test_owned_session_tool_sources_use_captured_override_not_value_difference(
                 assert await hub.get_session(session) == before
                 rejected = await client.post(
                     "/ui/api/session/security",
-                    headers={"Cf-Access-Jwt-Assertion": who, "X-Slavik-Session": session},
+                    headers=await _session_security_headers(
+                        client, {"Cf-Access-Jwt-Assertion": who, "X-Slavik-Session": session}
+                    ),
                     json={"tool_sources": data["tool_sources"]},
                 )
                 assert rejected.status == 400
@@ -67,21 +70,23 @@ def test_owned_session_tool_sources_use_captured_override_not_value_difference(
     asyncio.run(run())
 
 
-def test_session_security_configuration_read_is_detached_and_never_creates_state():
+def test_owned_security_snapshot_read_is_detached_and_never_creates_state():
     from server.ui_hub import UIHub
     from server.ui_session_storage import InMemoryUISessionStorage
 
     async def run():
-        hub = UIHub(storage=InMemoryUISessionStorage())
-        assert await hub.get_session_security_configuration("missing") is None
-        assert await hub.get_session("missing") is None
+        storage = InMemoryUISessionStorage()
+        hub = UIHub(storage=storage)
+        assert await hub.get_session_security_snapshot("missing", principal_id="owner") is None
+        assert storage.load_sessions() == []
         session = await hub.create_session("owner")
         await hub.set_session_policy(session, profile="index")
         await hub.set_session_tools_state(session, tools_state={"fs": False})
-        captured = await hub.get_session_security_configuration(session)
-        assert captured == ("index", {"fs": False})
-        captured[1]["fs"] = True
+        captured = await hub.get_session_security_snapshot(session, principal_id="owner")
+        assert captured.profile == "index" and captured.tools_state == {"fs": False}
+        captured.tools_state["fs"] = True
         await hub.set_session_policy(session, profile="sandbox")
-        assert await hub.get_session_security_configuration(session) == ("sandbox", {"fs": False})
+        current = await hub.get_session_security_snapshot(session, principal_id="owner")
+        assert current.profile == "sandbox" and current.tools_state == {"fs": False}
 
     asyncio.run(run())

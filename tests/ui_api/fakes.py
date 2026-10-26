@@ -864,7 +864,7 @@ async def _set_session_policy_via_api(
     payload: dict[str, JSONValue] = {"policy": policy}
     response = await client.post(
         "/ui/api/session/security",
-        headers={"X-Slavik-Session": session_id},
+        headers=await _session_security_headers(client, {"X-Slavik-Session": session_id}),
         json=payload,
     )
     body = await response.json()
@@ -1009,3 +1009,9 @@ def _plan_binding(plan: dict[str, JSONValue]) -> dict[str, JSONValue]:
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]
+
+
+async def _session_security_headers(client: TestClient, headers: dict[str, str]) -> dict[str, str]:
+    response = await client.get("/ui/api/session/security", headers=headers)
+    assert response.status == 200
+    return {**headers, "If-Match": response.headers["ETag"]}

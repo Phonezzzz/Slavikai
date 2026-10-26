@@ -5,6 +5,7 @@ import sqlite3
 from core.agent_response import AgentResponse
 from llm.types import ModelConfig
 from server.http.common.auth import UI_AUTH_COOKIE, _ui_auth_cookie_value
+from tests.ui_api.fakes import _session_security_headers
 
 # ruff: noqa: F403,F405
 from .fakes import *
@@ -462,7 +463,7 @@ def test_ui_session_security_get_and_post_updates_state() -> None:
 
             update_resp = await client.post(
                 "/ui/api/session/security",
-                headers={"X-Slavik-Session": session_id},
+                headers=await _session_security_headers(client, {"X-Slavik-Session": session_id}),
                 json={
                     "tools": {"state": {"shell": True, "web": True}},
                     "policy": {"profile": "sandbox"},
@@ -546,7 +547,7 @@ def test_ui_session_security_rejects_policy_yolo_armed_field() -> None:
 
             response = await client.post(
                 "/ui/api/session/security",
-                headers={"X-Slavik-Session": session_id},
+                headers=await _session_security_headers(client, {"X-Slavik-Session": session_id}),
                 json={"policy": {"profile": "sandbox", "yolo_armed": True}},
             )
             assert response.status == 400
@@ -574,7 +575,7 @@ def test_ui_session_security_rejects_tools_safe_mode_field() -> None:
 
             response = await client.post(
                 "/ui/api/session/security",
-                headers={"X-Slavik-Session": session_id},
+                headers=await _session_security_headers(client, {"X-Slavik-Session": session_id}),
                 json={"tools": {"state": {"safe_mode": False, "web": True}}},
             )
             assert response.status == 400

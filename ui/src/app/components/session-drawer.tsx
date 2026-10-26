@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ToggleSwitch } from './ui/toggle-switch';
 import { ModelQualification } from './model-qualification';
-import { parseSessionSecurityState, parseSessionToolSources, type SessionToolSources, type ToolKey, type PolicyProfile } from '../session-security';
+import { parseSessionSecurityRevision, parseSessionSecurityState, parseSessionToolSources, type SessionToolSources, type ToolKey, type PolicyProfile } from '../session-security';
 import { useFocusTrap } from '../use-focus-trap';
 import {
   SESSION_MODE_LABELS,
@@ -61,7 +61,10 @@ const extractErrorMessage = (payload: unknown, fallback: string): string => {
   if (!payload || typeof payload !== 'object') {
     return fallback;
   }
-  const body = payload as { error?: { message?: unknown } };
+  const body = payload as { error?: { message?: unknown; code?: unknown } };
+  if (body.error && body.error.code === 'session_security_revision_conflict') {
+    return 'Session controls changed. Reopen controls to read the current settings before saving again.';
+  }
   if (body.error && typeof body.error.message === 'string' && body.error.message.trim()) {
     return body.error.message;
   }
@@ -100,8 +103,9 @@ export function SessionDrawer({
   useFocusTrap(isOpen, panelRef);
   const epoch = useRef(0);
   const pendingWrites = useRef(new Map<string, Promise<void>>());
+  const [securityRevision, setSecurityRevision] = useState<string | null>(null);
   const [loadedSession, setLoadedSession] = useState<string | null>(null);
-  const ready = !!sessionId && loadedSession === `${sessionHeader}:${sessionId}`;
+  const ready = !!sessionId && securityRevision !== null && loadedSession === `${sessionHeader}:${sessionId}`;
   const requestHeaders = sessionId ? { [sessionHeader]: sessionId } : {};
   const safeModeEnabled = policyProfile !== 'yolo';
 
@@ -109,6 +113,7 @@ export function SessionDrawer({
     const generation = ++epoch.current;
     const abort = new AbortController();
     setLoadedSession(null);
+    setSecurityRevision(null);
     setToolSources(null);
     setSaving(false);
     setDangerConfirmText('');
@@ -130,7 +135,9 @@ export function SessionDrawer({
         if (!current()) return;
         if (!response.ok) throw new Error(extractErrorMessage(payload, 'Failed to load session controls.'));
         const parsed = parseSessionSecurityState(payload, sessionId);
-        if (!parsed) throw new Error('Session controls are unavailable or belong to another session.');
+        const revision = parseSessionSecurityRevision(payload, sessionId);
+        if (!parsed || !revision) throw new Error('Session controls are unavailable or belong to another session.');
+        setSecurityRevision(revision);
         setToolSources(parseSessionToolSources(payload, sessionId));
         setToolsState(parsed.toolsState);
         setPolicyProfile(parsed.policyProfile);
@@ -174,7 +181,7 @@ export function SessionDrawer({
   };
 
   const handleSave = async () => {
-    if (!sessionId || !ready || saving || pendingWrites.current.has(sessionId)) {
+    if (!sessionId || !ready || !securityRevision || saving || pendingWrites.current.has(sessionId)) {
       return;
     }
     const wantsDangerousMode = policyProfile === 'yolo';
@@ -196,6 +203,7 @@ export function SessionDrawer({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'If-Match': `"${securityRevision}"`,
             ...requestHeaders,
           },
           body: JSON.stringify({
@@ -215,17 +223,19 @@ export function SessionDrawer({
         }
         if (!current()) return;
         const parsed = parseSessionSecurityState(payload, sessionId);
-        if (!parsed) {
+        const revision = parseSessionSecurityRevision(payload, sessionId);
+        if (!parsed || !revision) {
           setLoadedSession(null);
           throw new Error('The update response is unavailable. Reopen controls to read the current state before another change.');
         }
         setToolSources(parseSessionToolSources(payload, sessionId));
         setToolsState(parsed.toolsState);
         setPolicyProfile(parsed.policyProfile);
+        setSecurityRevision(revision);
         setStatus('Session controls updated.');
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to save session controls.';
-        if (current()) { setLoadedSession(null); setStatus(message); }
+        if (current()) { setLoadedSession(null); setSecurityRevision(null); setStatus(message); }
       } finally {
         onSaveSettled?.(sessionId);
         if (current()) setSaving(false);

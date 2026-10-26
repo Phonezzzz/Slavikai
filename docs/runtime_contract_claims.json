@@ -605,6 +605,21 @@
         "server/ui_session_storage.py"
       ],
       "summary": "Saved session policy/raw tool overrides have a persisted revision and owned UIHub CAS. Trusted setters/import publish candidates after persistence; SQLite rejects stale snapshots inside the write transaction. Metadata initialization preserves configuration/messages. This is a storage prerequisite only: HTTP/UI preconditions remain unimplemented; installation defaults, grants, live revoke and multi-worker runtime are excluded. Existing startup-only principal normalization is revision-checked; NULL/blank principals restore to the configured owner, named principals cannot be reassigned and ordinary writers keep strict ownership checks."
+    },
+    {
+      "id": "ui.session_security_cas",
+      "scope": "security",
+      "status": "implemented",
+      "owner": "security",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_session_security_cas.py",
+        "tests/ui_api/test_session_security_validation.py",
+        "ui/src/app/__tests__/session-security-read-state.test.tsx",
+        "server/http/handlers/workspace.py"
+      ],
+      "summary": "Owned session security GET/POST expose saved-config revision and ETag from one captured snapshot. POST requires exact If-Match (428 missing, 400 malformed, 409 conflict), validates the full payload and existing root/YOLO guards under the scoped execution lock, then performs one persisted UIHub CAS. UI captures the selected-session revision; conflict requires a fresh read and another explicit save, with no automatic retry. Installation defaults, grants and running policy snapshots remain separate."
     }
   ]
 }

@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { WorkspaceToolbar } from '../../features/workspace/workspace-toolbar';
 import { SessionControlShell as SessionDrawer } from '../components/session-control-shell';
 import { loadSessionSecuritySummary, parseSessionSecuritySummary } from '../session-security';
-const payload = (id = 'A', profile = 'sandbox') => ({ session_id: id, policy: { profile }, tools_state: { fs: true, shell: false, web: false, project: false, img: false, tts: false, stt: false, safe_mode: profile !== 'yolo' } });
+const payload = (id = 'A', profile = 'sandbox') => ({ session_id: id, security_revision: (id === 'A' ? 'a' : 'b').repeat(32), policy: { profile }, tools_state: { fs: true, shell: false, web: false, project: false, img: false, tts: false, stt: false, safe_mode: profile !== 'yolo' } });
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; };
 const props = { isOpen: true, onClose: () => {}, sessionId: 'A', sessionHeader: 'X-Test', mode: 'ask' as const, modelLabel: 'Fixture', selectedModelValue: null };
@@ -45,6 +45,7 @@ it('drops a late read from another session and only saves the current snapshot',
   await screen.findByText('Session controls updated.');
   expect(writes).toHaveLength(1);
   expect(new Headers(writes[0].headers).get('X-Test')).toBe('B');
+  expect(new Headers(writes[0].headers).get('If-Match')).toBe('\"' + 'b'.repeat(32) + '\"');
   expect(JSON.parse(writes[0].body as string).policy.profile).toBe('index');
 });
 
@@ -144,4 +145,53 @@ it('clears source labels for a safety preset and rejects late source metadata fr
   expect(screen.getAllByText('Saved source: installation configuration.')).toHaveLength(7);
   fireEvent.click(screen.getByRole('button', { name: 'Reset to safety preset' }));
   expect(screen.getAllByText('Saved source unavailable; reopen controls to refresh.')).toHaveLength(7);
+});
+
+
+it.each([undefined, null, '', 'invalid', 'A'.repeat(32), 17])('cannot edit a snapshot without valid saved revision (%s)', async security_revision => {
+  const fetch = vi.fn(async () => json({ ...payload(), security_revision }));
+  vi.stubGlobal('fetch', fetch);
+  render(<SessionDrawer {...props} />);
+  await waitFor(() => expect(screen.queryByText('Loading session controls...')).toBeNull());
+  expect((screen.getByRole('button', { name: 'Save session controls' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Save session controls' }));
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it('requires a fresh read and another explicit save after a revision conflict', async () => {
+  const writes: RequestInit[] = []; let reads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') {
+      writes.push(init);
+      return writes.length === 1 ? json({ error: { code: 'session_security_revision_conflict', message: 'Changed elsewhere' } }, 409) : json({ ...payload(), security_revision: 'c'.repeat(32) });
+    }
+    reads++;
+    return json({ ...payload(), security_revision: (reads === 1 ? 'a' : 'b').repeat(32) });
+  }));
+  const h = render(<SessionDrawer {...props} />);
+  await screen.findByText('Session controls ready.');
+  fireEvent.click(screen.getByRole('button', { name: 'Save session controls' }));
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Save session controls' }) as HTMLButtonElement).disabled).toBe(true));
+  expect(writes).toHaveLength(1); expect(reads).toBe(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Save session controls' }));
+  expect(writes).toHaveLength(1);
+  h.rerender(<SessionDrawer {...props} isOpen={false} />);
+  h.rerender(<SessionDrawer {...props} />);
+  await screen.findByText('Session controls ready.');
+  expect(writes).toHaveLength(1); expect(reads).toBe(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Save session controls' }));
+  await screen.findByText('Session controls updated.');
+  expect(writes).toHaveLength(2);
+  expect(new Headers(writes[0].headers).get('If-Match')).toBe('"' + 'a'.repeat(32) + '"');
+  expect(new Headers(writes[1].headers).get('If-Match')).toBe('"' + 'b'.repeat(32) + '"');
+});
+
+it('preserves the root guard explanation for a non-revision 409', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => init?.method === 'POST'
+    ? json({ error: { code: 'policy_root_incompatible', message: 'Fixture root is incompatible with this policy.' } }, 409)
+    : json(payload())));
+  render(<SessionDrawer {...props} />);
+  await screen.findByText('Session controls ready.');
+  fireEvent.click(screen.getByRole('button', { name: 'Save session controls' }));
+  await screen.findByText('Fixture root is incompatible with this policy.');
 });

@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from shared.identity import principal_id_for_email
+from tests.ui_api.fakes import _session_security_headers
 from tests.ui_api.test_memory_management import _isolate, _start
 
 
@@ -32,7 +33,9 @@ def test_invalid_combined_session_security_never_persists_policy(monkeypatch, tm
             before = await hub.get_session(session)
             response = await client.post(
                 "/ui/api/session/security",
-                headers={"Cf-Access-Jwt-Assertion": who, "X-Slavik-Session": session},
+                headers=await _session_security_headers(
+                    client, {"Cf-Access-Jwt-Assertion": who, "X-Slavik-Session": session}
+                ),
                 json={"policy": {"profile": "index"}, "tools": tools},
             )
             assert response.status == 400
@@ -71,14 +74,14 @@ def test_valid_combined_security_and_rejected_policy_preserve_existing_guards(
             ]:
                 rejected = await client.post(
                     "/ui/api/session/security",
-                    headers=headers,
+                    headers=await _session_security_headers(client, headers),
                     json={"policy": policy, "tools": {"state": {"fs": False}}},
                 )
                 assert rejected.status == 400
                 assert await hub.get_session(session) == before
             saved = await client.post(
                 "/ui/api/session/security",
-                headers=headers,
+                headers=await _session_security_headers(client, headers),
                 json={
                     "policy": {"profile": "index"},
                     "tools": {"state": {"fs": False, "web": True}},

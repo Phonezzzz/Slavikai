@@ -76,3 +76,9 @@ export const parseSessionToolSources = (value: unknown, sessionId: string): Sess
   if (!SESSION_TOOL_KEYS.every(key => fields[key] === 'installation_configuration' || fields[key] === 'session_override')) return null;
   return Object.fromEntries(SESSION_TOOL_KEYS.map(key => [key, fields[key]])) as SessionToolSources;
 };
+
+export const parseSessionSecurityRevision = (value: unknown, sessionId: string): string | null => {
+  if (!parseSessionSecurityState(value, sessionId) || !record(value)
+    || typeof value.security_revision !== 'string' || !/^[a-f0-9]{32}$/.test(value.security_revision)) return null;
+  return value.security_revision;
+};
