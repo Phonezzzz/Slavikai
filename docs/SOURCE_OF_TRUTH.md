@@ -281,7 +281,10 @@ Principal-owned snapshot и CAS выполняются под existing UIHub loc
 публикуется в памяти после успешной persistence. SQLite проверяет expected revision
 и principal в той же transaction, что сохраняет session и её сообщения; устаревший
 общий snapshot не может вернуть прежний config. Инициализация existing schema добавляет
-только revision metadata, сохраняя прежние значения и сообщения.
+только revision metadata, сохраняя прежние значения и сообщения. Existing startup
+restore отдельно разрешает прежнюю нормализацию NULL/пустого principal к настроенному
+owner и обрезку пробелов. Этот trusted restore сохраняет revision и её проверку; обычные
+writers не получают права менять principal, именованный чужой principal не переназначается.
 
 Это storage primitive для следующего HTTP/UI среза: текущий session/security POST
 ещё не требует revision и не защищён от lost update двух browser clients.

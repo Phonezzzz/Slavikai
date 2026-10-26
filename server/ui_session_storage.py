@@ -184,6 +184,7 @@ def _check_security_revision(
     session: PersistedSession,
     current: tuple[str | None, str | None, str | None, dict[str, bool] | None] | None,
     expected_revision: str | None,
+    restore_owner_principal_id: str | None,
 ) -> None:
     if len(session.security_revision) != 32 or any(
         char not in "0123456789abcdef" for char in session.security_revision
@@ -195,7 +196,13 @@ def _check_security_revision(
         return
     current_principal, current_revision, current_profile, current_tools = current
     if current_principal != session.principal_id:
-        raise PermissionError("Session security principal conflict")
+        # Only startup may perform UIHub's existing persisted-principal normalization.
+        normalized = current_principal.strip() if isinstance(current_principal, str) else ""
+        restored_principal = (
+            restore_owner_principal_id if not normalized or normalized == "legacy" else normalized
+        )
+        if restore_owner_principal_id is None or session.principal_id != restored_principal:
+            raise PermissionError("Session security principal conflict")
     expected = expected_revision if expected_revision is not None else session.security_revision
     if current_revision is None or current_revision != expected:
         raise ValueError("Session security revision conflict")
@@ -227,7 +234,11 @@ class UISessionStorage(Protocol):
     def load_sessions(self) -> list[PersistedSession]: ...
 
     def save_session(
-        self, session: PersistedSession, *, expected_security_revision: str | None = None
+        self,
+        session: PersistedSession,
+        *,
+        expected_security_revision: str | None = None,
+        restore_owner_principal_id: str | None = None,
     ) -> None: ...
 
     def delete_sessions(self, session_ids: Sequence[str]) -> None: ...
@@ -273,7 +284,11 @@ class InMemoryUISessionStorage:
         return [self._clone_session(item) for item in self._sessions.values()]
 
     def save_session(
-        self, session: PersistedSession, *, expected_security_revision: str | None = None
+        self,
+        session: PersistedSession,
+        *,
+        expected_security_revision: str | None = None,
+        restore_owner_principal_id: str | None = None,
     ) -> None:
         current = self._sessions.get(session.session_id)
         _check_security_revision(
@@ -287,6 +302,7 @@ class InMemoryUISessionStorage:
             if current is not None
             else None,
             expected_security_revision,
+            restore_owner_principal_id,
         )
         self._sessions[session.session_id] = self._clone_session(session)
 
@@ -406,7 +422,7 @@ class SQLiteUISessionStorage:
                 sessions.append(
                     PersistedSession(
                         session_id=session_id,
-                        principal_id=_optional_str(row["principal_id"]),
+                        principal_id=row["principal_id"],
                         created_at=str(row["created_at"]),
                         updated_at=str(row["updated_at"]),
                         status=str(row["status"]),
@@ -435,7 +451,11 @@ class SQLiteUISessionStorage:
         return sessions
 
     def save_session(
-        self, session: PersistedSession, *, expected_security_revision: str | None = None
+        self,
+        session: PersistedSession,
+        *,
+        expected_security_revision: str | None = None,
+        restore_owner_principal_id: str | None = None,
     ) -> None:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -455,6 +475,7 @@ class SQLiteUISessionStorage:
                 if current is not None
                 else None,
                 expected_security_revision,
+                restore_owner_principal_id,
             )
             conn.execute(
                 """

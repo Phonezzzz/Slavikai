@@ -2226,7 +2226,11 @@ class UIHub:
             if restored.principal_id != principal_id:
                 migrated_session_ids.append(restored.session_id)
         for session_id in migrated_session_ids:
-            self._persist_session_locked(session_id)
+            self._persist_session_state_locked(
+                session_id,
+                self._sessions[session_id],
+                restore_owner_principal_id=self._legacy_principal_id,
+            )
         for session_id in recovered_session_ids:
             try:
                 self._persist_session_locked(session_id)
@@ -2281,6 +2285,7 @@ class UIHub:
         state: _SessionState,
         *,
         expected_security_revision: str | None = None,
+        restore_owner_principal_id: str | None = None,
     ) -> None:
         legacy_session = PersistedSession(
             session_id=session_id,
@@ -2308,10 +2313,17 @@ class UIHub:
             auto_state=(dict(state.auto_state) if state.auto_state is not None else None),
         )
         domains = split_persisted_session_domains(legacy_session)
-        self._storage.save_session(
-            legacy_session_from_domain_records(domains),
-            expected_security_revision=expected_security_revision,
-        )
+        persisted = legacy_session_from_domain_records(domains)
+        if restore_owner_principal_id is not None:
+            self._storage.save_session(
+                persisted,
+                expected_security_revision=expected_security_revision,
+                restore_owner_principal_id=restore_owner_principal_id,
+            )
+        else:
+            self._storage.save_session(
+                persisted, expected_security_revision=expected_security_revision
+            )
 
     def _prune_sessions_locked(self, *, keep_session_id: str | None = None) -> None:
         to_remove: set[str] = set()

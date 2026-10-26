@@ -267,3 +267,86 @@ def test_existing_null_revision_cannot_be_overwritten_as_a_new_record(tmp_path):
             assert conn.execute("SELECT security_revision FROM ui_sessions").fetchone() == (None,)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "memory"])
+@pytest.mark.parametrize("stored_principal", [None, "", "   ", " member ", " legacy "])
+def test_startup_principal_normalization_preserves_existing_restore_contract(
+    tmp_path, backend, stored_principal
+):
+    from dataclasses import replace
+
+    from server.ui_session_storage import InMemoryUISessionStorage, PersistedSession
+
+    store = (
+        SQLiteUISessionStorage(tmp_path / "sessions.db")
+        if backend == "sqlite"
+        else InMemoryUISessionStorage()
+    )
+    initial = PersistedSession(
+        session_id="fixture",
+        principal_id=stored_principal,
+        created_at="now",
+        updated_at="now",
+        status="idle",
+        decision=None,
+        messages=[],
+        policy_profile="index",
+        tools_state={"fs": False},
+    )
+    store.save_session(initial)
+    # Ordinary writers cannot use the restore exception to transfer ownership.
+    with pytest.raises(PermissionError, match="principal"):
+        store.save_session(replace(initial, principal_id="attacker"))
+    hub = UIHub(storage=store, legacy_principal_id="owner")
+    expected_principal = "member" if stored_principal == " member " else "owner"
+
+    async def read():
+        snapshot = await hub.get_session_security_snapshot(
+            "fixture", principal_id=expected_principal
+        )
+        assert snapshot.profile == "index" and snapshot.tools_state == {"fs": False}
+        assert snapshot.revision == initial.security_revision
+        assert await hub.get_session_security_snapshot("fixture", principal_id="attacker") is None
+
+    asyncio.run(read())
+    saved = store.load_sessions()[0]
+    assert saved.principal_id == expected_principal
+    assert saved.security_revision == initial.security_revision
+    with pytest.raises(PermissionError, match="principal"):
+        store.save_session(replace(saved, principal_id="attacker"))
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "memory"])
+def test_startup_normalization_cannot_reassign_named_principal_or_ignore_revision(
+    tmp_path, backend
+):
+    import uuid
+    from dataclasses import replace
+
+    from server.ui_session_storage import InMemoryUISessionStorage, PersistedSession
+
+    store = (
+        SQLiteUISessionStorage(tmp_path / "sessions.db")
+        if backend == "sqlite"
+        else InMemoryUISessionStorage()
+    )
+    record = PersistedSession(
+        session_id="fixture",
+        principal_id="member",
+        created_at="now",
+        updated_at="now",
+        status="idle",
+        decision=None,
+        messages=[],
+    )
+    store.save_session(record)
+    with pytest.raises(PermissionError, match="principal"):
+        store.save_session(
+            replace(record, principal_id="owner"), restore_owner_principal_id="owner"
+        )
+    newer = replace(record, security_revision=uuid.uuid4().hex)
+    store.save_session(newer, expected_security_revision=record.security_revision)
+    with pytest.raises(ValueError, match="revision"):
+        store.save_session(record, restore_owner_principal_id="owner")
+    assert store.load_sessions() == [newer]
