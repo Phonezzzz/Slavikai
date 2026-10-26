@@ -326,3 +326,10 @@ metadata оставляет источник unavailable до нового чт�
 поэтому override не доказывает, что пользователь отдельно менял данное поле.
 Это не provenance конкретного значения file/default, active-run snapshot, provider/tool
 capability, effective action permission, approval lifetime/revision или revoke.
+
+
+Session/security POST проверяет весь combined payload policy/tools до первого setter
+под существующим scoped agent lock. Неверный tools после корректного policy не
+сохраняет policy. Existing YOLO/root/ownership guards и valid update semantics
+сохраняются. Это отказ до записей при validation error, не CAS/revision и не новая
+transaction guarantee при storage failure.

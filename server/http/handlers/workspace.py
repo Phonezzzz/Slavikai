@@ -1564,6 +1564,8 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
         )
 
     async with api._agent_lock_for_request(request, session_id):
+        profile: str | None = None
+        normalized_tools: dict[str, bool] | None = None
         if "policy" in payload:
             policy_raw = payload.get("policy")
             if not isinstance(policy_raw, dict):
@@ -1573,8 +1575,6 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                     error_type="invalid_request_error",
                     code="invalid_request_error",
                 )
-            profile: str | None = None
-
             if "profile" in policy_raw:
                 profile_raw = policy_raw.get("profile")
                 if (
@@ -1648,11 +1648,6 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                     },
                 )
 
-            await hub.set_session_policy(
-                session_id,
-                profile=profile,
-            )
-
         if "tools" in payload:
             tools_raw = payload.get("tools")
             if not isinstance(tools_raw, dict):
@@ -1702,6 +1697,10 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
                     error_type="invalid_request_error",
                     code="invalid_request_error",
                 )
+        # Все части payload проверены до первой записи.
+        if "policy" in payload:
+            await hub.set_session_policy(session_id, profile=profile)
+        if normalized_tools is not None:
             await hub.set_session_tools_state(
                 session_id,
                 tools_state=normalized_tools,

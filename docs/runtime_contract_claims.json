@@ -578,6 +578,19 @@
         "ui/src/app/components/session-drawer.tsx"
       ],
       "summary": "Owned session security GET captures saved policy and tool overrides under one existing UIHub lock, then projects known tool configuration sources from the same override map as displayed values. No session/grant writes or runtime consumer changes. Source labels describe configuration at refresh, including equal-value overrides and loader defaults; missing/invalid metadata and unsaved tool drafts remain unavailable. Existing session/epoch/save fencing preserved. No per-file default provenance, active-run capability, unified grant revision or revoke claim."
+    },
+    {
+      "id": "ui.session_security_validate_before_write",
+      "scope": "ui",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_session_security_validation.py",
+        "server/http/handlers/workspace.py"
+      ],
+      "summary": "Existing owned session security POST validates all policy/tools input under the existing scoped agent lock before invoking either existing setter. Invalid combined requests cannot persist an earlier valid policy section. Owner/member ownership, YOLO confirmation, root constraints and valid update semantics remain unchanged. No new permission authority, API/schema, runtime consumers, CAS/revision or storage-failure transaction guarantee."
     }
   ]
 }
