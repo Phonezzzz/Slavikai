@@ -948,6 +948,16 @@ class UIHub:
             self._persist_session_locked(session_id)
             self._prune_sessions_locked(keep_session_id=session_id)
 
+    async def get_session_security_configuration(
+        self, session_id: str
+    ) -> tuple[PolicyProfile, dict[str, bool] | None] | None:
+        """Capture only saved UI configuration, without resolving runtime grants."""
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return None
+            return state.policy_profile, self._normalize_tools_state(state.tools_state)
+
     async def get_session_policy(self, session_id: str) -> dict[str, JSONValue]:
         async with self._lock:
             state = self._sessions.get(session_id)

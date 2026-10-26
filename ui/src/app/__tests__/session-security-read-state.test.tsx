@@ -111,3 +111,37 @@ it('does not apply a late save response or callback to the next session', async 
   expect(screen.queryByText('Danger zone')).toBeNull(); expect(onSaved).toHaveBeenCalledWith('A');
   expect(writes).toEqual(['A']);
 });
+
+const sources = { basis: 'configuration_at_refresh', fields: { fs: 'session_override', shell: 'installation_configuration', web: 'installation_configuration', project: 'installation_configuration', img: 'installation_configuration', tts: 'installation_configuration', stt: 'installation_configuration' } };
+it('labels saved tool configuration sources and clears them for unsaved drafts and source-less save responses', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => json(init?.method === 'POST' ? payload() : { ...payload(), tool_sources: sources })));
+  render(<SessionDrawer {...props} />);
+  await screen.findByText('Saved source: chat override.');
+  expect(screen.getAllByText('Saved source: installation configuration.')).toHaveLength(6);
+  fireEvent.click(screen.getByRole('switch', { name: 'Filesystem access' }));
+  expect(screen.queryByText('Saved source: chat override.')).toBeNull();
+  expect(screen.getAllByText('Saved source unavailable; reopen controls to refresh.')).toHaveLength(7);
+  fireEvent.click(screen.getByRole('button', { name: 'Save session controls' }));
+  await screen.findByText('Session controls updated.');
+  expect(screen.queryByText('Saved source: chat override.')).toBeNull();
+});
+it.each([undefined, { basis: 'configuration_at_refresh', fields: { fs: 'SECRET_FAKE' } }])('does not invent or echo missing/invalid source metadata', async tool_sources => {
+  vi.stubGlobal('fetch', vi.fn(async () => json({ ...payload(), tool_sources })));
+  const h = render(<SessionDrawer {...props} />);
+  await screen.findByText('Session controls ready.');
+  expect(screen.getAllByText('Saved source unavailable; reopen controls to refresh.')).toHaveLength(7);
+  expect(h.container.textContent).not.toContain('SECRET_');
+});
+
+it('clears source labels for a safety preset and rejects late source metadata from another chat', async () => {
+  const old = deferred<Response>();
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => new Headers(init?.headers).get('X-Test') === 'A' ? old.promise : json({ ...payload('B'), tool_sources: { ...sources, fields: { ...sources.fields, fs: 'installation_configuration' } } })));
+  const h = render(<SessionDrawer {...props} />);
+  h.rerender(<SessionDrawer {...props} sessionId="B" />);
+  await screen.findByText('Session controls ready.');
+  await act(async () => { old.resolve(json({ ...payload(), tool_sources: sources })); });
+  expect(screen.queryByText('Saved source: chat override.')).toBeNull();
+  expect(screen.getAllByText('Saved source: installation configuration.')).toHaveLength(7);
+  fireEvent.click(screen.getByRole('button', { name: 'Reset to safety preset' }));
+  expect(screen.getAllByText('Saved source unavailable; reopen controls to refresh.')).toHaveLength(7);
+});

@@ -307,3 +307,22 @@ command/risk restrictions помечаются как скрытые. Saved effe
 обещанием effective permission: transient once/session approvals и текущий host
 lease здесь не перечисляются, DENY сохраняет precedence. UI не изменяет/revokes
 rules и не предлагает reset-invalid. Source и lifetime — saved policy при refresh.
+
+
+## Источник tool configuration чата
+
+Owned GET session/security возвращает отдельный `tool_sources` для семи tool toggles:
+`session_override` означает наличие bool в сохранённой карте чата, даже если значение
+совпадает с installation default; `installation_configuration` означает отсутствие
+такого override и загрузку из существующего installation loader, включая его defaults.
+Policy и raw overrides захватываются одним чтением UIHub под существующим lock;
+значения и источники tools строятся из одной captured карты. GET private/no-store,
+не создаёт grant и не пишет session state. Runtime consumers и POST не меняются.
+
+Session Controls показывает источник сохранённой configuration при refresh.
+Редактирование tool toggle или применение preset сбрасывает source labels; POST без
+metadata оставляет источник unavailable до нового чтения. Смена/закрытие панели
+использует существующие epoch/session guards. Текущий save сохраняет всю карту tools,
+поэтому override не доказывает, что пользователь отдельно менял данное поле.
+Это не provenance конкретного значения file/default, active-run snapshot, provider/tool
+capability, effective action permission, approval lifetime/revision или revoke.

@@ -564,6 +564,20 @@
         "ui/src/features/desktop/desktop-approvals-panel.tsx"
       ],
       "summary": "Owner Settings reads a narrow principal-bound saved Desktop rule projection through the existing shared store. Inspection never rewrites the rule file; existing runtime/list/mutation behavior is preserved. Sensitive command/description/ID/email/error contents are omitted; only known typed file-target tool/action roles expose paths, including separate download destinations. XPath/GUI/unknown targets and command/risk restrictions remain explicitly hidden. Captured-subject/epoch guards reject foreign and late responses; read failure is not an empty list, UI has no mutators. No new grant authority, revoke, effective-action permission, transient approval or host lease claim."
+    },
+    {
+      "id": "ui.session_tool_configuration_sources",
+      "scope": "ui",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_session_tool_sources.py",
+        "ui/src/app/__tests__/session-security-read-state.test.tsx",
+        "ui/src/app/components/session-drawer.tsx"
+      ],
+      "summary": "Owned session security GET captures saved policy and tool overrides under one existing UIHub lock, then projects known tool configuration sources from the same override map as displayed values. No session/grant writes or runtime consumer changes. Source labels describe configuration at refresh, including equal-value overrides and loader defaults; missing/invalid metadata and unsaved tool drafts remain unavailable. Existing session/epoch/save fencing preserved. No per-file default provenance, active-run capability, unified grant revision or revoke claim."
     }
   ]
 }

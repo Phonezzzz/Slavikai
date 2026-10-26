@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ToggleSwitch } from './ui/toggle-switch';
 import { ModelQualification } from './model-qualification';
-import { parseSessionSecurityState, type ToolKey, type PolicyProfile } from '../session-security';
+import { parseSessionSecurityState, parseSessionToolSources, type SessionToolSources, type ToolKey, type PolicyProfile } from '../session-security';
 import { useFocusTrap } from '../use-focus-trap';
 import {
   SESSION_MODE_LABELS,
@@ -92,6 +92,7 @@ export function SessionDrawer({
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [toolsState, setToolsState] = useState<Record<ToolKey, boolean>>(buildSafetyPreset());
+  const [toolSources, setToolSources] = useState<SessionToolSources | null>(null);
   const [policyProfile, setPolicyProfile] = useState<PolicyProfile>('sandbox');
   const [dangerConfirmText, setDangerConfirmText] = useState('');
   const [dangerConfirmed, setDangerConfirmed] = useState(false);
@@ -108,6 +109,7 @@ export function SessionDrawer({
     const generation = ++epoch.current;
     const abort = new AbortController();
     setLoadedSession(null);
+    setToolSources(null);
     setSaving(false);
     setDangerConfirmText('');
     setDangerConfirmed(false);
@@ -129,6 +131,7 @@ export function SessionDrawer({
         if (!response.ok) throw new Error(extractErrorMessage(payload, 'Failed to load session controls.'));
         const parsed = parseSessionSecurityState(payload, sessionId);
         if (!parsed) throw new Error('Session controls are unavailable or belong to another session.');
+        setToolSources(parseSessionToolSources(payload, sessionId));
         setToolsState(parsed.toolsState);
         setPolicyProfile(parsed.policyProfile);
         setLoadedSession(`${sessionHeader}:${sessionId}`);
@@ -157,10 +160,12 @@ export function SessionDrawer({
   }, [isOpen, onClose]);
 
   const handleToolToggle = (tool: ToolKey) => {
+    setToolSources(null);
     setToolsState((current) => ({ ...current, [tool]: !current[tool] }));
   };
 
   const handleResetPreset = () => {
+    setToolSources(null);
     setPolicyProfile('sandbox');
     setToolsState(buildSafetyPreset());
     setDangerConfirmText('');
@@ -214,6 +219,7 @@ export function SessionDrawer({
           setLoadedSession(null);
           throw new Error('The update response is unavailable. Reopen controls to read the current state before another change.');
         }
+        setToolSources(parseSessionToolSources(payload, sessionId));
         setToolsState(parsed.toolsState);
         setPolicyProfile(parsed.policyProfile);
         setStatus('Session controls updated.');
@@ -382,6 +388,7 @@ export function SessionDrawer({
                   </span>
                 </div>
 
+                <p className="text-xs text-zinc-500">Sources describe saved configuration at refresh, not provider capability, active-run access or approvals. Chat overrides persist with the chat; installation configuration includes loader defaults. Saving controls records the full tool map, even unchanged fields.</p>
                 <div className="space-y-2">
                   {(['fs', 'project', 'shell', 'web', 'img', 'tts', 'stt'] as ToolKey[]).map((tool) => {
                     const blockedBySafeMode = safeModeEnabled && SAFE_MODE_BLOCKED_TOOLS.has(tool);
@@ -393,6 +400,7 @@ export function SessionDrawer({
                       >
                         <div>
                           <div className="text-sm font-medium text-zinc-100">{TOOL_LABELS[tool]}</div>
+                          <div className="text-xs text-zinc-500">{toolSources?.[tool] === 'session_override' ? 'Saved source: chat override.' : toolSources?.[tool] === 'installation_configuration' ? 'Saved source: installation configuration.' : 'Saved source unavailable; reopen controls to refresh.'}</div>
                           <div className="text-xs text-zinc-400">
                             {blockedBySafeMode
                               ? 'Disabled by safe mode.'

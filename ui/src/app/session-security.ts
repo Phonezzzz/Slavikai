@@ -67,3 +67,12 @@ export const loadSessionSecuritySummary = async (
   if (!parseSessionSecurityState(payload, sessionId)) throw new Error('Session controls are unavailable or belong to another session.');
   return parseSessionSecuritySummary(payload);
 };
+
+export type SessionToolSources = Record<ToolKey, 'installation_configuration' | 'session_override'>;
+export const parseSessionToolSources = (value: unknown, sessionId: string): SessionToolSources | null => {
+  if (!parseSessionSecurityState(value, sessionId) || !record(value) || !record(value.tool_sources)
+    || value.tool_sources.basis !== 'configuration_at_refresh' || !record(value.tool_sources.fields)) return null;
+  const fields = value.tool_sources.fields;
+  if (!SESSION_TOOL_KEYS.every(key => fields[key] === 'installation_configuration' || fields[key] === 'session_override')) return null;
+  return Object.fromEntries(SESSION_TOOL_KEYS.map(key => [key, fields[key]])) as SessionToolSources;
+};

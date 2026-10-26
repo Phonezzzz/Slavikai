@@ -15,6 +15,7 @@ from server.http.common.runtime_contract import (
     _resolve_runtime_main_for_session,
     _set_model_bound_decision,
 )
+from server.http.common.workflow_runtime import derive_safe_mode_from_policy_profile
 from server.http.common.workspace_git import (
     git_commit,
     git_stage,
@@ -27,6 +28,7 @@ from server.http_api import (
     POLICY_PROFILES,
     UI_SESSION_HEADER,
     _agent_scope,
+    _build_effective_tools_state,
     _build_ui_approval_decision,
     _decision_workflow_context,
     _index_workspace_root,
@@ -1498,18 +1500,31 @@ async def handle_ui_session_security_get(request: web.Request) -> web.Response:
     if session_id is None:
         return _session_forbidden_response()
     workspace_root = await _workspace_root_for_session(hub, session_id)
-    effective_tools, effective_policy = await _load_effective_session_security(
-        hub=hub,
-        session_id=session_id,
-    )
+    configuration = await hub.get_session_security_configuration(session_id)
+    if configuration is None:
+        return _session_forbidden_response()
+    profile, overrides = configuration
+    effective_tools = _build_effective_tools_state(session_override=overrides)
+    effective_tools["safe_mode"] = derive_safe_mode_from_policy_profile(profile)
+    effective_policy: dict[str, JSONValue] = {"profile": profile}
+    sources: dict[str, JSONValue] = {
+        key: "session_override"
+        if overrides is not None and key in overrides
+        else "installation_configuration"
+        for key in DEFAULT_TOOLS_STATE
+        if key != "safe_mode"
+    }
     response = json_response(
         {
             "session_id": session_id,
             "tools_state": effective_tools,
+            "tool_sources": {"basis": "configuration_at_refresh", "fields": sources},
             "policy": effective_policy,
             "workspace_root": str(workspace_root),
         }
     )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Cookie, Cf-Access-Jwt-Assertion, Authorization"
     response.headers[UI_SESSION_HEADER] = session_id
     return response
 
