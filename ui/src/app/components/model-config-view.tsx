@@ -4,6 +4,7 @@ const options = [
   ['thinking_enabled', 'Thinking requested', 'bool'], ['reasoning_effort', 'Reasoning effort', 'effort'],
   ['reasoning_summary', 'Reasoning summary requested', 'bool'],
   ['reasoning_summary_wait', 'Wait for reasoning summary', 'bool'], ['diffusing', 'Diffusing requested', 'bool'],
+  ['web_search_enabled', 'Web search requested', 'bool'],
 ] as const;
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const display = (value: unknown, kind: string): string => {
@@ -29,6 +30,6 @@ export function ModelConfigView({ snapshot }: { snapshot: unknown }) {
       {([['api_key', 'Credential override present'], ['base_url', 'Endpoint override present'], ['extra_headers', 'Additional headers present'], ['system_prompt', 'Prompt override present']] as const).map(([key, label]) => <tr key={key} className="border-t border-zinc-800"><th scope="row" className="py-2 font-normal">{label}</th><td>{typeof presence[key] === 'boolean' ? presence[key] ? 'Yes' : 'No' : 'Unavailable'}</td></tr>)}
     </tbody></table>
     <p className="mt-3 text-xs text-zinc-500">Presence flags describe the saved configuration, not active credential precedence. Credential, endpoint, header and prompt contents are not displayed. Change these options in the server configuration.</p>
-    <p className="mt-2 text-xs text-zinc-500">Web search option: the configuration loader does not restore this field. No active value is claimed.</p>
+    <p className="mt-2 text-xs text-zinc-500">The saved web-search request does not report an executed search. Actual use depends on the selected model and runtime policy.</p>
   </section>;
 }

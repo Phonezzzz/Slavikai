@@ -57,8 +57,8 @@ def test_saved_model_read_view_is_owner_only_sanitized_and_read_only(monkeypatch
             assert view["values"]["max_tokens"] == 2345
             assert view["values"]["reasoning_effort"] == "high"
             assert all(view["presence"].values())
-            assert "web_search_enabled" not in view["values"]
-            assert view["unsupported_fields"] == ["web_search_enabled"]
+            assert view["values"]["web_search_enabled"] is True
+            assert view["unsupported_fields"] == []
             assert "model_config_snapshot" not in await read("member")
             result = await client.post(
                 "/ui/api/settings",

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Settings } from '../components/Settings';
-const config = { state: 'available', basis: 'loaded_default_model_at_refresh', source: 'Saved default model configuration with loader defaults', identity: { provider: 'local', model: 'saved-fixture' }, values: { temperature: 0.23, top_p: 0.61, max_tokens: 2345, mode: 'default', thinking_enabled: true, reasoning_effort: 'high', reasoning_summary: true, reasoning_summary_wait: false, diffusing: null }, presence: { api_key: true, base_url: true, extra_headers: true, system_prompt: true }, unavailable_fields: [], unsupported_fields: ['web_search_enabled'] };
+const config = { state: 'available', basis: 'loaded_default_model_at_refresh', source: 'Saved default model configuration with loader defaults', identity: { provider: 'local', model: 'saved-fixture' }, values: { temperature: 0.23, top_p: 0.61, max_tokens: 2345, mode: 'default', thinking_enabled: true, reasoning_effort: 'high', reasoning_summary: true, reasoning_summary_wait: false, diffusing: null, web_search_enabled: true }, presence: { api_key: true, base_url: true, extra_headers: true, system_prompt: true }, unavailable_fields: [], unsupported_fields: [] };
 const setup = (owner = true, value: unknown = config) => {
   const mock = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url === '/ui/api/settings') return new Response(JSON.stringify({ settings: { can_manage_installation: owner, preferences_subject: owner ? 'owner' : 'member', preferences_etag: 'tag', model: { provider: 'local', model: 'saved-fixture' }, model_config_snapshot: value } }));
@@ -25,7 +25,8 @@ it('shows saved safe values and presence flags without dirtying settings or prob
   expect(within(region).getByText('high')).toBeTruthy();
   expect(within(region).getByText(/local.*saved-fixture/)).toBeTruthy();
   expect(within(region).getByText(/Already running chats may use different options/)).toBeTruthy();
-  expect(within(region).getByText(/loader does not restore this field/)).toBeTruthy();
+  expect(within(region).getByRole('row', { name: 'Web search requested Yes' })).toBeTruthy();
+  expect(within(region).queryByText(/loader does not restore this field/)).toBeNull();
   expect(region.querySelector('input,textarea,select')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
   await screen.findByText('No changes to save.');
@@ -74,4 +75,14 @@ it('does not echo untrusted non-scalar values from malformed diagnostics', async
   await advanced();
   expect(h.container.textContent).not.toContain('SECRET_');
   expect(screen.getAllByText('Unavailable').length).toBeGreaterThan(0);
+});
+
+it.each([true, false])('shows the saved web-search request without granting or activating it (%s)', async value => {
+  const mock = setup(true, { ...config, values: { ...config.values, web_search_enabled: value } });
+  render(<Settings isOpen onClose={() => undefined} />);
+  await advanced();
+  const region = await screen.findByRole('region', { name: 'Saved model options' });
+  expect(within(region).getByRole('row', { name: `Web search requested ${value ? 'Yes' : 'No'}` })).toBeTruthy();
+  expect(region.querySelector('input,textarea,select')).toBeNull();
+  expect(mock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
 });

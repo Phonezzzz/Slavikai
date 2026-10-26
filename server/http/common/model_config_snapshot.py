@@ -37,10 +37,16 @@ def build_model_config_snapshot(config: ModelConfig | None) -> dict[str, JSONVal
         values[key] = raw if valid else None
         if raw is not None and not valid:
             unavailable.append(key)
-    for key in ("thinking_enabled", "reasoning_summary", "reasoning_summary_wait", "diffusing"):
+    for key in (
+        "thinking_enabled",
+        "reasoning_summary",
+        "reasoning_summary_wait",
+        "diffusing",
+        "web_search_enabled",
+    ):
         raw = getattr(config, key)
         values[key] = raw if isinstance(raw, bool) else None
-        if raw is not None and not isinstance(raw, bool):
+        if not isinstance(raw, bool) and (raw is not None or key == "web_search_enabled"):
             unavailable.append(key)
     presence: dict[str, JSONValue] = {}
     for key in ("api_key", "base_url", "system_prompt"):
@@ -57,7 +63,7 @@ def build_model_config_snapshot(config: ModelConfig | None) -> dict[str, JSONVal
             "values": values,
             "presence": presence,
             "unavailable_fields": unavailable,
-            "unsupported_fields": ["web_search_enabled"],
+            "unsupported_fields": [],
         }
     )
     return result

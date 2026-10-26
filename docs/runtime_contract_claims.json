@@ -524,7 +524,7 @@
       "scope": "settings",
       "status": "implemented",
       "owner": "ui",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/ui_api/test_model_config_view.py",
@@ -532,7 +532,7 @@
         "server/http/common/model_config_snapshot.py",
         "ui/src/app/components/model-config-view.tsx"
       ],
-      "summary": "Owner Settings exposes a separate read-only saved default model projection from the existing loader. Finite safe numerics, known enums, bools and null are sanitized; sensitive overrides expose presence only. Members omit diagnostics and POST is rejected. No React defaults, model probes, editor, active-chat capability or credential precedence claim. The existing web_search_enabled loader gap remains explicitly unsupported; runtime/parser/schema are unchanged."
+      "summary": "Owner Settings exposes a separate read-only saved default model projection from the existing loader. Finite safe numerics, known enums, bools and null are sanitized; sensitive overrides expose presence only. Members omit diagnostics and POST is rejected. No React defaults, model probes, editor, active-chat capability or credential precedence claim. The separately adopted strict-bool loader prerequisite restores web_search_enabled; this read-only view reports the loaded request, not executed search or active-chat options."
     },
     {
       "id": "ui.session_security_read_state",
@@ -620,6 +620,21 @@
         "server/http/handlers/workspace.py"
       ],
       "summary": "Owned session security GET/POST expose saved-config revision and ETag from one captured snapshot. POST requires exact If-Match (428 missing, 400 malformed, 409 conflict), validates the full payload and existing root/YOLO guards under the scoped execution lock, then performs one persisted UIHub CAS. UI captures the selected-session revision; conflict requires a fresh read and another explicit save, with no automatic retry. Installation defaults, grants and running policy snapshots remain separate."
+    },
+    {
+      "id": "config.model_web_search_roundtrip",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_model_store.py",
+        "tests/test_llm_clients.py",
+        "tests/test_agent_response.py",
+        "tests/ui_api/test_model_config_view.py"
+      ],
+      "summary": "ModelConfig load preserves only JSON bool web_search_enabled; absent stays False and malformed non-bools raise without value echo. File reload/cold hydration and inert existing xAI request-path tests preserve session override precedence and distinguish saved configuration from active runtime. No new search executor, provider qualification, tools, grants, prompt strings, editor or live activation."
     }
   ]
 }

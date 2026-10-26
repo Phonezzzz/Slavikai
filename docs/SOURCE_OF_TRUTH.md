@@ -209,9 +209,17 @@ system_prompt не передаётся: показывается только �
 
 Источник — сохранённая default configuration с defaults существующего loader при
 Settings refresh, отдельно от несохранённого выбора. Это не effective snapshot
-работающего чата, проверка provider capability или credential precedence. Известный
-loader gap web_search_enabled обозначен без придумывания активного значения;
-parser/runtime этим read-only срезом не изменяются.
+работающего чата, проверка provider capability или credential precedence.
+
+Отдельно принятый loader prerequisite восстанавливает сохранённый
+`web_search_enabled` только из JSON bool; отсутствие сохраняет False, другой тип
+вызывает явную ошибку без содержимого значения. Owner read-only snapshot показывает
+loaded bool как «Web search requested», без нового редактора или доказательства
+выполненного поиска. Global runtime model гидратируется при старте; чтение Settings
+и изменение файла не активируют настройки в уже работающем runtime. Existing session
+model/override precedence сохраняется, наследование default options не добавляется.
+True выбирает существующие web-search consumers; их prompts, tools, qualification и
+policy/approval boundaries этим prerequisite не переписываются.
 
 ## Custom native tool protocol admission
 

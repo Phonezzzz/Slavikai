@@ -16,6 +16,9 @@ def model_config_to_dict(config: ModelConfig) -> dict[str, Any]:
 
 
 def model_config_from_dict(data: dict[str, Any]) -> ModelConfig:
+    web_search_enabled = data.get("web_search_enabled", False)
+    if not isinstance(web_search_enabled, bool):
+        raise ValueError("web_search_enabled must be a boolean")
     return ModelConfig(
         provider=data["provider"],
         model=data["model"],
@@ -32,6 +35,7 @@ def model_config_from_dict(data: dict[str, Any]) -> ModelConfig:
         reasoning_summary=data.get("reasoning_summary"),
         reasoning_summary_wait=data.get("reasoning_summary_wait"),
         diffusing=data.get("diffusing"),
+        web_search_enabled=web_search_enabled,
     )
 
 
