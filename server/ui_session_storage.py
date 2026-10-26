@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Literal, Protocol
 
 from shared.models import JSONValue
 from shared.sanitize import safe_json_loads
+from shared.session_domain import normalize_policy_profile
 
 MessageLane = Literal["chat", "workspace"]
 
@@ -35,6 +37,7 @@ class PersistedSession:
     yolo_armed: bool = False
     yolo_armed_at: str | None = None
     tools_state: dict[str, bool] | None = None
+    security_revision: str = field(default_factory=lambda: uuid.uuid4().hex)
     mode: str = "ask"
     active_plan: dict[str, JSONValue] | None = None
     active_task: dict[str, JSONValue] | None = None
@@ -72,6 +75,7 @@ class PersistedWorkspaceSessionRecord:
     yolo_armed: bool = False
     yolo_armed_at: str | None = None
     tools_state: dict[str, bool] | None = None
+    security_revision: str = field(default_factory=lambda: uuid.uuid4().hex)
     mode: str = "ask"
     active_plan: dict[str, JSONValue] | None = None
     active_task: dict[str, JSONValue] | None = None
@@ -132,6 +136,7 @@ def split_persisted_session_domains(session: PersistedSession) -> PersistedSessi
             yolo_armed=session.yolo_armed,
             yolo_armed_at=session.yolo_armed_at,
             tools_state=(dict(session.tools_state) if session.tools_state is not None else None),
+            security_revision=session.security_revision,
             mode=session.mode,
             active_plan=(dict(session.active_plan) if session.active_plan is not None else None),
             active_task=(dict(session.active_task) if session.active_task is not None else None),
@@ -167,11 +172,47 @@ def legacy_session_from_domain_records(records: PersistedSessionDomainRecords) -
         yolo_armed=workspace.yolo_armed,
         yolo_armed_at=workspace.yolo_armed_at,
         tools_state=(dict(workspace.tools_state) if workspace.tools_state is not None else None),
+        security_revision=workspace.security_revision,
         mode=workspace.mode,
         active_plan=(dict(workspace.active_plan) if workspace.active_plan is not None else None),
         active_task=(dict(workspace.active_task) if workspace.active_task is not None else None),
         auto_state=(dict(workspace.auto_state) if workspace.auto_state is not None else None),
     )
+
+
+def _check_security_revision(
+    session: PersistedSession,
+    current: tuple[str | None, str | None, str | None, dict[str, bool] | None] | None,
+    expected_revision: str | None,
+) -> None:
+    if len(session.security_revision) != 32 or any(
+        char not in "0123456789abcdef" for char in session.security_revision
+    ):
+        raise ValueError("Invalid session security revision")
+    if current is None:
+        if expected_revision is not None:
+            raise ValueError("Session security revision conflict")
+        return
+    current_principal, current_revision, current_profile, current_tools = current
+    if current_principal != session.principal_id:
+        raise PermissionError("Session security principal conflict")
+    expected = expected_revision if expected_revision is not None else session.security_revision
+    if current_revision is None or current_revision != expected:
+        raise ValueError("Session security revision conflict")
+    # Match the existing UIHub restore normalization, without rewriting stored data.
+    previous_tools = {
+        key: value for key, value in (current_tools or {}).items() if key != "safe_mode"
+    }
+    next_tools = {
+        key: value for key, value in (session.tools_state or {}).items() if key != "safe_mode"
+    }
+    changed = (
+        normalize_policy_profile(current_profile)
+        != normalize_policy_profile(session.policy_profile)
+        or previous_tools != next_tools
+    )
+    if changed and session.security_revision == current_revision:
+        raise ValueError("Session security update requires a new revision")
 
 
 class UISessionStorage(Protocol):
@@ -185,7 +226,9 @@ class UISessionStorage(Protocol):
 
     def load_sessions(self) -> list[PersistedSession]: ...
 
-    def save_session(self, session: PersistedSession) -> None: ...
+    def save_session(
+        self, session: PersistedSession, *, expected_security_revision: str | None = None
+    ) -> None: ...
 
     def delete_sessions(self, session_ids: Sequence[str]) -> None: ...
 
@@ -229,7 +272,22 @@ class InMemoryUISessionStorage:
     def load_sessions(self) -> list[PersistedSession]:
         return [self._clone_session(item) for item in self._sessions.values()]
 
-    def save_session(self, session: PersistedSession) -> None:
+    def save_session(
+        self, session: PersistedSession, *, expected_security_revision: str | None = None
+    ) -> None:
+        current = self._sessions.get(session.session_id)
+        _check_security_revision(
+            session,
+            (
+                current.principal_id,
+                current.security_revision,
+                current.policy_profile,
+                current.tools_state,
+            )
+            if current is not None
+            else None,
+            expected_security_revision,
+        )
         self._sessions[session.session_id] = self._clone_session(session)
 
     def delete_sessions(self, session_ids: Sequence[str]) -> None:
@@ -272,6 +330,7 @@ class InMemoryUISessionStorage:
             tools_state=(
                 dict(session.tools_state) if isinstance(session.tools_state, dict) else None
             ),
+            security_revision=session.security_revision,
             mode=session.mode,
             active_plan=(dict(session.active_plan) if session.active_plan is not None else None),
             active_task=(dict(session.active_task) if session.active_task is not None else None),
@@ -336,7 +395,7 @@ class SQLiteUISessionStorage:
                     , model_provider, model_id, title_override, folder_id
                     , output_text, output_updated_at, files_json, artifacts_json
                     , workspace_root, policy_profile, yolo_armed, yolo_armed_at
-                    , tools_state_json
+                    , tools_state_json, security_revision
                     , mode, active_plan_json, active_task_json, auto_state_json
                 FROM ui_sessions
                 """,
@@ -366,6 +425,7 @@ class SQLiteUISessionStorage:
                         yolo_armed=bool(int(row["yolo_armed"] or 0)),
                         yolo_armed_at=_optional_str(row["yolo_armed_at"]),
                         tools_state=self._decode_tools_state(row["tools_state_json"]),
+                        security_revision=str(row["security_revision"]),
                         mode=self._decode_mode(row["mode"]),
                         active_plan=self._decode_json_object(row["active_plan_json"]),
                         active_task=self._decode_json_object(row["active_task_json"]),
@@ -374,8 +434,28 @@ class SQLiteUISessionStorage:
                 )
         return sessions
 
-    def save_session(self, session: PersistedSession) -> None:
+    def save_session(
+        self, session: PersistedSession, *, expected_security_revision: str | None = None
+    ) -> None:
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT principal_id, security_revision, policy_profile, tools_state_json "
+                "FROM ui_sessions WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            _check_security_revision(
+                session,
+                (
+                    current["principal_id"],
+                    current["security_revision"],
+                    current["policy_profile"],
+                    self._decode_tools_state(current["tools_state_json"]),
+                )
+                if current is not None
+                else None,
+                expected_security_revision,
+            )
             conn.execute(
                 """
                 INSERT INTO ui_sessions (
@@ -398,12 +478,13 @@ class SQLiteUISessionStorage:
                     yolo_armed,
                     yolo_armed_at,
                     tools_state_json,
+                    security_revision,
                     mode,
                     active_plan_json,
                     active_task_json,
                     auto_state_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id)
                 DO UPDATE SET
                     principal_id=excluded.principal_id,
@@ -424,6 +505,7 @@ class SQLiteUISessionStorage:
                     yolo_armed=excluded.yolo_armed,
                     yolo_armed_at=excluded.yolo_armed_at,
                     tools_state_json=excluded.tools_state_json,
+                    security_revision=excluded.security_revision,
                     mode=excluded.mode,
                     active_plan_json=excluded.active_plan_json,
                     active_task_json=excluded.active_task_json,
@@ -449,6 +531,7 @@ class SQLiteUISessionStorage:
                     1 if session.yolo_armed else 0,
                     session.yolo_armed_at,
                     self._encode_tools_state(session.tools_state),
+                    session.security_revision,
                     self._normalize_mode(session.mode),
                     self._encode_json_object(session.active_plan),
                     self._encode_json_object(session.active_task),
@@ -609,6 +692,7 @@ class SQLiteUISessionStorage:
                     yolo_armed INTEGER NOT NULL DEFAULT 0,
                     yolo_armed_at TEXT,
                     tools_state_json TEXT,
+                    security_revision TEXT,
                     mode TEXT NOT NULL DEFAULT 'ask',
                     active_plan_json TEXT,
                     active_task_json TEXT,
@@ -617,6 +701,10 @@ class SQLiteUISessionStorage:
                 """,
             )
             self._ensure_columns(conn)
+            conn.execute(
+                "UPDATE ui_sessions SET security_revision = lower(hex(randomblob(16))) "
+                "WHERE security_revision IS NULL"
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ui_folders (
@@ -805,6 +893,8 @@ class SQLiteUISessionStorage:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN yolo_armed INTEGER NOT NULL DEFAULT 0")
         if "yolo_armed_at" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN yolo_armed_at TEXT")
+        if "security_revision" not in existing:
+            conn.execute("ALTER TABLE ui_sessions ADD COLUMN security_revision TEXT")
         if "tools_state_json" not in existing:
             conn.execute("ALTER TABLE ui_sessions ADD COLUMN tools_state_json TEXT")
         if "mode" not in existing:

@@ -272,6 +272,24 @@ Typed browser helpers передают явно выбранный
 PlanEnvelope, без неявной подстановки текущего плана. Готовность карточки плана
 этот API-контракт сам по себе не доказывает.
 
+## Storage prerequisite сохранённой session configuration
+
+UIHub хранит отдельную opaque `security_revision` только для сохранённых
+`policy_profile` и raw `tools_state`. Existing trusted setters меняют revision при
+изменении этих значений; import создаёт новую binding, restore сохраняет её.
+Principal-owned snapshot и CAS выполняются под existing UIHub lock. Новый candidate
+публикуется в памяти после успешной persistence. SQLite проверяет expected revision
+и principal в той же transaction, что сохраняет session и её сообщения; устаревший
+общий snapshot не может вернуть прежний config. Инициализация existing schema добавляет
+только revision metadata, сохраняя прежние значения и сообщения.
+
+Это storage primitive для следующего HTTP/UI среза: текущий session/security POST
+ещё не требует revision и не защищён от lost update двух browser clients.
+Storage-fault проверки покрывают отказ до commit и rollback transaction; неопределённый
+результат после commit/crash не получает новой recovery гарантии. Installation defaults,
+grants, running execution snapshot, reset и live revoke этой revision не покрываются.
+Один UIHub остаётся владельцем runtime state; multi-worker runtime не вводится.
+
 ## Чтение session security в браузере
 
 Session Controls и Computer используют проверенный snapshot существующего owned

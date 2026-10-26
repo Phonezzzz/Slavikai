@@ -591,6 +591,20 @@
         "server/http/handlers/workspace.py"
       ],
       "summary": "Existing owned session security POST validates all policy/tools input under the existing scoped agent lock before invoking either existing setter. Invalid combined requests cannot persist an earlier valid policy section. Owner/member ownership, YOLO confirmation, root constraints and valid update semantics remain unchanged. No new permission authority, API/schema, runtime consumers, CAS/revision or storage-failure transaction guarantee."
+    },
+    {
+      "id": "storage.session_security_revision",
+      "scope": "security",
+      "status": "implemented",
+      "owner": "security",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_session_security_revision.py",
+        "server/ui_hub.py",
+        "server/ui_session_storage.py"
+      ],
+      "summary": "Saved session policy/raw tool overrides have a persisted revision and owned UIHub CAS. Trusted setters/import publish candidates after persistence; SQLite rejects stale snapshots inside the write transaction. Metadata initialization preserves configuration/messages. This is a storage prerequisite only: HTTP/UI preconditions remain unimplemented; installation defaults, grants, live revoke and multi-worker runtime are excluded."
     }
   ]
 }

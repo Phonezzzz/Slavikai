@@ -232,6 +232,13 @@ class _SubscriberState:
     resync_reason: str = "subscriber_overflow"
 
 
+@dataclass(frozen=True)
+class SessionSecuritySnapshot:
+    profile: PolicyProfile
+    tools_state: dict[str, bool] | None
+    revision: str
+
+
 @dataclass
 class _SessionState:
     principal_id: str = DEFAULT_LEGACY_PRINCIPAL_ID
@@ -255,6 +262,7 @@ class _SessionState:
     workspace_root: str | None = None
     policy_profile: PolicyProfile = "sandbox"
     tools_state: dict[str, bool] | None = None
+    security_revision: str = field(default_factory=lambda: uuid.uuid4().hex)
     mode: SessionMode = "ask"
     active_plan: dict[str, JSONValue] | None = None
     active_task: dict[str, JSONValue] | None = None
@@ -764,6 +772,7 @@ class UIHub:
                         workspace_root=state.workspace_root,
                         policy_profile=state.policy_profile,
                         tools_state=self._normalize_tools_state(state.tools_state),
+                        security_revision=state.security_revision,
                         mode=state.mode,
                         active_plan=(
                             dict(state.active_plan) if state.active_plan is not None else None
@@ -817,7 +826,7 @@ class UIHub:
                 folder = self._folders.get(folder_id) if folder_id is not None else None
                 if folder is None or folder.principal_id != normalized_principal:
                     folder_id = None
-                self._sessions[item.session_id] = _SessionState(
+                next_state = _SessionState(
                     principal_id=normalized_principal,
                     messages=[dict(message) for message in item.messages],
                     output_text=item.output_text,
@@ -842,7 +851,12 @@ class UIHub:
                     created_at=created_at,
                     updated_at=restored_updated_at,
                 )
-                self._persist_session_locked(item.session_id)
+                self._persist_session_state_locked(
+                    item.session_id,
+                    next_state,
+                    expected_security_revision=existing.security_revision if existing else None,
+                )
+                self._sessions[item.session_id] = next_state
                 imported += 1
             self._prune_sessions_locked()
             return imported
@@ -958,6 +972,89 @@ class UIHub:
                 return None
             return state.policy_profile, self._normalize_tools_state(state.tools_state)
 
+    async def get_session_security_snapshot(
+        self, session_id: str, *, principal_id: str
+    ) -> SessionSecuritySnapshot | None:
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or state.principal_id != self._normalize_principal_id(principal_id):
+                return None
+            return self._security_snapshot(state)
+
+    async def compare_and_set_session_security(
+        self,
+        session_id: str,
+        *,
+        principal_id: str,
+        expected_revision: str,
+        profile: str | None = None,
+        tools_state: dict[str, bool] | None = None,
+    ) -> SessionSecuritySnapshot:
+        if profile is not None and profile not in {"sandbox", "index", "yolo"}:
+            raise ValueError("Invalid session policy")
+        if tools_state is not None and any(
+            key not in {"fs", "shell", "web", "project", "img", "tts", "stt"}
+            or not isinstance(value, bool)
+            for key, value in tools_state.items()
+        ):
+            raise ValueError("Invalid session tools")
+        async with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None or state.principal_id != self._normalize_principal_id(principal_id):
+                raise PermissionError("Session security principal conflict")
+            if expected_revision != state.security_revision:
+                raise ValueError("Session security revision conflict")
+            merged = dict(state.tools_state or {})
+            if tools_state is not None:
+                merged.update(tools_state)
+            next_state = self._commit_session_security_locked(
+                session_id,
+                state,
+                profile=self._normalize_policy_profile(profile)
+                if profile is not None
+                else state.policy_profile,
+                tools_state=merged or None,
+            )
+            return self._security_snapshot(next_state)
+
+    def _security_snapshot(self, state: _SessionState) -> SessionSecuritySnapshot:
+        return SessionSecuritySnapshot(
+            profile=state.policy_profile,
+            tools_state=self._normalize_tools_state(state.tools_state),
+            revision=state.security_revision,
+        )
+
+    def _commit_session_security_locked(
+        self,
+        session_id: str,
+        state: _SessionState,
+        *,
+        profile: PolicyProfile,
+        tools_state: dict[str, bool] | None,
+    ) -> _SessionState:
+        existing = self._sessions.get(session_id)
+        if (
+            existing is not None
+            and state.policy_profile == profile
+            and state.tools_state == tools_state
+        ):
+            return state
+        candidate = replace(
+            state,
+            policy_profile=profile,
+            tools_state=dict(tools_state) if tools_state is not None else None,
+            security_revision=uuid.uuid4().hex,
+            updated_at=_utc_iso_now(),
+        )
+        self._prune_sessions_locked(keep_session_id=session_id)
+        self._persist_session_state_locked(
+            session_id,
+            candidate,
+            expected_security_revision=existing.security_revision if existing else None,
+        )
+        self._sessions[session_id] = candidate
+        return candidate
+
     async def get_session_policy(self, session_id: str) -> dict[str, JSONValue]:
         async with self._lock:
             state = self._sessions.get(session_id)
@@ -972,20 +1069,15 @@ class UIHub:
         profile: str | None = None,
     ) -> dict[str, JSONValue]:
         async with self._lock:
-            state = self._sessions.get(session_id)
-            if state is None:
-                state = _SessionState()
-                self._sessions[session_id] = state
-            changed = False
-            if profile is not None:
-                normalized_profile = self._normalize_policy_profile(profile)
-                if state.policy_profile != normalized_profile:
-                    state.policy_profile = normalized_profile
-                    changed = True
-            if changed:
-                state.updated_at = _utc_iso_now()
-                self._persist_session_locked(session_id)
-                self._prune_sessions_locked(keep_session_id=session_id)
+            state = self._sessions.get(session_id) or _SessionState()
+            state = self._commit_session_security_locked(
+                session_id,
+                state,
+                profile=self._normalize_policy_profile(profile)
+                if profile is not None
+                else state.policy_profile,
+                tools_state=state.tools_state,
+            )
             return {"profile": state.policy_profile}
 
     async def get_session_tools_state(self, session_id: str) -> dict[str, bool] | None:
@@ -1007,7 +1099,6 @@ class UIHub:
             state = self._sessions.get(session_id)
             if state is None:
                 state = _SessionState()
-                self._sessions[session_id] = state
             current = self._normalize_tools_state(state.tools_state) or {}
             next_value: dict[str, bool] | None
             if normalized is None:
@@ -1018,12 +1109,9 @@ class UIHub:
                 next_value = merged or None
             else:
                 next_value = dict(normalized)
-            if state.tools_state == next_value:
-                return dict(next_value) if isinstance(next_value, dict) else None
-            state.tools_state = dict(next_value) if isinstance(next_value, dict) else None
-            state.updated_at = _utc_iso_now()
-            self._persist_session_locked(session_id)
-            self._prune_sessions_locked(keep_session_id=session_id)
+            state = self._commit_session_security_locked(
+                session_id, state, profile=state.policy_profile, tools_state=next_value
+            )
             return self._normalize_tools_state(state.tools_state)
 
     async def set_session_model(self, session_id: str, provider: str, model_id: str) -> None:
@@ -2123,6 +2211,7 @@ class UIHub:
                 workspace_root=restored.workspace_root,
                 policy_profile=self._normalize_policy_profile(restored.policy_profile),
                 tools_state=(self._normalize_tools_state(restored.tools_state)),
+                security_revision=restored.security_revision,
                 mode=self._normalize_mode(restored.mode),
                 active_plan=(
                     dict(restored.active_plan) if restored.active_plan is not None else None
@@ -2184,6 +2273,15 @@ class UIHub:
         state = self._sessions.get(session_id)
         if state is None:
             return
+        self._persist_session_state_locked(session_id, state)
+
+    def _persist_session_state_locked(
+        self,
+        session_id: str,
+        state: _SessionState,
+        *,
+        expected_security_revision: str | None = None,
+    ) -> None:
         legacy_session = PersistedSession(
             session_id=session_id,
             principal_id=state.principal_id,
@@ -2203,13 +2301,17 @@ class UIHub:
             workspace_root=state.workspace_root,
             policy_profile=state.policy_profile,
             tools_state=self._normalize_tools_state(state.tools_state),
+            security_revision=state.security_revision,
             mode=state.mode,
             active_plan=(dict(state.active_plan) if state.active_plan is not None else None),
             active_task=(dict(state.active_task) if state.active_task is not None else None),
             auto_state=(dict(state.auto_state) if state.auto_state is not None else None),
         )
         domains = split_persisted_session_domains(legacy_session)
-        self._storage.save_session(legacy_session_from_domain_records(domains))
+        self._storage.save_session(
+            legacy_session_from_domain_records(domains),
+            expected_security_revision=expected_security_revision,
+        )
 
     def _prune_sessions_locked(self, *, keep_session_id: str | None = None) -> None:
         to_remove: set[str] = set()

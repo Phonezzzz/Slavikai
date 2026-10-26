@@ -434,11 +434,13 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 original_save = hub._storage.save_session
                 failed_publication = []
 
-                def fail_approval_save(state):
+                def fail_approval_save(state, *, expected_security_revision=None):
                     if state.decision is not None and not failed_publication:
                         failed_publication.append(True)
                         raise RuntimeError("approval storage fault")
-                    return original_save(state)
+                    return original_save(
+                        state, expected_security_revision=expected_security_revision
+                    )
 
                 monkeypatch.setattr(hub._storage, "save_session", fail_approval_save)
 
@@ -624,10 +626,12 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 before_checkpoints = dict(agent._mwv_checkpoints)
                 original_save = hub._storage.save_session
 
-                def fail_cancel_save(state):
+                def fail_cancel_save(state, *, expected_security_revision=None):
                     if state.decision is None or state.active_task.get("status") == "cancelled":
                         raise RuntimeError("cancel storage fault")
-                    return original_save(state)
+                    return original_save(
+                        state, expected_security_revision=expected_security_revision
+                    )
 
                 monkeypatch.setattr(hub._storage, "save_session", fail_cancel_save)
                 response = await client.post(
@@ -676,10 +680,12 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert await hub.get_session_decision(session_id) == before_decision
                 original_save = hub._storage.save_session
 
-                def fail_rejected_save(state):
+                def fail_rejected_save(state, *, expected_security_revision=None):
                     if state.decision and state.decision.get("status") == "rejected":
                         raise RuntimeError("reject storage fault")
-                    return original_save(state)
+                    return original_save(
+                        state, expected_security_revision=expected_security_revision
+                    )
 
                 monkeypatch.setattr(hub._storage, "save_session", fail_rejected_save)
                 response = await client.post(
@@ -799,7 +805,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 original_save = hub._storage.save_session
                 failed_publication = []
 
-                def fail_new_approval_save(state):
+                def fail_new_approval_save(state, *, expected_security_revision=None):
                     if (
                         state.decision is not None
                         and state.decision["id"] != decision_id
@@ -807,7 +813,9 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                     ):
                         failed_publication.append(True)
                         raise RuntimeError("resumed approval storage fault")
-                    return original_save(state)
+                    return original_save(
+                        state, expected_security_revision=expected_security_revision
+                    )
 
                 monkeypatch.setattr(hub._storage, "save_session", fail_new_approval_save)
 
