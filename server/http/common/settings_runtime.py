@@ -8,6 +8,7 @@ from typing import Literal
 from config.memory_config import MemoryConfig
 from config.tools_config import DEFAULT_TOOLS_STATE, ToolsConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
+from config.web_search_config import WebSearchConfig
 from core import agent_tools
 from llm.types import ModelConfig
 from memory import session_summarizer
@@ -168,7 +169,9 @@ class SettingsRuntimeBindings:
         include_model_config: bool = False,
         include_attachment_limits: bool = False,
         include_runtime_context_limits: bool = False,
+        include_search_backend_defaults: bool = False,
     ) -> dict[str, JSONValue]:
+        search_defaults = WebSearchConfig() if include_search_backend_defaults else None
         policy_profile, yolo_armed, yolo_armed_at = self.load_policy_settings()
         memory_config = self.load_memory_config_fn()
         embeddings_settings = self.load_embeddings_settings()
@@ -237,6 +240,20 @@ class SettingsRuntimeBindings:
                         }
                     }
                     if include_runtime_context_limits
+                    else {}
+                ),
+                **(
+                    {
+                        "search_backend_defaults_snapshot": {
+                            "basis": "backend_class_defaults_at_refresh",
+                            "values": {
+                                "top_k": search_defaults.top_k,
+                                "timeout_seconds": search_defaults.timeout,
+                                "response_content_bytes": search_defaults.max_bytes,
+                            },
+                        }
+                    }
+                    if search_defaults is not None
                     else {}
                 ),
                 "memory": {

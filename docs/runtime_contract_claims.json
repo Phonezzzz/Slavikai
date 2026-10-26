@@ -665,6 +665,21 @@
         "ui/src/app/components/runtime-context-limits-view.tsx"
       ],
       "summary": "Owner-only no-store Settings projects existing short-term and summary input constants. Memory Advanced distinguishes transient user/assistant entries from saved-history summary messages and Unicode content slices, not retention, token window or remaining capacity. Member omits snapshot, POST rejects, missing/malformed values unavailable without React defaults. No Agent creation, summary generation, prompts, limits or Memory confirmation/lifecycle changes."
+    },
+    {
+      "id": "settings.search_backend_defaults_read_view",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_search_backend_defaults_view.py",
+        "ui/src/app/__tests__/search-backend-defaults-view.test.tsx",
+        "server/http/common/settings_runtime.py",
+        "ui/src/app/components/search-backend-defaults-view.tsx"
+      ],
+      "summary": "Owner-only no-store Settings snapshot allowlists numeric WebSearchConfig class defaults. Developer distinguishes candidate count, per-attempt timeout and content read budget from active tool/model state, result guarantees, total deadline and strict output size. Member omits snapshot, POST rejects, malformed values unavailable without React defaults. No tools/HTTP clients constructed, keys or provider exposed, capability probes, runtime/send/config/permission changes."
     }
   ]
 }

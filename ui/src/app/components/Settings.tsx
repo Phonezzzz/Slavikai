@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { DesktopApprovalsPanel } from '../../features/desktop/desktop-approvals-panel';
 import { ModelConfigView } from './model-config-view';
+import { SearchBackendDefaultsView } from './search-backend-defaults-view';
 import { AttachmentLimitsView } from './attachment-limits-view';
 import { RuntimeContextLimitsView } from './runtime-context-limits-view';
 import { ContextBudgetView } from './context-budget-view';
@@ -99,6 +100,7 @@ type ParsedSettings = {
   modelConfigSnapshot: unknown;
   attachmentLimitsSnapshot: unknown;
   runtimeContextLimitsSnapshot: unknown;
+  searchBackendDefaultsSnapshot: unknown;
   memoryInboxMaxItems: number;
   memoryInboxTtlDays: number;
   memoryInboxWritesPerMinute: number;
@@ -359,6 +361,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     modelConfigSnapshot: null,
     attachmentLimitsSnapshot: null,
     runtimeContextLimitsSnapshot: null,
+    searchBackendDefaultsSnapshot: null,
     memoryInboxMaxItems: DEFAULT_MEMORY_INBOX_MAX_ITEMS,
     memoryInboxTtlDays: DEFAULT_MEMORY_INBOX_TTL_DAYS,
     memoryInboxWritesPerMinute: DEFAULT_MEMORY_INBOX_WRITES_PER_MINUTE,
@@ -557,7 +560,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
-  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown; runtime_context_limits_snapshot?: unknown };
+  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown; runtime_context_limits_snapshot?: unknown; search_backend_defaults_snapshot?: unknown };
   return {
     preferencesEtag: typeof metadata.preferences_etag === 'string' ? metadata.preferences_etag : null,
     preferencesSubject: typeof metadata.preferences_subject === 'string' ? metadata.preferences_subject : null,
@@ -566,6 +569,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     modelConfigSnapshot: metadata.model_config_snapshot ?? null,
     attachmentLimitsSnapshot: metadata.attachment_limits_snapshot ?? null,
     runtimeContextLimitsSnapshot: metadata.runtime_context_limits_snapshot ?? null,
+    searchBackendDefaultsSnapshot: metadata.search_backend_defaults_snapshot ?? null,
     providers,
     providerInstances,
     ttsBackend,
@@ -819,6 +823,7 @@ export function Settings({
   const [developerView, setDeveloperView] = useState(false);
   const [showModelAdvanced, setShowModelAdvanced] = useState(false);
   const [showDesktopRules, setShowDesktopRules] = useState(false);
+  const [searchBackendDefaultsSnapshot, setSearchBackendDefaultsSnapshot] = useState<unknown>(null);
   const [runtimeContextLimitsSnapshot, setRuntimeContextLimitsSnapshot] = useState<unknown>(null);
   const [attachmentLimitsSnapshot, setAttachmentLimitsSnapshot] = useState<unknown>(null);
   const [modelConfigSnapshot, setModelConfigSnapshot] = useState<unknown>(null);
@@ -962,6 +967,7 @@ export function Settings({
     setModelConfigSnapshot(parsed.modelConfigSnapshot);
     setAttachmentLimitsSnapshot(parsed.attachmentLimitsSnapshot);
     setRuntimeContextLimitsSnapshot(parsed.runtimeContextLimitsSnapshot);
+    setSearchBackendDefaultsSnapshot(parsed.searchBackendDefaultsSnapshot);
     setCanManageInstallation(parsed.canManageInstallation);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
@@ -1805,6 +1811,7 @@ export function Settings({
                         <p className="text-xs text-zinc-400">Connection evidence remains in Models and connections; task details remain in Computer. Runtime budgets and their enforcement are owned by the runtime, not this display toggle.</p>
                       </SectionCard>
                       {canManageInstallation ? <AttachmentLimitsView snapshot={attachmentLimitsSnapshot} /> : null}
+                      {canManageInstallation ? <SearchBackendDefaultsView snapshot={searchBackendDefaultsSnapshot} /> : null}
                       {canManageInstallation ? (
                         <SectionCard title="Operational memory settings" description="Owner-only installation configuration. Save changes to apply an edited value." scope="Installation">
                           <Row

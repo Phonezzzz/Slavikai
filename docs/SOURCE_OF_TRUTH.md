@@ -246,6 +246,19 @@ Member snapshot не получает; POST отклоняется до запи
 остаётся unavailable без numeric defaults в React. Этот read view не вызывает summary,
 не создаёт Agent и не меняет summary prompt, close lifecycle или отдельный Memory confirm.
 
+## Search backend defaults
+
+Owner Settings → Developer показывает read-only `search_backend_defaults_snapshot`:
+только числовые top_k/timeout/max_bytes из свежего WebSearchConfig при refresh.
+Provider, keys и endpoints в этот snapshot не входят. Это class defaults, отдельно
+от уже созданных tool instances, active chat options и model-native web search.
+Top_k ограничивает рассматриваемые candidates, не гарантирует число valid results.
+Timeout — аргумент одной HTTP-попытки, не total deadline с retry. Content read budget
+не включает добавленный truncation marker и не является строгим output size cap.
+Member snapshot не получает, POST отклоняется до записи; missing/malformed metadata
+остаётся unavailable без numeric defaults в React. Чтение не создаёт Agent/search tool/
+HTTP client, не проверяет credentials и не запускает search/capability probe.
+
 ## Custom native tool protocol admission
 
 Custom route начинается Chat-only. Только явная verified owner/session проверка
