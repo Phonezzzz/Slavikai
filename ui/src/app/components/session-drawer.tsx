@@ -3,6 +3,7 @@ import { Shield, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { ToggleSwitch } from './ui/toggle-switch';
+import { PausedModelRequestView } from './paused-model-request-view';
 import { ModelQualification } from './model-qualification';
 import { parseSessionSecurityRevision, parseSessionSecurityState, parseSessionToolSources, type SessionToolSources, type ToolKey, type PolicyProfile } from '../session-security';
 import { useFocusTrap } from '../use-focus-trap';
@@ -107,10 +108,35 @@ export function SessionDrawer({
   const [loadedSession, setLoadedSession] = useState<string | null>(null);
   const ready = !!sessionId && securityRevision !== null && loadedSession === `${sessionHeader}:${sessionId}`;
   const requestHeaders = sessionId ? { [sessionHeader]: sessionId } : {};
+  const [pausedSnapshot, setPausedSnapshot] = useState<unknown>(null);
+  const [pausedLoading, setPausedLoading] = useState(false);
+  const pausedAbort = useRef<AbortController | null>(null);
+  const loadPausedRequest = async () => {
+    if (!sessionId || !isOpen) return;
+    const generation = epoch.current;
+    pausedAbort.current?.abort();
+    const abort = new AbortController();
+    pausedAbort.current = abort;
+    setPausedSnapshot(null);
+    setPausedLoading(true);
+    const current = () => epoch.current === generation && !abort.signal.aborted;
+    try {
+      const response = await fetch('/ui/api/session/paused-model-request', { headers: { [sessionHeader]: sessionId }, signal: abort.signal });
+      const payload: unknown = await response.json();
+      if (current()) setPausedSnapshot(response.ok ? payload ?? {} : {});
+    } catch {
+      if (current()) setPausedSnapshot({});
+    } finally {
+      if (current()) setPausedLoading(false);
+    }
+  };
   const safeModeEnabled = policyProfile !== 'yolo';
 
   useEffect(() => {
     const generation = ++epoch.current;
+    pausedAbort.current?.abort();
+    setPausedSnapshot(null);
+    setPausedLoading(false);
     const abort = new AbortController();
     setLoadedSession(null);
     setSecurityRevision(null);
@@ -121,7 +147,7 @@ export function SessionDrawer({
     if (!isOpen || !sessionId) {
       setLoading(false);
       setStatus(sessionId ? null : 'Select an active session to edit session controls.');
-      return () => { ++epoch.current; abort.abort(); };
+      return () => { ++epoch.current; abort.abort(); pausedAbort.current?.abort(); };
     }
     const current = () => epoch.current === generation && !abort.signal.aborted;
     setLoading(true);
@@ -148,7 +174,7 @@ export function SessionDrawer({
         if (current()) setLoading(false);
       }
     })();
-    return () => { ++epoch.current; abort.abort(); };
+    return () => { ++epoch.current; abort.abort(); pausedAbort.current?.abort(); };
   }, [isOpen, sessionId, sessionHeader]);
 
   useEffect(() => {
@@ -299,6 +325,8 @@ export function SessionDrawer({
                 )}
 
                 <p className="text-xs text-zinc-400">{SESSION_MODE_LABELS[mode]} · Режим выбирается у поля сообщения.</p>
+                <button type="button" disabled={!sessionId || pausedLoading} onClick={() => void loadPausedRequest()} className="text-xs text-zinc-300 underline disabled:opacity-50">{pausedLoading ? 'Reading paused model request...' : 'Show paused model request'}</button>
+                {pausedSnapshot !== null ? <PausedModelRequestView snapshot={pausedSnapshot} sessionId={sessionId} /> : null}
               </section>
 
               {ready ? <fieldset disabled={saving} className="contents">

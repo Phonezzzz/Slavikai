@@ -161,6 +161,9 @@ def register_routes(app: web.Application) -> None:
         sessions.handle_ui_session_folder_update,
     )
     app.router.add_post("/ui/api/session-model", sessions.handle_ui_session_model)
+    app.router.add_get(
+        "/ui/api/session/paused-model-request", sessions.handle_ui_paused_model_request
+    )
     app.router.add_get("/ui/api/session/security", workspace.handle_ui_session_security_get)
     app.router.add_post("/ui/api/session/security", workspace.handle_ui_session_security_post)
     app.router.add_get("/ui/api/workspace/root", workspace.handle_ui_workspace_root_get)

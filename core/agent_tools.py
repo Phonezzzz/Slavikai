@@ -474,6 +474,21 @@ class AgentToolsMixin:
         if self.main_config != main_config or self.main_api_key != main_api_key:
             raise ChatApprovalUnavailable("approval_continuation_unavailable")
 
+    def paused_chat_model_config(
+        self, identity: str, session_id: str, mode: str
+    ) -> ModelConfig | None:
+        pending = self._pending_chat_approval
+        if (
+            pending is None
+            or pending.identity != identity
+            or pending.session_id != session_id
+            or self.session_id != session_id
+            or pending.mode != mode
+            or pending.mode != self.runtime_mode
+        ):
+            return None
+        return pending.continuation.config
+
     def chat_approval_run(self, identity: str) -> TaskRun | None:
         self.validate_chat_approval(identity)
         pending = self._pending_chat_approval

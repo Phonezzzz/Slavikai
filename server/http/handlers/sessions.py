@@ -19,6 +19,7 @@ from server.http.common import ui_settings
 from server.http.common.auth import _require_owner
 from server.http.common.chat_cancellation import ChatCancellationRegistry
 from server.http.common.mode_transitions import _auto_run_active, build_mode_transitions
+from server.http.common.model_config_snapshot import build_model_config_snapshot
 from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
@@ -1148,3 +1149,65 @@ async def handle_ui_session_delete(request: web.Request) -> web.Response:
     provider = cast(ScopedAgentProvider[object], request.app["agent_provider"])
     await provider.release(scope)
     return json_response({"session_id": session_id, "deleted": True})
+
+
+async def handle_ui_paused_model_request(request: web.Request) -> web.Response:
+    hub: UIHub = request.app["ui_hub"]
+    session_id = request.headers.get(UI_SESSION_HEADER, "").strip()
+    if not session_id:
+        return error_response(
+            status=400,
+            message="Session header is required.",
+            error_type="invalid_request_error",
+            code="session_required",
+        )
+    access_error = await _ensure_session_owned(request, hub, session_id)
+    if access_error is not None:
+        return access_error
+    payload: dict[str, JSONValue] = {
+        "session_id": session_id,
+        "decision_id": None,
+        "basis": "paused_approval_model_request_at_refresh",
+        "state": "unavailable",
+    }
+    async with _agent_lock_for_request(request, session_id):
+        provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+        agent = await provider.get_existing_for_current_task(_agent_scope(request, session_id))
+        decision = await hub.get_session_decision(session_id)
+        if agent is not None and decision is not None:
+            context = decision.get("context")
+            if (
+                decision.get("decision_type") == "tool_approval"
+                and decision.get("status") == "pending"
+                and decision.get("blocking") is True
+                and isinstance(decision.get("id"), str)
+                and isinstance(context, dict)
+                and context.get("session_id") == session_id
+                and context.get("source_endpoint") == "chat.tool_continue"
+            ):
+                resume = context.get("resume_payload")
+                identity = resume.get("continuation_id") if isinstance(resume, dict) else None
+                mode = resume.get("execution_mode") if isinstance(resume, dict) else None
+                if (
+                    isinstance(identity, str)
+                    and identity
+                    and isinstance(mode, str)
+                    and mode in {"ask", "auto", "desktop"}
+                ):
+                    config = agent.paused_chat_model_config(identity, session_id, mode)
+                    if config is not None:
+                        snapshot = build_model_config_snapshot(config)
+                        payload.update(
+                            {
+                                "decision_id": decision["id"],
+                                "state": "available",
+                                "identity": snapshot["identity"],
+                                "values": snapshot["values"],
+                                "unavailable_fields": snapshot["unavailable_fields"],
+                            }
+                        )
+    response = json_response(payload)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Cookie, Cf-Access-Jwt-Assertion, Authorization"
+    response.headers[UI_SESSION_HEADER] = session_id
+    return response

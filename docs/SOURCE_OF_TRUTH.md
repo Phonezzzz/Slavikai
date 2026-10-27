@@ -440,3 +440,20 @@ Session/security POST проверяет весь combined payload policy/tools 
 сохраняет policy. Existing YOLO/root/ownership guards и valid update semantics
 сохраняются. Это отказ до записей при validation error, не CAS/revision и не новая
 transaction guarantee при storage failure.
+
+
+## Model options paused approval request
+
+Owned GET `/ui/api/session/paused-model-request` читает только существующий scoped
+Agent и текущий pending tool decision с source `chat.tool_continue`. Синхронный
+accessor проверяет continuation identity, session и execution mode под существующим
+scoped lock, без model resolver, Agent factory или brain initialization. Ответ
+private/no-store и связан с session/decision: finite numeric/enum/bool/null model options
+из captured continuation, без history, prompts, credentials, endpoint, headers и tool args.
+Missing/settled/чужой или утраченный checkpoint означает unavailable без fallback к
+Settings/main_config. Header обязателен; GET не создаёт session, POST отсутствует.
+Session Controls читает это отдельно по явной кнопке, отбрасывает ответы прежней панели
+или сессии и не добавляет editable/dirty/save state. Snapshot относится только к paused
+request при refresh: не general running config, provider acceptance, search execution,
+effective permission или гарантия resumability. Existing capture/resume/cancel, persisted
+schemas, prompts и approval policy не меняются.

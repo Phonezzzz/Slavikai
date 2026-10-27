@@ -710,6 +710,21 @@
         "ui/src/app/components/shell-numeric-defaults-view.tsx"
       ],
       "summary": "Owner-only no-store snapshot allowlists two pure ShellConfig numeric defaults without loading policy, normalization, tools or subprocess. Developer distinguishes per-operation JSON overrides, subprocess timeout and post-capture Unicode truncation (combined ShellTool versus per-stream TerminalTool oneshot, markers extra) from PTY/Desktop, task deadlines, memory/output caps or effective grants/root/allowlist. Member omits metadata, POST rejects, malformed values unavailable without React defaults. Runtime and permission enforcement unchanged."
+    },
+    {
+      "id": "session.paused_model_request_read_view",
+      "scope": "session",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_paused_model_request_view.py",
+        "ui/src/app/__tests__/paused-model-request-view.test.tsx",
+        "server/http/handlers/sessions.py",
+        "core/agent_tools.py"
+      ],
+      "summary": "Owned no-store read projects numeric/enum/bool/null model options only from an existing paused approval continuation bound to current pending decision, session, identity and execution mode. GET creates no session/Agent/brain and resolves no model; no sensitive contents or fallback to defaults/main_config. Session Controls explicit read discards stale panel/session responses without writes. This is captured paused configuration, not general running state, permission, provider acceptance or resumability; capture/resume/cancel and persisted schemas unchanged."
     }
   ]
 }
