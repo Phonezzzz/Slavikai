@@ -695,6 +695,21 @@
         "ui/src/app/components/speech-tool-defaults-view.tsx"
       ],
       "summary": "Owner-only no-store snapshot allowlists four numeric TtsConfig/SttConfig class defaults. Developer distinguishes Unicode text slices/per-attempt timeout and Agent STT from separate browser dictation. Member omits snapshot, POST rejects, malformed metadata unavailable without React defaults. New snapshot resolves no options/keys, constructs no tools/HTTP clients and runs no speech/capability request; existing env diagnostics, runtime, auth/approval and credentials unchanged."
+    },
+    {
+      "id": "settings.shell_numeric_defaults_read_view",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_shell_numeric_defaults_view.py",
+        "ui/src/app/__tests__/shell-numeric-defaults-view.test.tsx",
+        "server/http/common/settings_runtime.py",
+        "ui/src/app/components/shell-numeric-defaults-view.tsx"
+      ],
+      "summary": "Owner-only no-store snapshot allowlists two pure ShellConfig numeric defaults without loading policy, normalization, tools or subprocess. Developer distinguishes per-operation JSON overrides, subprocess timeout and post-capture Unicode truncation (combined ShellTool versus per-stream TerminalTool oneshot, markers extra) from PTY/Desktop, task deadlines, memory/output caps or effective grants/root/allowlist. Member omits metadata, POST rejects, malformed values unavailable without React defaults. Runtime and permission enforcement unchanged."
     }
   ]
 }

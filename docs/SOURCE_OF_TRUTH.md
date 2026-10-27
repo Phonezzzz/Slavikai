@@ -274,6 +274,20 @@ Member snapshot не получает, POST отклоняется до запи
 resolve_*, не создаёт tools/HTTP clients и не запускает speech/capability probes.
 Existing env diagnostics, auth/approval и credential resolution не меняются.
 
+## Shell numeric defaults
+
+Owner Settings → Developer показывает read-only `shell_numeric_defaults_snapshot` из
+чистого ShellConfig при refresh: timeout_seconds и max_output_chars. Это class defaults,
+не загруженная JSON policy или active-run snapshot; существующий JSON может переопределять
+их на каждом subprocess вызове. Timeout — аргумент subprocess, не общий task deadline.
+Порог Unicode code points применяется после capture: ShellTool обрезает объединённые
+stdout/stderr, TerminalTool oneshot — каждый поток отдельно; marker добавляется сверх
+порога. Это не memory cap и не строгий returned-output cap, не PTY/Desktop settings,
+effective grants, allowlist или root. Member snapshot не получает, POST отклоняется до
+записи; missing/malformed metadata остаётся unavailable без numeric defaults в React.
+Новый snapshot не вызывает loader/save/normalizer, не читает shell JSON и не создаёт
+tools/subprocess. Runtime enforcement и permissions не меняются.
+
 ## Custom native tool protocol admission
 
 Custom route начинается Chat-only. Только явная verified owner/session проверка

@@ -243,6 +243,7 @@ def _settings_response(request: web.Request) -> web.Response:
         include_runtime_context_limits=owner,
         include_search_backend_defaults=owner,
         include_speech_tool_defaults=owner,
+        include_shell_numeric_defaults=owner,
     )
     settings = cast(dict[str, JSONValue], payload["settings"])
     snapshot = cast(PreferencesStore, request.app["preferences_store"]).get(principal)

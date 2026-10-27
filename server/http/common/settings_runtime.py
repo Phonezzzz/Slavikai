@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from config.memory_config import MemoryConfig
+from config.shell_config import ShellConfig
 from config.stt_config import SttConfig
 from config.tools_config import DEFAULT_TOOLS_STATE, ToolsConfig
 from config.tts_config import TtsConfig
@@ -173,7 +174,9 @@ class SettingsRuntimeBindings:
         include_runtime_context_limits: bool = False,
         include_search_backend_defaults: bool = False,
         include_speech_tool_defaults: bool = False,
+        include_shell_numeric_defaults: bool = False,
     ) -> dict[str, JSONValue]:
+        shell_defaults = ShellConfig() if include_shell_numeric_defaults else None
         tts_defaults = TtsConfig() if include_speech_tool_defaults else None
         stt_defaults = SttConfig() if include_speech_tool_defaults else None
         search_defaults = WebSearchConfig() if include_search_backend_defaults else None
@@ -274,6 +277,19 @@ class SettingsRuntimeBindings:
                         }
                     }
                     if tts_defaults is not None and stt_defaults is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "shell_numeric_defaults_snapshot": {
+                            "basis": "shell_class_defaults_at_refresh",
+                            "values": {
+                                "timeout_seconds": shell_defaults.timeout_seconds,
+                                "output_code_points": shell_defaults.max_output_chars,
+                            },
+                        }
+                    }
+                    if shell_defaults is not None
                     else {}
                 ),
                 "memory": {
