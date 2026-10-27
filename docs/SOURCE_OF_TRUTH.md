@@ -198,6 +198,10 @@ ContextBudgetConfig из существующего server loader. GET settings 
 контекстной сборки, не model token window и не гарантия Auto execution budgets.
 Member diagnostics не получает; React не дублирует значения по умолчанию.
 
+Сохранение существующих inbox/embeddings Memory settings сохраняет уже загруженный
+ContextBudgetConfig без сброса к defaults. Это сохранность unrelated fields, не budget
+editor, live update существующего Agent или новая concurrency/storage guarantee.
+
 ## Сохранённые параметры default model
 
 Owner Settings → Models and connections → Advanced показывает отдельный read-only

@@ -523,6 +523,7 @@ async def handle_ui_settings_update(request: web.Request) -> web.Response:
                 inbox_max_items=inbox_max_items,
                 inbox_ttl_days=inbox_ttl_days,
                 inbox_writes_per_minute=inbox_writes_per_minute,
+                context_budget=current_memory.context_budget,
             ),
         )
 
