@@ -680,6 +680,21 @@
         "ui/src/app/components/search-backend-defaults-view.tsx"
       ],
       "summary": "Owner-only no-store Settings snapshot allowlists numeric WebSearchConfig class defaults. Developer distinguishes candidate count, per-attempt timeout and content read budget from active tool/model state, result guarantees, total deadline and strict output size. Member omits snapshot, POST rejects, malformed values unavailable without React defaults. No tools/HTTP clients constructed, keys or provider exposed, capability probes, runtime/send/config/permission changes."
+    },
+    {
+      "id": "settings.speech_tool_defaults_read_view",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/ui_api/test_speech_tool_defaults_view.py",
+        "ui/src/app/__tests__/speech-tool-defaults-view.test.tsx",
+        "server/http/common/settings_runtime.py",
+        "ui/src/app/components/speech-tool-defaults-view.tsx"
+      ],
+      "summary": "Owner-only no-store snapshot allowlists four numeric TtsConfig/SttConfig class defaults. Developer distinguishes Unicode text slices/per-attempt timeout and Agent STT from separate browser dictation. Member omits snapshot, POST rejects, malformed metadata unavailable without React defaults. New snapshot resolves no options/keys, constructs no tools/HTTP clients and runs no speech/capability request; existing env diagnostics, runtime, auth/approval and credentials unchanged."
     }
   ]
 }

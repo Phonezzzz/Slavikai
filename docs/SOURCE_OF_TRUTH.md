@@ -259,6 +259,21 @@ Member snapshot не получает, POST отклоняется до запи
 остаётся unavailable без numeric defaults в React. Чтение не создаёт Agent/search tool/
 HTTP client, не проверяет credentials и не запускает search/capability probe.
 
+## Speech tool numeric defaults
+
+Owner Settings → Developer показывает read-only `speech_tool_defaults_snapshot` из
+свежих TtsConfig/SttConfig при refresh: TTS timeout/input/request text limits и Agent
+STT timeout. Только четыре numeric fields, без key/model/voice/language/endpoint/path.
+Это class defaults, не snapshot существующего tool. TTS Unicode text измеряется после
+trim; несколько chunks означают несколько HTTP requests, timeout не total deadline.
+Browser dictation использует отдельный endpoint и не читает SttConfig; показанный
+Agent STT timeout не является его настройкой. Existing env-selected TTS model/voice/
+format остаются в Speech backend, request overrides — отдельный scope.
+Member snapshot не получает, POST отклоняется до записи, missing/malformed metadata
+остаётся unavailable без numeric defaults в React. Новый snapshot не вызывает
+resolve_*, не создаёт tools/HTTP clients и не запускает speech/capability probes.
+Existing env diagnostics, auth/approval и credential resolution не меняются.
+
 ## Custom native tool protocol admission
 
 Custom route начинается Chat-only. Только явная verified owner/session проверка

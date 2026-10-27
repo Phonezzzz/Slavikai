@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Literal
 
 from config.memory_config import MemoryConfig
+from config.stt_config import SttConfig
 from config.tools_config import DEFAULT_TOOLS_STATE, ToolsConfig
+from config.tts_config import TtsConfig
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from config.web_search_config import WebSearchConfig
 from core import agent_tools
@@ -170,7 +172,10 @@ class SettingsRuntimeBindings:
         include_attachment_limits: bool = False,
         include_runtime_context_limits: bool = False,
         include_search_backend_defaults: bool = False,
+        include_speech_tool_defaults: bool = False,
     ) -> dict[str, JSONValue]:
+        tts_defaults = TtsConfig() if include_speech_tool_defaults else None
+        stt_defaults = SttConfig() if include_speech_tool_defaults else None
         search_defaults = WebSearchConfig() if include_search_backend_defaults else None
         policy_profile, yolo_armed, yolo_armed_at = self.load_policy_settings()
         memory_config = self.load_memory_config_fn()
@@ -254,6 +259,21 @@ class SettingsRuntimeBindings:
                         }
                     }
                     if search_defaults is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "speech_tool_defaults_snapshot": {
+                            "basis": "speech_tool_class_defaults_at_refresh",
+                            "values": {
+                                "tts_timeout_seconds": tts_defaults.timeout,
+                                "tts_input_code_points": tts_defaults.max_input_chars,
+                                "tts_request_code_points": tts_defaults.max_request_chars,
+                                "stt_timeout_seconds": stt_defaults.timeout,
+                            },
+                        }
+                    }
+                    if tts_defaults is not None and stt_defaults is not None
                     else {}
                 ),
                 "memory": {
