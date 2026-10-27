@@ -16,7 +16,8 @@ from llm.cancellation import (
 )
 from llm.retry import request_with_retry
 from llm.stream_model import StreamEvent, iter_openai_sse_events
-from llm.types import LLMResult, LLMUsage, ModelConfig, ToolSpec
+from llm.types import LLMResult, ModelConfig, ToolSpec
+from llm.usage import parse_reported_usage
 from shared.models import JSONValue, LLMMessage
 
 OPENROUTER_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/chat/completions"
@@ -99,14 +100,7 @@ class OpenRouterBrain(Brain):
             else None
         )
 
-        usage: LLMUsage | None = None
-        usage_block = data.get("usage")
-        if isinstance(usage_block, dict):
-            usage = LLMUsage(
-                prompt_tokens=int(usage_block.get("prompt_tokens", 0)),
-                completion_tokens=int(usage_block.get("completion_tokens", 0)),
-                total_tokens=int(usage_block.get("total_tokens", 0)),
-            )
+        usage = parse_reported_usage(data.get("usage"))
 
         return LLMResult(text=content, reasoning=reasoning, usage=usage, raw=data)
 

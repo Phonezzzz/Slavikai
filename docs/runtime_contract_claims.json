@@ -122,6 +122,21 @@
       "summary": "Auto fences new model generation, post-model acceptance, each native/approved call and verifier admission at the original finite monotonic expiry, including approval wait and exact >= boundary. Captured continuation retains expiry across new loop/env settings; cancellation precedes expiry at loop and pre-verifier boundaries, completed prefix survives budget stop. Already-running operations are not interrupted and a verifier admitted before expiry can finish later. Expiry-less callers, R1a quota and existing authorization remain; no hard deadline, file/token/retry accounting, persistence or durable recovery claim."
     },
     {
+      "id": "llm.reported_usage_completeness",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "llm",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_usage_completeness.py",
+        "tests/test_llm_clients.py",
+        "tests/test_deepseek.py",
+        "tests/test_stream_events.py"
+      ],
+      "summary": "Existing sync adapters and shared SSE decoder use one pure usage validator: all three explicit nonnegative integer (non-bool) counts produce LLMUsage, including explicit zero; missing, partial or invalid metadata becomes unknown None without discarding valid text/tool calls. Existing xAI input/output aliases and canonical precedence remain. Unknown emits no synthetic zero Usage event; complete updates remain separate. No inferred total, aggregation, quota, transport, capability, authority or billing verification change."
+    },
+    {
       "id": "runtime.auto.ask_plan_act_fsm",
       "scope": "runtime",
       "status": "target",

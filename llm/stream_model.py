@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from llm.types import LLMResult, LLMUsage, ToolCall
+from llm.usage import parse_reported_usage
 from shared.models import JSONValue, ToolResult
 
 StreamTextMode = Literal["append", "replace"]
@@ -107,7 +108,7 @@ class OpenAIStreamEventAdapter:
                 if isinstance(finish_reason_raw, str) and finish_reason_raw:
                     self._finish_reason = finish_reason_raw
 
-        usage = _usage_from_payload(payload)
+        usage = parse_reported_usage(payload.get("usage"))
         if usage is not None:
             events.append(Usage(usage=usage))
         return events
@@ -289,27 +290,6 @@ def _provider_error(payload: dict[str, JSONValue]) -> str | None:
     if isinstance(message_raw, str) and message_raw.strip():
         return message_raw.strip()
     return json.dumps(error_raw, ensure_ascii=False, sort_keys=True)
-
-
-def _usage_from_payload(payload: dict[str, JSONValue]) -> LLMUsage | None:
-    usage_raw = payload.get("usage")
-    if not isinstance(usage_raw, dict):
-        return None
-    return LLMUsage(
-        prompt_tokens=_non_negative_int(usage_raw.get("prompt_tokens")),
-        completion_tokens=_non_negative_int(usage_raw.get("completion_tokens")),
-        total_tokens=_non_negative_int(usage_raw.get("total_tokens")),
-    )
-
-
-def _non_negative_int(value: JSONValue) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return max(0, value)
-    if isinstance(value, float):
-        return max(0, int(value))
-    return 0
 
 
 def _parse_tool_arguments(raw_arguments: str) -> dict[str, JSONValue]:

@@ -23,6 +23,7 @@ from llm.stream_model import (
     stream_events_from_result,
 )
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolSpec, WebSearchEvidence
+from llm.usage import parse_reported_usage
 from shared.models import JSONValue, LLMMessage
 
 XAI_ENDPOINT: Final[str] = "https://api.x.ai/v1/chat/completions"
@@ -80,16 +81,14 @@ def _extract_usage(data: dict[str, JSONValue]) -> LLMUsage | None:
     usage_block = data.get("usage")
     if not isinstance(usage_block, dict):
         return None
-    prompt_tokens_raw = usage_block.get("prompt_tokens", usage_block.get("input_tokens", 0))
-    completion_tokens_raw = usage_block.get(
-        "completion_tokens",
-        usage_block.get("output_tokens", 0),
-    )
-    total_tokens_raw = usage_block.get("total_tokens", 0)
-    return LLMUsage(
-        prompt_tokens=int(prompt_tokens_raw or 0),
-        completion_tokens=int(completion_tokens_raw or 0),
-        total_tokens=int(total_tokens_raw or 0),
+    return parse_reported_usage(
+        {
+            "prompt_tokens": usage_block.get("prompt_tokens", usage_block.get("input_tokens")),
+            "completion_tokens": usage_block.get(
+                "completion_tokens", usage_block.get("output_tokens")
+            ),
+            "total_tokens": usage_block.get("total_tokens"),
+        }
     )
 
 

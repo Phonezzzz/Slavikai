@@ -74,6 +74,14 @@ Auto v1 также проверяет исходный monotonic срок run п
 verifier не прерываются по часам, и успешный verifier может завершиться после срока.
 Hard wall deadline, files/tokens/retry accounting и durable recovery этим не реализованы.
 
+`LLMResult.usage` содержит `LLMUsage` только для трёх явно сообщённых неотрицательных
+integer counters (`prompt_tokens`, `completion_tokens`, `total_tokens`); bool, float,
+string, missing/null/negative metadata дают `None`, сохраняя валидные text/tool calls.
+Явный zero допустим. Существующие xAI input/output aliases и canonical-field precedence
+сохраняются. Shared stream decoder не создаёт синтетический zero Usage для unknown;
+полные updates остаются отдельными событиями. Это validity reported metadata, не
+проверка provider billing, aggregation, token quota или вывод отсутствующего total.
+
 - Ask: current `implemented` invariant — никаких Memory/tool writes и hidden vector runtime
   initialization; явный запрос на запоминание создаёт только preview/decision и не сохраняет
   данные.

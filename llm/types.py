@@ -41,6 +41,8 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class LLMUsage:
+    """Полные reported counters; unknown metadata представлена LLMResult.usage=None."""
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int

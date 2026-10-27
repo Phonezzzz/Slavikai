@@ -26,7 +26,8 @@ from llm.stream_model import (
     iter_openai_sse_events,
     stream_events_from_result,
 )
-from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec, is_custom_provider_id
+from llm.types import LLMResult, ModelConfig, ToolCall, ToolSpec, is_custom_provider_id
+from llm.usage import parse_reported_usage
 from shared.models import JSONValue, LLMMessage
 
 DEFAULT_LOCAL_ENDPOINT: Final[str] = "http://localhost:11434/v1/chat/completions"
@@ -127,17 +128,7 @@ def _parse_chat_result(data_json: object) -> LLMResult:
         else None
     )
 
-    usage: LLMUsage | None = None
-    usage_block = data.get("usage")
-    if isinstance(usage_block, dict):
-        try:
-            usage = LLMUsage(
-                prompt_tokens=int(usage_block.get("prompt_tokens", 0)),
-                completion_tokens=int(usage_block.get("completion_tokens", 0)),
-                total_tokens=int(usage_block.get("total_tokens", 0)),
-            )
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ChatResponseError("Некорректный формат usage.") from exc
+    usage = parse_reported_usage(data.get("usage"))
 
     return LLMResult(
         text=content,
