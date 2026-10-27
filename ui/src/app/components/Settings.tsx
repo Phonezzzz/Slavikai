@@ -1463,6 +1463,7 @@ export function Settings({
     setStatus(null);
     let finishWrite: (() => void) | undefined;
     let installationCommitted = false;
+    let installationAttempted = false;
     let personalPending = false;
     try {
       const providersPayload: Record<string, { api_key: string } | null> = {};
@@ -1534,12 +1535,21 @@ export function Settings({
         }
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (item.personal && privateEtagAtRequestStart) headers['If-Match'] = privateEtagAtRequestStart;
+        if (!item.personal) installationAttempted = true;
         const response = await fetch('/ui/api/settings', {
           method: 'POST', headers, body: JSON.stringify(item.payload),
         });
-        lastBody = await response.json();
+        try {
+          lastBody = await response.json();
+        } catch {
+          throw new Error('The server returned an unreadable save response.');
+        }
         if (!response.ok) {
           throw new Error(extractErrorMessage(lastBody, 'Failed to save settings.'));
+        }
+        if (!item.personal && (lastBody === null || typeof lastBody !== 'object' || !('settings' in lastBody)
+          || lastBody.settings === null || typeof lastBody.settings !== 'object' || Array.isArray(lastBody.settings))) {
+          throw new Error('The server returned an unreadable save response.');
         }
         if (item.personal) personalPending = false;
         else installationCommitted = true;
@@ -1554,7 +1564,9 @@ export function Settings({
       const message = error instanceof Error ? error.message : 'Failed to save settings.';
       setStatus(installationCommitted && personalPending
         ? `Installation settings saved. Preferences were not saved: ${message}`
-        : message);
+        : installationAttempted
+          ? `Some installation changes may already be saved. Reopen Settings to check saved values before retrying. ${message}`
+          : message);
     } finally {
       finishWrite?.();
       setSaving(false);

@@ -726,6 +726,21 @@
         "core/agent_tools.py"
       ],
       "summary": "Owned no-store read projects numeric/enum/bool/null model options only from an existing paused approval continuation bound to current pending decision, session, identity and execution mode. GET creates no session/Agent/brain and resolves no model; no sensitive contents or fallback to defaults/main_config. Session Controls explicit read discards stale panel/session responses without writes. This is captured paused configuration, not general running state, permission, provider acceptance or resumability; capture/resume/cancel and persisted schemas unchanged."
+    },
+    {
+      "id": "settings.installation_save_uncertainty",
+      "scope": "settings",
+      "status": "implemented",
+      "owner": "ui",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "Makefile",
+        "ui/src/app/__tests__/installation-save-disclosure.test.tsx",
+        "ui/src/app/__tests__/settings-loading.test.tsx",
+        "ui/src/app/components/Settings.tsx"
+      ],
+      "summary": "After an attempted installation POST, HTTP/transport/unreadable-response failure discloses possible partial persistence and asks the user to check saved values before an explicit retry. Drafts survive, no automatic POST or false success callback; local validation and personal-only conflicts keep separate semantics. A readable Settings acknowledgement is required for installation confirmation and malformed bodies are not echoed. Existing server write order, role/policy, model/provider activation and transaction guarantees unchanged; exact applied fields remain unknown."
     }
   ]
 }

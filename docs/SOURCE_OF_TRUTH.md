@@ -90,6 +90,15 @@ owner-only. `{ "reset_preferences": true }` с текущим ETag возвра�
 поля к defaults, увеличивая revision. Неизвестные поля и неверные типы отклоняются до записи.
 UI отправляет только изменённые группы; ошибка второй операции не отменяет уже
 сохранённую installation operation и сообщается как частичный результат.
+После отправленного installation POST ошибка HTTP/transport либо нечитаемый ответ
+не доказывает отсутствие записей: UI предупреждает о возможном частичном сохранении
+и предлагает заново проверить сохранённые значения перед явным retry. Draft сохраняется,
+автоматического POST retry/rollback нет. Local pre-dispatch ошибки не получают такое
+предупреждение; confirmed installation + personal conflict сохраняет отдельное сообщение.
+Installation success требует читаемого Settings response, raw malformed body не выводится.
+Это truthful unknown-outcome disclosure, не atomic multi-file transaction, exact applied-fields
+report или изменение существующего порядка server writes.
+
 
 Tone и private instructions применяются к следующему новому browser chat request.
 Snapshot verified principal читается под существующим agent execution lock. Отдельное
