@@ -273,7 +273,9 @@ class AutoOrchestrator:
             if skill_resolution is not None:
                 system_prompt = f"{system_prompt}\n\n{skill_resolution.system_instruction()}"
             loop_result = AgentToolLoop(
-                max_iterations=budgets.max_tool_calls, max_tool_calls=budgets.max_tool_calls
+                max_iterations=budgets.max_tool_calls,
+                max_tool_calls=budgets.max_tool_calls,
+                expires_at_monotonic=started_monotonic + budgets.max_runtime_seconds,
             ).run(
                 brain=brain,
                 gateway=gateway,
@@ -314,6 +316,12 @@ class AutoOrchestrator:
                     verifier=None,
                     next_steps=[],
                 )
+            if getattr(loop_result, "error", None) == "runtime_budget_exhausted":
+                reason = "Auto run expired; no further operation was started."
+                state["error"] = reason
+                state["error_code"] = "budget_runtime"
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                return _budget_stop_outcome(self.parent, reason, skill=_skill_state(state))
             if getattr(loop_result, "error", None) == "tool_call_budget_exhausted":
                 reason = (
                     f"Budget exhausted before next native tool call: "
@@ -387,6 +395,22 @@ class AutoOrchestrator:
                 )
 
             self._set_status(state, AutoRunStatus.VERIFYING)
+            if cancellation_token is not None and cancellation_token.is_set():
+                state["error"] = "cancelled_by_user"
+                self._set_status(state, AutoRunStatus.CANCELLED)
+                return AutoRunOutcome(
+                    text="Auto-run отменён; verifier не запускался.",
+                    status=AutoRunStatus.CANCELLED,
+                    stop_reason_code=None,
+                    verifier=None,
+                    next_steps=[],
+                )
+            budget_stop = _budget_runtime_stop(budgets=budgets, started_monotonic=started_monotonic)
+            if budget_stop is not None:
+                state["error"] = budget_stop
+                state["error_code"] = "budget_runtime"
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                return _budget_stop_outcome(self.parent, budget_stop, skill=_skill_state(state))
             verification = self._run_verifier(
                 run_id=run_id_value,
                 goal=goal,
@@ -800,12 +824,13 @@ def _budget_runtime_stop(
     budgets: AutoBudgets,
     started_monotonic: float,
 ) -> str | None:
-    elapsed = int(max(0.0, time.monotonic() - started_monotonic))
-    if elapsed <= budgets.max_runtime_seconds:
+    now = time.monotonic()
+    elapsed = max(0.0, now - started_monotonic)
+    if now < started_monotonic + budgets.max_runtime_seconds:
         return None
     return (
         f"Budget exhausted: runtime_seconds={elapsed} "
-        f"> max_runtime_seconds={budgets.max_runtime_seconds}"
+        f">= max_runtime_seconds={budgets.max_runtime_seconds}"
     )
 
 

@@ -107,6 +107,21 @@
       "summary": "Auto supplies an independent positive native-call cap to the existing ToolLoop/Gateway path. Each completed ToolResult, including failure or denial, consumes one call; ApprovalRequired does not. Captured continuation retains cap and executed prefix across resume; N+1 is blocked before Gateway/approval, while exactly N is not automatically budget failure. Iteration safety guard and verifier remain separate; uncapped callers retain prior semantics. Dispatch faults stop without replay and preserve available typed prefix, without asserting the unknown last effect. This is not strict wall-time, file/token accounting, durable recovery or new authority."
     },
     {
+      "id": "runtime.auto.run_expiry_admission",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_run_expiry.py",
+        "tests/test_auto_runtime.py",
+        "tests/test_auto_native_continuation.py",
+        "tests/test_tool_call_cap.py"
+      ],
+      "summary": "Auto fences new model generation, post-model acceptance, each native/approved call and verifier admission at the original finite monotonic expiry, including approval wait and exact >= boundary. Captured continuation retains expiry across new loop/env settings; cancellation precedes expiry at loop and pre-verifier boundaries, completed prefix survives budget stop. Already-running operations are not interrupted and a verifier admitted before expiry can finish later. Expiry-less callers, R1a quota and existing authorization remain; no hard deadline, file/token/retry accounting, persistence or durable recovery claim."
+    },
+    {
       "id": "runtime.auto.ask_plan_act_fsm",
       "scope": "runtime",
       "status": "target",

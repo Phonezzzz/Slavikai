@@ -64,6 +64,16 @@ Uncapped Ask/Desktop/Act сохраняют прежний контракт. П�
 Auto сохраняет доступный typed prefix и останавливается без автоматического replay;
 последний call с неизвестным результатом не объявляется выполненным или отменённым.
 
+Auto v1 также проверяет исходный monotonic срок run перед model request, после
+возврата модели, перед каждым native call/approved remainder и перед verifier.
+На `now >= start + max_runtime_seconds` следующая операция не начинается;
+ожидание approval входит в это время. Continuation сохраняет исходный срок,
+изменение env или новый loop не выдаёт новый запас времени. Cancellation проверяется
+раньше expiry на loop boundaries и перед verifier; доступный выполненный prefix
+сохраняется при budget stop. Это admission fence: уже выполняющиеся provider/tool/
+verifier не прерываются по часам, и успешный verifier может завершиться после срока.
+Hard wall deadline, files/tokens/retry accounting и durable recovery этим не реализованы.
+
 - Ask: current `implemented` invariant — никаких Memory/tool writes и hidden vector runtime
   initialization; явный запрос на запоминание создаёт только preview/decision и не сохраняет
   данные.

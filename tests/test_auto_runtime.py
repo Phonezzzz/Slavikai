@@ -697,8 +697,14 @@ def test_auto_runtime_rejects_approval_without_native_checkpoint(monkeypatch, tm
     class _ApprovalThenSuccessLoop:
         calls = 0
 
-        def __init__(self, max_iterations: int, *, max_tool_calls: int | None = None) -> None:
-            del max_iterations, max_tool_calls
+        def __init__(
+            self,
+            max_iterations: int,
+            *,
+            max_tool_calls: int | None = None,
+            expires_at_monotonic: float | None = None,
+        ) -> None:
+            del max_iterations, max_tool_calls, expires_at_monotonic
 
         def run(self, **kwargs):  # noqa: ANN003
             del kwargs

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import time
 from collections.abc import Callable, Generator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -56,14 +58,27 @@ class ToolLoopContinuation:
     tools: list[ToolSpec]
     config: ModelConfig | None
     max_tool_calls: int | None = None
+    expires_at_monotonic: float | None = None
 
 
 class AgentToolLoop:
-    def __init__(self, max_iterations: int = 8, *, max_tool_calls: int | None = None) -> None:
+    def __init__(
+        self,
+        max_iterations: int = 8,
+        *,
+        max_tool_calls: int | None = None,
+        expires_at_monotonic: float | None = None,
+    ) -> None:
         self.max_iterations = max(1, max_iterations)
         if max_tool_calls is not None and (type(max_tool_calls) is not int or max_tool_calls < 1):
             raise ValueError("max_tool_calls must be a positive integer or None")
         self.max_tool_calls = max_tool_calls
+        if expires_at_monotonic is not None and (
+            type(expires_at_monotonic) not in (int, float)
+            or not math.isfinite(expires_at_monotonic)
+        ):
+            raise ValueError("expires_at_monotonic must be finite or None")
+        self.expires_at_monotonic = expires_at_monotonic
 
     def run(
         self,
@@ -97,6 +112,11 @@ class AgentToolLoop:
             else self.max_iterations
         )
         call_cap = continuation.max_tool_calls if continuation is not None else self.max_tool_calls
+        expires_at = (
+            continuation.expires_at_monotonic
+            if continuation is not None
+            else self.expires_at_monotonic
+        )
         for iteration in range(first_iteration, maximum + 1):
             if cancellation_requested(cancellation_token):
                 return AgentToolLoopResult(
@@ -106,6 +126,9 @@ class AgentToolLoop:
                     iterations=iteration - 1,
                     cancelled=True,
                 )
+            expired = _expiry_stop(expires_at, final_text, history, executed, iteration - 1)
+            if expired is not None:
+                return expired
             resuming = continuation is not None and iteration == first_iteration
             try:
                 result = (
@@ -140,6 +163,9 @@ class AgentToolLoop:
                     iterations=iteration,
                     cancelled=True,
                 )
+            expired = _expiry_stop(expires_at, final_text, history, executed, iteration)
+            if expired is not None:
+                return expired
             final_text = result.text
             if not resuming:
                 history.append(
@@ -187,6 +213,9 @@ class AgentToolLoop:
                         iterations=iteration,
                         cancelled=True,
                     )
+                expired = _expiry_stop(expires_at, final_text, history, executed, iteration)
+                if expired is not None:
+                    return expired
                 if call_cap is not None and len(executed) >= call_cap:
                     return AgentToolLoopResult(
                         text=final_text,
@@ -220,11 +249,12 @@ class AgentToolLoop:
                             tools,
                             config,
                             call_cap,
+                            expires_at,
                         )
                     )
                     raise
                 except Exception as exc:
-                    if call_cap is None:
+                    if call_cap is None and expires_at is None:
                         raise
                     raise ToolLoopExecutionError(
                         AgentToolLoopResult(
@@ -296,6 +326,16 @@ class AgentToolLoop:
                     iterations=iteration - 1,
                     cancelled=True,
                 )
+            expired = _expiry_stop(
+                self.expires_at_monotonic, visible_text, history, executed, iteration - 1
+            )
+            if expired is not None:
+                yield Error(
+                    message="Auto run expired before the next operation.",
+                    code="runtime_budget_exhausted",
+                )
+                yield Done(finish_reason="error")
+                return expired
             iteration_text = ""
             pending_calls: list[ToolCall] = []
             stream_error: str | None = None
@@ -384,6 +424,16 @@ class AgentToolLoop:
                     cancelled=True,
                 )
 
+            expired = _expiry_stop(
+                self.expires_at_monotonic, visible_text, history, executed, iteration
+            )
+            if expired is not None:
+                yield Error(
+                    message="Auto run expired before the next operation.",
+                    code="runtime_budget_exhausted",
+                )
+                yield Done(finish_reason="error")
+                return expired
             if stream_error is not None:
                 yield Done(finish_reason="error")
                 return AgentToolLoopResult(
@@ -442,6 +492,16 @@ class AgentToolLoop:
                         iterations=iteration,
                         cancelled=True,
                     )
+                expired = _expiry_stop(
+                    self.expires_at_monotonic, visible_text, history, executed, iteration
+                )
+                if expired is not None:
+                    yield Error(
+                        message="Auto run expired before the next operation.",
+                        code="runtime_budget_exhausted",
+                    )
+                    yield Done(finish_reason="error")
+                    return expired
                 if self.max_tool_calls is not None and len(executed) >= self.max_tool_calls:
                     yield Error(
                         message="Native tool call budget exhausted.",
@@ -472,11 +532,12 @@ class AgentToolLoop:
                             tools,
                             config,
                             self.max_tool_calls,
+                            self.expires_at_monotonic,
                         )
                     )
                     raise
                 except Exception as exc:
-                    if self.max_tool_calls is None:
+                    if self.max_tool_calls is None and self.expires_at_monotonic is None:
                         raise
                     raise ToolLoopExecutionError(
                         AgentToolLoopResult(
@@ -528,6 +589,24 @@ class AgentToolLoop:
             iterations=self.max_iterations,
             error=message,
         )
+
+
+def _expiry_stop(
+    expires_at: float | None,
+    text: str,
+    history: list[LLMMessage],
+    executed: list[ExecutedToolCall],
+    iterations: int,
+) -> AgentToolLoopResult | None:
+    if expires_at is None or time.monotonic() < expires_at:
+        return None
+    return AgentToolLoopResult(
+        text=text,
+        messages=history,
+        tool_calls=executed,
+        iterations=iterations,
+        error="runtime_budget_exhausted",
+    )
 
 
 def _dispatch_model_tool_call(
