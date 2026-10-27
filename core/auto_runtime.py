@@ -32,6 +32,7 @@ from core.tool_loop import (
     AgentToolLoopResult,
     ExecutedToolCall,
     ToolLoopContinuation,
+    ToolLoopExecutionError,
 )
 from llm.brain_base import Brain
 from shared.auto_models import (
@@ -271,7 +272,9 @@ class AutoOrchestrator:
             system_prompt = AUTO_V1_SYSTEM_PROMPT
             if skill_resolution is not None:
                 system_prompt = f"{system_prompt}\n\n{skill_resolution.system_instruction()}"
-            loop_result = AgentToolLoop(max_iterations=budgets.max_tool_calls).run(
+            loop_result = AgentToolLoop(
+                max_iterations=budgets.max_tool_calls, max_tool_calls=budgets.max_tool_calls
+            ).run(
                 brain=brain,
                 gateway=gateway,
                 messages=compose_response_preferences(
@@ -311,10 +314,11 @@ class AutoOrchestrator:
                     verifier=None,
                     next_steps=[],
                 )
-            if len(loop_result.tool_calls) >= budgets.max_tool_calls:
+            if getattr(loop_result, "error", None) == "tool_call_budget_exhausted":
                 reason = (
-                    f"Budget exhausted: tool_calls={len(loop_result.tool_calls)} "
-                    f">= max_tool_calls={budgets.max_tool_calls}"
+                    f"Budget exhausted before next native tool call: "
+                    f"completed_calls={len(loop_result.tool_calls)}, "
+                    f"max_tool_calls={budgets.max_tool_calls}"
                 )
                 state["error"] = reason
                 state["error_code"] = "budget_tool_calls"
@@ -490,6 +494,8 @@ class AutoOrchestrator:
             self._set_status(state, AutoRunStatus.WAITING_APPROVAL)
             raise
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, ToolLoopExecutionError):
+                state["coders"] = [_auto_v1_tool_call_state(item) for item in exc.result.tool_calls]
             state["error"] = str(exc)
             self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
             return AutoRunOutcome(

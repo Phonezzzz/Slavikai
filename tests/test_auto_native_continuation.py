@@ -48,7 +48,21 @@ class ApprovalBatchBrain(Brain):
         "verifier_cancel",
     ],
 )
-def test_auto_resume_does_not_repeat_completed_tool(tmp_path: Path, changed_scope: str | None):
+def test_auto_resume_does_not_repeat_completed_tool(
+    tmp_path: Path, changed_scope: str | None, monkeypatch
+):
+    import sqlite3
+
+    from core.desktop_policy import DesktopPolicyStore
+
+    monkeypatch.chdir(tmp_path)
+    original_connect = sqlite3.connect
+
+    def isolated_connect(database, *args, **kwargs):
+        assert Path(database).resolve().is_relative_to(tmp_path)
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", isolated_connect)
     brain = ApprovalBatchBrain()
     agent = Agent(
         brain=brain,
@@ -56,6 +70,9 @@ def test_auto_resume_does_not_repeat_completed_tool(tmp_path: Path, changed_scop
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
         canonical_atoms_db_path=str(tmp_path / "atoms.db"),
+        memory_db_path=str(tmp_path / "memory.db"),
+        vectors_db_path=str(tmp_path / "vectors.db"),
+        desktop_policy_store=DesktopPolicyStore(tmp_path / "desktop.json"),
     )
     agent.set_session_context("auto-session", set())
     agent.set_runtime_state(

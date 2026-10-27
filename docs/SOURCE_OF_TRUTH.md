@@ -53,6 +53,17 @@ Desktop approvals также имеют explicit principal subject, при эт�
 
 ## Binding runtime decisions
 
+Auto v1 применяет отдельный native tool-call cap перед каждым следующим call,
+включая batch и approved continuation. Completed ToolResult (success/failure/denial)
+расходует слот; ожидание approval не расходует его, approved call учитывается один раз.
+Cap и выполненный prefix захвачены continuation, resume не получает свежую квоту.
+N+1 не передаётся Gateway; ровно N не является автоматическим budget failure.
+Лимит итераций остаётся отдельным guard, обычный verifier сохраняется. Это cap
+обработанных native calls, не успешных effects, файлов, токенов или hard wall deadline.
+Uncapped Ask/Desktop/Act сохраняют прежний контракт. При dispatch/observation fault
+Auto сохраняет доступный typed prefix и останавливается без автоматического replay;
+последний call с неизвестным результатом не объявляется выполненным или отменённым.
+
 - Ask: current `implemented` invariant — никаких Memory/tool writes и hidden vector runtime
   initialization; явный запрос на запоминание создаёт только preview/decision и не сохраняет
   данные.

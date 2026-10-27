@@ -39,7 +39,7 @@ class AgentToolLoopResult:
 
 class ToolLoopExecutionError(RuntimeError):
     def __init__(self, result: AgentToolLoopResult, cause: Exception) -> None:
-        super().__init__("provider_generation_failed")
+        super().__init__(result.error or "tool_loop_execution_failed")
         self.result = result
         self.cause = cause
 
@@ -55,11 +55,15 @@ class ToolLoopContinuation:
     max_iterations: int
     tools: list[ToolSpec]
     config: ModelConfig | None
+    max_tool_calls: int | None = None
 
 
 class AgentToolLoop:
-    def __init__(self, max_iterations: int = 8) -> None:
+    def __init__(self, max_iterations: int = 8, *, max_tool_calls: int | None = None) -> None:
         self.max_iterations = max(1, max_iterations)
+        if max_tool_calls is not None and (type(max_tool_calls) is not int or max_tool_calls < 1):
+            raise ValueError("max_tool_calls must be a positive integer or None")
+        self.max_tool_calls = max_tool_calls
 
     def run(
         self,
@@ -92,6 +96,7 @@ class AgentToolLoop:
             if continuation is not None
             else self.max_iterations
         )
+        call_cap = continuation.max_tool_calls if continuation is not None else self.max_tool_calls
         for iteration in range(first_iteration, maximum + 1):
             if cancellation_requested(cancellation_token):
                 return AgentToolLoopResult(
@@ -182,6 +187,14 @@ class AgentToolLoop:
                         iterations=iteration,
                         cancelled=True,
                     )
+                if call_cap is not None and len(executed) >= call_cap:
+                    return AgentToolLoopResult(
+                        text=final_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="tool_call_budget_exhausted",
+                    )
                 try:
                     if resuming and call_index == 0 and continuation is not None:
                         tool_result = gateway.call_approved_once(
@@ -206,9 +219,23 @@ class AgentToolLoop:
                             maximum,
                             tools,
                             config,
+                            call_cap,
                         )
                     )
                     raise
+                except Exception as exc:
+                    if call_cap is None:
+                        raise
+                    raise ToolLoopExecutionError(
+                        AgentToolLoopResult(
+                            text=final_text,
+                            messages=history,
+                            tool_calls=executed,
+                            iterations=iteration,
+                            error="tool_dispatch_failed",
+                        ),
+                        exc,
+                    ) from exc
                 executed.append(ExecutedToolCall(call=tool_call, result=tool_result))
                 history.append(
                     LLMMessage(
@@ -415,6 +442,19 @@ class AgentToolLoop:
                         iterations=iteration,
                         cancelled=True,
                     )
+                if self.max_tool_calls is not None and len(executed) >= self.max_tool_calls:
+                    yield Error(
+                        message="Native tool call budget exhausted.",
+                        code="tool_call_budget_exhausted",
+                    )
+                    yield Done(finish_reason="error")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="tool_call_budget_exhausted",
+                    )
                 try:
                     tool_result = _dispatch_model_tool_call(
                         gateway=gateway, tool_call=tool_call, allowed_tool_names=allowed_tool_names
@@ -431,9 +471,23 @@ class AgentToolLoop:
                             self.max_iterations,
                             tools,
                             config,
+                            self.max_tool_calls,
                         )
                     )
                     raise
+                except Exception as exc:
+                    if self.max_tool_calls is None:
+                        raise
+                    raise ToolLoopExecutionError(
+                        AgentToolLoopResult(
+                            text=visible_text,
+                            messages=history,
+                            tool_calls=executed,
+                            iterations=iteration,
+                            error="tool_dispatch_failed",
+                        ),
+                        exc,
+                    ) from exc
                 executed_call = ExecutedToolCall(call=tool_call, result=tool_result)
                 executed.append(executed_call)
                 history.append(

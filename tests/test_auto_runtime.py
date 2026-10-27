@@ -200,6 +200,118 @@ class _AutoV1Agent(_FakeAgent):
         return ToolGateway(self.tool_registry)
 
 
+@pytest.mark.parametrize("batch_size", [2, 3])
+def test_auto_native_call_cap_before_dispatch(tmp_path, monkeypatch, batch_size):
+    class BatchBrain(Brain):
+        supports_native_tools = True
+
+        def generate(self, messages, config=None, tools=None):
+            if messages[-1].role == "tool":
+                return LLMResult(text="finished")
+            return LLMResult(
+                text="batch",
+                tool_calls=[
+                    ToolCall(id=str(i), name="counted", arguments={"value": i})
+                    for i in range(batch_size)
+                ],
+            )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(auto_runtime.AUTO_MAX_TOOL_CALLS_ENV, "2")
+    agent = _AutoV1Agent()
+    agent._brain = BatchBrain()
+    dispatched = []
+    agent.tool_registry.register(
+        "counted",
+        lambda request: dispatched.append(request.args["value"])
+        or ToolResult.success({"output": "ok"}),
+        capability="read",
+    )
+    outcome = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path).run_v1("count")
+    assert dispatched == [0, 1]
+    assert len(agent.last_auto_state["coders"]) == 2
+    if batch_size == 3:
+        assert outcome.stop_reason_code == StopReasonCode.BUDGET_EXHAUSTED
+        assert outcome.verifier is None
+    else:
+        assert outcome.status == AutoRunStatus.COMPLETED
+        assert outcome.verifier is not None and outcome.verifier.ok
+
+
+def test_auto_call_cap_is_run_scoped_and_retained_across_approval(tmp_path, monkeypatch):
+    from core.approval_policy import ApprovalContext
+    from tests.test_tool_call_cap import BatchBrain, calls
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(auto_runtime.AUTO_MAX_TOOL_CALLS_ENV, "2")
+    runs = []
+    for principal in ["one", "two"]:
+        agent = _AutoV1Agent()
+        agent.user_id = principal
+        agent.session_id = principal
+        agent._brain = BatchBrain([calls("echo", "network", "network")])
+        dispatched = []
+        # Каждый run наблюдает собственные handler calls.
+        agent.tool_registry.register(
+            "echo",
+            lambda request, seen=dispatched: seen.append(request.name) or ToolResult.success({}),
+            capability="read",
+        )
+        agent.tool_registry.register(
+            "network",
+            lambda request, seen=dispatched: seen.append(request.name) or ToolResult.success({}),
+            capability="read",
+            risk_classes=["network"],
+        )
+        gateway = ToolGateway(
+            agent.tool_registry, approval_context=ApprovalContext(True, principal, set())
+        )
+        agent._build_tool_gateway = lambda current=gateway: current
+        orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+        with pytest.raises(ApprovalRequired):
+            orchestrator.run_v1("count")
+        assert dispatched == ["echo"]
+        runs.append((orchestrator, agent, dispatched, agent.last_auto_state["run_id"]))
+    monkeypatch.setenv(auto_runtime.AUTO_MAX_TOOL_CALLS_ENV, "100")
+    for orchestrator, agent, dispatched, run_id in runs:
+        outcome = orchestrator.resume(run_id)
+        assert outcome.stop_reason_code == StopReasonCode.BUDGET_EXHAUSTED
+        assert dispatched == ["echo", "network"]
+        assert len(agent.last_auto_state["coders"]) == 2
+        with pytest.raises(auto_runtime.AutoContinuationUnavailable):
+            orchestrator.resume(run_id)
+
+
+def test_auto_keeps_available_prefix_after_dispatch_observation_fault(tmp_path, monkeypatch):
+    from tests.test_tool_call_cap import BatchBrain, calls
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(auto_runtime.AUTO_MAX_TOOL_CALLS_ENV, "4")
+    agent = _AutoV1Agent()
+    agent._brain = BatchBrain([calls("echo", "second", "echo")])
+    dispatched = []
+    for name in ["echo", "second"]:
+        agent.tool_registry.register(
+            name,
+            lambda request: dispatched.append(request.name) or ToolResult.success({}),
+            capability="read",
+        )
+
+    def observe(request, result, context):
+        if request.name == "second":
+            raise RuntimeError("observation failed after handler")
+
+    agent._build_tool_gateway = lambda: ToolGateway(agent.tool_registry, post_call=observe)
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
+    outcome = orchestrator.run_v1("observe")
+    assert outcome.status == AutoRunStatus.FAILED_INTERNAL
+    assert dispatched == ["echo", "second"]
+    assert len(agent.last_auto_state["coders"]) == 1
+    assert agent.last_auto_state["error"] == "tool_dispatch_failed"
+    with pytest.raises(auto_runtime.AutoContinuationUnavailable):
+        orchestrator.resume(agent.last_auto_state["run_id"])
+
+
 class _RecoveryToolLoopBrain(Brain):
     """First call triggers a failing tool; second call recovers with a final answer."""
 
@@ -585,8 +697,8 @@ def test_auto_runtime_rejects_approval_without_native_checkpoint(monkeypatch, tm
     class _ApprovalThenSuccessLoop:
         calls = 0
 
-        def __init__(self, max_iterations: int) -> None:
-            del max_iterations
+        def __init__(self, max_iterations: int, *, max_tool_calls: int | None = None) -> None:
+            del max_iterations, max_tool_calls
 
         def run(self, **kwargs):  # noqa: ANN003
             del kwargs
