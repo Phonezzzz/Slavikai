@@ -203,10 +203,24 @@ def test_paused_request_unavailable_never_falls_back(monkeypatch, tmp_path, case
 
 @pytest.mark.parametrize("streaming", [False, True])
 def test_real_approval_capture_is_read_without_brain_or_dispatch(monkeypatch, tmp_path, streaming):
+    import sqlite3
     from dataclasses import replace
+    from pathlib import Path
 
     from shared.models import LLMMessage, ToolResult
     from tests.test_agent_response import ToolLoopBrain
+
+    original_connect = sqlite3.connect
+
+    def isolated_connect(database, *args, **kwargs):
+        assert str(database) == ":memory:" or Path(database).resolve().is_relative_to(
+            tmp_path.resolve()
+        ), "SQLite path must remain inside fixture"
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", isolated_connect)
+    monkeypatch.chdir(tmp_path)
+    from core.desktop_policy import DesktopPolicyStore
 
     brain = ToolLoopBrain()
     config = ModelConfig(provider="local", model="captured", temperature=0.31)
@@ -214,6 +228,9 @@ def test_real_approval_capture_is_read_without_brain_or_dispatch(monkeypatch, tm
         brain=brain,
         main_config=config,
         enable_tools={"safe_mode": True},
+        memory_db_path=str(tmp_path / "memory.db"),
+        vectors_db_path=str(tmp_path / "vectors.db"),
+        desktop_policy_store=DesktopPolicyStore(tmp_path / "desktop.json"),
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
         canonical_atoms_db_path=str(tmp_path / "atoms.db"),
