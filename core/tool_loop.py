@@ -19,7 +19,7 @@ from llm.stream_model import (
     TextDelta,
     ToolCallCompleted,
 )
-from llm.types import LLMResult, ModelConfig, ToolCall, ToolSpec
+from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
 
 
@@ -30,6 +30,42 @@ class ExecutedToolCall:
 
 
 @dataclass(frozen=True)
+class ModelUsageSummary:
+    """Reported usage внешних sync generate calls; не полный расход провайдера."""
+
+    started_calls: int = 0
+    reported_calls: int = 0
+    unknown_calls: int = 0
+    reported_sum: LLMUsage = field(default_factory=lambda: LLMUsage(0, 0, 0))
+
+    @property
+    def total_tokens(self) -> int | None:
+        if self.started_calls == 0 or self.unknown_calls:
+            return None
+        return self.reported_sum.total_tokens
+
+    def start_call(self) -> ModelUsageSummary:
+        return ModelUsageSummary(
+            self.started_calls + 1,
+            self.reported_calls,
+            self.unknown_calls + 1,
+            self.reported_sum,
+        )
+
+    def with_reported(self, usage: LLMUsage) -> ModelUsageSummary:
+        return ModelUsageSummary(
+            self.started_calls,
+            self.reported_calls + 1,
+            self.unknown_calls - 1,
+            LLMUsage(
+                self.reported_sum.prompt_tokens + usage.prompt_tokens,
+                self.reported_sum.completion_tokens + usage.completion_tokens,
+                self.reported_sum.total_tokens + usage.total_tokens,
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class AgentToolLoopResult:
     text: str
     messages: list[LLMMessage]
@@ -37,6 +73,7 @@ class AgentToolLoopResult:
     iterations: int = 0
     error: str | None = None
     cancelled: bool = False
+    model_usage: ModelUsageSummary | None = None
 
 
 class ToolLoopExecutionError(RuntimeError):
@@ -59,6 +96,7 @@ class ToolLoopContinuation:
     config: ModelConfig | None
     max_tool_calls: int | None = None
     expires_at_monotonic: float | None = None
+    model_usage: ModelUsageSummary | None = None
 
 
 class AgentToolLoop:
@@ -91,7 +129,9 @@ class AgentToolLoop:
         cancellation_token: asyncio.Event | None = None,
         final_gate: Callable[[Sequence[ExecutedToolCall]], str | None] | None = None,
         continuation: ToolLoopContinuation | None = None,
+        record_model_usage: bool = False,
     ) -> AgentToolLoopResult:
+        model_usage = ModelUsageSummary() if record_model_usage else None
         history = list(messages)
         executed: list[ExecutedToolCall] = []
         final_text = ""
@@ -99,6 +139,7 @@ class AgentToolLoop:
 
         if continuation is not None:
             continuation = deepcopy(continuation)
+            model_usage = continuation.model_usage
             history = continuation.history
             executed = continuation.executed
             final_text = continuation.text
@@ -120,24 +161,31 @@ class AgentToolLoop:
         for iteration in range(first_iteration, maximum + 1):
             if cancellation_requested(cancellation_token):
                 return AgentToolLoopResult(
+                    model_usage=model_usage,
                     text=final_text,
                     messages=history,
                     tool_calls=executed,
                     iterations=iteration - 1,
                     cancelled=True,
                 )
-            expired = _expiry_stop(expires_at, final_text, history, executed, iteration - 1)
+            expired = _expiry_stop(
+                expires_at, final_text, history, executed, iteration - 1, model_usage
+            )
             if expired is not None:
                 return expired
             resuming = continuation is not None and iteration == first_iteration
             try:
-                result = (
-                    LLMResult(text=final_text, tool_calls=continuation.pending_calls)
-                    if resuming and continuation is not None
-                    else brain.generate(history, config=config, tools=tools)
-                )
+                if resuming and continuation is not None:
+                    result = LLMResult(text=final_text, tool_calls=continuation.pending_calls)
+                else:
+                    if model_usage is not None:
+                        model_usage = model_usage.start_call()
+                    result = brain.generate(history, config=config, tools=tools)
+                    if model_usage is not None and result.usage is not None:
+                        model_usage = model_usage.with_reported(result.usage)
             except GenerationCancelled:
                 return AgentToolLoopResult(
+                    model_usage=model_usage,
                     text=final_text,
                     messages=history,
                     tool_calls=executed,
@@ -147,6 +195,7 @@ class AgentToolLoop:
             except Exception as exc:
                 raise ToolLoopExecutionError(
                     AgentToolLoopResult(
+                        model_usage=model_usage,
                         text=final_text,
                         messages=history,
                         tool_calls=executed,
@@ -157,13 +206,16 @@ class AgentToolLoop:
                 ) from exc
             if cancellation_requested(cancellation_token):
                 return AgentToolLoopResult(
+                    model_usage=model_usage,
                     text=final_text,
                     messages=history,
                     tool_calls=executed,
                     iterations=iteration,
                     cancelled=True,
                 )
-            expired = _expiry_stop(expires_at, final_text, history, executed, iteration)
+            expired = _expiry_stop(
+                expires_at, final_text, history, executed, iteration, model_usage
+            )
             if expired is not None:
                 return expired
             final_text = result.text
@@ -191,6 +243,7 @@ class AgentToolLoop:
                     if iteration < maximum:
                         continue
                     return AgentToolLoopResult(
+                        model_usage=model_usage,
                         text=final_text,
                         messages=history,
                         tool_calls=executed,
@@ -198,6 +251,7 @@ class AgentToolLoop:
                         error=gate_error,
                     )
                 return AgentToolLoopResult(
+                    model_usage=model_usage,
                     text=final_text,
                     messages=history,
                     tool_calls=executed,
@@ -207,17 +261,21 @@ class AgentToolLoop:
             for call_index, tool_call in enumerate(result.tool_calls):
                 if cancellation_requested(cancellation_token):
                     return AgentToolLoopResult(
+                        model_usage=model_usage,
                         text=final_text,
                         messages=history,
                         tool_calls=executed,
                         iterations=iteration,
                         cancelled=True,
                     )
-                expired = _expiry_stop(expires_at, final_text, history, executed, iteration)
+                expired = _expiry_stop(
+                    expires_at, final_text, history, executed, iteration, model_usage
+                )
                 if expired is not None:
                     return expired
                 if call_cap is not None and len(executed) >= call_cap:
                     return AgentToolLoopResult(
+                        model_usage=model_usage,
                         text=final_text,
                         messages=history,
                         tool_calls=executed,
@@ -250,6 +308,7 @@ class AgentToolLoop:
                             config,
                             call_cap,
                             expires_at,
+                            model_usage,
                         )
                     )
                     raise
@@ -258,6 +317,7 @@ class AgentToolLoop:
                         raise
                     raise ToolLoopExecutionError(
                         AgentToolLoopResult(
+                            model_usage=model_usage,
                             text=final_text,
                             messages=history,
                             tool_calls=executed,
@@ -276,6 +336,7 @@ class AgentToolLoop:
                 )
                 if _policy_rejected(tool_result):
                     return AgentToolLoopResult(
+                        model_usage=model_usage,
                         text=final_text,
                         messages=history,
                         tool_calls=executed,
@@ -284,6 +345,7 @@ class AgentToolLoop:
                     )
                 if cancellation_requested(cancellation_token):
                     return AgentToolLoopResult(
+                        model_usage=model_usage,
                         text=final_text,
                         messages=history,
                         tool_calls=executed,
@@ -293,6 +355,7 @@ class AgentToolLoop:
 
         message = f"Цикл инструментов превысил лимит: {maximum} итераций."
         return AgentToolLoopResult(
+            model_usage=model_usage,
             text=final_text,
             messages=history,
             tool_calls=executed,
@@ -597,6 +660,7 @@ def _expiry_stop(
     history: list[LLMMessage],
     executed: list[ExecutedToolCall],
     iterations: int,
+    model_usage: ModelUsageSummary | None = None,
 ) -> AgentToolLoopResult | None:
     if expires_at is None or time.monotonic() < expires_at:
         return None
@@ -606,6 +670,7 @@ def _expiry_stop(
         tool_calls=executed,
         iterations=iterations,
         error="runtime_budget_exhausted",
+        model_usage=model_usage,
     )
 
 

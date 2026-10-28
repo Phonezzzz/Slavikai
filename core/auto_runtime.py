@@ -31,6 +31,7 @@ from core.tool_loop import (
     AgentToolLoop,
     AgentToolLoopResult,
     ExecutedToolCall,
+    ModelUsageSummary,
     ToolLoopContinuation,
     ToolLoopExecutionError,
 )
@@ -290,6 +291,7 @@ class AutoOrchestrator:
                 config=self.parent.main_config,
                 continuation=continuation,
                 cancellation_token=cancellation_token,
+                record_model_usage=True,
             )
             tool_call_states = [_auto_v1_tool_call_state(item) for item in loop_result.tool_calls]
             state["coders"] = tool_call_states
@@ -303,6 +305,7 @@ class AutoOrchestrator:
                 "iterations": loop_result.iterations,
                 "files_touched": 0,
             }
+            _record_model_usage(state, loop_result.model_usage)
             self._set_state(state)
             if loop_result.cancelled or (
                 cancellation_token is not None and cancellation_token.is_set()
@@ -493,6 +496,7 @@ class AutoOrchestrator:
         except ApprovalRequired as exc:
             if exc.continuation is None:
                 raise AutoContinuationUnavailable("auto_continuation_unavailable") from exc
+            _record_model_usage(state, exc.continuation.model_usage)
             if cancellation_token is not None and cancellation_token.is_set():
                 state["coders"] = [
                     _auto_v1_tool_call_state(item) for item in exc.continuation.executed
@@ -519,6 +523,7 @@ class AutoOrchestrator:
             raise
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, ToolLoopExecutionError):
+                _record_model_usage(state, exc.result.model_usage)
                 state["coders"] = [_auto_v1_tool_call_state(item) for item in exc.result.tool_calls]
             state["error"] = str(exc)
             self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
@@ -869,3 +874,23 @@ def _skill_state(state: dict[str, JSONValue]) -> dict[str, JSONValue] | None:
 
 def _verifier_reason(verification: VerificationResult) -> str:
     return extract_verifier_excerpt(verification, max_lines=3, max_chars=300)
+
+
+def _record_model_usage(state: dict[str, JSONValue], usage: ModelUsageSummary | None) -> None:
+    if usage is None:
+        return
+    metrics = state.get("execution_metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+        state["execution_metrics"] = metrics
+    metrics["tool_loop_model_usage"] = {
+        "started_calls": usage.started_calls,
+        "reported_calls": usage.reported_calls,
+        "unknown_calls": usage.unknown_calls,
+        "reported_sum": {
+            "prompt_tokens": usage.reported_sum.prompt_tokens,
+            "completion_tokens": usage.reported_sum.completion_tokens,
+            "total_tokens": usage.reported_sum.total_tokens,
+        },
+        "total_tokens": usage.total_tokens,
+    }

@@ -137,6 +137,21 @@
       "summary": "Existing sync adapters and shared SSE decoder use one pure usage validator: all three explicit nonnegative integer (non-bool) counts produce LLMUsage, including explicit zero; missing, partial or invalid metadata becomes unknown None without discarding valid text/tool calls. Existing xAI input/output aliases and canonical precedence remain. Unknown emits no synthetic zero Usage event; complete updates remain separate. No inferred total, aggregation, quota, transport, capability, authority or billing verification change."
     },
     {
+      "id": "runtime.auto.sync_model_usage_accounting",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_auto_usage_accounting.py",
+        "tests/test_run_expiry.py",
+        "tests/test_tool_call_cap.py",
+        "tests/test_auto_native_continuation.py"
+      ],
+      "summary": "Sync Auto opts into immutable external Brain.generate usage accounting: started/reported/unknown calls and complete reported sums survive approval continuation and available stop/fault results. Synthetic resume is not another model request; received metadata precedes post-model cancellation/expiry. Numeric Auto-state projection rejects malformed summaries without synthesizing usage. Unknown does not stop execution. Internal HTTP retries, other model consumers, stream aggregation, verifier usage, billing, quota and durable recovery are not covered; existing dispatch/approval/expiry/cap behavior remains."
+    },
+    {
       "id": "runtime.auto.ask_plan_act_fsm",
       "scope": "runtime",
       "status": "target",

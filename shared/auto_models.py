@@ -229,7 +229,59 @@ def normalize_auto_state(value: object) -> dict[str, JSONValue] | None:
         ),
         "missing_paths": _normalize_string_list(value.get("missing_paths")),
     }
+    metrics = _normalize_model_usage_metrics(value.get("execution_metrics"))
+    if metrics is not None:
+        normalized["execution_metrics"] = metrics
     return normalized
+
+
+def _normalize_model_usage_metrics(value: object) -> dict[str, JSONValue] | None:
+    if not isinstance(value, dict):
+        return None
+    usage = value.get("tool_loop_model_usage")
+    if not isinstance(usage, dict):
+        return None
+    counts: dict[str, int] = {}
+    for key in ("started_calls", "reported_calls", "unknown_calls"):
+        count = usage.get(key)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return None
+        counts[key] = count
+    started, reported, unknown = (
+        counts[key] for key in ("started_calls", "reported_calls", "unknown_calls")
+    )
+    if started != reported + unknown:
+        return None
+    raw_sum = usage.get("reported_sum")
+    if not isinstance(raw_sum, dict):
+        return None
+    sums: list[int] = []
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        count = raw_sum.get(key)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return None
+        sums.append(count)
+    if reported == 0 and any(sums):
+        return None
+    if "total_tokens" not in usage:
+        return None
+    total = usage.get("total_tokens")
+    expected = sums[2] if started > 0 and unknown == 0 else None
+    if type(total) is not type(expected) or total != expected:
+        return None
+    return {
+        "tool_loop_model_usage": {
+            "started_calls": started,
+            "reported_calls": reported,
+            "unknown_calls": unknown,
+            "reported_sum": {
+                "prompt_tokens": sums[0],
+                "completion_tokens": sums[1],
+                "total_tokens": sums[2],
+            },
+            "total_tokens": total,
+        }
+    }
 
 
 def _normalize_pool_size(value: object) -> int:

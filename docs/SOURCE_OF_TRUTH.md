@@ -82,6 +82,21 @@ string, missing/null/negative metadata дают `None`, сохраняя вал�
 полные updates остаются отдельными событиями. Это validity reported metadata, не
 проверка provider billing, aggregation, token quota или вывод отсутствующего total.
 
+Синхронный Auto-loop отдельно наблюдает внешние вызовы `Brain.generate`:
+immutable summary содержит started/reported/unknown calls и сумму complete reported
+prompt/completion/total без вычисления отсутствующих полей. Общий `total_tokens`
+известен только при хотя бы одном вызове и отсутствии unknown. Полученный ответ
+учитывается до post-model cancel/expiry; вызов без результата остаётся unknown.
+Approval continuation сохраняет summary, synthetic resume не добавляет model call.
+Auto-state публикует только числовую `execution_metrics.tool_loop_model_usage`
+projection на доступных normal/paused/cancelled/budget/error exits; normalizer
+отбрасывает неверные counters и посторонние metadata. Эта projection может проходить
+через существующий workflow state transport/storage, но не является durable accounting
+или recovery authority. Внутренние HTTP retries, другие model consumers, streaming и
+verifier не покрыты: это не весь token расход run, actual billing либо spending cap.
+Unknown не останавливает run; квоты, R1a/R1b, approvals и verifier не меняются.
+Non-Auto sync callers по умолчанию не включают учёт, streaming не агрегируется.
+
 - Ask: current `implemented` invariant — никаких Memory/tool writes и hidden vector runtime
   initialization; явный запрос на запоминание создаёт только preview/decision и не сохраняет
   данные.
