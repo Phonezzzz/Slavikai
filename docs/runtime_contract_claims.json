@@ -398,6 +398,20 @@
       "summary": "Scoped durable admission identities, immutable revision/history and CAS transitions. UI Ask and Auto now admit and fence repeated dispatch after volatile replay loss using structured request fingerprints bound to grants, effective tools/policy and full execution config, with pre-admission history checked before dispatch. Existing admitted runs cannot be reclaimed without durable execution context. The native UI persists a pending client key/hash across lost acknowledgement and reload, requires explicit discard before replacing an uncertain payload and allows discard without dispatch, and targets regeneration deletion by immutable message identity; tests inject isolated app stores. Native UI Ask/Auto approval checkpoints now retain the admitted run identity; resume validates its exact scoped state/version and owned effective-security fingerprint before grants/dispatch, then submits the typed result to the same run. Root confirmation rejects changed mode/model snapshots. Public /v1 default/explicit Ask and explicit Auto now share scoped admission/CAS/submission with complete request/config/security fingerprints; no runtime_mode request inherits the previous Agent mode, and retries cannot redispatch. Other production entrypoints, durable continuation, result capture, acceptance/completion and recovery remain target."
     },
     {
+      "id": "runtime.lifecycle.producer_submission",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
+      "verified_by": [
+        "tests/test_run_submission.py",
+        "tests/ui_api/test_durable_submission.py",
+        "tests/ui_api/test_task_run_admission.py"
+      ],
+      "summary": "Existing admitted UI/API Ask/Auto and captured approval continuation atomically bind an immutable scoped producer-report envelope to result_submitted history in the existing TaskRunStore. Exact v2-to-v3 additive upgrade preserves old identities/history with historical payload unavailable. CAS, rollback, scoped read, digest, size limits and HTTP projection/storage faults are tested. Producer text is not canonical tool capture, terminal acceptance or replay/recovery authority; sensitive nonterminal payload may remain indefinitely without GC."
+    },
+    {
       "id": "runtime.approval.native_continuation",
       "scope": "runtime",
       "status": "implemented",

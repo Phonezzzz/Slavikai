@@ -1437,12 +1437,11 @@ async def _handle_ui_send_impl(
             if admitted_run is not None and agent_response is not None:
                 # Submission is not acceptance or completion; pending approval remains owned.
                 if agent_response.runtime_result is not None:
-                    admitted_run = run_store.transition(
+                    admitted_run = run_store.submit_result(
                         run_scope,
                         admitted_run.task_run_id,
                         expected_version=admitted_run.version,
-                        state=RunState.RESULT_SUBMITTED,
-                        authority=TransitionAuthority.RUNTIME,
+                        report=agent_response.producer_report(),
                         reason_code="runtime_result_submitted",
                     )
             drain_consumed_rules = getattr(agent, "drain_consumed_desktop_rule_ids", None)
@@ -2222,12 +2221,11 @@ async def handle_ui_approval_continue(
                         await hub.set_session_workflow(session_id, auto_state=auto_state)
                     await _drain_auto_progress(hub=hub, session_id=session_id, agent=agent)
                 if accepted_run is not None and response.runtime_result is not None:
-                    run_store.transition(
+                    run_store.submit_result(
                         run_scope,
                         accepted_run.task_run_id,
                         expected_version=accepted_run.version,
-                        state=RunState.RESULT_SUBMITTED,
-                        authority=TransitionAuthority.RUNTIME,
+                        report=response.producer_report(),
                         reason_code="approval_result_submitted",
                     )
                 text, report = _project_agent_response(response)

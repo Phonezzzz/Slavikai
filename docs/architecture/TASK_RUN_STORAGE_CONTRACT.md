@@ -1,7 +1,7 @@
 # Task/run admission store — foundation B1
 
 Статус: storage primitive реализован и проверяется `tests/test_task_run_storage.py`.
-**Production UI Ask использует admission/start fencing; остальные paths ещё не подключены.** Общий lifecycle contract остаётся target;
+**Production UI/API Ask/Auto используют admission/start fencing и scoped submission.** Общий lifecycle contract остаётся target;
 B1 не означает durable Ask/Auto/MWV execution, continuation или recovery tool.
 
 ## Граница и authority
@@ -64,17 +64,62 @@ Foreign и missing IDs дают одинаковый unavailable error. Reattach
 Session prune не вызывает удаление task/run DB: session attachment не является lifetime.
 
 DB создаётся mode 0600, новый parent directory — 0700; file symlink отклоняется.
-Existing parent directory должен быть доверенным bootstrap directory. Schema version — 2;
-unknown version и unrelated DB отклоняются без migration/compatibility layer.
+Existing parent directory должен быть доверенным bootstrap directory. Schema version — 3;
+единственный явно принятый additive upgrade v2→v3 выполняется транзакционно после проверки
+точного shipped v2 schema. Старые IDs/state/history сохраняются; неизвестная/посторонняя
+schema отклоняется. Ни reset, ни backfill результата из prose/logs не выполняются.
 Никакие raw tool payloads или secrets не копируются в events; reason — bounded code.
 Accepted goal может содержать sensitive data, поэтому DB подчиняется private storage scope,
 а не operational log permissions. Encryption-at-rest здесь не реализована.
 
-Payload storage, retention/GC, tombstones, paging/recovery и user deletion ещё не реализованы.
+Producer-report storage описан ниже; canonical tool payload storage, retention/GC, tombstones,
+paging/recovery и user deletion ещё не реализованы.
 Для canonical output действует target из `TOOL_EXECUTION_RESULT_CONTRACT.md`: configurable
 7 дней после terminal transition, active/resumable/recovery-pinned защищены от GC,
 ручное раннее удаление допускается. Duration metadata/history — отдельное open policy;
 B1 не вводит автоматический GC.
+
+## Durable producer submission — bounded R2a
+
+`AgentResponse.producer_report()` явно выбирает producer kind по typed runtime variant и
+копирует только публичный text + ResponseFailure code/message. Весь runtime object, history,
+reasoning, tool args и arbitrary metadata не сериализуются. Report остаётся untrusted content,
+не canonical tool evidence, verifier evidence или terminal acceptance. Native loop и Auto
+сохраняют свои kind; ни kind, ни слова «готово» не меняют lifecycle authority.
+
+Три existing submission seams (UI Ask/Auto, API Ask/Auto, captured approval continuation)
+вызывают `submit_result(scope, run_id, expected_version, report, reason_code)`. Одна
+`BEGIN IMMEDIATE` transaction сохраняет immutable envelope с submission/task/revision/run/
+attempt/scope/version/time, SHA-256 UTF-8 payload и transition/history reference. Producer не
+задаёт эти identities. Generic transition не создаёт новый result_submitted без payload.
+SQL binding trigger и deferred FK связывают payload с exact history version; payload/history
+immutable. Stale CAS, foreign scope или write failure откатывают все части. State остаётся
+non-terminal; failure/cancel/budget report не получает completed из producer status.
+
+Полный JSON envelope ограничен 1 MiB UTF-8; oversize/invalid input не truncate'ится и не
+заменяется пустым report. Submission fault после runtime не доказывает отсутствия effects;
+повторного execution нет. Сбой до commit может оставить running без report. Сбой после
+commit до UI/API projection не уничтожает сохранённый report. Ранее streamed chunks не
+становятся authoritative final из-за позднего commit.
+
+`get_submission(scope, run_id)` повторно проверяет principal + originating session, exact
+run/attempt/history binding и payload digest. Foreign/missing/unavailable дают одинаковый
+unavailable error. У старого v2 result_submitted после upgrade остаётся NULL submission ref:
+report явно unavailable; новых fake payload/replay нет. Старые running/admitted records при
+новом submission уже обязаны иметь payload. После recovery_required/aborted исходный report
+остаётся historical producer report, не новой execution authority.
+
+Текст ответа может быть sensitive: payload хранится в той же private DB, не в event reason
+или operational logs. Encryption-at-rest и новый HTTP read/replay/resume endpoint не добавлены.
+Нет GC/deletion scheduler; nonterminal данные могут храниться бессрочно. Семидневный terminal
+retention canonical tool output остаётся target, этот PR его не заявляет.
+
+Проверки: `tests/test_run_submission.py`, `tests/ui_api/test_durable_submission.py`,
+`tests/ui_api/test_task_run_admission.py`. Они проверяют reopen, upgrade/rollback, concurrent
+CAS, immutable history/payload, scope, digest, limits, HTTP storage/projection faults,
+approval resume/nested approval и post-runtime stream error. Canonical raw bytes capture,
+operation intents/unknown-effect settlement, execution recovery и terminal acceptance не
+реализованы этим slice; `TOOL_EXECUTION_RESULT_CONTRACT.md` readiness остаётся BLOCKED.
 
 ## Structured Auto outcome — foundation B2a
 

@@ -314,12 +314,11 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                             ),
                         )
                 if agent_response.runtime_result is not None:
-                    run_store.transition(
+                    run_store.submit_result(
                         run_scope,
                         admitted_run.task_run_id,
                         expected_version=admitted_run.version,
-                        state=RunState.RESULT_SUBMITTED,
-                        authority=TransitionAuthority.RUNTIME,
+                        report=agent_response.producer_report(),
                         reason_code="api_result_submitted",
                     )
             response_text, mwv_report = _project_agent_response(agent_response)

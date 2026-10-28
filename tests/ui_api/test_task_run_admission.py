@@ -765,6 +765,8 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(
                 run_id = conn.execute("SELECT task_run_id FROM task_runs").fetchone()[0]
             principal = await client.app["ui_hub"].get_session_principal_id(session)
             scope = RunScope(principal, session)
+            with pytest.raises(LookupError, match="Submission unavailable"):
+                store.get_submission(scope, run_id)
             accepted = store.get(scope, run_id)
             accepted_tools = dict(agent.tools_enabled)
             if stale is True:
@@ -826,6 +828,8 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(
                 next_decision = (await resumed.json())["decision"]
                 assert next_decision["id"] != decision["id"]
                 assert agent._pending_chat_approval.task_run == accepted
+                with pytest.raises(LookupError, match="Submission unavailable"):
+                    store.get_submission(scope, run_id)
                 resumed = await client.post(
                     "/ui/api/decision/respond",
                     headers=headers,
@@ -844,6 +848,15 @@ def test_native_approval_submits_original_run_or_fences_stale_owner(
                 if fenced
                 else RunState.RESULT_SUBMITTED
             )
+            if fenced:
+                with pytest.raises(LookupError, match="Submission unavailable"):
+                    store.get_submission(scope, run_id)
+            else:
+                saved = TaskRunStore(store.path).get_submission(scope, run_id)
+                assert saved.task_id == accepted.task_id
+                assert saved.attempt_id == accepted.attempt_id
+                assert saved.version == accepted.version + 1
+                assert saved.report.text
             with sqlite3.connect(store.path) as conn:
                 assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == 1
         finally:

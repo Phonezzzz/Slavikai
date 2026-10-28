@@ -7,7 +7,7 @@ from concurrent.futures import ProcessPoolExecutor
 import pytest
 
 from core.task_run_storage import RunConflictError, TaskRunStore
-from shared.task_run import RunScope, RunState, TransitionAuthority
+from shared.task_run import ProducerKind, ProducerReport, RunScope, RunState, TransitionAuthority
 
 
 def test_admission_is_durable_scoped_and_idempotent(tmp_path) -> None:
@@ -59,12 +59,11 @@ def test_transition_is_versioned_and_durable_without_inferred_completion(tmp_pat
         authority=TransitionAuthority.RUNTIME,
         reason_code="execution_started",
     )
-    submitted = store.transition(
+    submitted = store.submit_result(
         scope,
         run.task_run_id,
         expected_version=running.version,
-        state=RunState.RESULT_SUBMITTED,
-        authority=TransitionAuthority.RUNTIME,
+        report=ProducerReport(ProducerKind.AUTO, "report"),
         reason_code="result_submitted",
     )
     assert submitted.terminal_at is None

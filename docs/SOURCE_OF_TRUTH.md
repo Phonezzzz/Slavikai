@@ -133,6 +133,18 @@ Providers без complete reported usage не могут продолжить м
   внедряются per run в Auto v1; MWV report/UI наблюдают выбранный skill и terminal status. Brain
   не мутируется, tool/approval/sandbox/verifier полномочия не расширяются.
 
+## Submitted producer report
+
+Existing admitted UI/API Ask/Auto и captured approval continuation атомарно сохраняют
+producer-report envelope вместе с result_submitted/history в TaskRunStore schema3. Envelope
+связан с exact principal/session/task revision/run/attempt/version; scope и digest проверяются
+при чтении. Явный additive v2→v3 upgrade сохраняет старую историю без fabricated payload:
+старые reports остаются unavailable. Oversize/invalid report или storage failure не дают
+payload-free новый submitted state и не разрешают tool replay. Это untrusted producer text
+и response-failure metadata, не canonical tool output, acceptance/completion либо delivery
+recovery. Sensitive report хранится в private DB; новый GC не добавлен, nonterminal payload
+может храниться бессрочно. Точный bounded contract — TASK_RUN_STORAGE_CONTRACT.md.
+
 ## Личные настройки браузера
 
 `personalization`, `appearance` и `composer` принадлежат verified browser principal.

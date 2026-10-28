@@ -50,3 +50,47 @@ class RunTransition:
     authority: TransitionAuthority
     reason_code: str
     occurred_at: str
+    submission_id: str | None = None
+
+
+class ProducerKind(StrEnum):
+    MODEL = "model"
+    NATIVE_LOOP = "native_loop"
+    AUTO = "auto"
+    MWV = "mwv"
+    DESKTOP = "desktop"
+    LOCAL = "local"
+
+
+@dataclass(frozen=True)
+class ProducerReport:
+    """Untrusted producer text, not canonical tool evidence or acceptance."""
+
+    kind: ProducerKind
+    text: str
+    failure_code: str | None = None
+    failure_message: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ProducerKind) or not isinstance(self.text, str):
+            raise ValueError("Typed producer report required")
+        if (self.failure_code is None) != (self.failure_message is None):
+            raise ValueError("Incomplete response failure")
+        if self.failure_code is not None and (
+            not isinstance(self.failure_code, str) or not isinstance(self.failure_message, str)
+        ):
+            raise ValueError("Invalid response failure")
+
+
+@dataclass(frozen=True)
+class RunSubmission:
+    submission_id: str
+    task_id: str
+    task_revision: int
+    task_run_id: str
+    attempt_id: str
+    scope: RunScope
+    version: int
+    created_at: str
+    report: ProducerReport
+    content_digest: str
