@@ -179,7 +179,7 @@ def test_api_context_change_before_admission_is_fenced(tmp_path, monkeypatch, ch
 
 @pytest.mark.parametrize("mode", ["ask", "auto"])
 def test_api_reconstructed_app_does_not_repeat_gateway_dispatch(tmp_path, monkeypatch, mode):  # noqa: ANN001, ANN201
-    from llm.types import LLMResult, ToolCall
+    from llm.types import LLMResult, LLMUsage, ToolCall
     from shared.models import ToolResult
 
     monkeypatch.chdir(tmp_path)
@@ -192,10 +192,11 @@ def test_api_reconstructed_app_does_not_repeat_gateway_dispatch(tmp_path, monkey
             self.calls += 1
             if not any(m.role == "tool" for m in messages):
                 return LLMResult(
+                    usage=LLMUsage(0, 0, 0),
                     text="",
                     tool_calls=[ToolCall(id="original-lookup", name="lookup", arguments={})],
                 )
-            return LLMResult(text="observed")
+            return LLMResult(usage=LLMUsage(0, 0, 0), text="observed")
 
     async def new_client():
         brain = LookupBrain()

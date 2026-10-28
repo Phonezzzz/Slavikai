@@ -8,7 +8,7 @@ from core.approval_policy import ApprovalRequired
 from core.auto_runtime import AutoContinuationUnavailable, AutoOrchestrator
 from core.response_preferences import ResponsePreferences
 from llm.brain_base import Brain
-from llm.types import LLMResult, ToolCall
+from llm.types import LLMResult, LLMUsage, ToolCall
 from shared.models import ToolResult
 
 
@@ -22,9 +22,10 @@ class ApprovalBatchBrain(Brain):
     def generate(self, messages, config=None, tools=None):
         self.history.append(list(messages))
         if messages[-1].role == "tool":
-            return LLMResult(text="completed")
+            return LLMResult(usage=LLMUsage(0, 0, 0), text="completed")
         self.initial_requests += 1
         return LLMResult(
+            usage=LLMUsage(0, 0, 0),
             text="batch",
             tool_calls=[
                 ToolCall(id="before-approval", name="before_approval", arguments={}),

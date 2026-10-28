@@ -276,6 +276,7 @@ class AutoOrchestrator:
             loop_result = AgentToolLoop(
                 max_iterations=budgets.max_tool_calls,
                 max_tool_calls=budgets.max_tool_calls,
+                max_model_tokens=budgets.max_llm_tokens,
                 expires_at_monotonic=started_monotonic + budgets.max_runtime_seconds,
             ).run(
                 brain=brain,
@@ -338,6 +339,23 @@ class AutoOrchestrator:
                     self.parent,
                     reason,
                     skill=_skill_state(state),
+                )
+            if loop_result.error in {"model_usage_unknown", "model_token_budget_exhausted"}:
+                unknown = loop_result.error == "model_usage_unknown"
+                reason = (
+                    "Reported usage предыдущего вызова модели неизвестен; "
+                    "следующий model request с token limit не начат."
+                    if unknown
+                    else "Reported token threshold достигнут; следующий model request не начат."
+                )
+                state["error"] = reason
+                state["error_code"] = "budget_tokens_unknown" if unknown else "budget_tokens"
+                self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
+                return _budget_stop_outcome(
+                    self.parent,
+                    reason,
+                    skill=_skill_state(state),
+                    usage_unknown=unknown,
                 )
             loop_error = getattr(loop_result, "error", None)
             if loop_error is not None:
@@ -844,19 +862,33 @@ def _budget_stop_outcome(
     reason: str,
     *,
     skill: dict[str, JSONValue] | None = None,
+    usage_unknown: bool = False,
 ) -> AutoRunOutcome:
     next_steps = [
         "Сузь задачу и перезапусти auto.",
         "Увеличь budgets для auto-run при необходимости.",
     ]
+    if usage_unknown:
+        next_steps = [
+            "Проверь поддержку полного reported usage у выбранного provider.",
+            "Проверь выполненные действия перед явным новым запуском.",
+        ]
     return AutoRunOutcome(
         text=parent_agent._format_stop_response(
-            what="Auto-run остановлен: budget exhausted",
+            what=(
+                "Auto-run остановлен: token usage неизвестен"
+                if usage_unknown
+                else "Auto-run остановлен: budget exhausted"
+            ),
             why=reason,
             next_steps=next_steps,
             stop_reason_code=StopReasonCode.BUDGET_EXHAUSTED,
             route="auto",
-            plan_summary="Auto FSM остановлен бюджетным лимитом.",
+            plan_summary=(
+                "Token admission невозможен без reported usage."
+                if usage_unknown
+                else "Auto FSM остановлен бюджетным лимитом."
+            ),
             execution_summary=reason,
             skill=skill,
         ),

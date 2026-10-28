@@ -15,7 +15,7 @@ from core.skills.models import SkillEntry
 from core.tool_gateway import ToolGateway
 from core.tool_loop import ExecutedToolCall
 from llm.brain_base import Brain
-from llm.types import LLMResult, ToolCall, ToolSpec
+from llm.types import LLMResult, LLMUsage, ToolCall, ToolSpec
 from shared.auto_models import AutoRunStatus
 from shared.models import LLMMessage, ToolResult
 from tools.tool_registry import ToolRegistry
@@ -40,6 +40,7 @@ def test_auto_process_outcome_through_gateway_and_next_model_request(tmp_path, e
             del config, tools
             if messages[-1].role != "tool":
                 return LLMResult(
+                    usage=LLMUsage(0, 0, 0),
                     text="run script",
                     tool_calls=[
                         ToolCall(
@@ -49,7 +50,7 @@ def test_auto_process_outcome_through_gateway_and_next_model_request(tmp_path, e
                 )
             self.projection = json.loads(messages[-1].content)
             assert messages[-1].tool_call_id == "script-call"
-            return LLMResult(text="script completed")
+            return LLMResult(usage=LLMUsage(0, 0, 0), text="script completed")
 
     class FacadeAgent(_AutoV1Agent, AgentToolsMixin):
         pass
@@ -155,6 +156,7 @@ class _ToolLoopBrain(Brain):
         self.messages_seen.append(list(messages))
         if self.calls == 1:
             return LLMResult(
+                usage=LLMUsage(0, 0, 0),
                 text="call tool",
                 tool_calls=[
                     ToolCall(
@@ -165,7 +167,7 @@ class _ToolLoopBrain(Brain):
                 ],
             )
         assert messages[-1].role == "tool"
-        return LLMResult(text="auto v1 final")
+        return LLMResult(usage=LLMUsage(0, 0, 0), text="auto v1 final")
 
 
 class _ResponseOnlyBrain(Brain):
@@ -177,7 +179,7 @@ class _ResponseOnlyBrain(Brain):
     def generate(self, messages, config=None, tools=None):  # noqa: ANN001
         del config, tools
         self.messages_seen.append(list(messages))
-        return LLMResult(text="Привет! Чем помочь?")
+        return LLMResult(usage=LLMUsage(0, 0, 0), text="Привет! Чем помочь?")
 
 
 class _AutoV1Agent(_FakeAgent):
@@ -207,8 +209,9 @@ def test_auto_native_call_cap_before_dispatch(tmp_path, monkeypatch, batch_size)
 
         def generate(self, messages, config=None, tools=None):
             if messages[-1].role == "tool":
-                return LLMResult(text="finished")
+                return LLMResult(usage=LLMUsage(0, 0, 0), text="finished")
             return LLMResult(
+                usage=LLMUsage(0, 0, 0),
                 text="batch",
                 tool_calls=[
                     ToolCall(id=str(i), name="counted", arguments={"value": i})
@@ -327,13 +330,14 @@ class _RecoveryToolLoopBrain(Brain):
         self.messages_seen.append(list(messages))
         if self.calls == 1:
             return LLMResult(
+                usage=LLMUsage(0, 0, 0),
                 text="call tool",
                 tool_calls=[
                     ToolCall(id="auto-call-fail", name="fail_tool", arguments={}),
                 ],
             )
         assert messages[-1].role == "tool"
-        return LLMResult(text="auto v1 final after recovery")
+        return LLMResult(usage=LLMUsage(0, 0, 0), text="auto v1 final after recovery")
 
 
 class _RecoveryAgent(_FakeAgent):
@@ -520,16 +524,18 @@ class _CorrectiveRecoveryBrain(Brain):
         self.calls += 1
         if self.calls == 1:
             return LLMResult(
+                usage=LLMUsage(0, 0, 0),
                 text="call fail_tool",
                 tool_calls=[ToolCall(id="c1", name="fail_tool", arguments={})],
             )
         if self.calls == 2:
             assert messages[-1].role == "tool"
             return LLMResult(
+                usage=LLMUsage(0, 0, 0),
                 text="call ok_tool",
                 tool_calls=[ToolCall(id="c2", name="ok_tool", arguments={})],
             )
-        return LLMResult(text="done after corrective action")
+        return LLMResult(usage=LLMUsage(0, 0, 0), text="done after corrective action")
 
 
 class _CorrectiveRecoveryAgent(_FakeAgent):
@@ -703,8 +709,9 @@ def test_auto_runtime_rejects_approval_without_native_checkpoint(monkeypatch, tm
             *,
             max_tool_calls: int | None = None,
             expires_at_monotonic: float | None = None,
+            max_model_tokens: int | None = None,
         ) -> None:
-            del max_iterations, max_tool_calls, expires_at_monotonic
+            del max_iterations, max_tool_calls, expires_at_monotonic, max_model_tokens
 
         def run(self, **kwargs):  # noqa: ANN003
             del kwargs

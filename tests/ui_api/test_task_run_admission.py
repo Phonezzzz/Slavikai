@@ -127,7 +127,7 @@ def test_fresh_app_cannot_repeat_committed_ask_tool_dispatch(tmp_path, monkeypat
     from aiohttp.test_utils import TestClient, TestServer
 
     from config.http_server_config import HttpAuthConfig
-    from llm.types import LLMResult, ToolCall
+    from llm.types import LLMResult, LLMUsage, ToolCall
     from server.http.app import create_app
     from server.ui_session_storage import SQLiteUISessionStorage
     from shared.models import ToolResult
@@ -145,9 +145,11 @@ def test_fresh_app_cannot_repeat_committed_ask_tool_dispatch(tmp_path, monkeypat
             self.calls += 1
             if self.calls == 1:
                 return LLMResult(
-                    text="", tool_calls=[ToolCall(id="lookup", name="lookup", arguments={})]
+                    usage=LLMUsage(0, 0, 0),
+                    text="",
+                    tool_calls=[ToolCall(id="lookup", name="lookup", arguments={})],
                 )
-            return LLMResult(text="read complete")
+            return LLMResult(usage=LLMUsage(0, 0, 0), text="read complete")
 
     async def new_client():
         brain = ToolBrain()

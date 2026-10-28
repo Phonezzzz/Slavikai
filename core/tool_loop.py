@@ -97,6 +97,7 @@ class ToolLoopContinuation:
     max_tool_calls: int | None = None
     expires_at_monotonic: float | None = None
     model_usage: ModelUsageSummary | None = None
+    max_model_tokens: int | None = None
 
 
 class AgentToolLoop:
@@ -106,11 +107,17 @@ class AgentToolLoop:
         *,
         max_tool_calls: int | None = None,
         expires_at_monotonic: float | None = None,
+        max_model_tokens: int | None = None,
     ) -> None:
         self.max_iterations = max(1, max_iterations)
         if max_tool_calls is not None and (type(max_tool_calls) is not int or max_tool_calls < 1):
             raise ValueError("max_tool_calls must be a positive integer or None")
         self.max_tool_calls = max_tool_calls
+        if max_model_tokens is not None and (
+            type(max_model_tokens) is not int or max_model_tokens < 1
+        ):
+            raise ValueError("max_model_tokens must be a positive integer or None")
+        self.max_model_tokens = max_model_tokens
         if expires_at_monotonic is not None and (
             type(expires_at_monotonic) not in (int, float)
             or not math.isfinite(expires_at_monotonic)
@@ -131,7 +138,9 @@ class AgentToolLoop:
         continuation: ToolLoopContinuation | None = None,
         record_model_usage: bool = False,
     ) -> AgentToolLoopResult:
-        model_usage = ModelUsageSummary() if record_model_usage else None
+        model_usage = (
+            ModelUsageSummary() if record_model_usage or self.max_model_tokens is not None else None
+        )
         history = list(messages)
         executed: list[ExecutedToolCall] = []
         final_text = ""
@@ -151,6 +160,9 @@ class AgentToolLoop:
             min(self.max_iterations, continuation.max_iterations)
             if continuation is not None
             else self.max_iterations
+        )
+        token_cap = (
+            continuation.max_model_tokens if continuation is not None else self.max_model_tokens
         )
         call_cap = continuation.max_tool_calls if continuation is not None else self.max_tool_calls
         expires_at = (
@@ -178,6 +190,16 @@ class AgentToolLoop:
                 if resuming and continuation is not None:
                     result = LLMResult(text=final_text, tool_calls=continuation.pending_calls)
                 else:
+                    token_error = _token_admission_error(token_cap, model_usage)
+                    if token_error is not None:
+                        return AgentToolLoopResult(
+                            text=final_text,
+                            messages=history,
+                            tool_calls=executed,
+                            iterations=iteration - 1,
+                            error=token_error,
+                            model_usage=model_usage,
+                        )
                     if model_usage is not None:
                         model_usage = model_usage.start_call()
                     result = brain.generate(history, config=config, tools=tools)
@@ -309,6 +331,7 @@ class AgentToolLoop:
                             call_cap,
                             expires_at,
                             model_usage,
+                            token_cap,
                         )
                     )
                     raise
@@ -732,3 +755,13 @@ def _serialize_tool_result(result: ToolResult) -> str:
         "meta": result.meta,
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _token_admission_error(cap: int | None, usage: ModelUsageSummary | None) -> str | None:
+    if cap is None:
+        return None
+    if usage is None or usage.unknown_calls:
+        return "model_usage_unknown"
+    if usage.started_calls > 0 and usage.reported_sum.total_tokens >= cap:
+        return "model_token_budget_exhausted"
+    return None

@@ -5,7 +5,7 @@ import pytest
 from core.agent import Agent
 from core.agent_tools import ChatApprovalUnavailable
 from llm.brain_base import Brain
-from llm.types import LLMResult, ToolCall
+from llm.types import LLMResult, LLMUsage, ToolCall
 from shared.models import ToolResult
 from tests.ui_api.fakes import _session_security_headers
 
@@ -23,9 +23,10 @@ class AutoBatchBrain(Brain):
     def generate(self, messages, config=None, tools=None):
         self.history.append(list(messages))
         if messages[-1].role == "tool":
-            return LLMResult(text="finished")
+            return LLMResult(usage=LLMUsage(0, 0, 0), text="finished")
         self.initial_requests += 1
         return LLMResult(
+            usage=LLMUsage(0, 0, 0),
             text="native batch",
             tool_calls=[
                 ToolCall(id="first-original", name="auto_read", arguments={"index": 0}),

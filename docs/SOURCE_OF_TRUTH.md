@@ -94,8 +94,24 @@ projection на доступных normal/paused/cancelled/budget/error exits; n
 через существующий workflow state transport/storage, но не является durable accounting
 или recovery authority. Внутренние HTTP retries, другие model consumers, streaming и
 verifier не покрыты: это не весь token расход run, actual billing либо spending cap.
-Unknown не останавливает run; квоты, R1a/R1b, approvals и verifier не меняются.
+Сам учёт не останавливает run; token admission задаётся отдельным контрактом ниже.
 Non-Auto sync callers по умолчанию не включают учёт, streaming не агрегируется.
+
+Синхронный Auto захватывает существующий `max_llm_tokens` и проверяет его только
+перед следующим genuine `Brain.generate`, после cancellation/expiry guards. Первый
+request разрешён; при unknown usage следующая generation блокируется с причиной
+невозможности проверить limit, без утверждения превышения. При complete reported
+sum `>= limit` следующая generation блокируется как достигшая threshold. Continuation
+сохраняет исходный limit и summary: новый loop/env не выдаёт свежую квоту, uncapped
+checkpoint не наследует policy нового loop. Synthetic approved remainder не model
+request: уже полученные tools проходят прежние Gateway/approval/call-cap/expiry.
+Final response без tools может пройти verifier даже при unknown или threshold.
+Unknown и exhausted различаются в Auto error_code/reason; автоматического replay нет.
+Это admission fence следующего model request, не hard spending cap: активный request
+может превысить остаток, HTTP retries/другие model consumers/verifier не учитываются.
+Providers без complete reported usage не могут продолжить многошаговый Auto после
+такого ответа. Default120000 и existing loader не меняются; non-Auto/streaming не
+получают новый token policy. Files/retries/hard interruption/recovery остаются отдельно.
 
 - Ask: current `implemented` invariant — никаких Memory/tool writes и hidden vector runtime
   initialization; явный запрос на запоминание создаёт только preview/decision и не сохраняет

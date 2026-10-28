@@ -149,7 +149,23 @@
         "tests/test_tool_call_cap.py",
         "tests/test_auto_native_continuation.py"
       ],
-      "summary": "Sync Auto opts into immutable external Brain.generate usage accounting: started/reported/unknown calls and complete reported sums survive approval continuation and available stop/fault results. Synthetic resume is not another model request; received metadata precedes post-model cancellation/expiry. Numeric Auto-state projection rejects malformed summaries without synthesizing usage. Unknown does not stop execution. Internal HTTP retries, other model consumers, stream aggregation, verifier usage, billing, quota and durable recovery are not covered; existing dispatch/approval/expiry/cap behavior remains."
+      "summary": "Sync Auto opts into immutable external Brain.generate usage accounting: started/reported/unknown calls and complete reported sums survive approval continuation and available stop/fault results. Synthetic resume is not another model request; received metadata precedes post-model cancellation/expiry. Numeric Auto-state projection rejects malformed summaries without synthesizing usage. Accounting alone does not stop execution; Auto token admission is a separate policy. Internal HTTP retries, other model consumers, stream aggregation, verifier usage, billing, quota and durable recovery are not covered; existing dispatch/approval/expiry/cap behavior remains."
+    },
+    {
+      "id": "runtime.auto.reported_token_admission",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_token_admission.py",
+        "tests/test_auto_usage_accounting.py",
+        "tests/test_run_expiry.py",
+        "tests/test_tool_call_cap.py",
+        "tests/test_auto_native_continuation.py"
+      ],
+      "summary": "Sync Auto gates only the next genuine Brain.generate on captured reported token limit: first request allowed, unknown usage blocks with an uncertainty reason, complete sum >= cap blocks as exhausted. Captured cap and accounting survive approvals/new loop/env; synthetic approved remainder and final verifier retain existing guards. Cancellation/expiry precede token admission; no automatic replay. Existing defaults/loader, non-Auto and streaming policy remain. This is not a hard spending/billing cap: active request overshoot, HTTP retries, other model consumers and verifier usage are not covered."
     },
     {
       "id": "runtime.auto.ask_plan_act_fsm",

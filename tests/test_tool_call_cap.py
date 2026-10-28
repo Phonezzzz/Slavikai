@@ -7,7 +7,7 @@ from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop, ToolLoopExecutionError
 from llm.brain_base import Brain
 from llm.stream_model import Done, ToolCallCompleted
-from llm.types import LLMResult, ToolCall, ToolSpec
+from llm.types import LLMResult, LLMUsage, ToolCall, ToolSpec
 from shared.models import LLMMessage, ToolResult
 from tools.tool_logger import ToolCallLogger
 from tools.tool_registry import ToolRegistry
@@ -20,7 +20,7 @@ class BatchBrain(Brain):
         self.batches = iter(batches)
 
     def generate(self, messages, config=None, tools=None):
-        return LLMResult(text="answer", tool_calls=next(self.batches, []))
+        return LLMResult(usage=LLMUsage(0, 0, 0), text="answer", tool_calls=next(self.batches, []))
 
     def generate_stream_events(self, messages, config=None, tools=None):
         for call in self.generate(messages, config, tools).tool_calls:
