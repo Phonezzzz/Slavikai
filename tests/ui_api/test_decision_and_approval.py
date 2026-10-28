@@ -711,14 +711,21 @@ def test_ui_decision_respond_workspace_git_stage_approve_executes(
             respond_payload = await respond.json()
             resume = respond_payload.get("resume")
             assert isinstance(resume, dict)
-            assert resume.get("ok") is True
+            assert resume.get("ok") is False
+            assert "изолированная среда" in str(resume.get("data", {}).get("message"))
             assert resume.get("source_endpoint") == "workspace.git"
 
-            from server.http.common.workspace_git import git_status
-
-            status = git_status(repo)
+            status = {
+                "staged": [
+                    {"path": p}
+                    for p in subprocess.check_output(
+                        ["git", "-C", str(repo), "diff", "--cached", "--name-only", "-z"], text=True
+                    ).split("\0")
+                    if p
+                ]
+            }
             staged = [e["path"] for e in status["staged"]]
-            assert "to-stage.txt" in staged
+            assert "to-stage.txt" not in staged
         finally:
             await client.close()
 
@@ -833,13 +840,20 @@ def test_ui_decision_respond_workspace_git_stage_dash_filename(
             respond_payload = await respond.json()
             resume = respond_payload.get("resume")
             assert isinstance(resume, dict)
-            assert resume.get("ok") is True
+            assert resume.get("ok") is False
+            assert "изолированная среда" in str(resume.get("data", {}).get("message"))
 
-            from server.http.common.workspace_git import git_status
-
-            status = git_status(repo)
+            status = {
+                "staged": [
+                    {"path": p}
+                    for p in subprocess.check_output(
+                        ["git", "-C", str(repo), "diff", "--cached", "--name-only", "-z"], text=True
+                    ).split("\0")
+                    if p
+                ]
+            }
             staged = [e["path"] for e in status["staged"]]
-            assert "-weird.txt" in staged
+            assert "-weird.txt" not in staged
         finally:
             await client.close()
 
@@ -951,14 +965,21 @@ def test_ui_decision_respond_workspace_git_stage_preserves_leading_trailing_spac
             respond_payload = await respond.json()
             resume = respond_payload.get("resume")
             assert isinstance(resume, dict)
-            assert resume.get("ok") is True
+            assert resume.get("ok") is False
+            assert "изолированная среда" in str(resume.get("data", {}).get("message"))
 
-            from server.http.common.workspace_git import git_status
-
-            status = git_status(repo)
+            status = {
+                "staged": [
+                    {"path": p}
+                    for p in subprocess.check_output(
+                        ["git", "-C", str(repo), "diff", "--cached", "--name-only", "-z"], text=True
+                    ).split("\0")
+                    if p
+                ]
+            }
             staged = [e["path"] for e in status["staged"]]
-            assert " leading.txt" in staged
-            assert "trailing.txt " in staged
+            assert " leading.txt" not in staged
+            assert "trailing.txt " not in staged
         finally:
             await client.close()
 
@@ -1094,13 +1115,20 @@ def test_ui_decision_respond_workspace_git_works_without_selected_model(
             respond_payload = await respond.json()
             resume = respond_payload.get("resume")
             assert isinstance(resume, dict)
-            assert resume.get("ok") is True
+            assert resume.get("ok") is False
+            assert "изолированная среда" in str(resume.get("data", {}).get("message"))
 
-            from server.http.common.workspace_git import git_status
-
-            status = git_status(repo)
+            status = {
+                "staged": [
+                    {"path": p}
+                    for p in subprocess.check_output(
+                        ["git", "-C", str(repo), "diff", "--cached", "--name-only", "-z"], text=True
+                    ).split("\0")
+                    if p
+                ]
+            }
             staged = [e["path"] for e in status["staged"]]
-            assert "nomodel.txt" in staged
+            assert "nomodel.txt" not in staged
         finally:
             await client.close()
 
@@ -1152,13 +1180,20 @@ def test_ui_decision_respond_workspace_git_reapprove_does_not_run_twice(
             respond_payload = await respond.json()
             resume = respond_payload.get("resume")
             assert isinstance(resume, dict)
-            assert resume.get("ok") is True
+            assert resume.get("ok") is False
+            assert "изолированная среда" in str(resume.get("data", {}).get("message"))
 
-            from server.http.common.workspace_git import git_status
-
-            status_after_first = git_status(repo)
+            status_after_first = {
+                "staged": [
+                    {"path": p}
+                    for p in subprocess.check_output(
+                        ["git", "-C", str(repo), "diff", "--cached", "--name-only", "-z"], text=True
+                    ).split("\0")
+                    if p
+                ]
+            }
             staged_after_first = [e["path"] for e in status_after_first["staged"]]
-            assert "once.txt" in staged_after_first
+            assert "once.txt" not in staged_after_first
 
             reapprove = await client.post(
                 "/ui/api/decision/respond",
@@ -1175,7 +1210,15 @@ def test_ui_decision_respond_workspace_git_reapprove_does_not_run_twice(
             assert isinstance(error, dict)
             assert error.get("code") in {"decision_already_resolved", "decision_not_pending"}
 
-            status_after_reapprove = git_status(repo)
+            status_after_reapprove = {
+                "staged": [
+                    {"path": p}
+                    for p in subprocess.check_output(
+                        ["git", "-C", str(repo), "diff", "--cached", "--name-only", "-z"], text=True
+                    ).split("\0")
+                    if p
+                ]
+            }
             staged_after_reapprove = [e["path"] for e in status_after_reapprove["staged"]]
             assert staged_after_reapprove == staged_after_first
         finally:

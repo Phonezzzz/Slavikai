@@ -69,21 +69,14 @@ def test_auto_process_outcome_through_gateway_and_next_model_request(tmp_path, e
     with workspace_root_context(tmp_path):
         outcome = agent.handle_auto_command("run script")
 
-    expected = AutoRunStatus.COMPLETED if exit_code == 0 else AutoRunStatus.FAILED_WORKER
     assert isinstance(outcome, auto_runtime.AutoRunOutcome)
-    assert outcome.status == expected
-    if exit_code:
-        assert outcome.stop_reason_code == StopReasonCode.WORKER_FAILED
-        assert outcome.verifier is None
-        assert outcome.next_steps
-    else:
-        assert outcome.stop_reason_code is None
-        assert outcome.verifier is not None and outcome.verifier.ok
+    assert outcome.status == AutoRunStatus.FAILED_WORKER
+    assert outcome.stop_reason_code == StopReasonCode.WORKER_FAILED
+    assert outcome.verifier is None
     assert brain.projection["trust"] == "untrusted_observation"
-    assert brain.projection["ok"] is (exit_code == 0)
-    assert brain.projection["data"]["exit_code"] == exit_code
-    assert brain.projection["data"]["output"] == "process output\n"
-    assert brain.projection["data"]["stderr"] == "process diagnostic\n"
+    assert brain.projection["ok"] is False
+    assert "exit_code" not in brain.projection["data"]
+    assert "изолированная среда" in brain.projection["error"]
 
 
 class _FakeBrain(Brain):
@@ -739,3 +732,23 @@ def test_auto_runtime_rejects_approval_without_native_checkpoint(monkeypatch, tm
         with pytest.raises(auto_runtime.AutoContinuationUnavailable):
             orchestrator.run_v1("goal")
     assert not orchestrator._paused_runs
+
+
+@pytest.mark.parametrize("override", ["GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL"])
+def test_auto_does_not_claim_process_free_verification_when_git_context_is_ambiguous(
+    tmp_path,
+    monkeypatch,
+    override,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(override, str(tmp_path / "private-git-context"))
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: calls.append(a))
+    agent = _AutoV1Agent()
+    auto = AutoAgent(agent)
+    auto.orchestrator.workspace_root = tmp_path
+    with workspace_root_context(tmp_path):
+        result = auto.run_outcome("inspect workspace")
+    assert calls == []
+    assert result.status == AutoRunStatus.FAILED_VERIFIER
+    assert result.verifier.error == "canonical_repo_verifier_unavailable"

@@ -1,31 +1,23 @@
 from __future__ import annotations
 
-import subprocess
-
 import pytest
 
 from shared.models import ToolRequest
 from tools.shell_tool import ShellConfig, handle_shell, handle_shell_request
 
 
-def test_shell_nonzero_exit_is_failure_with_diagnostics(tmp_path, monkeypatch) -> None:
+def test_shell_cannot_spawn_even_a_known_safe_command(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
-    monkeypatch.setattr(
-        "tools.shell_tool.subprocess.run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            ["echo", "hello"], 7, stdout="before failure\n", stderr="critical error\n"
-        ),
-    )
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: calls.append(a))
     result = handle_shell("echo hello", config=ShellConfig(allowed_commands=["echo"]))
-
     assert not result.ok
-    assert result.error and "7" in result.error
-    assert result.data["returncode"] == 7
-    assert "before failure" in result.data["output"]
-    assert "critical error" in result.data["output"]
+    assert calls == []
+    assert result.meta["reason_code"] == "sandbox_execution_unavailable"
+    assert "returncode" not in result.data
 
 
-def test_shell_allowed_command(tmp_path, monkeypatch) -> None:
+def test_allowed_shell_command_requires_isolation(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
     cfg = ShellConfig(
         allowed_commands=["echo"],
@@ -34,8 +26,8 @@ def test_shell_allowed_command(tmp_path, monkeypatch) -> None:
         sandbox_root="sandbox",
     )
     res = handle_shell("echo hello", config=cfg)
-    assert res.ok
-    assert "hello" in str(res.data.get("output"))
+    assert not res.ok
+    assert res.meta["reason_code"] == "sandbox_execution_unavailable"
 
 
 def test_shell_blocks_abs_path(tmp_path, monkeypatch) -> None:
@@ -56,7 +48,7 @@ def test_shell_blocks_dangerous_and_chain(tmp_path, monkeypatch) -> None:
     assert "цепоч" in (res_chain.error or "").lower() or "запрещ" in (res_chain.error or "").lower()
 
 
-def test_shell_timeout(tmp_path, monkeypatch) -> None:
+def test_configured_timeout_does_not_allow_host_execution(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("shared.sandbox.SANDBOX_ROOT", tmp_path / "sandbox")
     cfg = ShellConfig(
         allowed_commands=["sleep"],
@@ -66,7 +58,7 @@ def test_shell_timeout(tmp_path, monkeypatch) -> None:
     )
     res = handle_shell("sleep 2", config=cfg)
     assert not res.ok
-    assert "лимит" in (res.error or "").lower() or "timeout" in (res.error or "").lower()
+    assert res.meta["reason_code"] == "sandbox_execution_unavailable"
 
 
 def test_shell_rejects_absolute_sandbox_root(tmp_path, monkeypatch) -> None:
@@ -109,8 +101,8 @@ def test_shell_uses_defaults_when_config_missing(tmp_path, monkeypatch) -> None:
     res = handle_shell_request(
         ToolRequest(name="shell", args={"command": "echo hi", "config_path": str(config_path)})
     )
-    assert res.ok
-    assert "hi" in str(res.data.get("output"))
+    assert not res.ok
+    assert res.meta["reason_code"] == "sandbox_execution_unavailable"
     assert not config_path.exists()
 
 

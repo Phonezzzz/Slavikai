@@ -166,25 +166,6 @@ def test_write_file_path_traversal_rejected(
 # ── apply_patch ──────────────────────────────────────────────────────────────
 
 
-def test_apply_patch_calls_runner_with_patch_command(
-    tmp_path: Path, fake_runner: FakeContainerRunner
-) -> None:
-    (tmp_path / "src.txt").write_text("original")
-    fake_runner.responses = [(0, "", "")]
-    b = ContainerComputerBackend(image="img", project_root=tmp_path, runner=fake_runner)
-    b.apply_patch("src.txt", "@@ -1 +1 @@\n-original\n+replaced\n")
-    assert len(fake_runner.calls) == 1
-    cmd_args = fake_runner.calls[0]
-    # verify docker run invocation and path mapping
-    assert "docker" in cmd_args[0]
-    assert "run" in cmd_args
-    assert "--rm" in cmd_args
-    # the command passed to sh -c must contain "patch"
-    shell_cmd = cmd_args[-1]
-    assert "patch" in shell_cmd
-    assert "/workspace/src.txt" in shell_cmd
-
-
 def test_apply_patch_path_traversal_rejected(
     tmp_path: Path, fake_runner: FakeContainerRunner
 ) -> None:
@@ -193,143 +174,24 @@ def test_apply_patch_path_traversal_rejected(
         b.apply_patch("../../evil.txt", "diff")
 
 
-# ── run_command ──────────────────────────────────────────────────────────────
-
-
-def test_run_command_calls_runner_with_docker_run(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    fake_runner.responses = [(0, "hello", "")]
-    result = backend.run_command("echo hello")
-    assert result.ok
-    assert result.data["output"] == "hello"
-    assert len(fake_runner.calls) == 1
-    args = fake_runner.calls[0]
-    assert args[0] == "docker"
-    assert "run" in args
-    assert "--rm" in args
-    assert "test-image:latest" in args
-    assert "echo hello" in args
-
-
-def test_run_command_mounts_project_root(
-    backend: ContainerComputerBackend,
-    fake_runner: FakeContainerRunner,
-    tmp_path: Path,
-) -> None:
-    backend.run_command("ls")
-    args = fake_runner.calls[0]
-    volume_arg = f"{tmp_path}:/workspace"
-    assert volume_arg in args
-
-
-def test_run_command_sets_workdir_to_container_workspace(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    backend.run_command("pwd")
-    args = fake_runner.calls[0]
-    idx = args.index("-w")
-    assert args[idx + 1] == "/workspace"
-
-
-def test_run_command_failure_returns_error(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    fake_runner.responses = [(1, "", "command not found")]
-    result = backend.run_command("no_such_cmd")
-    assert not result.ok
-    assert "command not found" in (result.error or "")
-
-
-def test_run_command_runner_exception_returns_failure(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    fake_runner.responses = []
-
-    def _boom(args: list[str]) -> tuple[int, str, str]:
-        raise RuntimeError("docker not found")
-
-    fake_runner.run = _boom  # type: ignore[method-assign]
-    result = backend.run_command("ls")
-    assert not result.ok
-    assert "docker not found" in (result.error or "")
-
-
-# ── git_diff ─────────────────────────────────────────────────────────────────
-
-
-def test_git_diff_no_path_calls_git_diff(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    backend.git_diff()
-    shell_cmd = fake_runner.calls[0][-1]
-    assert shell_cmd == "git diff"
-
-
-def test_git_diff_with_path_includes_path(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    backend.git_diff("src/main.py")
-    shell_cmd = fake_runner.calls[0][-1]
-    assert shell_cmd == "git diff -- src/main.py"
-
-
-# ── run_tests ────────────────────────────────────────────────────────────────
-
-
-def test_run_tests_no_path_calls_pytest(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    backend.run_tests()
-    shell_cmd = fake_runner.calls[0][-1]
-    assert shell_cmd == "pytest"
-
-
-def test_run_tests_with_path_calls_pytest_path(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    backend.run_tests("tests/test_foo.py")
-    shell_cmd = fake_runner.calls[0][-1]
-    assert shell_cmd == "pytest tests/test_foo.py"
-
-
-# ── check ────────────────────────────────────────────────────────────────────
-
-
-def test_check_calls_make_check(
-    backend: ContainerComputerBackend, fake_runner: FakeContainerRunner
-) -> None:
-    backend.check()
-    shell_cmd = fake_runner.calls[0][-1]
-    assert shell_cmd == "make check"
-
-
-# ── podman support ───────────────────────────────────────────────────────────
-
-
-def test_podman_runtime_used_in_args(tmp_path: Path, fake_runner: FakeContainerRunner) -> None:
+@pytest.mark.parametrize("engine", ["docker", "podman"])
+@pytest.mark.parametrize(
+    "operation", ["run_command", "git_diff", "run_tests", "check", "apply_patch"]
+)
+def test_container_process_operations_cannot_use_even_injected_runner(
+    tmp_path, fake_runner, engine, operation
+):
     b = ContainerComputerBackend(
-        image="img", project_root=tmp_path, runtime="podman", runner=fake_runner
+        image="unqualified", project_root=tmp_path, runtime=engine, runner=fake_runner
     )
-    b.run_command("ls")
-    args = fake_runner.calls[0]
-    assert args[0] == "podman"
-
-
-# ── custom container_workspace ───────────────────────────────────────────────
-
-
-def test_custom_container_workspace_used_in_volume_and_workdir(
-    tmp_path: Path, fake_runner: FakeContainerRunner
-) -> None:
-    b = ContainerComputerBackend(
-        image="img",
-        project_root=tmp_path,
-        container_workspace="/code",
-        runner=fake_runner,
-    )
-    b.run_command("ls")
-    args = fake_runner.calls[0]
-    assert f"{tmp_path}:/code" in args
-    idx = args.index("-w")
-    assert args[idx + 1] == "/code"
+    before = list(tmp_path.iterdir())
+    if operation == "apply_patch":
+        result = b.apply_patch("file.txt", "patch")
+    elif operation == "check":
+        result = b.check()
+    else:
+        result = getattr(b, operation)("echo data" if operation == "run_command" else "")
+    assert not result.ok
+    assert result.meta["reason_code"] == "sandbox_execution_unavailable"
+    assert fake_runner.calls == []
+    assert list(tmp_path.iterdir()) == before

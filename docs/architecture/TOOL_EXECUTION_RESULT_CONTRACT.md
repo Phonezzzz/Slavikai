@@ -4,7 +4,12 @@
 разделяет authoritative execution outcome и представления результата для потребителей.
 Он не объявляет существующий `ToolResult` полным durable canonical result.
 
-## Outcome — implemented для generic process tools
+## Outcome — контракт generic process results; Sandbox execution недоступен
+
+Current I0: `shell`, terminal oneshot и `workspace_run` возвращают execution unavailable
+до запуска по [SANDBOX_PROCESS_FENCE.md](SANDBOX_PROCESS_FENCE.md), без выдуманных
+exit code/raw output. Следующая семантика outcome остаётся контрактом для реально
+полученного process result; она не означает доступный qualified executor.
 
 `ToolResult.ok` описывает выполнение запрошенной операции, а не успешный запуск процесса
 или доставку ответа. Для `shell`, terminal oneshot и `workspace_run` exit code 0 означает

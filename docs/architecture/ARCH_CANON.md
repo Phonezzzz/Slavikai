@@ -287,6 +287,13 @@ API:
 
 ## 6) Policy boundary (sandbox/index/yolo)
 
+Current I0: process operations Sandbox недоступны до появления отдельно принятой
+qualified environment; граница tools/verifier/manual terminal/Git/import/container
+описана в [SANDBOX_PROCESS_FENCE.md](SANDBOX_PROCESS_FENCE.md). Approval/yolo не снимают
+этот отказ; required verifier не становится PASS. Desktop сохраняет explicit host
+authority. Это отказ от unsafe spawn, не реализация целевой isolation.
+
+
 - Policy/scope/budgets/verifier фиксируются в packet и становятся immutable для Act.
 - Enforcement строится по packet-policy snapshot, а не по “текущему состоянию”.
 - Работа вне workspace root запрещается policy-check на исполнении шага.

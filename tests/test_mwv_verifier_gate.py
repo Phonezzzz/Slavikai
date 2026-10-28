@@ -53,7 +53,7 @@ def test_mwv_stops_on_verifier_failure(tmp_path: Path) -> None:
         verifier=lambda _task, _ctx: runner.run(),
     )
 
-    assert result.verification_result.status == VerificationStatus.FAILED
+    assert result.verification_result.status == VerificationStatus.ERROR
     assert result.retry_decision is not None
     assert result.retry_decision.allow_retry is False
-    assert "tests failed" in result.verification_result.stderr
+    assert result.verification_result.error == "sandbox_execution_unavailable"

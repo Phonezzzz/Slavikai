@@ -3,24 +3,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import pty
 import shlex
-import shutil
 import subprocess
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from config.shell_config import DEFAULT_SHELL_CONFIG_PATH, load_shell_config
 from shared.command_safety import is_hard_unsafe_command as _is_unsafe_shell_command
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.sandbox_execution import SandboxExecutionUnavailable, sandbox_execution_failure
 from tools.shell_tool import _validate_args as _validate_shell_args
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 
 def _utc_iso_now() -> str:
@@ -140,37 +135,7 @@ class TerminalTool:
         if not cwd.exists() or not cwd.is_dir():
             return ToolResult.failure("Рабочая директория для команды не найдена.")
 
-        try:
-            proc = subprocess.run(
-                args,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=cfg.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return ToolResult.failure(f"Команда превысила лимит времени ({cfg.timeout_seconds}с).")
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult.failure(f"Ошибка запуска: {exc}")
-
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-        if len(stdout) > cfg.max_output_chars:
-            stdout = stdout[: cfg.max_output_chars] + "\n...[stdout truncated]"
-        if len(stderr) > cfg.max_output_chars:
-            stderr = stderr[: cfg.max_output_chars] + "\n...[stderr truncated]"
-        data: dict[str, JSONValue] = {
-            "mode": "oneshot",
-            "output": stdout,
-            "stderr": stderr,
-            "exit_code": proc.returncode,
-            "cwd": str(cwd),
-            "cwd_mode": cwd_mode,
-        }
-        if proc.returncode != 0:
-            return ToolResult.failure(f"Команда завершилась с кодом {proc.returncode}.", data=data)
-        return ToolResult.success(data)
+        return sandbox_execution_failure()
 
     async def create_or_get(
         self,
@@ -180,32 +145,7 @@ class TerminalTool:
         rows: int | None = None,
         cols: int | None = None,
     ) -> dict[str, JSONValue]:
-        async with self._lock:
-            existing = self._states.get(session_id)
-            if existing is not None and existing.status == "running":
-                return self._snapshot_for_state(existing)
-            state = self._spawn_state(
-                session_id=session_id,
-                workspace_root=workspace_root,
-                rows=rows,
-                cols=cols,
-            )
-            self._states[session_id] = state
-            self._append_event_locked(
-                state,
-                "terminal.started",
-                {
-                    "session_id": session_id,
-                    "terminal_id": state.terminal_id,
-                    "status": state.status,
-                    "workspace_root": state.workspace_root,
-                    "spawn_cwd": state.spawn_cwd,
-                    "rows": state.rows,
-                    "cols": state.cols,
-                },
-            )
-            self._publish_to_subscribers_locked(state, state.event_buffer[-1].event)
-            return self._snapshot_for_state(state)
+        raise SandboxExecutionUnavailable()
 
     async def get_snapshot(self, session_id: str) -> dict[str, JSONValue] | None:
         async with self._lock:
@@ -215,25 +155,7 @@ class TerminalTool:
             return self._snapshot_for_state(state)
 
     async def write_input(self, session_id: str, data: str) -> dict[str, JSONValue]:
-        encoded = data.encode("utf-8")
-        async with self._lock:
-            state = self._states.get(session_id)
-            if state is None:
-                raise KeyError("terminal not started")
-            if state.status != "running":
-                raise RuntimeError("terminal is not running")
-            master_fd = state.master_fd
-            if master_fd is None:
-                raise RuntimeError("terminal PTY is unavailable")
-            terminal_id = state.terminal_id
-            initial_output = state.output
-        await asyncio.to_thread(os.write, master_fd, encoded)
-        await self._wait_for_output_quiet(
-            session_id=session_id,
-            terminal_id=terminal_id,
-            initial_output=initial_output,
-        )
-        return await self.require_snapshot(session_id)
+        raise SandboxExecutionUnavailable()
 
     async def resize(
         self,
@@ -242,35 +164,7 @@ class TerminalTool:
         rows: int,
         cols: int,
     ) -> dict[str, JSONValue]:
-        async with self._lock:
-            state = self._states.get(session_id)
-            if state is None:
-                raise KeyError("terminal not started")
-            if state.status != "running":
-                raise RuntimeError("terminal is not running")
-            master_fd = state.master_fd
-            if master_fd is None:
-                raise RuntimeError("terminal PTY is unavailable")
-        await asyncio.to_thread(self._apply_winsize, master_fd, rows, cols)
-        async with self._lock:
-            state = self._states.get(session_id)
-            if state is None:
-                raise KeyError("terminal not started")
-            state.rows = rows
-            state.cols = cols
-            state.updated_at = _utc_iso_now()
-            self._append_event_locked(
-                state,
-                "terminal.resized",
-                {
-                    "session_id": session_id,
-                    "terminal_id": state.terminal_id,
-                    "rows": rows,
-                    "cols": cols,
-                },
-            )
-            self._publish_to_subscribers_locked(state, state.event_buffer[-1].event)
-            return self._snapshot_for_state(state)
+        raise SandboxExecutionUnavailable()
 
     async def close(self, session_id: str) -> dict[str, JSONValue]:
         async with self._lock:
@@ -370,80 +264,6 @@ class TerminalTool:
         if snapshot is None:
             raise KeyError("terminal not started")
         return snapshot
-
-    async def _wait_for_output_quiet(
-        self,
-        *,
-        session_id: str,
-        terminal_id: str,
-        initial_output: str,
-        timeout_seconds: float = 1.0,
-        quiet_seconds: float = 0.08,
-    ) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
-        last_output = initial_output
-        last_change_at: float | None = None
-        while loop.time() < deadline:
-            async with self._lock:
-                state = self._states.get(session_id)
-                if state is None or state.terminal_id != terminal_id or state.status != "running":
-                    return
-                current_output = state.output
-            now = loop.time()
-            if current_output != last_output:
-                last_output = current_output
-                last_change_at = now
-            if last_change_at is not None and now - last_change_at >= quiet_seconds:
-                return
-            await asyncio.sleep(0.01)
-
-    def _spawn_state(
-        self,
-        *,
-        session_id: str,
-        workspace_root: str,
-        rows: int | None,
-        cols: int | None,
-    ) -> _TerminalState:
-        master_fd, slave_fd = pty.openpty()
-        spawn_cwd = workspace_root
-        shell_argv = self._shell_argv()
-        env = dict(os.environ)
-        env["TERM"] = env.get("TERM", "xterm-256color")
-        env["PS1"] = ""
-        env["PROMPT_COMMAND"] = ""
-        process = subprocess.Popen(
-            shell_argv,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            cwd=spawn_cwd,
-            env=env,
-            start_new_session=True,
-        )
-        os.close(slave_fd)
-        os.set_blocking(master_fd, True)
-        state = _TerminalState(
-            terminal_id=uuid.uuid4().hex,
-            session_id=session_id,
-            workspace_root=workspace_root,
-            spawn_cwd=spawn_cwd,
-            rows=max(1, rows or self._default_rows),
-            cols=max(1, cols or self._default_cols),
-            process=process,
-            master_fd=master_fd,
-        )
-        self._apply_winsize(master_fd, state.rows, state.cols)
-        state.read_task = asyncio.create_task(
-            self._read_loop(session_id, state.terminal_id),
-            name=f"terminal-read-{session_id}",
-        )
-        state.wait_task = asyncio.create_task(
-            self._wait_loop(session_id, state.terminal_id),
-            name=f"terminal-wait-{session_id}",
-        )
-        return state
 
     async def _read_loop(self, session_id: str, terminal_id: str) -> None:
         while True:
@@ -565,21 +385,3 @@ class TerminalTool:
         if len(text) <= self._output_max_chars:
             return text
         return text[-self._output_max_chars :]
-
-    def _shell_argv(self) -> Sequence[str]:
-        bash_path = shutil.which("bash")
-        if bash_path:
-            return [bash_path, "--noprofile", "--norc", "-i"]
-        sh_path = shutil.which("sh")
-        if sh_path:
-            return [sh_path, "-i"]
-        raise RuntimeError("No interactive shell found for PTY terminal runtime.")
-
-    @staticmethod
-    def _apply_winsize(master_fd: int, rows: int, cols: int) -> None:
-        import fcntl
-        import struct
-        import termios
-
-        winsize = struct.pack("HHHH", rows, cols, 0, 0)
-        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)

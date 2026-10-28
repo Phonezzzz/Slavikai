@@ -1,99 +1,57 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+
+import pytest
 
 from shared.models import ToolRequest
-from tools.terminal_tool import TerminalTool
+from shared.sandbox_execution import SandboxExecutionUnavailable
+from tools.terminal_tool import TerminalTool, _TerminalState
 
 
-async def _wait_for_snapshot(
-    manager: TerminalTool,
-    session_id: str,
-    *,
-    predicate,
-    attempts: int = 60,
-) -> dict[str, object]:
-    for _ in range(attempts):
-        snapshot = await manager.require_snapshot(session_id)
-        if predicate(snapshot):
-            return snapshot
-        await asyncio.sleep(0.05)
-    raise AssertionError("terminal snapshot predicate was not satisfied")
+def test_terminal_create_input_resize_refuse_before_os_actions(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr("os.write", lambda *a: calls.append(a))
 
-
-def test_terminal_manager_reuses_running_terminal_and_uses_workspace_root(tmp_path: Path) -> None:
-    async def run() -> None:
+    async def run():
         manager = TerminalTool()
-        session_id = "session-a"
-        first = await manager.create_or_get(session_id, workspace_root=str(tmp_path))
-        second = await manager.create_or_get(session_id, workspace_root=str(tmp_path))
-        assert first["terminal_id"] == second["terminal_id"]
-        assert first["workspace_root"] == str(tmp_path)
-        assert first["spawn_cwd"] == str(tmp_path)
-
-        await manager.write_input(session_id, "pwd\n")
-        snapshot = await _wait_for_snapshot(
-            manager,
-            session_id,
-            predicate=lambda item: str(tmp_path) in str(item.get("output") or ""),
+        # Retained pre-fence state не становится разрешённой environment.
+        manager._states["old"] = _TerminalState(
+            terminal_id="old-id",
+            session_id="old",
+            workspace_root=str(tmp_path),
+            spawn_cwd=str(tmp_path),
+            rows=24,
+            cols=80,
+            master_fd=999,
         )
-        assert str(tmp_path) in str(snapshot.get("output") or "")
+        for session in ("new", "old"):
+            with pytest.raises(SandboxExecutionUnavailable):
+                await manager.create_or_get(session, workspace_root=str(tmp_path))
+            with pytest.raises(SandboxExecutionUnavailable):
+                await manager.write_input(session, "echo private\n")
+            with pytest.raises(SandboxExecutionUnavailable):
+                await manager.resize(session, rows=40, cols=120)
+        assert await manager.get_snapshot("new") is None
+        assert (await manager.get_snapshot("old"))["terminal_id"] == "old-id"
+        assert calls == []
+        manager._states["old"].master_fd = None
         await manager.shutdown()
 
     asyncio.run(run())
 
 
-def test_terminal_manager_resize_close_and_new_terminal_id(tmp_path: Path) -> None:
-    async def run() -> None:
-        manager = TerminalTool()
-        session_id = "session-b"
-        first = await manager.create_or_get(session_id, workspace_root=str(tmp_path))
-        resized = await manager.resize(session_id, rows=40, cols=120)
-        assert resized["rows"] == 40
-        assert resized["cols"] == 120
-
-        closed = await manager.close(session_id)
-        assert closed["status"] == "closed"
-
-        second = await manager.create_or_get(session_id, workspace_root=str(tmp_path))
-        assert second["terminal_id"] != first["terminal_id"]
-        await manager.shutdown()
-
-    asyncio.run(run())
-
-
-def test_terminal_manager_tracks_exit_code_and_shutdown(tmp_path: Path) -> None:
-    async def run() -> None:
-        manager = TerminalTool()
-        session_id = "session-c"
-        await manager.create_or_get(session_id, workspace_root=str(tmp_path))
-        await manager.write_input(session_id, "exit 7\n")
-        exited = await _wait_for_snapshot(
-            manager,
-            session_id,
-            predicate=lambda item: item.get("status") == "exited",
-        )
-        assert exited["exit_code"] == 7
-        await manager.shutdown()
-
-    asyncio.run(run())
-
-
-def test_terminal_tool_handle_oneshot_uses_explicit_workspace_root(tmp_path: Path) -> None:
+def test_terminal_handle_cannot_turn_workspace_root_into_host_authority(tmp_path):
     result = TerminalTool().handle(
         ToolRequest(
-            name="terminal",
+            name="workspace_terminal_run",
             args={
-                "mode": "oneshot",
-                "command": "echo ok",
-                "cwd_mode": "session_root",
+                "command": "echo hello",
                 "workspace_root": str(tmp_path),
                 "sandbox_root": str(tmp_path),
             },
         )
     )
-
-    assert result.ok
-    assert result.data["mode"] == "oneshot"
-    assert result.data["cwd"] == str(tmp_path)
+    assert not result.ok
+    assert result.meta["reason_code"] == "sandbox_execution_unavailable"

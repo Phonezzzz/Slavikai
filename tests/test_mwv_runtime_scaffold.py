@@ -24,7 +24,6 @@ from core.mwv.models import (
 from core.mwv.routing import RouteDecision
 from core.mwv.verifier import VerifierRunner
 from core.mwv.verifier_runtime import (
-    NON_REPO_VERIFIER_REQUIRED_ERROR,
     VerifierRuntime,
     _default_runner,
 )
@@ -96,7 +95,7 @@ def test_verifier_runtime_requires_explicit_command_for_non_repo_workspace(tmp_p
         ),
     )
     assert result.status == VerificationStatus.ERROR
-    assert result.error == NON_REPO_VERIFIER_REQUIRED_ERROR
+    assert result.error == "sandbox_execution_unavailable"
 
 
 def test_default_verifier_runner_factory() -> None:

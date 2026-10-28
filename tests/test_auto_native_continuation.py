@@ -46,7 +46,7 @@ class ApprovalBatchBrain(Brain):
         "main_config",
         "expired",
         "skill_cancel",
-        "verifier_cancel",
+        "verifier_unavailable",
     ],
 )
 def test_auto_resume_does_not_repeat_completed_tool(
@@ -128,40 +128,13 @@ def test_auto_resume_does_not_repeat_completed_tool(
             assert cancelled_state["plan"] == original_plan
             assert executions == ["before_approval"]
             return
-        if changed_scope == "verifier_cancel":
-            import shlex
-            import sys
-            import threading
-            import time
-
-            ready = tmp_path / "verifier-ready"
-            script = (
-                "import pathlib,time; print('diagnostic',flush=True); "
-                f"pathlib.Path({str(ready)!r}).touch(); time.sleep(30)"
-            )
-            (tmp_path / "Makefile").write_text(
-                f"check:\n\t@{shlex.quote(sys.executable)} -c {shlex.quote(script)}\n"
-            )
-            live_token = asyncio.Event()
-
-            def stop_verifier():
-                deadline = time.monotonic() + 3
-                while not ready.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                live_token.set()
-
-            worker = threading.Thread(target=stop_verifier)
-            worker.start()
+        if changed_scope == "verifier_unavailable":
+            (tmp_path / "Makefile").write_text("check:\n\t@true\n")
             agent.set_session_context("auto-session", {"NETWORK_RISK"})
-            try:
-                outcome = orchestrator.resume(run_id, cancellation_token=live_token)
-            finally:
-                worker.join(timeout=4)
-            assert ready.exists()
-            assert outcome.status.value == "cancelled"
-            assert outcome.verifier.error == "verifier_cancelled"
-            assert "diagnostic" in outcome.verifier.stdout
-            assert agent.last_auto_state["status"] == "cancelled"
+            outcome = orchestrator.resume(run_id)
+            assert outcome.status.value == "failed_verifier"
+            assert outcome.verifier.error == "sandbox_execution_unavailable"
+            assert outcome.verifier.exit_code is None
             assert executions == ["before_approval", "pending_network"]
             assert brain.initial_requests == 1
             return

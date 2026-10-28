@@ -8,6 +8,12 @@ Product direction (personal agent computer, роли Chat/Computer, backends) �
 Computer Mode product invariant ("not a manual IDE", live agent execution surface, primary vs secondary surfaces) — `ARCH_CANON.md §9`.
 Если здесь описан legacy-путь, это не делает его целевой архитектурой.
 
+Current I0 ограничение: sandbox process execution недоступен. Tools, process verifier,
+manual PTY/Git/import и Container commands отказывают до запуска; прежние описания
+host runners ниже являются историей механизма, а не доступной capability.
+См. [SANDBOX_PROCESS_FENCE.md](SANDBOX_PROCESS_FENCE.md). Process-free paths и explicit
+Desktop authority сохраняются; изолированный backend ещё не реализован.
+
 ## Цель
 
 SlavikAI сейчас работает как server-side agent runtime с Cloudflare Access owner/member
@@ -108,7 +114,7 @@ conversational endpoint и существующий LLM/tool loop, но публ
   - `ComputerBackend` — `@runtime_checkable` Protocol, определяет те же 8 методов.
   - `LocalComputerBackend` — default implementation; делегирует операции через `ToolGateway`.
     `Agent.make_computer_runtime()` создаёт его по умолчанию.
-  - `ContainerComputerBackend` — **opt-in/inactive** alternative; запускает команды через
+  - `ContainerComputerBackend` — **opt-in/inactive** alternative; command execution закрыт I0 fence. Прежний runner использовал
     `docker/podman run --rm`; в тестах используется `FakeContainerRunner` вместо реального
     Docker daemon. По умолчанию не включён; `LocalComputerBackend` остаётся default.
   - Computer UI read-only по умолчанию; ручные правки файлов (New/Rename/Move/Del/Save)

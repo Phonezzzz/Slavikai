@@ -9,7 +9,7 @@ from tools.terminal_tool import TerminalTool
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
-def test_terminal_oneshot_outcome_preserves_process_diagnostics(
+def test_terminal_oneshot_does_not_claim_unexecuted_script_output(
     tmp_path, monkeypatch, exit_code
 ) -> None:
     script = tmp_path / "result.py"
@@ -28,12 +28,9 @@ def test_terminal_oneshot_outcome_preserves_process_diagnostics(
         sandbox_root=tmp_path,
     )
 
-    assert result.ok is (exit_code == 0)
-    assert result.data["output"] == "before failure\n"
-    assert result.data["stderr"] == "diagnostic\n"
-    assert result.data["exit_code"] == exit_code
-    if exit_code:
-        assert result.error and str(exit_code) in result.error
+    assert not result.ok
+    assert result.meta["reason_code"] == "sandbox_execution_unavailable"
+    assert "exit_code" not in result.data
 
 
 def test_terminal_oneshot_blocks_absolute_paths() -> None:

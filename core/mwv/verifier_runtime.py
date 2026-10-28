@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
-import signal
-import subprocess
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -12,79 +10,8 @@ from pathlib import Path
 from typing import Protocol
 
 from core.mwv.models import RunContext, TaskPacket, VerificationResult, VerificationStatus
-from core.mwv.verifier import VerifierRunner
-from core.mwv.verifier_summary import extract_verifier_excerpt, verifier_fail_type
+from core.mwv.verifier import VerifierRunner, sandbox_verification_unavailable
 from shared.models import JSONValue, ToolResult
-
-
-class VerifierCancelled(Exception):
-    def __init__(self, stdout: str = "", stderr: str = "") -> None:
-        super().__init__("verifier_cancelled")
-        self.stdout, self.stderr = stdout, stderr
-
-
-def _drain_stopped_process(process: subprocess.Popen[str]) -> tuple[str, str]:
-    try:
-        return process.communicate(timeout=0.5)
-    except subprocess.TimeoutExpired as exc:
-        # Отделившийся потомок может держать inherited pipes после остановки owning group.
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                pipe.close()
-        process.wait(timeout=0.5)
-        return (
-            _coerce_output(exc.stdout),
-            _coerce_output(exc.stderr) + "\n[verifier pipe capture incomplete]",
-        )
-
-
-def _execute_command(
-    command: list[str],
-    *,
-    cwd: Path,
-    timeout_seconds: int,
-    cancelled: Callable[[], bool] | None,
-) -> subprocess.CompletedProcess[str]:
-    if cancelled is None:
-        return subprocess.run(
-            command, cwd=cwd, capture_output=True, text=True, timeout=timeout_seconds, check=False
-        )
-    if cancelled():
-        raise VerifierCancelled()
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    deadline = time.monotonic() + timeout_seconds
-    try:
-        while True:
-            stopped = cancelled()
-            remaining = deadline - time.monotonic()
-            if stopped or remaining <= 0:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                stdout, stderr = _drain_stopped_process(process)
-                if stopped:
-                    raise VerifierCancelled(stdout, stderr)
-                raise subprocess.TimeoutExpired(command, timeout_seconds, stdout, stderr)
-            try:
-                stdout, stderr = process.communicate(timeout=min(0.05, remaining))
-                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-            except subprocess.TimeoutExpired:
-                continue
-    finally:
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            _drain_stopped_process(process)
 
 
 class VerifierRunnerProtocol(Protocol):
@@ -342,8 +269,8 @@ class VerifierRuntime:
         try:
             workspace_root = _resolve_workspace_root(context.workspace_root)
             command = _resolve_packet_command(task.verifier)
-            timeout_seconds = _resolve_timeout(task.verifier)
-            cwd = _resolve_cwd(task.verifier, workspace_root=workspace_root)
+            _resolve_timeout(task.verifier)
+            _resolve_cwd(task.verifier, workspace_root=workspace_root)
         except ValueError as exc:
             return VerificationResult(
                 status=VerificationStatus.ERROR,
@@ -362,218 +289,19 @@ class VerifierRuntime:
                 ),
             )
 
-        if command is not None:
-            return self._run_command(
-                command, cwd=cwd, timeout_seconds=timeout_seconds, cancelled=cancelled
-            )
-
-        if not is_repo_workspace(workspace_root):
+        if cancelled is not None and cancelled():
             return VerificationResult(
                 status=VerificationStatus.ERROR,
-                command=[],
+                command=command or [],
                 exit_code=None,
                 stdout="",
                 stderr="",
-                duration_seconds=time.monotonic() - start,
-                error=NON_REPO_VERIFIER_REQUIRED_ERROR,
-                fail_type="non_repo_workspace",
-                excerpt=NON_REPO_VERIFIER_REQUIRED_ERROR,
-                verifier_profile="fallback",
-            )
-        return self._run_fallback(cwd=cwd, timeout_seconds=timeout_seconds, cancelled=cancelled)
-
-    def _run_command(
-        self,
-        command: list[str],
-        *,
-        cwd: Path,
-        timeout_seconds: int,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> VerificationResult:
-        start = time.monotonic()
-        try:
-            completed = _execute_command(
-                command, cwd=cwd, timeout_seconds=timeout_seconds, cancelled=cancelled
-            )
-        except VerifierCancelled as exc:
-            return VerificationResult(
-                status=VerificationStatus.ERROR,
-                command=command,
-                exit_code=None,
-                stdout=exc.stdout,
-                stderr=exc.stderr,
-                duration_seconds=time.monotonic() - start,
+                duration_seconds=0.0,
                 error="verifier_cancelled",
                 fail_type="cancelled",
-                excerpt="verifier_cancelled",
-                verifier_profile="explicit",
+                verifier_profile="unavailable",
             )
-        except subprocess.TimeoutExpired as exc:
-            return VerificationResult(
-                status=VerificationStatus.ERROR,
-                command=command,
-                exit_code=None,
-                stdout=_coerce_output(exc.stdout),
-                stderr=_coerce_output(exc.stderr),
-                duration_seconds=time.monotonic() - start,
-                error="verifier_timeout",
-                fail_type="timeout",
-                excerpt="verifier_timeout",
-                verifier_profile="explicit",
-            )
-        except OSError as exc:
-            return VerificationResult(
-                status=VerificationStatus.ERROR,
-                command=command,
-                exit_code=None,
-                stdout="",
-                stderr="",
-                duration_seconds=time.monotonic() - start,
-                error=f"verifier_os_error: {exc}",
-                fail_type="os_error",
-                excerpt=str(exc),
-                verifier_profile="explicit",
-            )
-
-        status = (
-            VerificationStatus.PASSED if completed.returncode == 0 else VerificationStatus.FAILED
-        )
-        result = VerificationResult(
-            status=status,
-            command=command,
-            exit_code=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
-            duration_seconds=time.monotonic() - start,
-            error=None,
-            fail_type=None
-            if status == VerificationStatus.PASSED
-            else verifier_fail_type(
-                VerificationResult(
-                    status=status,
-                    command=command,
-                    exit_code=completed.returncode,
-                    stdout=completed.stdout or "",
-                    stderr=completed.stderr or "",
-                    duration_seconds=0.0,
-                )
-            ),
-            excerpt=None,
-            verifier_profile="explicit",
-        )
-        if status != VerificationStatus.PASSED:
-            return VerificationResult(
-                status=result.status,
-                command=result.command,
-                exit_code=result.exit_code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                duration_seconds=result.duration_seconds,
-                error=result.error,
-                fail_type=result.fail_type,
-                excerpt=extract_verifier_excerpt(result),
-                verifier_profile=result.verifier_profile,
-            )
-        return result
-
-    def _run_fallback(
-        self,
-        *,
-        cwd: Path,
-        timeout_seconds: int,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> VerificationResult:
-        start = time.monotonic()
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
-        last_command: list[str] = []
-        for command_tuple in self.fallback_commands:
-            command = list(command_tuple)
-            last_command = command
-            try:
-                completed = _execute_command(
-                    command, cwd=cwd, timeout_seconds=timeout_seconds, cancelled=cancelled
-                )
-            except VerifierCancelled as exc:
-                return VerificationResult(
-                    status=VerificationStatus.ERROR,
-                    command=command,
-                    exit_code=None,
-                    stdout=_join_output([*stdout_parts, exc.stdout]),
-                    stderr=_join_output([*stderr_parts, exc.stderr]),
-                    duration_seconds=time.monotonic() - start,
-                    error="verifier_cancelled",
-                    fail_type="cancelled",
-                    excerpt="verifier_cancelled",
-                    verifier_profile="fallback",
-                )
-            except subprocess.TimeoutExpired as exc:
-                return VerificationResult(
-                    status=VerificationStatus.ERROR,
-                    command=command,
-                    exit_code=None,
-                    stdout=_join_output(stdout_parts),
-                    stderr=_join_output([*stderr_parts, _coerce_output(exc.stderr)]),
-                    duration_seconds=time.monotonic() - start,
-                    error="verifier_timeout",
-                    fail_type="timeout",
-                    excerpt="verifier_timeout",
-                    verifier_profile="fallback",
-                )
-            except OSError as exc:
-                return VerificationResult(
-                    status=VerificationStatus.ERROR,
-                    command=command,
-                    exit_code=None,
-                    stdout=_join_output(stdout_parts),
-                    stderr=_join_output([*stderr_parts, str(exc)]),
-                    duration_seconds=time.monotonic() - start,
-                    error=f"fallback_failed: {exc}",
-                    fail_type="os_error",
-                    excerpt=str(exc),
-                    verifier_profile="fallback",
-                )
-
-            stdout_parts.extend((f"$ {' '.join(command)}", completed.stdout or ""))
-            stderr_parts.extend((f"$ {' '.join(command)}", completed.stderr or ""))
-            if completed.returncode != 0:
-                result = VerificationResult(
-                    status=VerificationStatus.FAILED,
-                    command=command,
-                    exit_code=completed.returncode,
-                    stdout=_join_output(stdout_parts),
-                    stderr=_join_output(stderr_parts),
-                    duration_seconds=time.monotonic() - start,
-                    error=None,
-                    fail_type="stderr",
-                    excerpt=None,
-                    verifier_profile="fallback",
-                )
-                return VerificationResult(
-                    status=result.status,
-                    command=result.command,
-                    exit_code=result.exit_code,
-                    stdout=result.stdout,
-                    stderr=result.stderr,
-                    duration_seconds=result.duration_seconds,
-                    error=result.error,
-                    fail_type=verifier_fail_type(result),
-                    excerpt=extract_verifier_excerpt(result),
-                    verifier_profile=result.verifier_profile,
-                )
-
-        return VerificationResult(
-            status=VerificationStatus.PASSED,
-            command=last_command,
-            exit_code=0,
-            stdout=_join_output(stdout_parts),
-            stderr=_join_output(stderr_parts),
-            duration_seconds=time.monotonic() - start,
-            error=None,
-            fail_type=None,
-            excerpt=None,
-            verifier_profile="fallback",
-        )
+        return sandbox_verification_unavailable(command or [])
 
 
 def _resolve_packet_command(verifier: object) -> list[str] | None:
@@ -643,26 +371,14 @@ def _resolve_cwd(verifier: object, *, workspace_root: Path) -> Path:
     return resolved
 
 
-def _coerce_output(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
-
-
-def _join_output(parts: list[str]) -> str:
-    filtered = [part for part in parts if part]
-    return "\n".join(filtered)
-
-
 def is_repo_workspace(root: Path) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        check=False,
+    """Marker корня repo/worktree без исполнения Git и repository config.
+
+    Существующий критерий относится к самому workspace root, не его родителям.
+    Положительный marker или неоднозначный Git env требуют repository verification.
+    """
+    ambiguous_git_context = any(
+        name in {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"} or name.startswith("GIT_CONFIG_")
+        for name in os.environ
     )
-    if result.returncode != 0 or not result.stdout.strip():
-        return False
-    return Path(result.stdout.strip()).resolve() == root.resolve()
+    return ambiguous_git_context or (root.resolve() / ".git").exists()

@@ -46,12 +46,12 @@ def test_single_attempt_coding_pass(tmp_path: Path) -> None:
 
     assert result.attempt == 1
     assert result.work_result.status == WorkStatus.SUCCESS
-    assert result.verification_result.status == VerificationStatus.PASSED
+    assert result.verification_result.status == VerificationStatus.ERROR
     assert result.work_result.tool_calls_used == 1
     assert result.work_result.tool_summaries == ["workspace_write: ok"]
     assert "sample.py" in result.report.changed_files
     assert "Changed files:" in result.report_text
-    assert "Verifier: PASS" in result.report_text
+    assert "Verifier: ERROR" in result.report_text
     assert "Next steps:" in result.report_text
     assert 1 <= len(result.report.next_steps) <= 3
 
@@ -75,12 +75,12 @@ def test_single_attempt_coding_fail_with_diagnostics(tmp_path: Path) -> None:
 
     assert result.attempt == 1
     assert result.work_result.status == WorkStatus.SUCCESS
-    assert result.verification_result.status == VerificationStatus.FAILED
+    assert result.verification_result.status == VerificationStatus.ERROR
     assert result.work_result.tool_calls_used == 1
     assert result.report.diagnostics is not None
     assert result.report.diagnostics.command == ["make", "check"]
     assert result.report.diagnostics.summary
-    assert "Verifier: FAIL" in result.report_text
+    assert "Verifier: ERROR" in result.report_text
     assert "Diagnostics:" in result.report_text
     assert "Next steps:" in result.report_text
 

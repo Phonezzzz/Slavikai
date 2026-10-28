@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import shlex
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
 
 from core.approval_policy import ApprovalCategory, ApprovalPrompt, ApprovalRequest
 from shared.models import ToolRequest
+from shared.sandbox_execution import SANDBOX_EXECUTION_MESSAGE
 from tools.project_tool import handle_project_request
 
 GITHUB_ROOT: Final[Path] = Path("sandbox/project/github").resolve()
@@ -104,32 +102,7 @@ async def clone_github_repository(
     branch: str | None,
     target_path: Path,
 ) -> tuple[bool, str]:
-    cmd = ["git", "clone", "--depth", "1"]
-    if branch:
-        cmd.extend(["--branch", branch])
-    cmd.extend([repo_url, str(target_path)])
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=180,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return False, f"Git clone failed: {exc}"
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        stdout = result.stdout.strip()
-        details = stderr or stdout or "unknown error"
-        try:
-            if target_path.exists():
-                shutil.rmtree(target_path, ignore_errors=True)
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to cleanup clone target after error", exc_info=True)
-        return False, f"Git clone failed: {details}"
-    return True, "ok"
+    return False, SANDBOX_EXECUTION_MESSAGE
 
 
 def index_imported_project(relative_path: str) -> tuple[bool, str]:

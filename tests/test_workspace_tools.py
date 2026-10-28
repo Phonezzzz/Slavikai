@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 
 import tools.terminal_tool as terminal_tool_module
@@ -160,7 +159,7 @@ def test_apply_patch_rejects_multifile_contract() -> None:
     assert "single-file" in (result.error or "").lower()
 
 
-def test_run_code_success_and_timeout(tmp_path: Path) -> None:
+def test_workspace_scripts_are_unavailable_without_isolation(tmp_path: Path) -> None:
     scripts_dir = WORKSPACE_ROOT / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     good_script = scripts_dir / "hello.py"
@@ -169,8 +168,8 @@ def test_run_code_success_and_timeout(tmp_path: Path) -> None:
     result_ok = RunCodeTool(timeout=2).handle(
         _make_request("workspace_run", {"path": str(good_script.relative_to(WORKSPACE_ROOT))})
     )
-    assert result_ok.ok
-    assert "hi" in str(result_ok.data.get("output"))
+    assert not result_ok.ok
+    assert result_ok.meta["reason_code"] == "sandbox_execution_unavailable"
 
     slow_script = scripts_dir / "sleepy.py"
     slow_script.write_text("import time\n\ntime.sleep(5)\n", encoding="utf-8")
@@ -178,7 +177,7 @@ def test_run_code_success_and_timeout(tmp_path: Path) -> None:
         _make_request("workspace_run", {"path": str(slow_script.relative_to(WORKSPACE_ROOT))})
     )
     assert not result_timeout.ok
-    assert "превышено" in (result_timeout.error or "").lower()
+    assert result_timeout.meta["reason_code"] == "sandbox_execution_unavailable"
 
     shutil.rmtree(scripts_dir, ignore_errors=True)
 
@@ -327,7 +326,7 @@ def test_workspace_delete_rejects_root_and_allows_recursive_dir_delete() -> None
     assert not nested_dir.exists()
 
 
-def test_workspace_terminal_run_uses_workspace_root_cwd(monkeypatch) -> None:
+def test_workspace_terminal_cwd_does_not_qualify_execution(monkeypatch) -> None:
     monkeypatch.setattr(
         terminal_tool_module,
         "load_shell_config",
@@ -341,9 +340,9 @@ def test_workspace_terminal_run_uses_workspace_root_cwd(monkeypatch) -> None:
     command_result = WorkspaceTerminalRunTool().handle(
         _make_request("workspace_terminal_run", {"command": "echo ok", "cwd_mode": "session_root"})
     )
-    assert command_result.ok
-    cwd_value = str(command_result.data.get("cwd") or "")
-    assert cwd_value == str(WORKSPACE_ROOT)
+    assert not command_result.ok
+    assert command_result.meta["reason_code"] == "sandbox_execution_unavailable"
+    assert "exit_code" not in command_result.data
 
 
 def test_workspace_list_returns_tree_meta_and_truncates_by_max_entries(
@@ -454,223 +453,19 @@ def _flatten_paths(tree: list[dict[str, object]]) -> set[str]:
     return collected
 
 
-def _git_init(repo: Path) -> None:
-    repo.mkdir(exist_ok=True)
-    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.email", "test@test"],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.name", "test"],
-        check=True,
-    )
+def test_workspace_git_operations_are_unavailable_without_spawning(tmp_path, monkeypatch):
+    from server.http.common.workspace_git import git_commit, git_stage, git_status, git_unstage
 
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True)
-
-
-def _git_commit_all(repo: Path, message: str) -> None:
-    _git(repo, "add", "--all")
-    _git(repo, "commit", "-qm", message)
-
-
-def test_git_status_v2_staged_only(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    (repo / "staged.txt").write_text("staged\n")
-    _git(repo, "add", "staged.txt")
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    staged = [e["path"] for e in result["staged"]]
-    assert staged == ["staged.txt"]
-    assert [e["path"] for e in result["unstaged"]] == []
-    assert [e["path"] for e in result["untracked"]] == []
-    assert [e["path"] for e in result["conflicted"]] == []
-
-
-def test_git_status_v2_unstaged_only(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    (repo / "file.txt").write_text("v1\n")
-    _git_commit_all(repo, "c1")
-    (repo / "file.txt").write_text("v2\n")
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    assert [e["path"] for e in result["staged"]] == []
-    unstaged = [e["path"] for e in result["unstaged"]]
-    assert unstaged == ["file.txt"]
-
-
-def test_git_status_v2_staged_and_unstaged_same_file(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    (repo / "dual.txt").write_text("v1\n")
-    _git_commit_all(repo, "c1")
-    (repo / "dual.txt").write_text("v2\n")
-    _git(repo, "add", "dual.txt")
-    (repo / "dual.txt").write_text("v3\n")
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    staged = [e["path"] for e in result["staged"]]
-    unstaged = [e["path"] for e in result["unstaged"]]
-    assert "dual.txt" in staged
-    assert "dual.txt" in unstaged
-
-
-def test_git_status_v2_untracked(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    (repo / "untracked.txt").write_text("x\n")
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    untracked = [e["path"] for e in result["untracked"]]
-    assert untracked == ["untracked.txt"]
-    assert [e["path"] for e in result["staged"]] == []
-    assert [e["path"] for e in result["unstaged"]] == []
-
-
-def test_git_status_v2_conflicted(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    (repo / "c.txt").write_text("base\n")
-    _git_commit_all(repo, "c1")
-    _git(repo, "checkout", "-qb", "side")
-    (repo / "c.txt").write_text("side\n")
-    _git_commit_all(repo, "side")
-    _git(repo, "checkout", "-q", "master")
-    (repo / "c.txt").write_text("master\n")
-    _git_commit_all(repo, "master")
-
-    merge = subprocess.run(
-        ["git", "-C", str(repo), "merge", "side"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert merge.returncode != 0
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    conflicted = [e["path"] for e in result["conflicted"]]
-    assert "c.txt" in conflicted
-    assert [e["path"] for e in result["staged"]] == []
-    assert [e["path"] for e in result["unstaged"]] == []
-
-
-def test_git_status_v2_rename(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    (repo / "old.txt").write_text("x\n")
-    _git_commit_all(repo, "c1")
-    _git(repo, "mv", "old.txt", "new.txt")
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    staged = [e["path"] for e in result["staged"]]
-    assert "new.txt" in staged
-
-
-def test_git_status_v2_rename_with_unstaged_modification(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    (repo / "old.txt").write_text("x\n")
-    _git_commit_all(repo, "c1")
-    _git(repo, "mv", "old.txt", "new.txt")
-    (repo / "new.txt").write_text("modified after rename\n")
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    staged = [e["path"] for e in result["staged"]]
-    unstaged = [e["path"] for e in result["unstaged"]]
-    assert "new.txt" in staged
-    assert "new.txt" in unstaged
-
-
-def test_git_status_v2_filename_with_spaces(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    name = "my file with spaces.txt"
-    (repo / name).write_text("x\n")
-    _git(repo, "add", "--", name)
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    staged = [e["path"] for e in result["staged"]]
-    assert name in staged
-
-
-def test_git_status_v2_filename_starting_with_dash(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    name = "-weird.txt"
-    (repo / name).write_text("x\n")
-    _git(repo, "add", "--", name)
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    staged = [e["path"] for e in result["staged"]]
-    assert name in staged
-
-
-def test_git_status_v2_unicode_filename(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    name = "ünïcode-файл.txt"
-    (repo / name).write_text("x\n")
-    _git(repo, "add", "--", name)
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    staged = [e["path"] for e in result["staged"]]
-    assert name in staged
-
-
-def test_git_status_v2_type_change_detected(tmp_path) -> None:
-    from server.http.common.workspace_git import git_status
-
-    repo = tmp_path / "repo"
-    _git_init(repo)
-    (repo / "t.txt").write_text("x\n")
-    _git_commit_all(repo, "c1")
-    (repo / "t.txt").unlink()
-    (repo / "t.txt").symlink_to("target.txt")
-    _git(repo, "add", "--", "t.txt")
-
-    result = git_status(repo)
-    assert result["ok"] is True
-    staged = [e["path"] for e in result["staged"]]
-    assert "t.txt" in staged
-    status_xy = next(
-        (e["status"] for e in result["staged"] if e["path"] == "t.txt"),
-        "",
-    )
-    assert status_xy[0] == "T"
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: calls.append(a))
+    status = git_status(tmp_path)
+    assert status["ok"] is False
+    assert "изолированная среда" in status["error"]
+    for operation in (git_stage, git_unstage):
+        assert operation(tmp_path, ["-name with spaces.txt"])[0] is False
+        assert operation(tmp_path, all_files=True)[0] is False
+    assert git_commit(tmp_path, "commit")[0] is False
+    assert calls == []
 
 
 def test_parse_git_operation_paths_preserves_exact_filename() -> None:

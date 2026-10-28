@@ -16,6 +16,7 @@ from server.http_api import (
 )
 from server.ui_hub import UIHub
 from shared.models import JSONValue
+from shared.sandbox_execution import SandboxExecutionReason, SandboxExecutionUnavailable
 from tools.terminal_tool import TerminalTool
 
 
@@ -113,12 +114,20 @@ async def handle_ui_terminal_create(request: web.Request) -> web.Response:
     workspace_root = str(await _workspace_root_for_session(request.app["ui_hub"], session_id))
     rows = _normalize_dimension(payload.get("rows"), default=24)
     cols = _normalize_dimension(payload.get("cols"), default=80)
-    snapshot = await _terminal_manager(request).create_or_get(
-        session_id,
-        workspace_root=workspace_root,
-        rows=rows,
-        cols=cols,
-    )
+    try:
+        snapshot = await _terminal_manager(request).create_or_get(
+            session_id,
+            workspace_root=workspace_root,
+            rows=rows,
+            cols=cols,
+        )
+    except SandboxExecutionUnavailable as exc:
+        return error_response(
+            status=503,
+            message=str(exc),
+            error_type="execution_unavailable",
+            code=SandboxExecutionReason.UNAVAILABLE.value,
+        )
     response = json_response({"session_id": session_id, "terminal": snapshot})
     response.headers[UI_SESSION_HEADER] = session_id
     return response
@@ -177,6 +186,13 @@ async def handle_ui_terminal_input(request: web.Request) -> web.Response:
         )
     try:
         snapshot = await _terminal_manager(request).write_input(session_id, input_raw)
+    except SandboxExecutionUnavailable as exc:
+        return error_response(
+            status=503,
+            message=str(exc),
+            error_type="execution_unavailable",
+            code=SandboxExecutionReason.UNAVAILABLE.value,
+        )
     except KeyError:
         return error_response(
             status=404,
@@ -234,6 +250,13 @@ async def handle_ui_terminal_resize(request: web.Request) -> web.Response:
     cols = _normalize_dimension(cols_raw, default=80)
     try:
         snapshot = await _terminal_manager(request).resize(session_id, rows=rows, cols=cols)
+    except SandboxExecutionUnavailable as exc:
+        return error_response(
+            status=503,
+            message=str(exc),
+            error_type="execution_unavailable",
+            code=SandboxExecutionReason.UNAVAILABLE.value,
+        )
     except KeyError:
         return error_response(
             status=404,

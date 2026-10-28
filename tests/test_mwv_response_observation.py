@@ -14,14 +14,12 @@ from tests.test_agent_response import SimpleBrain
 
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("tool_ok", [False, True])
-@pytest.mark.parametrize("verifier_ok", [False, True])
 @pytest.mark.parametrize("projection_failure", [None, "format", "log"])
 def test_mwv_result_survives_agent_projection(
     tmp_path: Path,
     monkeypatch,
     streaming: bool,
     tool_ok: bool,
-    verifier_ok: bool,
     projection_failure: str | None,
 ) -> None:
     brain = SimpleBrain("must not regenerate")
@@ -35,9 +33,7 @@ def test_mwv_result_survives_agent_projection(
     agent.memory.get_recent = lambda *a, **k: []
     agent.memory.get_user_prefs = lambda: []
     agent.vectors.search = lambda *a, **k: []
-    (tmp_path / "Makefile").write_text(
-        "check:\n\t@echo verifier-diagnostic\n\t@exit " + ("0" if verifier_ok else "1") + "\n"
-    )
+    (tmp_path / "Makefile").write_text("check:\n\t@echo verifier-diagnostic\n\t@exit 0\n")
     executions = []
     observed = (
         ToolResult.success({"output": "worker-diagnostic"})
@@ -87,7 +83,7 @@ def test_mwv_result_survives_agent_projection(
             "_format_mwv_response" if projection_failure == "format" else "_log_chat_interaction",
             fail,
         )
-        if projection_failure == "format" and not verifier_ok:
+        if projection_failure == "format":
             monkeypatch.setattr(agent, "_handle_decision_packet", fail)
     messages = [LLMMessage(role="user", content="почини тесты")]
     if streaming:
@@ -114,10 +110,9 @@ def test_mwv_result_survives_agent_projection(
     assert isinstance(result, MWVRunResult)
     assert result is actual_results[0]
     assert result.work_result.status == (WorkStatus.SUCCESS if tool_ok else WorkStatus.FAILURE)
-    assert result.verification_result.status == (
-        VerificationStatus.PASSED if verifier_ok else VerificationStatus.FAILED
-    )
-    assert "verifier-diagnostic" in result.verification_result.stdout
+    assert result.verification_result.status == VerificationStatus.ERROR
+    assert result.verification_result.error == "sandbox_execution_unavailable"
+    assert result.verification_result.stdout == ""
     assert "worker-diagnostic" in str(result.work_result.diagnostics)
     assert len(executions) == result.attempt
     assert brain.calls == 0

@@ -240,6 +240,24 @@ def test_owned_worker_checkpoint_preserves_prefix_and_exact_once(
 def test_retry_checkpoint_uses_owned_revision_and_fault_attempt(tmp_path, monkeypatch, retry_fault):
     from dataclasses import replace
 
+    from core.mwv.models import VerificationResult, VerificationStatus
+
+    # Этот тест проверяет ownership retry checkpoint, не execution environment.
+    # VerificationResult поступает как process-free observation; настоящий fence
+    # отдельно проверяется через VerifierRuntime.run без этой подмены.
+    def verify(_self, task, context, **kwargs):
+        passed = context.attempt > 1
+        return VerificationResult(
+            status=VerificationStatus.PASSED if passed else VerificationStatus.FAILED,
+            command=["fixture-verifier"],
+            exit_code=0 if passed else 1,
+            stdout="",
+            stderr="",
+            duration_seconds=0.0,
+        )
+
+    monkeypatch.setattr("core.mwv.verifier_runtime.VerifierRuntime.run", verify)
+
     agent = Agent(
         brain=SimpleBrain("unused"),
         enable_tools={"safe_mode": True},

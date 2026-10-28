@@ -13,7 +13,8 @@ def test_shell_respects_custom_allowed(tmp_path, monkeypatch) -> None:
         sandbox_root="sandbox",
     )
     result = handle_shell("echo hi", config=cfg)
-    assert result.ok
+    assert not result.ok
+    assert result.meta["reason_code"] == "sandbox_execution_unavailable"
 
 
 def test_shell_blocks_unlisted_command(tmp_path, monkeypatch) -> None:

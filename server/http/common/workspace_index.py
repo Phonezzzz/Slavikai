@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
@@ -9,6 +8,7 @@ from typing import Final
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from memory.vector_index import VectorIndex
 from shared.models import JSONValue
+from shared.sandbox_execution import SANDBOX_EXECUTION_MESSAGE
 
 DEFAULT_IGNORED_DIRS: Final[set[str]] = {
     "venv",
@@ -157,15 +157,4 @@ def _index_workspace_root_with_index(
 
 
 def workspace_git_diff(root: Path) -> tuple[str, str | None]:
-    result = subprocess.run(
-        ["git", "-C", str(root), "diff", "--no-ext-diff", "--", "."],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "not a git repository" in stderr.lower():
-            return "", None
-        return "", stderr or "git diff failed"
-    return result.stdout, None
+    return "", SANDBOX_EXECUTION_MESSAGE

@@ -942,7 +942,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert state_resp.status == 200
                 state_payload = await state_resp.json()
                 active_task = state_payload.get("active_task")
-                if isinstance(active_task, dict) and active_task.get("status") == "completed":
+                if isinstance(active_task, dict) and active_task.get("status") == "failed":
                     execution = active_task.get("execution")
                     assert isinstance(execution, dict)
                     assert execution.get("runner") == "mwv_packet_runner"

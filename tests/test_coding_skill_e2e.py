@@ -15,7 +15,7 @@ def _make_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_coding_skill_happy_path(tmp_path: Path) -> None:
+def test_coding_skill_preserves_write_before_verifier_unavailable(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     script_path = repo / "scripts" / "check.sh"
     script_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
@@ -36,11 +36,11 @@ def test_coding_skill_happy_path(tmp_path: Path) -> None:
     result = skill.run("внеси маленькое изменение в файл sample.py")
 
     assert result.run_result.work_result.status == WorkStatus.SUCCESS
-    assert result.run_result.verification_result.status == VerificationStatus.PASSED
+    assert result.run_result.verification_result.status == VerificationStatus.ERROR
     assert "mwv" in target.read_text(encoding="utf-8")
 
 
-def test_coding_skill_fail_then_fix(tmp_path: Path) -> None:
+def test_coding_skill_does_not_retry_when_verifier_unavailable(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     script_path = repo / "scripts" / "check.sh"
     script_path.write_text(
@@ -70,14 +70,15 @@ def test_coding_skill_fail_then_fix(tmp_path: Path) -> None:
     )
     result = skill.run("внеси маленькое изменение в файл sample.py")
 
-    assert result.run_result.attempt == 2
-    assert result.run_result.verification_result.status == VerificationStatus.PASSED
+    assert result.run_result.attempt == 1
+    assert result.run_result.verification_result.status == VerificationStatus.ERROR
     content = target.read_text(encoding="utf-8")
-    assert "BAD" not in content
-    assert "GOOD" in content
+    assert "BAD" in content
+    assert "GOOD" not in content
+    assert result.run_result.verification_result.error == "sandbox_execution_unavailable"
 
 
-def test_coding_skill_hard_fail(tmp_path: Path) -> None:
+def test_coding_skill_verifier_unavailable_is_not_test_failure(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     script_path = repo / "scripts" / "check.sh"
     script_path.write_text("#!/usr/bin/env bash\necho fail 1>&2\nexit 1\n", encoding="utf-8")
@@ -97,8 +98,8 @@ def test_coding_skill_hard_fail(tmp_path: Path) -> None:
     )
     result = skill.run("внеси маленькое изменение в файл sample.py")
 
-    assert result.run_result.attempt == 3
-    assert result.run_result.verification_result.status == VerificationStatus.FAILED
+    assert result.run_result.attempt == 1
+    assert result.run_result.verification_result.status == VerificationStatus.ERROR
     assert result.run_result.retry_decision is not None
     assert result.run_result.retry_decision.allow_retry is False
-    assert "Verifier failed" in result.report
+    assert "sandbox_execution_unavailable" == result.run_result.verification_result.error

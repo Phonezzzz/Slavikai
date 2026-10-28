@@ -28,9 +28,10 @@ def test_verifier_runtime_uses_packet_command(tmp_path: Path) -> None:
     runtime = VerifierRuntime(project_root=tmp_path)
 
     result = runtime.run(task, context)
-    assert result.status == VerificationStatus.PASSED
+    assert result.status == VerificationStatus.ERROR
     assert result.command[0] == sys.executable
-    assert "packet-verifier-ok" in result.stdout
+    assert result.error == "sandbox_execution_unavailable"
+    assert result.exit_code is None
 
 
 def test_verifier_runtime_blocks_cwd_outside_workspace(tmp_path: Path) -> None:

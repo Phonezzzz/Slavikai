@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from core.computer_backend import ComputerBackend  # noqa: F401 (re-exported for type checks)
 from shared.models import JSONValue, ToolResult
+from shared.sandbox_execution import SandboxExecutionUnavailable, sandbox_execution_failure
 
 
 class ContainerCommandRunner(Protocol):
@@ -20,31 +19,20 @@ class ContainerCommandRunner(Protocol):
 
 @dataclass
 class SubprocessContainerRunner:
-    """Production runner — calls the real docker/podman binary."""
+    """Неквалифицированный runner: host CLI не запускается."""
 
     timeout: int = 60
 
     def run(self, args: list[str]) -> tuple[int, str, str]:
-        result = subprocess.run(  # noqa: S603
-            args,
-            capture_output=True,
-            text=True,
-            timeout=self.timeout,
-        )
-        return result.returncode, result.stdout, result.stderr
+        raise SandboxExecutionUnavailable()
 
 
 @dataclass
 class ContainerComputerBackend:
-    """ComputerBackend that runs command operations inside a container.
+    """Opt-in factory candidate без квалифицированной process environment.
 
-    File operations (list_files, read_file, write_file) access the mounted
-    project_root directly on the host. Command operations (run_command,
-    git_diff, run_tests, check, apply_patch) execute inside a fresh container
-    via ``docker run --rm``.
-
-    This backend is **opt-in / inactive by default**. Nothing in the main
-    runtime instantiates it — it must be wired explicitly in a future PR.
+    File operations используют прежние host path guards. Command operations
+    закрыты I0 fence независимо от image/engine/injected runner.
     """
 
     image: str
@@ -78,26 +66,7 @@ class ContainerComputerBackend:
     # ── Container command helper ──────────────────────────────────────────────
 
     def _run_in_container(self, command: str) -> ToolResult:
-        args = [
-            self.runtime,
-            "run",
-            "--rm",
-            "-v",
-            f"{self.project_root}:{self.container_workspace}",
-            "-w",
-            self.container_workspace,
-            self.image,
-            "sh",
-            "-c",
-            command,
-        ]
-        try:
-            rc, stdout, stderr = self.runner.run(args)
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult.failure(f"Container command failed: {exc}")
-        if rc != 0:
-            return ToolResult.failure(stderr.strip() or f"exit {rc}")
-        return ToolResult.success({"output": stdout, "exit_code": rc})
+        return sandbox_execution_failure()
 
     # ── ComputerBackend implementation ────────────────────────────────────────
 
@@ -143,24 +112,8 @@ class ContainerComputerBackend:
 
     def apply_patch(self, path: str, patch: str) -> ToolResult:
         self._ensure_in_project(path)
-        container_file = self._container_path(path)
-        with tempfile.NamedTemporaryFile(
-            dir=self.project_root,
-            prefix=".patch_",
-            suffix=".diff",
-            mode="w",
-            delete=False,
-            encoding="utf-8",
-        ) as tmp:
-            tmp.write(patch)
-            tmp_path = Path(tmp.name)
-        try:
-            tmp_rel = str(tmp_path.relative_to(self.project_root))
-            container_patch = f"{self.container_workspace}/{tmp_rel}"
-            cmd = f"patch {container_file} {container_patch}"
-            return self._run_in_container(cmd)
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        self._container_path(path)
+        return sandbox_execution_failure()
 
     def run_command(self, command: str) -> ToolResult:
         return self._run_in_container(command)

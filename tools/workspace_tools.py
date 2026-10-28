@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
-import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.sandbox_execution import sandbox_execution_failure
 from tools.terminal_tool import TerminalTool
 
 SANDBOX_ROOT = Path("sandbox").resolve()
@@ -594,26 +593,7 @@ class RunCodeTool:
                 resolved.relative_to(get_workspace_root())
             except ValueError:
                 return ToolResult.failure("Скрипт вне рабочей директории запрещён.")
-            proc = subprocess.run(
-                [sys.executable, str(resolved)],
-                cwd=get_workspace_root(),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                check=False,
-            )
-            data: dict[str, JSONValue] = {
-                "output": proc.stdout,
-                "stderr": proc.stderr,
-                "exit_code": proc.returncode,
-            }
-            if proc.returncode != 0:
-                return ToolResult.failure(
-                    f"Скрипт завершился с кодом {proc.returncode}.", data=data
-                )
-            return ToolResult.success(data)
-        except subprocess.TimeoutExpired:
-            return ToolResult.failure(f"Время выполнения превышено ({self.timeout}с).")
+            return sandbox_execution_failure()
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Ошибка запуска: {exc}")
 

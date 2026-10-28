@@ -73,12 +73,12 @@ def test_shell_blocks_dangerous_command() -> None:
     assert not result.ok
 
 
-def test_shell_allows_simple_command() -> None:
+def test_simple_shell_command_is_unavailable() -> None:
     from tools.shell_tool import handle_shell_request
 
     result = handle_shell_request(ToolRequest(name="shell", args={"command": "echo hi"}))
-    assert result.ok
-    assert "hi" in str(result.data.get("output"))
+    assert not result.ok
+    assert result.meta["reason_code"] == "sandbox_execution_unavailable"
 
 
 def test_web_search_simulation() -> None:

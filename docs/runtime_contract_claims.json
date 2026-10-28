@@ -357,9 +357,9 @@
     {
       "id": "runtime.tools.generic_process_outcome",
       "scope": "runtime",
-      "status": "implemented",
+      "status": "partial",
       "owner": "tool_runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/TOOL_EXECUTION_RESULT_CONTRACT.md",
       "verified_by": [
         "tests/test_shell_tool_edges.py",
@@ -367,7 +367,7 @@
         "tests/test_auto_runtime.py",
         "tests/ui_api/test_workspace_and_tools.py"
       ],
-      "summary": "Generic shell, terminal oneshot and workspace_run nonzero exits remain failed with available diagnostics through model and UI projections."
+      "summary": "Sandbox process execution is unavailable under I0 before spawn. Existing process-result projection semantics remain defined, but no qualified generic Sandbox executor is shipped."
     },
     {
       "id": "runtime.tools.canonical_execution_evidence",
@@ -791,7 +791,7 @@
       "scope": "settings",
       "status": "implemented",
       "owner": "ui",
-      "version": 1,
+      "version": 2,
       "source": "docs/SOURCE_OF_TRUTH.md",
       "verified_by": [
         "tests/ui_api/test_shell_numeric_defaults_view.py",
@@ -799,7 +799,7 @@
         "server/http/common/settings_runtime.py",
         "ui/src/app/components/shell-numeric-defaults-view.tsx"
       ],
-      "summary": "Owner-only no-store snapshot allowlists two pure ShellConfig numeric defaults without loading policy, normalization, tools or subprocess. Developer distinguishes per-operation JSON overrides, subprocess timeout and post-capture Unicode truncation (combined ShellTool versus per-stream TerminalTool oneshot, markers extra) from PTY/Desktop, task deadlines, memory/output caps or effective grants/root/allowlist. Member omits metadata, POST rejects, malformed values unavailable without React defaults. Runtime and permission enforcement unchanged."
+      "summary": "Owner-only no-store snapshot allowlists two pure ShellConfig numeric defaults without loading policy, normalization, tools or subprocess. Developer distinguishes per-operation JSON overrides, subprocess timeout and post-capture Unicode truncation (combined ShellTool versus per-stream TerminalTool oneshot, markers extra) from PTY/Desktop, task deadlines, memory/output caps or effective grants/root/allowlist. Member omits metadata, POST rejects, malformed values unavailable without React defaults. Runtime and permission enforcement unchanged. I0 blocks Sandbox process execution before these configured limits are used; the read-only defaults snapshot is not execution readiness."
     },
     {
       "id": "session.paused_model_request_read_view",
@@ -830,6 +830,21 @@
         "ui/src/app/components/Settings.tsx"
       ],
       "summary": "After an attempted installation POST, HTTP/transport/unreadable-response failure discloses possible partial persistence and asks the user to check saved values before an explicit retry. Drafts survive, no automatic POST or false success callback; local validation and personal-only conflicts keep separate semantics. A readable Settings acknowledgement is required for installation confirmation and malformed bodies are not echoed. Existing server write order, role/policy, model/provider activation and transaction guarantees unchanged; exact applied fields remain unknown."
+    },
+    {
+      "id": "runtime.sandbox.process_execution_fence",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/SANDBOX_PROCESS_FENCE.md",
+      "verified_by": [
+        "tests/test_sandbox_execution_fence.py",
+        "tests/test_verifier_runtime.py",
+        "tests/test_container_computer_backend.py",
+        "tests/ui_api/test_terminal_runtime.py"
+      ],
+      "summary": "Sandbox tools, process verifier, manual terminal/Git/import and unqualified container commands refuse before host spawn/input, including approved/yolo continuations. Required verification stays unavailable/error; process-free checks and explicit Desktop authority retain their existing boundaries. No permit flag or isolated backend is introduced."
     }
   ]
 }

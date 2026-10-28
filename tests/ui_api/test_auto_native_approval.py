@@ -337,7 +337,7 @@ def test_http_auto_native_approval_preserves_batch_and_once_scope(tmp_path, monk
                 "network-original-1",
                 "network-original-2",
             ]
-            assert agent.last_auto_state["status"] == "completed"
+            assert agent.last_auto_state["status"] == "failed_verifier"
             repeated = await client.post(
                 "/ui/api/decision/respond",
                 headers=headers,

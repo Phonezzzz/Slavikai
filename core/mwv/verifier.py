@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from core.mwv.models import VerificationResult, VerificationStatus
+from shared.sandbox_execution import SANDBOX_EXECUTION_MESSAGE, SandboxExecutionReason
 
 DEFAULT_TIMEOUT_SECONDS = 60 * 30
 DEFAULT_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check.sh"
@@ -31,69 +30,19 @@ class VerifierRunner:
                 error=f"Verifier script not found: {self.script_path}",
             )
 
-        start = time.monotonic()
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=self._project_root(),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            duration = time.monotonic() - start
-            return VerificationResult(
-                status=VerificationStatus.ERROR,
-                command=command,
-                exit_code=None,
-                stdout=_truncate_output(_coerce_output(exc.stdout)),
-                stderr=_truncate_output(_coerce_output(exc.stderr)),
-                duration_seconds=duration,
-                error="verifier_timeout",
-            )
-        except OSError as exc:
-            duration = time.monotonic() - start
-            return VerificationResult(
-                status=VerificationStatus.ERROR,
-                command=command,
-                exit_code=None,
-                stdout="",
-                stderr="",
-                duration_seconds=duration,
-                error=str(exc),
-            )
-
-        duration = time.monotonic() - start
-        status = (
-            VerificationStatus.PASSED if completed.returncode == 0 else VerificationStatus.FAILED
-        )
-        return VerificationResult(
-            status=status,
-            command=command,
-            exit_code=completed.returncode,
-            stdout=_truncate_output(completed.stdout or ""),
-            stderr=_truncate_output(completed.stderr or ""),
-            duration_seconds=duration,
-            error=None,
-        )
-
-    def _project_root(self) -> Path:
-        return self.script_path.resolve().parents[1]
+        return sandbox_verification_unavailable(command)
 
 
-def _coerce_output(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
-
-
-def _truncate_output(text: str) -> str:
-    if len(text) <= MAX_OUTPUT_CHARS:
-        return text
-    limit = MAX_OUTPUT_CHARS - len(TRUNCATION_SUFFIX)
-    if limit <= 0:
-        return TRUNCATION_SUFFIX[:MAX_OUTPUT_CHARS]
-    return f"{text[:limit]}{TRUNCATION_SUFFIX}"
+def sandbox_verification_unavailable(command: list[str]) -> VerificationResult:
+    return VerificationResult(
+        status=VerificationStatus.ERROR,
+        command=command,
+        exit_code=None,
+        stdout="",
+        stderr=SANDBOX_EXECUTION_MESSAGE,
+        duration_seconds=0.0,
+        error=SandboxExecutionReason.UNAVAILABLE.value,
+        fail_type="execution_unavailable",
+        excerpt=SANDBOX_EXECUTION_MESSAGE,
+        verifier_profile="unavailable",
+    )
