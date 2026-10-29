@@ -296,7 +296,9 @@ class UIHub:
         legacy_principal_aliases: Collection[str] = (),
         on_session_pruned: Callable[[str, str], None] | None = None,
         default_model_getter: Callable[[], tuple[str, str] | None] | None = None,
+        workspace_root_policy: Callable[[str, str | None], str | None] | None = None,
     ) -> None:
+        self._workspace_root_policy = workspace_root_policy
         self._storage: UISessionStorage = storage or InMemoryUISessionStorage()
         normalized_legacy_principal = legacy_principal_id.strip()
         self._legacy_principal_id = normalized_legacy_principal or DEFAULT_LEGACY_PRINCIPAL_ID
@@ -946,7 +948,9 @@ class UIHub:
             state = self._sessions.get(session_id)
             if state is None:
                 return None
-            return state.workspace_root
+            principal, root = state.principal_id, state.workspace_root
+        policy = self._workspace_root_policy
+        return policy(principal, root) if policy is not None else root
 
     async def set_workspace_root(self, session_id: str, root_path: str | None) -> None:
         normalized = root_path.strip() if isinstance(root_path, str) and root_path.strip() else None
@@ -955,6 +959,12 @@ class UIHub:
             if state is None:
                 state = _SessionState()
                 self._sessions[session_id] = state
+            policy = self._workspace_root_policy
+            if policy is not None and normalized is not None:
+                candidate = policy(state.principal_id, normalized)
+                if candidate is None:
+                    raise ValueError("workspace root policy returned no candidate")
+                normalized = candidate
             if state.workspace_root == normalized:
                 return
             state.workspace_root = normalized

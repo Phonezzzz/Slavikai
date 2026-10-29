@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
+from shared.workspace_binding import WorkspaceBinding
+
 JSONPrimitive = str | bytes | int | float | bool | None
 JSONValue = JSONPrimitive | Sequence["JSONValue"] | Mapping[str, "JSONValue"]
 
@@ -18,6 +20,7 @@ class ToolResultStatus(StrEnum):
 class ToolRequest:
     name: str
     args: dict[str, JSONValue] = field(default_factory=dict)
+    workspace_binding: WorkspaceBinding | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

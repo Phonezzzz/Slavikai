@@ -357,6 +357,18 @@ class AgentToolLoop:
                         tool_call_id=tool_call.id,
                     )
                 )
+                if (
+                    tool_result.meta is not None
+                    and tool_result.meta.get("execution_review_required") is True
+                ):
+                    return AgentToolLoopResult(
+                        model_usage=model_usage,
+                        text=final_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="workspace_execution_review_required",
+                    )
                 if _policy_rejected(tool_result):
                     return AgentToolLoopResult(
                         model_usage=model_usage,
@@ -645,6 +657,25 @@ class AgentToolLoop:
                     )
                 )
                 yield ToolCallCompleted(call=tool_call, result=tool_result)
+                if (
+                    tool_result.meta is not None
+                    and tool_result.meta.get("execution_review_required") is True
+                ):
+                    yield Error(
+                        message=(
+                            "Результат исполнения требует проверки; "
+                            "автоматическое продолжение остановлено."
+                        ),
+                        code="workspace_execution_review_required",
+                    )
+                    yield Done(finish_reason="error")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        error="workspace_execution_review_required",
+                    )
                 if _policy_rejected(tool_result):
                     yield Error(message="tool_policy_denied", code="tool_policy_denied")
                     yield Done(finish_reason="error")

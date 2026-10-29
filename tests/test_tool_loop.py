@@ -13,6 +13,69 @@ from shared.models import LLMMessage, ToolResult
 from tools.tool_registry import ToolRegistry
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_unreconciled_workspace_execution_stops_batch_and_next_model_request(tmp_path, streaming):
+    from tools.tool_logger import ToolCallLogger
+
+    class BatchBrain:
+        calls = 0
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(id="uncertain", name="workspace_run", arguments={"path": "script.py"}),
+                    ToolCall(id="later", name="write", arguments={}),
+                ],
+            )
+
+        def generate_stream_events(self, messages, config=None, tools=None):
+            result = self.generate(messages, config, tools)
+            for call in result.tool_calls:
+                yield ToolCallCompleted(call=call)
+            yield Done()
+
+    calls = []
+    registry = ToolRegistry(call_logger=ToolCallLogger(tmp_path / "tools.log"))
+    registry.register(
+        "workspace_run",
+        lambda request: calls.append(request.name)
+        or ToolResult.failure(
+            "execution outcome requires review",
+            meta={"execution_review_required": True, "execution_started": None},
+        ),
+        capability="exec",
+    )
+    registry.register(
+        "write",
+        lambda request: calls.append(request.name) or ToolResult.success({}),
+        capability="write",
+    )
+    registry.set_execution_policy(mode="auto")
+    brain = BatchBrain()
+    arguments = {
+        "brain": brain,
+        "gateway": ToolGateway(registry),
+        "messages": [LLMMessage(role="user", content="synthetic")],
+        "tools": registry.list_tool_specs(),
+    }
+    if streaming:
+        events = list(AgentToolLoop(max_iterations=3).run_stream_events(**arguments))
+        assert any(
+            isinstance(event, Error) and event.code == "workspace_execution_review_required"
+            for event in events
+        )
+        assert isinstance(events[-1], Done) and events[-1].finish_reason == "error"
+    else:
+        result = AgentToolLoop(max_iterations=3).run(**arguments)
+        assert result.error == "workspace_execution_review_required"
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].result.meta["execution_started"] is None
+    assert calls == ["workspace_run"]
+    assert brain.calls == 1
+
+
 class LoopBrain:
     def __init__(self) -> None:
         self.calls = 0

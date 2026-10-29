@@ -12,6 +12,43 @@ from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import RunCodeTool, workspace_root_context
 
 
+def test_unqualified_backend_and_model_arguments_cannot_enable_native_process(
+    tmp_path, monkeypatch
+):
+    from core.container_computer_backend import ContainerComputerBackend
+
+    (tmp_path / "script.py").write_text("print('synthetic')")
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("unqualified backend must not spawn")
+
+    monkeypatch.setattr("subprocess.run", forbidden)
+    monkeypatch.setattr("subprocess.Popen", forbidden)
+    backend = ContainerComputerBackend(image="image", project_root=tmp_path, runtime="podman")
+    registry = ToolRegistry(call_logger=ToolCallLogger(tmp_path / "tools.log"))
+    registry.register("workspace_run", RunCodeTool(backend=backend), capability="exec")
+    registry.set_execution_policy(mode="auto")
+    gateway = ToolGateway(registry=registry)
+    with workspace_root_context(tmp_path):
+        result = gateway.call(
+            ToolRequest(
+                "workspace_run",
+                {
+                    "path": "script.py",
+                    "isolation_verified": True,
+                    "workspace_binding": {"principal_id": "alice", "revision": "forged"},
+                },
+            )
+        )
+    assert not result.ok
+    assert result.meta["reason_code"] == "sandbox_execution_unavailable"
+    assert result.meta["execution_started"] is False
+    assert "exit_code" not in result.data
+    assert calls == []
+
+
 def test_approved_sandbox_run_cannot_spawn_host_process(tmp_path, monkeypatch) -> None:
     script = tmp_path / "script.py"
     script.write_text('print("private data")\n')
@@ -160,3 +197,22 @@ def test_workspace_import_diff_and_direct_container_runner_cannot_spawn(tmp_path
         SubprocessContainerRunner().run(["docker", "run", "unqualified"])
     assert calls == []
     assert marker.read_text() == "owned fixture"
+
+
+def test_manual_agent_run_entrypoint_cannot_use_category_only_execution_resume(monkeypatch):
+    from core.agent import Agent
+    from shared.models import ToolResult
+
+    agent = Agent.__new__(Agent)
+    calls = []
+
+    def category_only_dispatch(*args, **kwargs):
+        calls.append(args)
+        return ToolResult.success({"exit_code": 0})
+
+    monkeypatch.setattr(agent, "_call_tool_logged", category_only_dispatch)
+    result = agent.call_tool("workspace_run", {"path": "script.py"}, raw_input="ui:workspace_run")
+    assert not result.ok
+    assert result.meta["reason_code"] == "sandbox_execution_unavailable"
+    assert result.meta["execution_started"] is False
+    assert calls == []

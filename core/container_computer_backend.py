@@ -5,8 +5,16 @@ from pathlib import Path
 from typing import Protocol
 
 from core.computer_backend import ComputerBackend  # noqa: F401 (re-exported for type checks)
-from shared.models import JSONValue, ToolResult
+from core.rootless_podman import QUALIFIED_PYTHON_IMAGE
+from core.tool_gateway import ToolGateway
+from core.workspace_python_execution import (
+    RootlessPythonExecutor,
+    WorkspacePythonOutcome,
+    unavailable_python_execution,
+)
+from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.sandbox_execution import SandboxExecutionUnavailable, sandbox_execution_failure
+from shared.workspace_binding import WorkspaceBinding
 
 
 class ContainerCommandRunner(Protocol):
@@ -40,6 +48,30 @@ class ContainerComputerBackend:
     container_workspace: str = "/workspace"
     runtime: str = "docker"
     runner: ContainerCommandRunner = field(default_factory=SubprocessContainerRunner)
+    python_executor: RootlessPythonExecutor | None = None
+    file_gateway: ToolGateway | None = None
+
+    def execute_python(
+        self, binding: WorkspaceBinding, script: str, *, timeout: float
+    ) -> WorkspacePythonOutcome:
+        executor = self.python_executor
+        if (
+            executor is None
+            or self.runtime != "podman"
+            or self.image != QUALIFIED_PYTHON_IMAGE
+            or self.container_workspace != "/workspace"
+            or self.project_root.absolute() != executor.workspace.root
+        ):
+            return unavailable_python_execution()
+        return executor.execute_python(binding, script, timeout=timeout)
+
+    def _qualified_file_call(self, request: ToolRequest) -> ToolResult:
+        if self.file_gateway is None:
+            return ToolResult.failure(
+                "Отсутствует scoped Gateway для managed workspace.",
+                meta={"reason_code": "workspace_unavailable", "execution_started": False},
+            )
+        return self.file_gateway.call(request)
 
     # ── Path guards ───────────────────────────────────────────────────────────
 
@@ -71,6 +103,8 @@ class ContainerComputerBackend:
     # ── ComputerBackend implementation ────────────────────────────────────────
 
     def list_files(self, path: str = "") -> ToolResult:
+        if self.python_executor is not None:
+            return self._qualified_file_call(ToolRequest("workspace_list", {"path": path}))
         target = self._ensure_in_project(path)
         if not target.exists():
             return ToolResult.failure(f"Path not found: {path!r}")
@@ -92,6 +126,8 @@ class ContainerComputerBackend:
         )
 
     def read_file(self, path: str) -> ToolResult:
+        if self.python_executor is not None:
+            return self._qualified_file_call(ToolRequest("workspace_read", {"path": path}))
         target = self._ensure_in_project(path)
         if not target.exists() or not target.is_file():
             return ToolResult.failure(f"File not found: {path!r}")
@@ -102,6 +138,10 @@ class ContainerComputerBackend:
         return ToolResult.success({"output": content})
 
     def write_file(self, path: str, content: str) -> ToolResult:
+        if self.python_executor is not None:
+            return self._qualified_file_call(
+                ToolRequest("workspace_write", {"path": path, "content": content})
+            )
         target = self._ensure_in_project(path)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +151,10 @@ class ContainerComputerBackend:
         return ToolResult.success({"output": f"written: {path}"})
 
     def apply_patch(self, path: str, patch: str) -> ToolResult:
+        if self.python_executor is not None:
+            return self._qualified_file_call(
+                ToolRequest("workspace_patch", {"path": path, "patch": patch})
+            )
         self._ensure_in_project(path)
         self._container_path(path)
         return sandbox_execution_failure()

@@ -167,6 +167,8 @@ def test_make_computer_runtime_returns_runtime_with_local_backend(
     gateway_mock = MagicMock()
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return gateway_mock
 

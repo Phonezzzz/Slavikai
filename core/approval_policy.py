@@ -16,6 +16,7 @@ from core.desktop_policy import (
 from core.desktop_security import DesktopPathSecurity
 from shared.command_safety import is_hard_unsafe_command as _is_unsafe
 from shared.models import JSONValue, ToolRequest
+from shared.workspace_binding import WorkspaceBinding
 
 if TYPE_CHECKING:
     from core.tool_loop import ToolLoopContinuation
@@ -84,6 +85,7 @@ class ApprovalRequest:
     reason: str = "category_not_approved"
     policy_rule_id: str | None = None
     request_json: str | None = None
+    workspace_binding: WorkspaceBinding | None = None
 
 
 class ApprovalRequired(RuntimeError):

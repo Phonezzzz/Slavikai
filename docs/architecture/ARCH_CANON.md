@@ -23,7 +23,8 @@
   вынес layout/resize state и quick-open indexing/filtering в feature-модули,
   Workspace переименован в Computer (inspector/runtime для chat session), добавлены
   `AgentComputerRuntime`, `ComputerBackend` Protocol, `LocalComputerBackend` (default),
-  `ContainerComputerBackend` (opt-in/inactive). Production browser auth проверяет Cloudflare
+  `ContainerComputerBackend` (explicit opt-in; native Python только qualified rootless profile).
+  Production browser auth проверяет Cloudflare
   Access JWT и выводит owner/member principal из verified email. Cloudflare Access JWT является
   единственным production browser identity; local development
   использует только явный unauth-local bypass. Plan draft получает executable steps через structured
@@ -291,7 +292,10 @@ Current I0: process operations Sandbox недоступны до появлен�
 qualified environment; граница tools/verifier/manual terminal/Git/import/container
 описана в [SANDBOX_PROCESS_FENCE.md](SANDBOX_PROCESS_FENCE.md). Approval/yolo не снимают
 этот отказ; required verifier не становится PASS. Desktop сохраняет explicit host
-authority. Это отказ от unsafe spawn, не реализация целевой isolation.
+authority. Узкое принятое исключение native `workspace_run` требует qualified rootless
+ComputerBackend, managed principal owner/revision, original approval/environment binding,
+private byte staging и guarded publication после settlement. Unknown не публикуется и не
+повторяется; остальные process paths fenced. Это не полная целевая isolation/recovery.
 
 
 - Policy/scope/budgets/verifier фиксируются в packet и становятся immutable для Act.
@@ -405,7 +409,8 @@ Explorer/editor/terminal — вторичные inspection tools, доступн
 ### Текущие backends
 
 - `LocalComputerBackend` — реализован, default.
-- `ContainerComputerBackend` — реализован, opt-in/inactive (SLAVIK_COMPUTER_* env vars).
+- `ContainerComputerBackend` — explicit opt-in: native Python только через qualified rootless
+  managed workspace; generic commands/verifier остаются fenced (SLAVIK_COMPUTER_* env vars).
 
 ### Future backends (направление, не реализованы)
 

@@ -361,14 +361,28 @@ class AutoOrchestrator:
             if loop_error is not None:
                 state["error"] = loop_error
                 self._set_status(state, AutoRunStatus.FAILED_WORKER)
+                review_required = loop_error == "workspace_execution_review_required"
+                next_steps = (
+                    [
+                        "Проверь сохранённый результат и состояние среды "
+                        "перед решением о новом запуске."
+                    ]
+                    if review_required
+                    else [
+                        "Проверь auto_state.coders.",
+                        "Исправь причину ошибки tool call и перезапусти auto.",
+                    ]
+                )
                 return AutoRunOutcome(
                     text=self.parent._format_stop_response(
                         what="Auto-run остановлен: tool loop failed",
-                        why=loop_error,
-                        next_steps=[
-                            "Проверь auto_state.coders.",
-                            "Исправь причину ошибки tool call и перезапусти auto.",
-                        ],
+                        why=(
+                            "Результат изолированного исполнения не согласован; "
+                            "дальнейшие вызовы остановлены."
+                            if review_required
+                            else loop_error
+                        ),
+                        next_steps=next_steps,
                         stop_reason_code=StopReasonCode.WORKER_FAILED,
                         route="auto",
                         plan_summary="Auto v1 выполнил задачу через native tool loop.",
@@ -378,10 +392,7 @@ class AutoOrchestrator:
                     status=AutoRunStatus.FAILED_WORKER,
                     stop_reason_code=StopReasonCode.WORKER_FAILED,
                     verifier=None,
-                    next_steps=[
-                        "Проверь auto_state.coders.",
-                        "Исправь причину ошибки tool call и перезапусти auto.",
-                    ],
+                    next_steps=next_steps,
                 )
 
             if _has_failed_tool_call(loop_result.tool_calls):

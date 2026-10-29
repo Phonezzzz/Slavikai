@@ -28,6 +28,7 @@ from core.decision.models import DecisionPacket
 from core.decision.session_end import build_session_end_packet
 from core.desktop_policy import DesktopApprovalRule, DesktopPolicyRuntime
 from core.desktop_runtime import DesktopContinuationUnavailable, DesktopRunOutcome, DesktopRuntime
+from core.managed_workspace import ManagedWorkspacePool, WorkspaceAccess
 from core.mwv.models import (
     MWV_REPORT_PREFIX,
     StopReasonCode,
@@ -76,6 +77,7 @@ from shared.models import (
 )
 from shared.policy_models import PolicyAction, PolicyRule, PolicyScope
 from shared.sandbox import normalize_sandbox_path
+from shared.sandbox_execution import sandbox_execution_failure
 from shared.task_run import TaskRun
 from tools.workspace_tools import MAX_FILE_BYTES, WORKSPACE_ROOT
 
@@ -803,6 +805,17 @@ class AgentToolsMixin:
             approval_context=self._approval_context(safe_mode_override=safe_mode_override),
             log_event=self.tracer.log,
             confirmed_decision=confirmed_decision,
+            workspace_access=(
+                value
+                if isinstance(value := getattr(self, "_workspace_access", None), WorkspaceAccess)
+                else None
+            ),
+            workspace_pool=(
+                pool
+                if isinstance(pool := getattr(self, "_workspace_pool", None), ManagedWorkspacePool)
+                else None
+            ),
+            workspace_principal_id=self.user_id,
         )
 
     def _track_tool_error(self, request: ToolRequest, result: ToolResult) -> None:
@@ -1069,6 +1082,10 @@ class AgentToolsMixin:
         *,
         confirmed_decision: bool = False,
     ) -> ToolResult:
+        if name == "workspace_run":
+            # Ручной resume хранит категории, а не immutable workspace approval.
+            # Новый executor доступен native Gateway/continuation, не этому entrypoint.
+            return sandbox_execution_failure()
         request = ToolRequest(name=name, args=args or {})
         return self._call_tool_logged(
             raw_input or f"tool:{name}",

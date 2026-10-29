@@ -25,14 +25,17 @@ from core.decision.models import DecisionPacket
 from core.desktop_policy import DesktopPolicyRuntime, DesktopPolicyStore
 from core.desktop_runtime import DesktopExecutionControl, DesktopRunCoordinator, DesktopRuntime
 from core.desktop_security import DesktopPathSecurity
+from core.managed_workspace import ManagedWorkspacePool, WorkspaceAccess
 from core.mwv.manager import ManagerRuntime, MWVRunResult
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.plan_compiler import compile_structured_plan_steps
 from core.response_preferences import ResponsePreferences
+from core.rootless_podman import QUALIFIED_PYTHON_IMAGE
 from core.rule_engine import RuleEngine
 from core.skills.candidates import SkillCandidateWriter
 from core.skills.index import SkillIndex, SkillMatch
 from core.tracer import Tracer
+from core.workspace_python_execution import RootlessPythonExecutor
 from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.brain_manager import BrainManager
@@ -179,7 +182,34 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         desktop_policy_store: DesktopPolicyStore | None = None,
         desktop_home: Path | None = None,
         desktop_run_coordinator: DesktopRunCoordinator | None = None,
+        workspace_executor: RootlessPythonExecutor | None = None,
+        workspace_access: WorkspaceAccess | None = None,
+        workspace_pool: ManagedWorkspacePool | None = None,
     ) -> None:
+        if workspace_access is not None and workspace_access.principal_id != user_id:
+            raise ValueError("workspace principal mismatch")
+        if workspace_executor is not None and (
+            workspace_access is None
+            or workspace_access.workspace is not workspace_executor.workspace
+            or workspace_access.environment_revision != workspace_executor.profile.revision
+            or workspace_pool is None
+            or workspace_pool.protected_root != workspace_executor.profile.state_root
+            or not workspace_pool.owns(user_id, workspace_access.workspace)
+        ):
+            raise ValueError("workspace execution binding mismatch")
+        self._workspace_executor = workspace_executor
+        self._workspace_access = workspace_access
+        self._workspace_pool = workspace_pool
+        self._python_backend: ComputerBackend | None = (
+            ContainerComputerBackend(
+                image=QUALIFIED_PYTHON_IMAGE,
+                project_root=workspace_executor.workspace.root,
+                runtime="podman",
+                python_executor=workspace_executor,
+            )
+            if workspace_executor is not None
+            else None
+        )
         self.main_config = main_config
         self.main_api_key = main_api_key
         self._native_tool_qualification: NativeToolQualification | None = None
@@ -213,6 +243,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             home=desktop_home,
             policy_store_path=self.desktop_policy_store.path,
             protected_paths=(
+                *((workspace_pool.protected_root,) if workspace_pool is not None else ()),
                 project_root / "config",
                 project_root / "core" / "approval_policy.py",
                 project_root / "core" / "agent.py",
@@ -293,14 +324,18 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self.response_preferences = ResponsePreferences()
         self.short_term: list[LLMMessage] = []
         self.conversation_id = str(uuid.uuid4())
-        self.session_id: str | None = None
+        self.session_id: str | None = (
+            workspace_access.session_id if workspace_access is not None else None
+        )
         self.approved_categories: set[ApprovalCategory] = set()
         self.runtime_mode = "act"
         self.runtime_active_plan: dict[str, JSONValue] | None = None
         self.runtime_active_task: dict[str, JSONValue] | None = None
         self.runtime_auto_state: dict[str, JSONValue] | None = None
         self.runtime_plan_guard_enabled = False
-        self.runtime_workspace_root: str | None = None
+        self.runtime_workspace_root: str | None = (
+            str(workspace_access.workspace.root) if workspace_access is not None else None
+        )
         self.last_plan: TaskPlan | None = None
         self.last_plan_original: TaskPlan | None = None
         self.last_hints_used: list[str] = []
@@ -355,7 +390,18 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
     def make_computer_runtime(self) -> AgentComputerRuntime:
         cfg = resolve_computer_backend_config()
         backend: ComputerBackend
-        if cfg.mode == "container":
+        executor = self._workspace_executor
+        if executor is not None:
+            backend = ContainerComputerBackend(
+                image=QUALIFIED_PYTHON_IMAGE,
+                project_root=Path(self.runtime_workspace_root)
+                if self.runtime_workspace_root
+                else executor.workspace.root,
+                runtime="podman",
+                python_executor=executor,
+                file_gateway=self._build_tool_gateway(),
+            )
+        elif cfg.mode == "container":
             backend = ContainerComputerBackend(
                 image=cfg.container_image,
                 project_root=WORKSPACE_ROOT,
@@ -516,7 +562,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         )
         register_tool(
             "workspace_run",
-            RunCodeTool(),
+            RunCodeTool(backend=self._python_backend),
             enabled=self.tools_enabled.get("workspace_run", True),
             capability="exec",
             risk_classes=["execute"],

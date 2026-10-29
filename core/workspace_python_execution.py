@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import logging
+import math
+import os
+import selectors
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+from core.managed_workspace import ManagedWorkspace, WorkspaceLimits
+from core.rootless_podman import RootlessPodmanProfile
+from shared.workspace_binding import WorkspaceBinding, WorkspaceConflict, WorkspaceUnavailable
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class WorkspacePythonOutcome:
+    state: Literal["finished", "unavailable", "unknown", "conflict"]
+    stdout: bytes
+    stderr: bytes
+    exit_code: int | None
+    execution_started: bool | None
+    reason_code: str | None
+    publication: Literal["none", "published", "retained"]
+    retained_stage: Path | None = None
+    cleanup_warning: bool = False
+    container_id: str | None = None
+
+
+def unavailable_python_execution() -> WorkspacePythonOutcome:
+    return WorkspacePythonOutcome(
+        "unavailable", b"", b"", None, False, "sandbox_execution_unavailable", "none"
+    )
+
+
+@dataclass(frozen=True)
+class _AttachedCapture:
+    stdout: bytes
+    stderr: bytes
+    returncode: int | None
+    reason: str | None
+
+
+def _collect(process: subprocess.Popen[bytes], *, timeout: float, limit: int) -> _AttachedCapture:
+    output = bytearray()
+    errors = bytearray()
+    reason: str | None = None
+    deadline = time.monotonic() + timeout
+    try:
+        if process.stdout is None or process.stderr is None:
+            raise OSError("isolated process output pipes unavailable")
+        buffers = {process.stdout.fileno(): output, process.stderr.fileno(): errors}
+        with selectors.DefaultSelector() as selector:
+            for fd in buffers:
+                os.set_blocking(fd, False)
+                selector.register(fd, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    reason = "workspace_process_timeout"
+                    break
+                for key, _ in selector.select(min(remaining, 0.05)):
+                    try:
+                        chunk = os.read(key.fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fd)
+                        continue
+                    target = buffers[key.fd]
+                    available = limit - len(target)
+                    target.extend(chunk[:available])
+                    if len(chunk) > available:
+                        reason = "workspace_output_limit"
+                        break
+                if reason is not None:
+                    break
+        if reason is None:
+            try:
+                process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                reason = "workspace_process_timeout"
+    except OSError:
+        reason = "workspace_transport_unknown"
+    finally:
+        if process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                reason = "workspace_transport_unknown"
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+    return _AttachedCapture(bytes(output), bytes(errors), process.returncode, reason)
+
+
+@dataclass(frozen=True)
+class RootlessPythonExecutor:
+    """Byte primitive ниже ComputerBackend/Gateway, без собственного tool loop."""
+
+    profile: RootlessPodmanProfile
+    workspace: ManagedWorkspace
+    limits: WorkspaceLimits
+    max_output_bytes: int
+
+    def __post_init__(self) -> None:
+        if type(self.max_output_bytes) is not int or self.max_output_bytes <= 0:
+            raise ValueError("output byte limit must be a positive integer")
+
+    def execute_python(
+        self, binding: WorkspaceBinding, script: str, *, timeout: float
+    ) -> WorkspacePythonOutcome:
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("process timeout must be finite and positive")
+        stage = None
+        try:
+            snapshot = self.workspace.capture(binding, limits=self.limits)
+            relative = Path(script)
+            if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".py":
+                raise WorkspaceUnavailable("invalid workspace Python script")
+            if not any(file.path == relative.as_posix() for file in snapshot.files):
+                raise WorkspaceUnavailable("workspace Python script unavailable")
+            stage = self.workspace.stage(snapshot)
+            prepared = self.profile.create_python_container(stage, relative.as_posix())
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return WorkspacePythonOutcome(
+                "conflict" if isinstance(exc, WorkspaceConflict) else "unavailable",
+                b"",
+                b"",
+                None,
+                False,
+                exc.reason_code
+                if isinstance(exc, WorkspaceUnavailable)
+                else "workspace_unavailable",
+                "none" if stage is None else "retained",
+                None if stage is None else stage.root,
+            )
+
+        capture = _AttachedCapture(b"", b"", None, "workspace_transport_unknown")
+        child_exit: int | None = None
+        reason: str | None = None
+        start_attempted = False
+        removed = False
+        try:
+            if self.workspace.capture(binding, limits=self.limits) != snapshot:
+                raise WorkspaceConflict("workspace changed before process admission")
+            self.profile.verify_created(prepared)
+            stage.begin_process()
+            self.profile.check_current()
+            start_attempted = True
+            process = subprocess.Popen(
+                self.profile.argv() + ["start", "--attach", prepared.container_id],
+                env=self.profile.environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+            )
+            capture = _collect(process, timeout=timeout, limit=self.max_output_bytes)
+            reason = capture.reason
+            if reason is None and capture.returncode is not None:
+                child_exit = self.profile.finished_exit(prepared, cli_returncode=capture.returncode)
+            if child_exit is None and reason is None:
+                reason = "workspace_transport_unknown"
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            reason = (
+                exc.reason_code
+                if isinstance(exc, WorkspaceUnavailable)
+                else "workspace_transport_unknown"
+            )
+        except Exception:
+            logger.exception("Unexpected isolated workspace execution fault")
+            reason = "workspace_transport_unknown"
+        finally:
+            try:
+                removed = self.profile.remove_owned(prepared)
+            except Exception:
+                logger.exception("Isolated workspace container settlement failed")
+            if not removed or reason is not None or child_exit is None:
+                stage.mark_unknown()
+        if not removed or reason is not None or child_exit is None:
+            if not start_attempted:
+                return WorkspacePythonOutcome(
+                    "conflict" if reason == "workspace_conflict" else "unavailable",
+                    capture.stdout,
+                    capture.stderr,
+                    None,
+                    False,
+                    reason or "workspace_unavailable",
+                    "retained",
+                    stage.root,
+                    container_id=None if removed else prepared.container_id,
+                )
+            return WorkspacePythonOutcome(
+                "unknown",
+                capture.stdout,
+                capture.stderr,
+                None,
+                None,
+                reason or "workspace_settlement_unknown",
+                "retained",
+                stage.root,
+                container_id=None if removed else prepared.container_id,
+            )
+
+        stage.mark_settled()
+        try:
+            self.workspace.publish(snapshot, stage, limits=self.limits)
+        except (OSError, WorkspaceUnavailable) as exc:
+            return WorkspacePythonOutcome(
+                "conflict" if isinstance(exc, WorkspaceConflict) else "unavailable",
+                capture.stdout,
+                capture.stderr,
+                child_exit,
+                True,
+                exc.reason_code
+                if isinstance(exc, WorkspaceUnavailable)
+                else "workspace_publication_unavailable",
+                "retained",
+                stage.root,
+            )
+        try:
+            self.workspace.discard_retired(snapshot, stage)
+        except (OSError, WorkspaceUnavailable):
+            return WorkspacePythonOutcome(
+                "finished",
+                capture.stdout,
+                capture.stderr,
+                child_exit,
+                True,
+                None,
+                "published",
+                stage.root,
+                cleanup_warning=True,
+            )
+        return WorkspacePythonOutcome(
+            "finished", capture.stdout, capture.stderr, child_exit, True, None, "published"
+        )

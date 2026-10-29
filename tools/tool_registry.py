@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Literal
 
 from llm.types import ToolSpec
 from shared.models import JSONValue, ToolCallRecord, ToolRequest, ToolResult
+from shared.workspace_binding import WorkspaceConflict, WorkspaceUnavailable
 from tools.protocols import Tool
 from tools.tool_logger import ToolCallLogger
 
@@ -151,6 +153,7 @@ class ToolRegistry:
         *,
         bypass_safe_mode: bool = False,
         confirmed_decision: bool = False,
+        effect_guard: AbstractContextManager[object] | None = None,
     ) -> ToolResult:
         descriptor = self._tools.get(request.name)
         if not descriptor:
@@ -214,7 +217,8 @@ class ToolRegistry:
 
         self._logger.info("tool_call_start", extra={"tool": request.name})
         try:
-            result = descriptor.handler(request)
+            with effect_guard if effect_guard is not None else nullcontext():
+                result = descriptor.handler(request)
             self._logger.info(
                 "tool_call_end",
                 extra={"tool": request.name, "ok": result.ok, "error": result.error},
@@ -225,6 +229,19 @@ class ToolRegistry:
                 error=result.error,
                 meta=result.meta,
                 args=request.args,
+            )
+            return result
+        except WorkspaceUnavailable as exc:
+            result = ToolResult.failure(
+                str(exc),
+                meta={
+                    "reason_code": exc.reason_code,
+                    "execution_started": False,
+                    "execution_review_required": isinstance(exc, WorkspaceConflict),
+                },
+            )
+            self._log_call(
+                request.name, ok=False, error=str(exc), meta=result.meta, args=request.args
             )
             return result
         except Exception as exc:

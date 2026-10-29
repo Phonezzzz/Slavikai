@@ -8,6 +8,7 @@ from typing import cast
 
 from aiohttp import web
 
+from config.computer_backend_config import resolve_computer_backend_config
 from config.http_server_config import (
     DEFAULT_MAX_REQUEST_BYTES,
     HttpAuthConfig,
@@ -19,7 +20,15 @@ from config.http_server_config import (
 from config.model_store import load_model_configs
 from core.desktop_policy import DesktopPolicyStore
 from core.desktop_runtime import DesktopRunCoordinator
+from core.managed_workspace import (
+    ManagedWorkspace,
+    ManagedWorkspacePool,
+    WorkspaceAccess,
+    WorkspaceLimits,
+)
+from core.rootless_podman import QUALIFIED_PYTHON_IMAGE, RootlessPodmanProfile
 from core.task_run_storage import TaskRunStore
+from core.workspace_python_execution import RootlessPythonExecutor
 from llm.types import ModelConfig
 from server import http_api as api
 from server.agent_provider import AgentScope, ScopedAgentProvider
@@ -41,6 +50,7 @@ from server.preferences_store import PreferencesStore
 from server.principal_storage import principal_storage_paths
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
+from shared.workspace_binding import WorkspaceUnavailable
 from tools.terminal_tool import TerminalTool
 
 _load_dotenv: Callable[..., bool] | None
@@ -144,6 +154,41 @@ def create_app(
         legacy_subject_principal_id=owner_principal_id,
     )
     app["desktop_policy_store"] = resolved_desktop_policy_store
+    computer_config = resolve_computer_backend_config()
+    workspace_pool: ManagedWorkspacePool | None = None
+    workspace_profile: RootlessPodmanProfile | None = None
+    workspace_limits: WorkspaceLimits | None = None
+    if computer_config.rootless_state_root is not None:
+        state_root = Path(computer_config.rootless_state_root)
+        sandbox = (api.PROJECT_ROOT / "sandbox").resolve()
+        canonical_state = state_root.resolve()
+        if canonical_state.is_relative_to(sandbox) or sandbox.is_relative_to(canonical_state):
+            raise ValueError("Rootless state must not overlap ordinary sandbox resources")
+        workspace_pool = ManagedWorkspacePool(state_root / "workspaces", protected_root=state_root)
+        file_bytes = computer_config.capture_file_bytes
+        total_bytes = computer_config.capture_total_bytes
+        entries = computer_config.capture_entries
+        depth = computer_config.capture_depth
+        if file_bytes is None or total_bytes is None or entries is None or depth is None:
+            raise ValueError("Explicit workspace capture limits required")
+        workspace_limits = WorkspaceLimits(file_bytes, total_bytes, entries, depth)
+        try:
+            if computer_config.container_image != QUALIFIED_PYTHON_IMAGE:
+                raise WorkspaceUnavailable("Container image must use the qualified immutable ID")
+            workspace_profile = RootlessPodmanProfile.qualify(state_root)
+        except (WorkspaceUnavailable, OSError) as exc:
+            # Недоступен именно процессный backend; host fallback отсутствует.
+            logger.warning("Rootless workspace execution unavailable: %s", exc)
+
+    def _workspace_root_policy(principal_id: str, selected: str | None) -> str | None:
+        if workspace_pool is None:
+            return selected
+        if selected is None and workspace_profile is None:
+            return None
+        return str(workspace_pool.resolve_root(principal_id, Path(selected) if selected else None))
+
+    app["managed_workspace_pool"] = workspace_pool
+
     if agent is None:
 
         def _factory(scope: AgentScope, main_config: ModelConfig | None) -> AgentProtocol:
@@ -159,6 +204,29 @@ def create_app(
                 owner_principal_id=owner_principal_id,
                 memory_root=api.PROJECT_ROOT / "memory",
             )
+            workspace_kwargs: dict[str, object] = {}
+            if workspace_pool is not None:
+                workspace_kwargs["workspace_pool"] = workspace_pool
+                owner: ManagedWorkspace | None = None
+                try:
+                    owner = workspace_pool.for_principal(scope.principal_id)
+                except (WorkspaceUnavailable, OSError):
+                    logger.warning("Managed workspace unavailable for scoped Agent")
+                if owner is not None:
+                    access = WorkspaceAccess(
+                        owner,
+                        scope.principal_id,
+                        scope.session_id,
+                        workspace_profile.revision if workspace_profile is not None else None,
+                    )
+                    workspace_kwargs["workspace_access"] = access
+                    if workspace_profile is not None and workspace_limits is not None:
+                        output_bytes = computer_config.capture_output_bytes
+                        if output_bytes is None:
+                            raise ValueError("Explicit output byte limit required")
+                        workspace_kwargs["workspace_executor"] = RootlessPythonExecutor(
+                            workspace_profile, owner, workspace_limits, output_bytes
+                        )
             return cast(
                 "AgentProtocol",
                 agent_factory(
@@ -176,6 +244,7 @@ def create_app(
                     embeddings_openai_api_key=api._resolve_provider_api_key("openai"),
                     desktop_policy_store=resolved_desktop_policy_store,
                     desktop_run_coordinator=desktop_run_coordinator,
+                    **workspace_kwargs,
                 ),
             )
 
@@ -203,6 +272,7 @@ def create_app(
     app["ui_hub"] = UIHub(
         storage=resolved_ui_storage,
         default_model_getter=_default_session_model,
+        workspace_root_policy=_workspace_root_policy if workspace_pool is not None else None,
         legacy_principal_id=owner_principal_id,
         legacy_principal_aliases=_legacy_owner_principal_aliases(),
         on_session_pruned=lambda principal_id, session_id: provider.schedule_release(
@@ -231,6 +301,12 @@ def create_app(
     app.on_cleanup.append(_close_terminal_manager)
     app.on_cleanup.append(_close_embedding_downloads)
     app.on_cleanup.append(_close_agent_provider)
+    if workspace_pool is not None:
+
+        async def _close_workspace_pool(_app: web.Application) -> None:
+            workspace_pool.close()
+
+        app.on_cleanup.append(_close_workspace_pool)
     dist_path = api.PROJECT_ROOT / "ui" / "dist"
     app["ui_dist_path"] = dist_path
     from server.http.routes import register_routes

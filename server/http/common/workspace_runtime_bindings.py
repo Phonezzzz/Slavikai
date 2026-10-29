@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from aiohttp import web
 
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from server.http.common import workspace_index, workspace_paths, workspace_runtime
 from server.ui_hub import UIHub
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.workspace_binding import WorkspaceUnavailable
 from tools.workspace_tools import workspace_root_context
 
 
@@ -28,11 +32,24 @@ class WorkspaceRuntimeBindings:
         return self.workspace_root_getter()
 
     async def workspace_root_for_session(self, hub: UIHub, session_id: str) -> Path:
-        return await workspace_paths.workspace_root_for_session(
-            hub=hub,
-            session_id=session_id,
-            fallback_root=self._workspace_root(),
-        )
+        try:
+            return await workspace_paths.workspace_root_for_session(
+                hub=hub,
+                session_id=session_id,
+                fallback_root=self._workspace_root(),
+            )
+        except WorkspaceUnavailable as exc:
+            raise web.HTTPConflict(
+                text=json.dumps(
+                    {
+                        "error": {
+                            "code": exc.reason_code,
+                            "message": "Workspace недоступен для текущего principal.",
+                        }
+                    }
+                ),
+                content_type="application/json",
+            ) from exc
 
     def resolve_workspace_root_candidate(self, path_raw: str, *, policy_profile: str) -> Path:
         return workspace_paths.resolve_workspace_root_candidate(

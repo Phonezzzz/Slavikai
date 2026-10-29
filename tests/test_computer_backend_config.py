@@ -21,6 +21,16 @@ from core.container_computer_backend import ContainerComputerBackend
 # ── resolve_computer_backend_config ─────────────────────────────────────────
 
 
+def test_rootless_state_requires_explicit_capture_limits(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLAVIK_COMPUTER_BACKEND", "container")
+    monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_ENGINE", "podman")
+    monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_IMAGE", "pinned-image")
+    monkeypatch.setenv("SLAVIK_COMPUTER_ROOTLESS_STATE", str(tmp_path))
+    monkeypatch.delenv("SLAVIK_COMPUTER_CAPTURE_FILE_BYTES", raising=False)
+    with pytest.raises(ValueError, match="CAPTURE_FILE_BYTES"):
+        resolve_computer_backend_config()
+
+
 def test_no_env_returns_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SLAVIK_COMPUTER_BACKEND", raising=False)
     cfg = resolve_computer_backend_config()
@@ -112,6 +122,8 @@ def test_make_computer_runtime_default_creates_local_backend(
     gateway_mock = MagicMock()
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return gateway_mock
 
@@ -132,6 +144,8 @@ def test_make_computer_runtime_explicit_local_creates_local_backend(
     gateway_mock = MagicMock()
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return gateway_mock
 
@@ -154,6 +168,8 @@ def test_make_computer_runtime_container_creates_container_backend(
     monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_IMAGE", "python:3.12-slim")
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return MagicMock()
 
@@ -174,6 +190,8 @@ def test_make_computer_runtime_container_uses_configured_image(
     monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_ENGINE", "docker")
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return MagicMock()
 
@@ -195,6 +213,8 @@ def test_make_computer_runtime_container_uses_configured_workspace(
     monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_WORKSPACE", "/code")
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return MagicMock()
 
@@ -216,6 +236,8 @@ def test_make_computer_runtime_container_uses_production_runner(
     monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_IMAGE", "img")
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return MagicMock()
 
@@ -234,6 +256,8 @@ def test_make_computer_runtime_invalid_backend_raises(
     monkeypatch.setenv("SLAVIK_COMPUTER_BACKEND", "bad-value")
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return MagicMock()
 
@@ -252,6 +276,8 @@ def test_make_computer_runtime_container_missing_image_raises(
     monkeypatch.delenv("SLAVIK_COMPUTER_CONTAINER_IMAGE", raising=False)
 
     class _StubAgent:
+        _workspace_executor = None
+
         def _build_tool_gateway(self) -> MagicMock:
             return MagicMock()
 

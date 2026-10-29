@@ -7,6 +7,7 @@ from aiohttp import web
 
 from config.tools_config import DEFAULT_TOOLS_STATE
 from core.approval_policy import ApprovalCategory, ApprovalRequired
+from core.managed_workspace import ManagedWorkspacePool
 from server import http_api as api
 from server.http.common.auth import _owner_principal_id, _request_principal_id
 from server.http.common.responses import error_response, json_response
@@ -49,6 +50,7 @@ from server.http_api import (
 from server.principal_storage import principal_storage_paths
 from server.ui_hub import SessionSecuritySnapshot, UIHub
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.workspace_binding import WorkspaceUnavailable
 from tools.workspace_tools import (
     ListFilesTool,
     ReadFileTool,
@@ -70,6 +72,18 @@ async def handle_ui_index(request: web.Request) -> web.FileResponse:
 
 async def handle_workspace_index(request: web.Request) -> web.FileResponse:
     return await handle_ui_index(request)
+
+
+def _resolve_owned_root_candidate(
+    request: web.Request, session_id: str, path_raw: str, *, policy_profile: str
+) -> Path:
+    pool = request.app.get("managed_workspace_pool")
+    if isinstance(pool, ManagedWorkspacePool):
+        principal = _agent_scope(request, session_id).principal_id
+        candidate = pool.resolve_root(principal, Path(path_raw).expanduser())
+        if candidate.parent == pool.root.resolve():
+            return candidate
+    return _resolve_workspace_root_candidate(path_raw, policy_profile=policy_profile)
 
 
 async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
@@ -117,7 +131,19 @@ async def handle_ui_workspace_root_select(request: web.Request) -> web.Response:
     profile_raw = effective_policy.get("profile")
     profile = _normalize_policy_profile(profile_raw)
     try:
-        target_root = _resolve_workspace_root_candidate(path_raw.strip(), policy_profile=profile)
+        target_root = _resolve_owned_root_candidate(
+            request, session_id, path_raw.strip(), policy_profile=profile
+        )
+    except WorkspaceUnavailable as exc:
+        return error_response(
+            status=409,
+            message=(
+                "Root недоступен: область managed workspace "
+                "принадлежит другому scope либо защищена."
+            ),
+            error_type="invalid_request_error",
+            code=exc.reason_code,
+        )
     except ValueError as exc:
         return error_response(
             status=400,
@@ -1662,7 +1688,9 @@ async def handle_ui_session_security_post(request: web.Request) -> web.Response:
             current_profile = _normalize_policy_profile(current_policy.get("profile"))
             target_profile = profile or current_profile
             try:
-                _resolve_workspace_root_candidate(
+                _resolve_owned_root_candidate(
+                    request,
+                    session_id,
                     str(workspace_root),
                     policy_profile=target_profile,
                 )

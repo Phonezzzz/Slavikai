@@ -6,8 +6,8 @@
 
 ## Текущий обязательный контракт
 
-Квалифицированной sandbox process environment в current runtime нет. До её отдельной
-реализации и проверки process execution недоступен во всех следующих контурах:
+По умолчанию sandbox process execution недоступен во всех следующих контурах.
+Единственное явное исключение для managed `workspace_run` описано ниже:
 
 - native `shell`, `workspace_run`, `workspace_terminal_run`;
 - manual PTY create/reuse, input и resize;
@@ -61,12 +61,59 @@ stdin/resize/reuse unqualified host process не разрешаются. Уже 
 
 ## Что не реализовано
 
-Нет isolated execution backend, real environment qualification, новых grants/config
-bypass, migrations/schemas/stores, hard run timeout, effects ledger, recovery/replay,
-полного file/network isolation или raw canonical capture. I0 не завершает R2b/R2/R1.
+I0 сам по себе не реализует isolated execution backend, real environment qualification,
+новые grants/config bypass, migrations/schemas/stores, hard run timeout, effects ledger,
+recovery/replay, полную file/network isolation или raw canonical capture. I0 не завершает R2b/R2/R1.
 Наличие Container factory либо fake runner tests не доказывает isolation.
 
 Разрешение process execution потребует отдельного согласованного scope: реальная среда,
 trusted principal/workspace/environment binding, недоступность server-private DB/env,
 проверка mounts/FDs/processes/sockets/network и controlled positive/negative acceptance.
-Это направление остаётся proposal, а не разрешение подключить backend или ослабить fence.
+Принятое узкое исключение реализуется только на описанной ниже boundary.
+
+## Узкое исключение: managed Python workspace
+
+Отдельный explicit rootless profile возвращает только native `workspace_run` через
+`ToolGateway -> RunCodeTool -> ComputerBackend.execute_python`. Все остальные process
+paths из списка выше остаются закрыты. Ручной Run через `Agent.call_tool`/HTTP и
+его category-only resume также остаются unavailable: они не захватывают immutable
+workspace/environment approval. Native loop/typed continuation идут через Gateway. Local backend не исполняет Python на host;
+выбор image/approval/yolo сам по себе не даёт admission.
+
+Для подключения нужны `SLAVIK_COMPUTER_BACKEND=container`, engine `podman`, workspace
+`/workspace`, immutable image ID и canonical absolute `SLAVIK_COMPUTER_ROOTLESS_STATE`.
+Все пять `SLAVIK_COMPUTER_CAPTURE_FILE_BYTES|TOTAL_BYTES|ENTRIES|DEPTH|OUTPUT_BYTES`
+задаются явно положительными integers; новых числовых defaults нет. Runtime ничего
+не устанавливает, не скачивает и не запускает daemon. Без этих настроек действует I0.
+Точные поддержанные engine/image/config bindings определены в `core/rootless_podman.py`;
+иная версия или изменённая binding даёт unavailable, без автоматического ремонта.
+
+Server создаёт отдельный workspace principal под private rootless state. Существующие
+host roots не импортируются и остаются file-only. Доверенный pool разделяется между
+sessions; один principal имеет общий workspace owner/revision и exclusive OS lease.
+Restart сохраняет bytes, но выдаёт новую identity/revision, без восстановления approvals.
+Весь control state защищён от выбора как workspace и от Desktop file capabilities.
+Шесть native writers проходят тот же owner guard после registry policy checks.
+
+Ingress — ограниченный nofollow capture с отказом для links/special files и race;
+в контейнер передаются независимые private staged bytes. Реальная stopped-container
+конфигурация проверяется до start: pinned image, private namespaces, network none,
+readonly rootfs, capdropall, no-new-privileges, единственный workspace mount с
+nosuid/nodev, ограниченные memory/pids/tmpfs и allowlisted environment. Host home,
+DB, credentials, control sockets и inherited FDs не передаются. Это qualification
+конкретного профиля, не обещание защиты от kernel/engine vulnerabilities.
+
+Collector разделяет raw stdout/stderr bytes, actual child exit и transport outcome.
+Публикация происходит только после подтверждённого завершения и удаления собственной
+container environment; проверяются outputs, исходные owner/revision/content, затем
+Linux atomic directory exchange. Unsupported exchange не заменяется copy-back.
+Concurrent writer даёт conflict, unknown/timeout/output limit — retained stage без
+публикации или replay. Такой результат останавливает batch и следующие model/tool calls;
+проверка и новый запуск требуют явного решения. Retained stages не имеют GC/recovery
+UI и могут сохранять чувствительные bytes; автоматического cleanup unknown outputs нет.
+При ошибке удаления контейнер может остаться, settlement не объявляется успешным.
+
+Raw bytes пока доступны внутренней boundary только на время вызова; native ToolResult
+содержит decoded view. Durable canonical capture, original run/attempt intent и recovery
+относятся к незавершённому R2b. Required process verifier остаётся ERROR/unavailable;
+этот backend не завершает R2/R1 и не включает production activation.

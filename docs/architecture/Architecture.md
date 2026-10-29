@@ -12,7 +12,8 @@ Current I0 ограничение: sandbox process execution недоступе�
 manual PTY/Git/import и Container commands отказывают до запуска; прежние описания
 host runners ниже являются историей механизма, а не доступной capability.
 См. [SANDBOX_PROCESS_FENCE.md](SANDBOX_PROCESS_FENCE.md). Process-free paths и explicit
-Desktop authority сохраняются; изолированный backend ещё не реализован.
+Desktop authority сохраняются. Native `workspace_run` имеет узкий explicit qualified
+rootless backend с managed principal workspace; default остаётся unavailable.
 
 ## Цель
 
@@ -43,7 +44,8 @@ PR-26 workspace IDE начал декомпозицию: layout/resize state и 
 `tool_outcomes` вне code repository.
 После PR-07..PR-12 (текущей серии) Workspace переименован в **Computer** как UI
 inspector/runtime для текущей chat session. Добавлены `AgentComputerRuntime`, `ComputerBackend`
-Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend` (opt-in/inactive).
+Protocol, `LocalComputerBackend` (default) и `ContainerComputerBackend`
+(explicit opt-in, qualified native Python only).
 Текущий runtime также содержит отдельный Desktop execution profile. Он использует общий
 conversational endpoint и существующий LLM/tool loop, но публикует host tools только при
 `mode=desktop`; Chat (`ask`) и Agent (`auto`/Act) сохраняют прежние sandbox semantics.
@@ -111,12 +113,15 @@ conversational endpoint и существующий LLM/tool loop, но публ
     composer и не является новым chat lane.
   - `AgentComputerRuntime` — backend-agnostic facade; методы: `list_files`, `read_file`,
     `write_file`, `apply_patch`, `run_command`, `git_diff`, `run_tests`, `check`.
-  - `ComputerBackend` — `@runtime_checkable` Protocol, определяет те же 8 методов.
+  - `ComputerBackend` — `@runtime_checkable` Protocol, определяет facade methods
+    и internal byte primitive `execute_python`.
   - `LocalComputerBackend` — default implementation; делегирует операции через `ToolGateway`.
     `Agent.make_computer_runtime()` создаёт его по умолчанию.
-  - `ContainerComputerBackend` — **opt-in/inactive** alternative; command execution закрыт I0 fence. Прежний runner использовал
+  - `ContainerComputerBackend` — **explicit opt-in**; generic command execution закрыт I0 fence. Прежний runner использовал
     `docker/podman run --rm`; в тестах используется `FakeContainerRunner` вместо реального
-    Docker daemon. По умолчанию не включён; `LocalComputerBackend` остаётся default.
+    Docker daemon. По умолчанию не включён; `LocalComputerBackend` остаётся default. Только explicit
+    qualified rootless profile подключает internal Python primitive для native workspace_run;
+    file facade такого backend идёт через scoped Gateway. Остальные commands fenced.
   - Computer UI read-only по умолчанию; ручные правки файлов (New/Rename/Move/Del/Save)
     разблокируются только при `sessionYoloActive`.
   - Computer activity log (`ComputerActivityLog`) хранится в `computer_events` в session hub,
@@ -325,6 +330,6 @@ conversational endpoint и существующий LLM/tool loop, но публ
 - `server/terminal_manager.py` — совместимый alias на `TerminalTool`, не отдельная реализация.
 - Не создавать `/ui/api/computer/send`, `lane="computer"`, или новый conversational
   entrypoint для Computer. Chat остаётся единственной conversational entrypoint.
-- `ContainerComputerBackend` — opt-in/inactive. Не переключать default на container
+- `ContainerComputerBackend` — explicit opt-in. Не переключать default на container
   без явной config/env wiring и отдельного решения. `FakeContainerRunner` —
   test-only utility, не production backend.

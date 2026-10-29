@@ -57,8 +57,10 @@ Sandbox process execution временно недоступен по
 [`SANDBOX_PROCESS_FENCE.md`](architecture/SANDBOX_PROCESS_FENCE.md): tools, process
 verifier, manual terminal/Git/import и unqualified container commands отказывают до
 запуска независимо от approval/yolo. Process-free operations и explicit Desktop
-authority сохраняются. Это I0 containment fence, не working isolated backend,
-полная OS isolation, raw capture или завершение R2b. Нового permit/config bypass нет.
+authority сохраняются. Узкое explicit исключение — native `workspace_run` через
+qualified rootless ComputerBackend и principal-owned managed workspace; точные
+admission/publication/unknown boundaries описаны там же. Без explicit profile I0
+сохраняется. Raw durable capture и завершение R2b этим не реализованы.
 
 
 Auto v1 применяет отдельный native tool-call cap перед каждым следующим call,

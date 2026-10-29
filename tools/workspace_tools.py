@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import logging
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.sandbox_execution import sandbox_execution_failure
 from tools.terminal_tool import TerminalTool
+
+if TYPE_CHECKING:
+    from core.computer_backend import ComputerBackend
 
 SANDBOX_ROOT = Path("sandbox").resolve()
 WORKSPACE_ROOT = (SANDBOX_ROOT / "project").resolve()
@@ -575,8 +580,9 @@ class ApplyPatchTool:
 
 
 class RunCodeTool:
-    def __init__(self, timeout: int = 3) -> None:
+    def __init__(self, timeout: int = 3, *, backend: ComputerBackend | None = None) -> None:
         self.timeout = timeout
+        self.backend = backend
 
     def handle(self, request: ToolRequest) -> ToolResult:
         raw_path = str(request.args.get("path") or "").strip()
@@ -593,7 +599,68 @@ class RunCodeTool:
                 resolved.relative_to(get_workspace_root())
             except ValueError:
                 return ToolResult.failure("Скрипт вне рабочей директории запрещён.")
-            return sandbox_execution_failure()
+            if self.backend is None or request.workspace_binding is None:
+                return sandbox_execution_failure()
+            try:
+                outcome = self.backend.execute_python(
+                    request.workspace_binding,
+                    resolved.relative_to(get_workspace_root()).as_posix(),
+                    timeout=self.timeout,
+                )
+            except Exception:  # noqa: BLE001
+                logging.getLogger("SlavikAI.Workspace").exception(
+                    "isolated Python outcome unavailable"
+                )
+                return ToolResult.failure(
+                    "Результат исполнения неизвестен; "
+                    "требуется проверка среды перед новым запуском.",
+                    meta={
+                        "reason_code": "workspace_transport_unknown",
+                        "execution_started": None,
+                        "execution_review_required": True,
+                    },
+                )
+            if outcome.reason_code == "sandbox_execution_unavailable":
+                return sandbox_execution_failure()
+            # Только view. Полные bytes остаются на внутренней backend boundary для R2b.
+            stdout = outcome.stdout.decode("utf-8", errors="replace")
+            stderr = outcome.stderr.decode("utf-8", errors="replace")
+            data: dict[str, JSONValue] = {
+                "output": stdout + ("\nSTDERR:\n" + stderr if stderr else ""),
+                "stdout": stdout,
+                "stderr": stderr,
+                "publication": outcome.publication,
+            }
+            if outcome.exit_code is not None:
+                data["exit_code"] = outcome.exit_code
+            review_required = outcome.reason_code == "workspace_conflict" or (
+                outcome.execution_started is not False and outcome.publication == "retained"
+            )
+            meta: dict[str, JSONValue] = {
+                "execution_started": outcome.execution_started,
+                "execution_review_required": review_required,
+                "cleanup_warning": outcome.cleanup_warning,
+            }
+            if outcome.reason_code is not None:
+                meta["reason_code"] = outcome.reason_code
+            if (
+                outcome.state == "finished"
+                and outcome.publication == "published"
+                and outcome.exit_code == 0
+            ):
+                return ToolResult.success(data, meta=meta)
+            if outcome.state == "unknown":
+                error = (
+                    "Результат исполнения неизвестен. "
+                    "Изменения среды не опубликованы; требуется проверка."
+                )
+            elif review_required:
+                error = "Изменения среды не опубликованы; сохранённый результат требует проверки."
+            elif outcome.exit_code is not None:
+                error = f"Скрипт завершился с кодом {outcome.exit_code}."
+            else:
+                error = "Изолированное исполнение недоступно для текущей привязки workspace."
+            return ToolResult.failure(error, meta=meta, data=data)
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Ошибка запуска: {exc}")
 
