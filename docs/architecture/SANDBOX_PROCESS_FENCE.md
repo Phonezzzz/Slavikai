@@ -83,7 +83,10 @@ workspace/environment approval. Native loop/typed continuation идут чере
 Для подключения нужны `SLAVIK_COMPUTER_BACKEND=container`, engine `podman`, workspace
 `/workspace`, immutable image ID и canonical absolute `SLAVIK_COMPUTER_ROOTLESS_STATE`.
 Все пять `SLAVIK_COMPUTER_CAPTURE_FILE_BYTES|TOTAL_BYTES|ENTRIES|DEPTH|OUTPUT_BYTES`
-задаются явно положительными integers; новых числовых defaults нет. Runtime ничего
+задаются явно положительными integers. Отдельно обязательны
+`SLAVIK_COMPUTER_STAGING_SLOT_BYTES|STAGING_SLOT_INODES|STAGING_SLOTS`:
+размер каждого tmpfs slot (кратный странице), число inodes и конечное число slots.
+Capture limits не подменяют execution quota; числовых defaults и наследования нет. Runtime ничего
 не устанавливает, не скачивает и не запускает daemon. Без этих настроек действует I0.
 Точные поддержанные engine/image/config bindings определены в `core/rootless_podman.py`;
 иная версия или изменённая binding даёт unavailable, без автоматического ремонта.
@@ -96,21 +99,37 @@ Restart сохраняет bytes, но выдаёт новую identity/revision
 Шесть native writers проходят тот же owner guard после registry policy checks.
 
 Ingress — ограниченный nofollow capture с отказом для links/special files и race;
-в контейнер передаются независимые private staged bytes. Реальная stopped-container
+в контейнер передаются независимые private staged bytes внутри kernel-bounded tmpfs.
+Один principal занимает не более одного active или retained slot; разные principals
+могут исполняться параллельно. Совокупный предел staging — число slots × размер
+slot (отдельно inodes), включая retained outputs. Краткий allocation lock не
+удерживается во время execution. Worker не получает writable host-backed stage.
+Доверенный mount owner живёт в существующих rootless namespaces; сервер работает
+через отдельный capability-free view. PID/start time, namespaces, helper files и
+реальные slot identities входят в environment binding. Потеря owner или неизвестные
+старые mounts запрещают admission/reuse; автоматического overmount/recovery нет.
+Реальная stopped-container
 конфигурация проверяется до start: pinned image, private namespaces, network none,
 readonly rootfs, capdropall, no-new-privileges, единственный workspace mount с
-nosuid/nodev, ограниченные memory/pids/tmpfs и allowlisted environment. Host home,
+nosuid/nodev, ограниченные memory/pids/tmpfs и allowlisted environment. Container
+logging отключён и проверяется в actual spec: stdout/stderr не дублируются в
+неограниченный host log. Host home,
 DB, credentials, control sockets и inherited FDs не передаются. Это qualification
 конкретного профиля, не обещание защиты от kernel/engine vulnerabilities.
 
 Collector разделяет raw stdout/stderr bytes, actual child exit и transport outcome.
 Публикация происходит только после подтверждённого завершения и удаления собственной
-container environment; проверяются outputs, исходные owner/revision/content, затем
+container environment; nofollow capture outputs ограничен до переноса в новый
+доверенный host stage, проверяются исходные owner/revision/content, затем
 Linux atomic directory exchange. Unsupported exchange не заменяется copy-back.
 Concurrent writer даёт conflict, unknown/timeout/output limit — retained stage без
 публикации или replay. Такой результат останавливает batch и следующие model/tool calls;
 проверка и новый запуск требуют явного решения. Retained stages не имеют GC/recovery
 UI и могут сохранять чувствительные bytes; автоматического cleanup unknown outputs нет.
+Retained outputs продолжают занимать bounded slot; exhaustion даёт unavailable.
+Slot освобождается только после publication и подтверждённого cleanup; ошибка
+cleanup требует review. Shutdown с живыми allocations сохраняет их mounts;
+чистое завершение требует доставленной команды и подтверждённого unmount.
 При ошибке удаления контейнер может остаться, settlement не объявляется успешным.
 
 Raw bytes пока доступны внутренней boundary только на время вызова; native ToolResult

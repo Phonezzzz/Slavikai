@@ -13,12 +13,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from core.managed_workspace import WorkspaceStage
+from core.rootless_staging import BoundedStage
 from shared.workspace_binding import WorkspaceUnavailable
 
 QUALIFIED_PYTHON_IMAGE = "37ccb536022bb36c4570856b55ebfa85bf07827e3c2fa3eba37f0dac62eebc05"
 QUALIFIED_PYTHON_DIGEST = "sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487"
 QUALIFIED_AMD64_DIGEST = "sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337"
-QUALIFIED_PROFILE_VERSION = "i1-ubuntu-podman-5.7-python-v2"
+QUALIFIED_PROFILE_VERSION = "i1-ubuntu-podman-5.7-python-bounded-v3"
 
 
 def _field(value: object, *path: str) -> object:
@@ -60,9 +61,13 @@ def _required_field(value: object, *path: str) -> object:
 class PreparedPythonContainer:
     container_id: str
     name: str
-    stage: WorkspaceStage
+    bounded: BoundedStage
     script: str
     profile_revision: str
+
+    @property
+    def stage(self) -> WorkspaceStage:
+        return self.bounded.stage
 
 
 @dataclass(frozen=True)
@@ -281,9 +286,13 @@ class RootlessPodmanProfile:
             raise WorkspaceUnavailable("invalid rootless engine metadata") from exc
 
     def create_python_container(
-        self, stage: WorkspaceStage, script: str
+        self, bounded: BoundedStage, script: str
     ) -> PreparedPythonContainer:
-        if stage.binding.environment_revision != self.revision:
+        if not isinstance(bounded, BoundedStage) or bounded.pool.profile is not self:
+            raise WorkspaceUnavailable("bounded workspace environment required")
+        bounded.pool.check_stage(bounded)
+        stage = bounded.stage
+        if stage.binding.environment_revision != bounded.pool.execution_revision:
             raise WorkspaceUnavailable("workspace environment binding changed")
         relative = Path(script)
         if (
@@ -307,6 +316,7 @@ class RootlessPodmanProfile:
                 "--label",
                 f"slavikai.workspace.operation={name}",
                 "--pull=never",
+                "--log-driver=none",
                 "--network=none",
                 "--pid=private",
                 "--ipc=private",
@@ -324,7 +334,7 @@ class RootlessPodmanProfile:
                 "--http-proxy=false",
                 "--image-volume=ignore",
                 "--mount",
-                f"type=bind,src={stage.root},dst=/workspace,rw,nosuid,nodev",
+                f"type=bind,src={bounded.engine_root},dst=/workspace,rw,nosuid,nodev",
                 QUALIFIED_PYTHON_IMAGE,
                 *command,
             ]
@@ -336,7 +346,7 @@ class RootlessPodmanProfile:
             character not in "0123456789abcdef" for character in container_id
         ):
             raise WorkspaceUnavailable("container identity unavailable; execution not started")
-        prepared = PreparedPythonContainer(container_id, name, stage, command[-1], self.revision)
+        prepared = PreparedPythonContainer(container_id, name, bounded, command[-1], self.revision)
         try:
             self.verify_created(prepared)
             if result.stderr:
@@ -348,9 +358,11 @@ class RootlessPodmanProfile:
             raise
 
     def verify_created(self, prepared: PreparedPythonContainer) -> None:
+        prepared.bounded.pool.check_stage(prepared.bounded)
         if (
             prepared.profile_revision != self.revision
-            or prepared.stage.binding.environment_revision != self.revision
+            or prepared.stage.binding.environment_revision
+            != prepared.bounded.pool.execution_revision
         ):
             raise WorkspaceUnavailable("container environment binding changed")
         signature = _signature(prepared.stage.root, directory=True)
@@ -397,6 +409,7 @@ class RootlessPodmanProfile:
             ("HostConfig", "SecurityOpt"): ["no-new-privileges"],
             ("HostConfig", "RestartPolicy"): {"Name": "no", "MaximumRetryCount": 0},
             ("HostConfig", "AutoRemove"): False,
+            ("HostConfig", "LogConfig", "Type"): "none",
             ("HostConfig", "Tmpfs"): {"/tmp": "rw,nosuid,nodev,noexec,size=32m,rprivate,tmpcopyup"},
             ("EffectiveCaps",): None,
             ("BoundingCaps",): None,
@@ -430,7 +443,7 @@ class RootlessPodmanProfile:
             raise WorkspaceUnavailable("effective container mounts are unqualified")
         for key, value in {
             "Type": "bind",
-            "Source": str(prepared.stage.root),
+            "Source": str(prepared.bounded.engine_root),
             "Destination": "/workspace",
             "RW": True,
             "Propagation": "rprivate",

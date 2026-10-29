@@ -851,17 +851,18 @@
       "scope": "runtime",
       "status": "partial",
       "owner": "runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/SANDBOX_PROCESS_FENCE.md",
       "verified_by": [
         "tests/test_managed_workspace.py",
         "tests/test_rootless_podman.py",
+        "tests/test_rootless_staging.py",
         "tests/test_workspace_python_execution.py",
         "tests/ui_api/test_managed_workspace.py",
         "tests/test_tool_loop.py",
         "tests/test_sandbox_execution_fence.py"
       ],
-      "summary": "Explicit pinned rootless Podman profile admits only native workspace_run through scoped Gateway and ComputerBackend. Principal-owned managed workspaces coordinate six writers, once approval binds immutable workspace/environment revision, private nofollow byte staging rejects aliases and atomic publication requires original content/revision after container settlement. Unknown/conflict stops subsequent tool/model calls without publication/replay. Raw bytes and actual exit exist internally; durable capture, run-intent fencing/recovery, other process consumers and production activation remain outside this partial slice. Unit tests do not independently prove OS isolation; real synthetic qualification evidence is recorded separately."
+      "summary": "Explicit pinned rootless Podman profile admits only native workspace_run through scoped Gateway and ComputerBackend. Principal-owned managed workspaces coordinate six writers, once approval binds immutable workspace/environment revision, finite explicit kernel tmpfs byte/inode slots bound active and retained private nofollow stages (one per principal), container logs are disabled, unknown mount ownership denies reuse, and bounded transfer plus atomic publication requires original content/revision after container settlement. Unknown/conflict stops subsequent tool/model calls without publication/replay. Raw bytes and actual exit exist internally; durable capture, run-intent fencing/recovery, other process consumers and production activation remain outside this partial slice. Unit tests do not independently prove OS isolation; real synthetic qualification evidence is recorded separately."
     }
   ]
 }

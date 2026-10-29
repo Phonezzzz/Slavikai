@@ -233,11 +233,13 @@ class ManagedWorkspace:
             os.close(fd)
             raise
 
-    def stage(self, snapshot: WorkspaceSnapshot) -> WorkspaceStage:
+    def stage(self, snapshot: WorkspaceSnapshot, *, storage: Path | None = None) -> WorkspaceStage:
         with self._lock:
             self._validate(snapshot.binding)
-            parent_fd = self._open_parent()
+            parent = self.root.parent if storage is None else storage
+            parent_fd = self._open_parent() if storage is None else _directory(parent)
             try:
+                _private_directory(os.fstat(parent_fd))
                 name = f"stage-{uuid.uuid4().hex}"
                 os.mkdir(name, mode=0o700, dir_fd=parent_fd)
                 fd = os.open(
@@ -268,7 +270,7 @@ class ManagedWorkspace:
                             os.close(target)
                     info = os.fstat(fd)
                     return WorkspaceStage(
-                        self.root.parent / name, snapshot.binding, (info.st_dev, info.st_ino)
+                        parent / name, snapshot.binding, (info.st_dev, info.st_ino)
                     )
                 finally:
                     os.close(fd)
@@ -299,6 +301,62 @@ class ManagedWorkspace:
                 shutil.rmtree(stage.root.name, dir_fd=parent_fd)
             finally:
                 os.close(parent_fd)
+
+    def _discard_fresh(self, stage: WorkspaceStage) -> None:
+        if (
+            stage._state != "fresh"
+            or stage.binding.workspace_id != self._workspace_id
+            or stage.root.parent != self.root.parent
+            or stage.root == self.root
+            or not shutil.rmtree.avoids_symlink_attacks
+        ):
+            raise WorkspaceUnavailable("unpublished host staging cleanup unavailable")
+        parent_fd = self._open_parent()
+        try:
+            info = os.stat(stage.root.name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != stage.identity:
+                raise WorkspaceConflict("unpublished host staging identity changed")
+            shutil.rmtree(stage.root.name, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
+
+    def publish_bounded(
+        self, snapshot: WorkspaceSnapshot, stage: WorkspaceStage, *, limits: WorkspaceLimits
+    ) -> Path | None:
+        """После settlement переносит только validated bytes в trusted host stage.
+
+        Worker никогда не получает writable host stage. Копирование ограничено
+        capture limits, затем используется тот же owner/CAS/atomic exchange.
+        Возвращает путь старого host tree только при cleanup warning после commit.
+        """
+        with self._lock, stage.publication():
+            if stage._state != "settled":
+                raise WorkspaceUnavailable("bounded stage processes have not settled")
+            self._validate(snapshot.binding)
+            if stage.binding != snapshot.binding:
+                raise WorkspaceUnavailable("bounded output binding mismatch")
+            fd = _directory(stage.root)
+            try:
+                info = os.fstat(fd)
+                _private_directory(info)
+                if (info.st_dev, info.st_ino) != stage.identity:
+                    raise WorkspaceConflict("bounded output identity changed")
+                output = _capture_tree(fd, binding=stage.binding, limits=limits)
+                if _capture_tree(fd, binding=stage.binding, limits=limits) != output:
+                    raise WorkspaceConflict("bounded output is still changing")
+            finally:
+                os.close(fd)
+            host_stage = self.stage(output)
+            try:
+                self.publish(snapshot, host_stage, limits=limits)
+            except BaseException:
+                self._discard_fresh(host_stage)
+                raise
+            try:
+                self.discard_retired(snapshot, host_stage)
+            except (OSError, WorkspaceUnavailable):
+                return host_stage.root
+            return None
 
     def publish(
         self,

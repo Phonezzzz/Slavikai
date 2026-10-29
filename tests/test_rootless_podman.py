@@ -47,3 +47,26 @@ def test_stale_environment_binding_cannot_create_container(tmp_path, monkeypatch
     with pytest.raises(WorkspaceUnavailable, match="environment"):
         profile.create_python_container(stage, "script.py")
     assert calls == []
+
+
+def test_plain_host_stage_is_not_a_bounded_execution_backing_store(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "script.py").write_text("print('synthetic')")
+    binding = replace(
+        owner.bind(principal_id="alice", session_id="chat"), environment_revision="profile"
+    )
+    snapshot = owner.capture(binding, limits=WorkspaceLimits(1024, 4096, 20, 8))
+    stage = owner.stage(snapshot)
+    profile = RootlessPodmanProfile(tmp_path, os.geteuid(), os.getegid(), "profile", (), ())
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("plain host staging must be rejected before contacting engine")
+
+    monkeypatch.setattr(RootlessPodmanProfile, "check_current", lambda self: None)
+    monkeypatch.setattr("subprocess.run", forbidden)
+    with pytest.raises(WorkspaceUnavailable, match="bounded"):
+        profile.create_python_container(stage, "script.py")

@@ -633,8 +633,10 @@ class RunCodeTool:
             }
             if outcome.exit_code is not None:
                 data["exit_code"] = outcome.exit_code
-            review_required = outcome.reason_code == "workspace_conflict" or (
-                outcome.execution_started is not False and outcome.publication == "retained"
+            review_required = (
+                outcome.state == "conflict"
+                or outcome.cleanup_warning
+                or (outcome.execution_started is not False and outcome.publication == "retained")
             )
             meta: dict[str, JSONValue] = {
                 "execution_started": outcome.execution_started,

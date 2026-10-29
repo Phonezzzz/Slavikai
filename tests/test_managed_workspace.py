@@ -517,3 +517,45 @@ def test_concurrent_writer_and_publisher_never_lose_accepted_write(tmp_path):
         publishing.result(timeout=10)
     assert (owner.root / "value.txt").read_text() == "accepted-write"
     assert (stage.root / "value.txt").read_text() == "process-output"
+
+
+def test_snapshot_can_be_materialized_in_separate_private_execution_storage(tmp_path):
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "script.py").write_bytes(b"independent bytes")
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    snapshot = owner.capture(owner.bind(principal_id="alice", session_id="chat"), limits=limits)
+    storage = tmp_path / "bounded-private-storage"
+    storage.mkdir(mode=0o700)
+    stage = owner.stage(snapshot, storage=storage)
+    assert stage.root.parent == storage
+    assert (stage.root / "script.py").read_bytes() == b"independent bytes"
+    assert (stage.root / "script.py").stat().st_ino != (owner.root / "script.py").stat().st_ino
+    (stage.root / "script.py").write_bytes(b"worker output")
+    assert (owner.root / "script.py").read_bytes() == b"independent bytes"
+    with pytest.raises(WorkspaceUnavailable):
+        owner.publish(snapshot, stage, limits=limits)
+
+
+def test_settled_external_stage_publishes_only_via_bounded_capture_and_atomic_exchange(tmp_path):
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "script.py").write_bytes(b"original")
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    snapshot = owner.capture(owner.bind(principal_id="alice", session_id="chat"), limits=limits)
+    storage = tmp_path / "bounded-private-storage"
+    storage.mkdir(mode=0o700)
+    stage = owner.stage(snapshot, storage=storage)
+    stage.begin_process()
+    (stage.root / "script.py").write_bytes(b"verified output")
+    with pytest.raises(WorkspaceUnavailable, match="settled"):
+        owner.publish_bounded(snapshot, stage, limits=limits)
+    stage.mark_settled()
+    assert owner.publish_bounded(snapshot, stage, limits=limits) is None
+    assert (owner.root / "script.py").read_bytes() == b"verified output"
+    assert (stage.root / "script.py").read_bytes() == b"verified output"
+    assert list(parent.glob("stage-*")) == []
+    with pytest.raises(WorkspaceConflict):
+        owner.publish_bounded(snapshot, stage, limits=limits)

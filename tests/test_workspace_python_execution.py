@@ -38,16 +38,36 @@ def test_stale_workspace_refuses_before_any_engine_command(tmp_path, monkeypatch
 def test_unexpected_engine_inspection_fault_cleans_own_container_without_publication(
     tmp_path, monkeypatch
 ):
+    from dataclasses import replace
+
     from core.rootless_podman import PreparedPythonContainer
+    from core.rootless_staging import BoundedStage, RootlessStagePool, StagingLimits
 
     parent = tmp_path / "managed"
     parent.mkdir(mode=0o700)
     owner = ManagedWorkspace.create(parent, principal_id="alice")
     (owner.root / "script.py").write_text("print('original')")
-    binding = owner.bind(principal_id="alice", session_id="chat-a")
+    binding = replace(
+        owner.bind(principal_id="alice", session_id="chat-a"),
+        environment_revision="synthetic-bounded-environment",
+    )
     profile = RootlessPodmanProfile(tmp_path, os.geteuid(), os.getegid(), "revision", (), ())
+    pool = RootlessStagePool(profile, StagingLimits(4096, 32, 2))
+    # Только fault propagation/cleanup: OS staging и engine здесь заменены boundary stubs.
+    monkeypatch.setattr(
+        RootlessStagePool,
+        "execution_revision",
+        property(lambda self: "synthetic-bounded-environment"),
+    )
+
+    def prepare(self, workspace, snapshot):
+        stage = workspace.stage(snapshot)
+        info = stage.root.stat()
+        return BoundedStage(stage, self, stage.root, stage.root, (info.st_dev, info.st_ino))
+
+    monkeypatch.setattr(RootlessStagePool, "prepare", prepare)
     executor = RootlessPythonExecutor(
-        profile, owner, WorkspaceLimits(1024, 4096, 20, 8), max_output_bytes=1024
+        profile, owner, WorkspaceLimits(1024, 4096, 20, 8), max_output_bytes=1024, staging_pool=pool
     )
     prepared_containers = []
     removed = []

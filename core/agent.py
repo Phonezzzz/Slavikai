@@ -191,7 +191,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         if workspace_executor is not None and (
             workspace_access is None
             or workspace_access.workspace is not workspace_executor.workspace
-            or workspace_access.environment_revision != workspace_executor.profile.revision
+            or workspace_access.environment_revision != workspace_executor.environment_revision
             or workspace_pool is None
             or workspace_pool.protected_root != workspace_executor.profile.state_root
             or not workspace_pool.owns(user_id, workspace_access.workspace)
@@ -252,6 +252,11 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
                 project_root / "core" / "desktop_security.py",
                 project_root / "core" / "tool_gateway.py",
                 project_root / "core" / "tool_loop.py",
+                project_root / "core" / "rootless_stage_helper.py",
+                project_root / "core" / "rootless_staging.py",
+                project_root / "core" / "rootless_podman.py",
+                project_root / "core" / "managed_workspace.py",
+                project_root / "core" / "workspace_python_execution.py",
                 project_root / "requirements.in",
                 project_root / "requirements.txt",
                 project_root / "constraints.txt",

@@ -27,6 +27,7 @@ from core.managed_workspace import (
     WorkspaceLimits,
 )
 from core.rootless_podman import QUALIFIED_PYTHON_IMAGE, RootlessPodmanProfile
+from core.rootless_staging import RootlessStagePool, StagingLimits
 from core.task_run_storage import TaskRunStore
 from core.workspace_python_execution import RootlessPythonExecutor
 from llm.types import ModelConfig
@@ -158,6 +159,7 @@ def create_app(
     workspace_pool: ManagedWorkspacePool | None = None
     workspace_profile: RootlessPodmanProfile | None = None
     workspace_limits: WorkspaceLimits | None = None
+    staging_pool: RootlessStagePool | None = None
     if computer_config.rootless_state_root is not None:
         state_root = Path(computer_config.rootless_state_root)
         sandbox = (api.PROJECT_ROOT / "sandbox").resolve()
@@ -172,11 +174,19 @@ def create_app(
         if file_bytes is None or total_bytes is None or entries is None or depth is None:
             raise ValueError("Explicit workspace capture limits required")
         workspace_limits = WorkspaceLimits(file_bytes, total_bytes, entries, depth)
+        slot_bytes = computer_config.staging_slot_bytes
+        slot_inodes = computer_config.staging_slot_inodes
+        slots = computer_config.staging_slots
+        if slot_bytes is None or slot_inodes is None or slots is None:
+            raise ValueError("Explicit staging kernel limits required")
+        staging_limits = StagingLimits(slot_bytes, slot_inodes, slots)
         try:
             if computer_config.container_image != QUALIFIED_PYTHON_IMAGE:
                 raise WorkspaceUnavailable("Container image must use the qualified immutable ID")
             workspace_profile = RootlessPodmanProfile.qualify(state_root)
+            staging_pool = RootlessStagePool.open(workspace_profile, staging_limits)
         except (WorkspaceUnavailable, OSError) as exc:
+            workspace_profile = None
             # Недоступен именно процессный backend; host fallback отсутствует.
             logger.warning("Rootless workspace execution unavailable: %s", exc)
 
@@ -217,15 +227,23 @@ def create_app(
                         owner,
                         scope.principal_id,
                         scope.session_id,
-                        workspace_profile.revision if workspace_profile is not None else None,
+                        staging_pool.execution_revision if staging_pool is not None else None,
                     )
                     workspace_kwargs["workspace_access"] = access
-                    if workspace_profile is not None and workspace_limits is not None:
+                    if (
+                        workspace_profile is not None
+                        and workspace_limits is not None
+                        and staging_pool is not None
+                    ):
                         output_bytes = computer_config.capture_output_bytes
                         if output_bytes is None:
                             raise ValueError("Explicit output byte limit required")
                         workspace_kwargs["workspace_executor"] = RootlessPythonExecutor(
-                            workspace_profile, owner, workspace_limits, output_bytes
+                            workspace_profile,
+                            owner,
+                            workspace_limits,
+                            output_bytes,
+                            staging_pool=staging_pool,
                         )
             return cast(
                 "AgentProtocol",
@@ -307,6 +325,12 @@ def create_app(
             workspace_pool.close()
 
         app.on_cleanup.append(_close_workspace_pool)
+    if staging_pool is not None:
+
+        async def _close_staging_pool(_app: web.Application) -> None:
+            staging_pool.close()
+
+        app.on_cleanup.append(_close_staging_pool)
     dist_path = api.PROJECT_ROOT / "ui" / "dist"
     app["ui_dist_path"] = dist_path
     from server.http.routes import register_routes

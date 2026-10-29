@@ -285,3 +285,31 @@ def test_make_computer_runtime_container_missing_image_raises(
 
     with pytest.raises(ValueError, match="SLAVIK_COMPUTER_CONTAINER_IMAGE"):
         _StubAgent().make_computer_runtime()
+
+
+def test_rootless_execution_requires_explicit_bounded_staging_limits(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLAVIK_COMPUTER_BACKEND", "container")
+    monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_ENGINE", "podman")
+    monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_IMAGE", "pinned-image")
+    monkeypatch.setenv("SLAVIK_COMPUTER_ROOTLESS_STATE", str(tmp_path))
+    for key in ("FILE_BYTES", "TOTAL_BYTES", "ENTRIES", "DEPTH", "OUTPUT_BYTES"):
+        monkeypatch.setenv("SLAVIK_COMPUTER_CAPTURE_" + key, "4096")
+    monkeypatch.delenv("SLAVIK_COMPUTER_STAGING_SLOT_BYTES", raising=False)
+    with pytest.raises(ValueError, match="STAGING_SLOT_BYTES"):
+        resolve_computer_backend_config()
+
+
+def test_explicit_staging_limits_are_not_inferred_from_capture_limits(monkeypatch, tmp_path):
+    monkeypatch.setenv("SLAVIK_COMPUTER_BACKEND", "container")
+    monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_ENGINE", "podman")
+    monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_IMAGE", "pinned-image")
+    monkeypatch.setenv("SLAVIK_COMPUTER_ROOTLESS_STATE", str(tmp_path))
+    for key in ("FILE_BYTES", "TOTAL_BYTES", "ENTRIES", "DEPTH", "OUTPUT_BYTES"):
+        monkeypatch.setenv("SLAVIK_COMPUTER_CAPTURE_" + key, "4096")
+    monkeypatch.setenv("SLAVIK_COMPUTER_STAGING_SLOT_BYTES", "2097152")
+    monkeypatch.setenv("SLAVIK_COMPUTER_STAGING_SLOT_INODES", "64")
+    monkeypatch.setenv("SLAVIK_COMPUTER_STAGING_SLOTS", "2")
+    config = resolve_computer_backend_config()
+    assert config.staging_slot_bytes == 2097152
+    assert config.staging_slot_inodes == 64
+    assert config.staging_slots == 2

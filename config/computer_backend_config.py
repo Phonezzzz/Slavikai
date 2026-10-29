@@ -27,10 +27,13 @@ class ComputerBackendConfig:
     capture_entries: int | None = None
     capture_depth: int | None = None
     capture_output_bytes: int | None = None
+    staging_slot_bytes: int | None = None
+    staging_slot_inodes: int | None = None
+    staging_slots: int | None = None
 
 
-def _required_positive_env(suffix: str) -> int:
-    name = "SLAVIK_COMPUTER_CAPTURE_" + suffix
+def _required_positive_env(suffix: str, *, prefix: str = "SLAVIK_COMPUTER_CAPTURE_") -> int:
+    name = prefix + suffix
     raw = os.getenv(name, "").strip()
     if not raw or any(character not in "0123456789" for character in raw):
         raise ValueError(f"{name} must be an explicit positive integer")
@@ -83,6 +86,7 @@ def resolve_computer_backend_config() -> ComputerBackendConfig:
 
     rootless_root = os.getenv("SLAVIK_COMPUTER_ROOTLESS_STATE", "").strip() or None
     file_bytes = total_bytes = entries = depth = output_bytes = None
+    slot_bytes = slot_inodes = slots = None
     if rootless_root is not None:
         if mode != "container" or engine != "podman" or container_workspace != "/workspace":
             raise ValueError("Rootless state requires container/podman and /workspace")
@@ -95,6 +99,9 @@ def resolve_computer_backend_config() -> ComputerBackendConfig:
         entries = _required_positive_env("ENTRIES")
         depth = _required_positive_env("DEPTH")
         output_bytes = _required_positive_env("OUTPUT_BYTES")
+        slot_bytes = _required_positive_env("STAGING_SLOT_BYTES", prefix="SLAVIK_COMPUTER_")
+        slot_inodes = _required_positive_env("STAGING_SLOT_INODES", prefix="SLAVIK_COMPUTER_")
+        slots = _required_positive_env("STAGING_SLOTS", prefix="SLAVIK_COMPUTER_")
 
     return ComputerBackendConfig(
         mode=mode,
@@ -107,4 +114,7 @@ def resolve_computer_backend_config() -> ComputerBackendConfig:
         capture_entries=entries,
         capture_depth=depth,
         capture_output_bytes=output_bytes,
+        staging_slot_bytes=slot_bytes,
+        staging_slot_inodes=slot_inodes,
+        staging_slots=slots,
     )

@@ -27,6 +27,9 @@ def test_private_engine_roots_and_foreign_workspace_refused_by_http(tmp_path, mo
     monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_IMAGE", "unqualified-synthetic")
     monkeypatch.setenv("SLAVIK_COMPUTER_CONTAINER_WORKSPACE", "/workspace")
     monkeypatch.setenv("SLAVIK_COMPUTER_ROOTLESS_STATE", str(state))
+    monkeypatch.setenv("SLAVIK_COMPUTER_STAGING_SLOT_BYTES", "2097152")
+    monkeypatch.setenv("SLAVIK_COMPUTER_STAGING_SLOT_INODES", "64")
+    monkeypatch.setenv("SLAVIK_COMPUTER_STAGING_SLOTS", "2")
     for suffix, value in {
         "FILE_BYTES": "1024",
         "TOTAL_BYTES": "4096",

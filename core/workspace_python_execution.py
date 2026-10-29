@@ -12,6 +12,7 @@ from typing import Literal
 
 from core.managed_workspace import ManagedWorkspace, WorkspaceLimits
 from core.rootless_podman import RootlessPodmanProfile
+from core.rootless_staging import RootlessStagePool
 from shared.workspace_binding import WorkspaceBinding, WorkspaceConflict, WorkspaceUnavailable
 
 logger = logging.getLogger(__name__)
@@ -111,10 +112,18 @@ class RootlessPythonExecutor:
     workspace: ManagedWorkspace
     limits: WorkspaceLimits
     max_output_bytes: int
+    staging_pool: RootlessStagePool | None = None
 
     def __post_init__(self) -> None:
         if type(self.max_output_bytes) is not int or self.max_output_bytes <= 0:
             raise ValueError("output byte limit must be a positive integer")
+
+    @property
+    def environment_revision(self) -> str:
+        pool = self.staging_pool
+        if pool is None or pool.profile is not self.profile:
+            raise WorkspaceUnavailable("bounded staging environment unavailable")
+        return pool.execution_revision
 
     def execute_python(
         self, binding: WorkspaceBinding, script: str, *, timeout: float
@@ -129,8 +138,14 @@ class RootlessPythonExecutor:
                 raise WorkspaceUnavailable("invalid workspace Python script")
             if not any(file.path == relative.as_posix() for file in snapshot.files):
                 raise WorkspaceUnavailable("workspace Python script unavailable")
-            stage = self.workspace.stage(snapshot)
-            prepared = self.profile.create_python_container(stage, relative.as_posix())
+            pool = self.staging_pool
+            if pool is None or pool.profile is not self.profile:
+                raise WorkspaceUnavailable("bounded staging environment unavailable")
+            if binding.environment_revision != self.environment_revision:
+                raise WorkspaceConflict("workspace staging environment binding changed")
+            bounded = pool.prepare(self.workspace, snapshot)
+            stage = bounded.stage
+            prepared = self.profile.create_python_container(bounded, relative.as_posix())
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return WorkspacePythonOutcome(
                 "conflict" if isinstance(exc, WorkspaceConflict) else "unavailable",
@@ -155,6 +170,7 @@ class RootlessPythonExecutor:
                 raise WorkspaceConflict("workspace changed before process admission")
             self.profile.verify_created(prepared)
             stage.begin_process()
+            pool.check_stage(bounded)
             self.profile.check_current()
             start_attempted = True
             process = subprocess.Popen(
@@ -214,7 +230,8 @@ class RootlessPythonExecutor:
 
         stage.mark_settled()
         try:
-            self.workspace.publish(snapshot, stage, limits=self.limits)
+            pool.check_stage(bounded)
+            retained_host = self.workspace.publish_bounded(snapshot, stage, limits=self.limits)
         except (OSError, WorkspaceUnavailable) as exc:
             return WorkspacePythonOutcome(
                 "conflict" if isinstance(exc, WorkspaceConflict) else "unavailable",
@@ -229,7 +246,9 @@ class RootlessPythonExecutor:
                 stage.root,
             )
         try:
-            self.workspace.discard_retired(snapshot, stage)
+            if retained_host is not None:
+                raise WorkspaceUnavailable("retired host workspace cleanup unavailable")
+            pool.release(bounded)
         except (OSError, WorkspaceUnavailable):
             return WorkspacePythonOutcome(
                 "finished",
