@@ -8,6 +8,7 @@ from typing import Literal
 
 from llm.types import ToolSpec
 from shared.models import JSONValue, ToolCallRecord, ToolRequest, ToolResult
+from shared.tool_capture import ToolCaptureFault
 from shared.workspace_binding import WorkspaceConflict, WorkspaceUnavailable
 from tools.protocols import Tool
 from tools.tool_logger import ToolCallLogger
@@ -244,6 +245,8 @@ class ToolRegistry:
                 request.name, ok=False, error=str(exc), meta=result.meta, args=request.args
             )
             return result
+        except ToolCaptureFault:
+            raise
         except Exception as exc:
             self._logger.exception("tool_call_error", extra={"tool": request.name})
             self._log_call(request.name, ok=False, error=str(exc), args=request.args)

@@ -21,6 +21,7 @@ from llm.stream_model import (
 )
 from llm.types import LLMResult, LLMUsage, ModelConfig, ToolCall, ToolSpec
 from shared.models import JSONValue, LLMMessage, ToolRequest, ToolResult
+from shared.tool_capture import CaptureBinding, ToolCaptureContext, ToolCaptureFault
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,7 @@ class ToolLoopContinuation:
     expires_at_monotonic: float | None = None
     model_usage: ModelUsageSummary | None = None
     max_model_tokens: int | None = None
+    capture_binding: CaptureBinding | None = None
 
 
 class AgentToolLoop:
@@ -137,7 +139,16 @@ class AgentToolLoop:
         final_gate: Callable[[Sequence[ExecutedToolCall]], str | None] | None = None,
         continuation: ToolLoopContinuation | None = None,
         record_model_usage: bool = False,
+        capture_binding: CaptureBinding | None = None,
     ) -> AgentToolLoopResult:
+        if capture_binding is not None and not isinstance(capture_binding, CaptureBinding):
+            raise ToolCaptureFault("workspace_capture_binding_invalid")
+        if (
+            continuation is not None
+            and capture_binding is not None
+            and continuation.capture_binding != capture_binding
+        ):
+            raise ToolCaptureFault("workspace_capture_continuation_binding_changed")
         model_usage = (
             ModelUsageSummary() if record_model_usage or self.max_model_tokens is not None else None
         )
@@ -148,6 +159,7 @@ class AgentToolLoop:
 
         if continuation is not None:
             continuation = deepcopy(continuation)
+            capture_binding = continuation.capture_binding
             model_usage = continuation.model_usage
             history = continuation.history
             executed = continuation.executed
@@ -307,7 +319,7 @@ class AgentToolLoop:
                 try:
                     if resuming and call_index == 0 and continuation is not None:
                         tool_result = gateway.call_approved_once(
-                            ToolRequest(name=tool_call.name, args=dict(tool_call.arguments)),
+                            _captured_tool_request(tool_call, capture_binding),
                             continuation.approval,
                         )
                     else:
@@ -315,6 +327,7 @@ class AgentToolLoop:
                             gateway=gateway,
                             tool_call=tool_call,
                             allowed_tool_names=allowed_tool_names,
+                            capture_binding=capture_binding,
                         )
                 except ApprovalRequired as exc:
                     exc.continuation = deepcopy(
@@ -332,11 +345,24 @@ class AgentToolLoop:
                             expires_at,
                             model_usage,
                             token_cap,
+                            capture_binding,
                         )
                     )
                     raise
                 except Exception as exc:
-                    if call_cap is None and expires_at is None:
+                    cause = exc
+                    if (
+                        capture_binding is not None
+                        and tool_call.name == "workspace_run"
+                        and not isinstance(exc, ToolCaptureFault)
+                    ):
+                        cause = ToolCaptureFault("workspace_capture_dispatch_or_publication_failed")
+                        cause.__cause__ = exc
+                    if (
+                        call_cap is None
+                        and expires_at is None
+                        and not isinstance(cause, ToolCaptureFault)
+                    ):
                         raise
                     raise ToolLoopExecutionError(
                         AgentToolLoopResult(
@@ -345,10 +371,12 @@ class AgentToolLoop:
                             messages=history,
                             tool_calls=executed,
                             iterations=iteration,
-                            error="tool_dispatch_failed",
+                            error="tool_capture_failed"
+                            if isinstance(cause, ToolCaptureFault)
+                            else "tool_dispatch_failed",
                         ),
-                        exc,
-                    ) from exc
+                        cause,
+                    ) from cause
                 executed.append(ExecutedToolCall(call=tool_call, result=tool_result))
                 history.append(
                     LLMMessage(
@@ -733,13 +761,23 @@ def _dispatch_model_tool_call(
     gateway: ToolGateway,
     tool_call: ToolCall,
     allowed_tool_names: set[str],
+    capture_binding: CaptureBinding | None = None,
 ) -> ToolResult:
     if tool_call.name not in allowed_tool_names:
         return ToolResult.failure(
             f"MODEL_TOOL_NOT_EXPOSED: tool '{tool_call.name}' was not provided to the model.",
             meta={"policy_reason": "model_tool_not_exposed"},
         )
-    return gateway.call(ToolRequest(name=tool_call.name, args=dict(tool_call.arguments)))
+    return gateway.call(_captured_tool_request(tool_call, capture_binding))
+
+
+def _captured_tool_request(call: ToolCall, binding: CaptureBinding | None) -> ToolRequest:
+    context = (
+        ToolCaptureContext(binding, call.id)
+        if binding is not None and call.name == "workspace_run"
+        else None
+    )
+    return ToolRequest(call.name, dict(call.arguments), capture=context)
 
 
 def _policy_rejected(result: ToolResult) -> bool:

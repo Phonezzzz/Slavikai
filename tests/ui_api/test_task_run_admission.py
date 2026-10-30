@@ -151,10 +151,13 @@ def test_fresh_app_cannot_repeat_committed_ask_tool_dispatch(tmp_path, monkeypat
                 )
             return LLMResult(usage=LLMUsage(0, 0, 0), text="read complete")
 
+    from server.http.common.auth import _principal_id_from_token
+
     async def new_client():
         brain = ToolBrain()
         agent = _RealStreamingAgent(
             brain=brain,
+            user_id=_principal_id_from_token(TEST_API_TOKEN),
             enable_tools={"safe_mode": True},
             memory_companion_db_path=str(tmp_path / "companion.db"),
             memory_inbox_db_path=str(tmp_path / "inbox.db"),

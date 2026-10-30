@@ -94,7 +94,7 @@ class DummyAgent:
             }
         )
 
-    def respond(self, messages) -> AgentResponse:
+    def respond(self, messages, *, auto_capture=None) -> AgentResponse:
         content = messages[-1].content if messages else ""
         self.tracer.log("user_input", content)
         self.last_approval_request = None

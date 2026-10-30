@@ -64,15 +64,16 @@ Foreign и missing IDs дают одинаковый unavailable error. Reattach
 Session prune не вызывает удаление task/run DB: session attachment не является lifetime.
 
 DB создаётся mode 0600, новый parent directory — 0700; file symlink отклоняется.
-Existing parent directory должен быть доверенным bootstrap directory. Schema version — 3;
-единственный явно принятый additive upgrade v2→v3 выполняется транзакционно после проверки
-точного shipped v2 schema. Старые IDs/state/history сохраняются; неизвестная/посторонняя
+Existing parent directory должен быть доверенным bootstrap directory. Schema version — 4;
+явно принятые additive upgrades v2→v3 (producer report) и v3→v4 (bounded tool capture)
+выполняются транзакционно после проверки исходной shipped schema. Старые IDs/state/history сохраняются; неизвестная/посторонняя
 schema отклоняется. Ни reset, ни backfill результата из prose/logs не выполняются.
 Никакие raw tool payloads или secrets не копируются в events; reason — bounded code.
 Accepted goal может содержать sensitive data, поэтому DB подчиняется private storage scope,
 а не operational log permissions. Encryption-at-rest здесь не реализована.
 
-Producer-report storage описан ниже; canonical tool payload storage, retention/GC, tombstones,
+Producer-report и scoped workspace_run capture описаны ниже; полный canonical tool payload
+storage для остальных consumers, retention/GC, tombstones,
 paging/recovery и user deletion ещё не реализованы.
 Для canonical output действует target из `TOOL_EXECUTION_RESULT_CONTRACT.md`: configurable
 7 дней после terminal transition, active/resumable/recovery-pinned защищены от GC,
@@ -120,6 +121,54 @@ CAS, immutable history/payload, scope, digest, limits, HTTP storage/projection f
 approval resume/nested approval и post-runtime stream error. Canonical raw bytes capture,
 operation intents/unknown-effect settlement, execution recovery и terminal acceptance не
 реализованы этим slice; `TOOL_EXECUTION_RESULT_CONTRACT.md` readiness остаётся BLOCKED.
+
+## Durable workspace_run capture — bounded R2b
+
+Только admitted синхронный Auto UI/API и его captured native approval continuation
+передают original immutable TaskRun binding через Agent/Auto/loop/Gateway в qualified
+ComputerBackend. UI stream доставляет результат того же синхронного Auto execution.
+Binding не берётся из model args, auto-* ID или глобального mutable state. Manual
+category-only Run и все остальные I0 process paths остаются закрыты.
+
+После policy/path/workspace/environment/revision guards непосредственно перед start
+qualified container Store атомарно создаёт operation intent с независимыми opaque
+operation_id/tool_attempt_id и original run/attempt/version. Model tool-call ID — только
+label. Missing/stale/foreign intent или write fault запрещает start. Сохранённый intent
+сам по себе не доказывает execution: crash до/после start остаётся unresolved, без replay.
+
+Единственный существующий backend collector наблюдает separate raw stdout/stderr chunks
+до backend view truncation/decode. Retained prefix ограничен 1MiB/stream; observed counts
+и EOF раздельны. Existing configured output/timeout/settlement guards не ослаблены:
+при их stop сохраняется честный partial/unknown, а не выдуманный full stream/child exit.
+Actual child exit отличается от CLI/transport; публикация workspace остаётся отдельной
+проверенной boundary. Outcome/publication не переписываются ошибкой записи capture.
+
+До новой lossy ToolResult/model projection original intent получает одну immutable
+observation: BLOB prefixes, counts/EOF, actual exit либо unknown, timeout/capture error,
+SHA-256 digests, timestamp и opaque result_id. Transaction fault не публикует ref на
+отсутствующие bytes; дальнейшие batch/model calls останавливаются без replay. Доступный
+RAM outcome не объявляется persisted. Late observation допустима как historical evidence
+исходного intent после abort, но не resurrect run и не даёт следующий operation.
+
+Только после commit ToolResult получает opaque refs/completeness и отдельные UTF-8 views
+stdout/stderr до32KiB encoded bytes/stream (replacement только в view). Более низкий
+existing backend view limit сохраняется. Raw bytes не попадают в model JSON, events или
+operational logs. Scoped Python readers проверяют principal/session/run/operation/attempt,
+original policy/history binding и digests; foreign/missing одинаково unavailable.
+
+Additive schema4 сохраняет все прежние reports/IDs/history, без fabricated tool evidence
+для старых runs. Store не принимает completion/acceptance, не восстанавливает process и
+не предоставляет новый HTTP read/replay endpoint. До2MiB/attempt private sensitive bytes
+могут храниться бессрочно: aggregate DB quota/retention/GC/deletion этим не добавлены.
+Shell/terminal/PTY/Desktop/Ask/Act/MWV/direct HTTP tools, полный canonical capture и
+recovery остаются uncovered/target. Production activation/upgrade здесь не выполняются.
+
+Проверки: tests/test_tool_capture_storage.py, tests/test_tool_capture_streams.py,
+tests/test_tool_capture_loop.py, tests/test_workspace_capture_projection.py,
+tests/test_workspace_python_execution.py, tests/ui_api/test_qualified_workspace_capture.py.
+Pytest заменяет только OS/engine boundary и не доказывает OS isolation; real synthetic
+qualified byte/HTTP/once/timeout/output-limit/post-effect-store-fault proofs выполняются
+отдельно. Producer report R2a остаётся отдельным artifact, не заменяет tool observation.
 
 ## Structured Auto outcome — foundation B2a
 

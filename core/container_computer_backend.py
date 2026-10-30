@@ -14,6 +14,7 @@ from core.workspace_python_execution import (
 )
 from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.sandbox_execution import SandboxExecutionUnavailable, sandbox_execution_failure
+from shared.tool_capture import ToolCaptureContext
 from shared.workspace_binding import WorkspaceBinding
 
 
@@ -52,7 +53,12 @@ class ContainerComputerBackend:
     file_gateway: ToolGateway | None = None
 
     def execute_python(
-        self, binding: WorkspaceBinding, script: str, *, timeout: float
+        self,
+        binding: WorkspaceBinding,
+        script: str,
+        *,
+        timeout: float,
+        capture: ToolCaptureContext | None = None,
     ) -> WorkspacePythonOutcome:
         executor = self.python_executor
         if (
@@ -63,7 +69,7 @@ class ContainerComputerBackend:
             or self.project_root.absolute() != executor.workspace.root
         ):
             return unavailable_python_execution()
-        return executor.execute_python(binding, script, timeout=timeout)
+        return executor.execute_python(binding, script, timeout=timeout, capture=capture)
 
     def _qualified_file_call(self, request: ToolRequest) -> ToolResult:
         if self.file_gateway is None:

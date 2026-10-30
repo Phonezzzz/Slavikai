@@ -25,6 +25,7 @@ from llm.retry import visible_provider_error
 from llm.stream_model import Done, Error, StreamEvent, TextDelta, Usage
 from llm.types import LLMResult, ToolSpec, WebSearchEvidence
 from shared.models import LLMMessage, ToolRequest, ToolResult
+from shared.tool_capture import CaptureBinding
 
 if TYPE_CHECKING:
     import logging
@@ -117,6 +118,7 @@ class AgentRoutingMixin:
             goal: str,
             *,
             skill_resolution: SkillResolution | None = None,
+            capture_binding: CaptureBinding | None = None,
         ) -> AutoRunOutcome: ...
         def is_explicit_memory_request(self, text: str) -> bool: ...
         def build_memory_save_preview(
@@ -237,7 +239,9 @@ class AgentRoutingMixin:
         "i checked",
     )
 
-    def respond(self, messages: list[LLMMessage]) -> AgentResponse:
+    def respond(
+        self, messages: list[LLMMessage], *, auto_capture: CaptureBinding | None = None
+    ) -> AgentResponse:
         if not messages:
             return AgentResponse("[Пустое сообщение]")
 
@@ -312,6 +316,7 @@ class AgentRoutingMixin:
                 outcome = self.handle_auto_command(
                     last_content,
                     skill_resolution=skill_resolution,
+                    **({"capture_binding": auto_capture} if auto_capture is not None else {}),
                 )
                 result = outcome.text
                 self._log_chat_interaction(raw_input=last_content, response_text=result)
@@ -390,6 +395,8 @@ class AgentRoutingMixin:
         self,
         messages: list[LLMMessage],
         cancellation_token: asyncio.Event | None = None,
+        *,
+        auto_capture: CaptureBinding | None = None,
     ) -> Iterator[StreamEvent]:
         if cancellation_requested(cancellation_token):
             yield Done(finish_reason="cancelled")
@@ -486,6 +493,7 @@ class AgentRoutingMixin:
                 outcome = self.handle_auto_command(
                     last_content,
                     skill_resolution=skill_resolution,
+                    **({"capture_binding": auto_capture} if auto_capture is not None else {}),
                 )
                 response = outcome.text
                 self.last_stream_response_raw = response

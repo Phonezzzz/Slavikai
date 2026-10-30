@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from core.managed_workspace import ManagedWorkspace, WorkspaceLimits
 from core.rootless_podman import RootlessPodmanProfile
 from core.workspace_python_execution import RootlessPythonExecutor
@@ -104,3 +106,134 @@ def test_unexpected_engine_inspection_fault_cleans_own_container_without_publica
     with pytest.raises(WorkspaceUnavailable):
         with prepared_containers[0].stage.publication():
             pytest.fail("unknown stage must not publish")
+
+
+@pytest.mark.parametrize("intent_fault", ["raise", "missing"])
+def test_capture_intent_failure_prevents_start_and_cleans_prepared_container(
+    tmp_path, monkeypatch, intent_fault
+):
+    from dataclasses import replace
+
+    import pytest
+
+    from core.rootless_podman import PreparedPythonContainer
+    from core.rootless_staging import BoundedStage, RootlessStagePool, StagingLimits
+    from core.task_run_storage import TaskRunStore
+    from shared.task_run import RunScope, RunState, TransitionAuthority
+    from shared.tool_capture import CaptureBinding, ToolCaptureContext, ToolCaptureFault
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "script.py").write_text("print('synthetic')")
+    binding = replace(
+        owner.bind(principal_id="alice", session_id="chat"), environment_revision="environment"
+    )
+    profile = RootlessPodmanProfile(tmp_path, os.geteuid(), os.getegid(), "revision", (), ())
+    pool = RootlessStagePool(profile, StagingLimits(4096, 32, 1))
+    monkeypatch.setattr(
+        RootlessStagePool, "execution_revision", property(lambda self: "environment")
+    )
+
+    def prepare(self, workspace, snapshot):
+        stage = workspace.stage(snapshot)
+        info = stage.root.stat()
+        return BoundedStage(stage, self, stage.root, stage.root, (info.st_dev, info.st_ino))
+
+    monkeypatch.setattr(RootlessStagePool, "prepare", prepare)
+    monkeypatch.setattr(RootlessStagePool, "check_stage", lambda *args: None)
+    monkeypatch.setattr(RootlessPodmanProfile, "check_current", lambda *args: None)
+    checked = []
+    removed = []
+    monkeypatch.setattr(
+        RootlessPodmanProfile,
+        "create_python_container",
+        lambda self, stage, script: PreparedPythonContainer(
+            "own", "own", stage, script, "revision"
+        ),
+    )
+    monkeypatch.setattr(
+        RootlessPodmanProfile, "verify_created", lambda *args: checked.append("effective-spec")
+    )
+    monkeypatch.setattr(
+        RootlessPodmanProfile,
+        "remove_owned",
+        lambda self, prepared: removed.append(prepared.container_id) or True,
+    )
+    store = TaskRunStore(tmp_path / "runs.db")
+    scope = RunScope("alice", "chat")
+    admitted = store.admit(
+        scope, request_key="key", goal="synthetic", mode="auto", request_fingerprint="e" * 64
+    )
+    run = store.transition(
+        scope,
+        admitted.task_run_id,
+        expected_version=0,
+        state=RunState.RUNNING,
+        authority=TransitionAuthority.RUNTIME,
+        reason_code="started",
+    )
+
+    def fail_intent(*args, **kwargs):
+        assert checked == ["effective-spec"]
+        if intent_fault == "raise":
+            raise OSError("synthetic intent write fault")
+        return None
+
+    monkeypatch.setattr(store, "begin_tool_operation", fail_intent)
+    monkeypatch.setattr(
+        "subprocess.Popen", lambda *args, **kwargs: pytest.fail("intent failure must prevent start")
+    )
+    executor = RootlessPythonExecutor(
+        profile, owner, WorkspaceLimits(1024, 4096, 20, 8), 1024, pool
+    )
+    with pytest.raises(ToolCaptureFault, match="intent_"):
+        executor.execute_python(
+            binding,
+            "script.py",
+            timeout=3,
+            capture=ToolCaptureContext(CaptureBinding(store, run), "label"),
+        )
+    assert removed == ["own"]
+
+
+@pytest.mark.parametrize("principal,session", [("bob", "chat"), ("alice", "other-chat")])
+def test_foreign_capture_binding_refuses_before_any_engine_command(
+    tmp_path, monkeypatch, principal, session
+):
+    from core.task_run_storage import TaskRunStore
+    from shared.task_run import RunScope, RunState, TransitionAuthority
+    from shared.tool_capture import CaptureBinding, ToolCaptureContext, ToolCaptureFault
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    store = TaskRunStore(tmp_path / "runs.db")
+    scope = RunScope(principal, session)
+    admitted = store.admit(
+        scope, request_key="key", goal="synthetic", mode="auto", request_fingerprint="f" * 64
+    )
+    run = store.transition(
+        scope,
+        admitted.task_run_id,
+        expected_version=0,
+        state=RunState.RUNNING,
+        authority=TransitionAuthority.RUNTIME,
+        reason_code="started",
+    )
+    profile = RootlessPodmanProfile(tmp_path, os.geteuid(), os.getegid(), "unqualified", (), ())
+    executor = RootlessPythonExecutor(profile, owner, WorkspaceLimits(1024, 4096, 20, 8), 1024)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("foreign capture binding must not contact engine")
+
+    monkeypatch.setattr("subprocess.run", forbidden)
+    monkeypatch.setattr("subprocess.Popen", forbidden)
+    with pytest.raises(ToolCaptureFault, match="scope_mismatch"):
+        executor.execute_python(
+            binding,
+            "emit.py",
+            timeout=3,
+            capture=ToolCaptureContext(CaptureBinding(store, run), "label"),
+        )

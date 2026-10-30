@@ -6,13 +6,20 @@ import os
 import selectors
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
 from core.managed_workspace import ManagedWorkspace, WorkspaceLimits
 from core.rootless_podman import RootlessPodmanProfile
 from core.rootless_staging import RootlessStagePool
+from shared.tool_capture import (
+    RawProcessCapture,
+    ToolCaptureContext,
+    ToolCaptureFault,
+    ToolCaptureReceipt,
+    ToolOperation,
+)
 from shared.workspace_binding import WorkspaceBinding, WorkspaceConflict, WorkspaceUnavailable
 
 logger = logging.getLogger(__name__)
@@ -30,6 +37,74 @@ class WorkspacePythonOutcome:
     retained_stage: Path | None = None
     cleanup_warning: bool = False
     container_id: str | None = None
+    capture_receipt: ToolCaptureReceipt | None = None
+
+
+@dataclass
+class _CaptureAttempt:
+    context: ToolCaptureContext
+    script: str
+    streams: RawProcessCapture = field(default_factory=RawProcessCapture)
+    operation: ToolOperation | None = None
+
+    def begin(self) -> None:
+        try:
+            run = self.context.binding.run
+            operation = self.context.binding.store.begin_tool_operation(
+                run,
+                model_call_id=self.context.model_call_id,
+                request_path=self.script,
+            )
+        except Exception as exc:
+            raise ToolCaptureFault("workspace_capture_intent_failed") from exc
+        if not isinstance(operation, ToolOperation) or (
+            operation.scope,
+            operation.task_id,
+            operation.task_revision,
+            operation.task_run_id,
+            operation.run_attempt_id,
+            operation.run_version,
+            operation.model_call_id,
+            operation.request_path,
+        ) != (
+            run.scope,
+            run.task_id,
+            run.task_revision,
+            run.task_run_id,
+            run.attempt_id,
+            run.version,
+            self.context.model_call_id,
+            self.script,
+        ):
+            raise ToolCaptureFault("workspace_capture_intent_invalid")
+        self.operation = operation
+
+    def finish(self, outcome: WorkspacePythonOutcome) -> WorkspacePythonOutcome:
+        operation = self.operation
+        if operation is None:
+            if outcome.execution_started is not False:
+                raise ToolCaptureFault("workspace_capture_intent_unavailable")
+            return outcome
+        observation = self.streams.observation(
+            exit_code=outcome.exit_code,
+            timed_out=outcome.reason_code == "workspace_process_timeout",
+            capture_error=(
+                "output_limit"
+                if outcome.reason_code == "workspace_output_limit"
+                else "read_error"
+                if outcome.reason_code == "workspace_transport_unknown"
+                else "cleanup_incomplete"
+                if outcome.reason_code == "workspace_settlement_unknown" or outcome.cleanup_warning
+                else None
+            ),
+        )
+        try:
+            result_id = self.context.binding.store.record_tool_observation(operation, observation)
+        except Exception as exc:
+            raise ToolCaptureFault("workspace_capture_store_failed", observation) from exc
+        return replace(
+            outcome, capture_receipt=ToolCaptureReceipt(operation, result_id, observation)
+        )
 
 
 def unavailable_python_execution() -> WorkspacePythonOutcome:
@@ -46,7 +121,13 @@ class _AttachedCapture:
     reason: str | None
 
 
-def _collect(process: subprocess.Popen[bytes], *, timeout: float, limit: int) -> _AttachedCapture:
+def _collect(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+    limit: int,
+    capture: RawProcessCapture | None = None,
+) -> _AttachedCapture:
     output = bytearray()
     errors = bytearray()
     reason: str | None = None
@@ -55,6 +136,10 @@ def _collect(process: subprocess.Popen[bytes], *, timeout: float, limit: int) ->
         if process.stdout is None or process.stderr is None:
             raise OSError("isolated process output pipes unavailable")
         buffers = {process.stdout.fileno(): output, process.stderr.fileno(): errors}
+        streams: dict[int, Literal["stdout", "stderr"]] = {
+            process.stdout.fileno(): "stdout",
+            process.stderr.fileno(): "stderr",
+        }
         with selectors.DefaultSelector() as selector:
             for fd in buffers:
                 os.set_blocking(fd, False)
@@ -69,6 +154,8 @@ def _collect(process: subprocess.Popen[bytes], *, timeout: float, limit: int) ->
                         chunk = os.read(key.fd, 65536)
                     except BlockingIOError:
                         continue
+                    if capture is not None:
+                        capture.feed(streams[key.fd], chunk)
                     if not chunk:
                         selector.unregister(key.fd)
                         continue
@@ -126,7 +213,30 @@ class RootlessPythonExecutor:
         return pool.execution_revision
 
     def execute_python(
-        self, binding: WorkspaceBinding, script: str, *, timeout: float
+        self,
+        binding: WorkspaceBinding,
+        script: str,
+        *,
+        timeout: float,
+        capture: ToolCaptureContext | None = None,
+    ) -> WorkspacePythonOutcome:
+        if capture is not None and (
+            not isinstance(capture, ToolCaptureContext)
+            or capture.binding.run.scope.principal_id != binding.principal_id
+            or capture.binding.run.scope.session_id != binding.session_id
+        ):
+            raise ToolCaptureFault("workspace_capture_scope_mismatch")
+        attempt = _CaptureAttempt(capture, script) if capture is not None else None
+        outcome = self._execute_python(binding, script, timeout=timeout, capture=attempt)
+        return attempt.finish(outcome) if attempt is not None else outcome
+
+    def _execute_python(
+        self,
+        binding: WorkspaceBinding,
+        script: str,
+        *,
+        timeout: float,
+        capture: _CaptureAttempt | None,
     ) -> WorkspacePythonOutcome:
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("process timeout must be finite and positive")
@@ -160,7 +270,7 @@ class RootlessPythonExecutor:
                 None if stage is None else stage.root,
             )
 
-        capture = _AttachedCapture(b"", b"", None, "workspace_transport_unknown")
+        attached = _AttachedCapture(b"", b"", None, "workspace_transport_unknown")
         child_exit: int | None = None
         reason: str | None = None
         start_attempted = False
@@ -172,6 +282,8 @@ class RootlessPythonExecutor:
             stage.begin_process()
             pool.check_stage(bounded)
             self.profile.check_current()
+            if capture is not None:
+                capture.begin()
             start_attempted = True
             process = subprocess.Popen(
                 self.profile.argv() + ["start", "--attach", prepared.container_id],
@@ -181,12 +293,21 @@ class RootlessPythonExecutor:
                 stderr=subprocess.PIPE,
                 close_fds=True,
             )
-            capture = _collect(process, timeout=timeout, limit=self.max_output_bytes)
-            reason = capture.reason
-            if reason is None and capture.returncode is not None:
-                child_exit = self.profile.finished_exit(prepared, cli_returncode=capture.returncode)
+            attached = _collect(
+                process,
+                timeout=timeout,
+                limit=self.max_output_bytes,
+                capture=capture.streams if capture is not None else None,
+            )
+            reason = attached.reason
+            if reason is None and attached.returncode is not None:
+                child_exit = self.profile.finished_exit(
+                    prepared, cli_returncode=attached.returncode
+                )
             if child_exit is None and reason is None:
                 reason = "workspace_transport_unknown"
+        except ToolCaptureFault:
+            raise
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             reason = (
                 exc.reason_code
@@ -207,8 +328,8 @@ class RootlessPythonExecutor:
             if not start_attempted:
                 return WorkspacePythonOutcome(
                     "conflict" if reason == "workspace_conflict" else "unavailable",
-                    capture.stdout,
-                    capture.stderr,
+                    attached.stdout,
+                    attached.stderr,
                     None,
                     False,
                     reason or "workspace_unavailable",
@@ -218,8 +339,8 @@ class RootlessPythonExecutor:
                 )
             return WorkspacePythonOutcome(
                 "unknown",
-                capture.stdout,
-                capture.stderr,
+                attached.stdout,
+                attached.stderr,
                 None,
                 None,
                 reason or "workspace_settlement_unknown",
@@ -235,8 +356,8 @@ class RootlessPythonExecutor:
         except (OSError, WorkspaceUnavailable) as exc:
             return WorkspacePythonOutcome(
                 "conflict" if isinstance(exc, WorkspaceConflict) else "unavailable",
-                capture.stdout,
-                capture.stderr,
+                attached.stdout,
+                attached.stderr,
                 child_exit,
                 True,
                 exc.reason_code
@@ -252,8 +373,8 @@ class RootlessPythonExecutor:
         except (OSError, WorkspaceUnavailable):
             return WorkspacePythonOutcome(
                 "finished",
-                capture.stdout,
-                capture.stderr,
+                attached.stdout,
+                attached.stderr,
                 child_exit,
                 True,
                 None,
@@ -262,5 +383,5 @@ class RootlessPythonExecutor:
                 cleanup_warning=True,
             )
         return WorkspacePythonOutcome(
-            "finished", capture.stdout, capture.stderr, child_exit, True, None, "published"
+            "finished", attached.stdout, attached.stderr, child_exit, True, None, "published"
         )

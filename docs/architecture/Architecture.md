@@ -121,7 +121,9 @@ conversational endpoint и существующий LLM/tool loop, но публ
     `docker/podman run --rm`; в тестах используется `FakeContainerRunner` вместо реального
     Docker daemon. По умолчанию не включён; `LocalComputerBackend` остаётся default. Только explicit
     qualified rootless profile подключает internal Python primitive для native workspace_run;
-    file facade такого backend идёт через scoped Gateway. Остальные commands fenced.
+    file facade такого backend идёт через scoped Gateway. Admitted sync Auto UI/API
+    и captured approval передают trusted run binding для intent/raw capture в existing
+    TaskRunStore schema4 до ToolResult projection. Остальные commands fenced.
   - Computer UI read-only по умолчанию; ручные правки файлов (New/Rename/Move/Del/Save)
     разблокируются только при `sessionYoloActive`.
   - Computer activity log (`ComputerActivityLog`) хранится в `computer_events` в session hub,

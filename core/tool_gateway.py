@@ -14,6 +14,7 @@ from core.approval_policy import (
 )
 from core.managed_workspace import ManagedWorkspacePool, WorkspaceAccess
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.tool_capture import ToolCaptureFault
 from shared.workspace_binding import WorkspaceBinding, WorkspaceConflict, WorkspaceUnavailable
 from tools.tool_registry import ToolRegistry
 
@@ -250,6 +251,8 @@ class ToolGateway:
                 )
         except WorkspaceUnavailable as exc:
             result = _workspace_failure(exc)
+        except ToolCaptureFault:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка инструмента %s: %s", request.name, exc)
             result = ToolResult.failure(f"Ошибка инструмента {request.name}: {exc}")

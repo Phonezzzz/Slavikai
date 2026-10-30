@@ -44,6 +44,7 @@ from shared.auto_models import (
     utc_now_iso,
 )
 from shared.models import JSONValue, LLMMessage
+from shared.tool_capture import CaptureBinding, ToolCaptureFault
 from tools.workspace_tools import WORKSPACE_ROOT, get_workspace_root
 
 if TYPE_CHECKING:
@@ -109,6 +110,7 @@ class _RunFrame:
     principal_id: str
     session_id: str | None
     runtime_root: str | None
+    capture_binding: CaptureBinding | None = None
 
 
 @dataclass
@@ -140,7 +142,13 @@ class AutoOrchestrator:
         *,
         skill_resolution: SkillResolution | None = None,
         run_root_override: Path | None = None,
+        capture_binding: CaptureBinding | None = None,
     ) -> AutoRunOutcome:
+        if capture_binding is not None and (
+            capture_binding.run.scope.principal_id != self.parent.user_id
+            or capture_binding.run.scope.session_id != self.parent.session_id
+        ):
+            raise ToolCaptureFault("workspace_capture_scope_mismatch")
         run_id_value = f"auto-{uuid.uuid4().hex}"
         started = utc_now_iso()
         started_monotonic = time.monotonic()
@@ -191,6 +199,7 @@ class AutoOrchestrator:
             self.parent.user_id,
             self.parent.session_id,
             self.parent.runtime_workspace_root,
+            capture_binding,
         )
         return self._execute_frame(frame)
 
@@ -293,6 +302,7 @@ class AutoOrchestrator:
                 continuation=continuation,
                 cancellation_token=cancellation_token,
                 record_model_usage=True,
+                capture_binding=frame.capture_binding,
             )
             tool_call_states = [_auto_v1_tool_call_state(item) for item in loop_result.tool_calls]
             state["coders"] = tool_call_states
@@ -554,29 +564,43 @@ class AutoOrchestrator:
             if isinstance(exc, ToolLoopExecutionError):
                 _record_model_usage(state, exc.result.model_usage)
                 state["coders"] = [_auto_v1_tool_call_state(item) for item in exc.result.tool_calls]
-            state["error"] = str(exc)
+            capture_cause = (
+                exc.cause
+                if isinstance(exc, ToolLoopExecutionError)
+                and isinstance(exc.cause, ToolCaptureFault)
+                else exc
+                if isinstance(exc, ToolCaptureFault)
+                else None
+            )
+            capture_fault = capture_cause is not None
+            reason = str(capture_cause) if capture_fault else str(exc)
+            steps = (
+                [
+                    "Проверь сохранённый intent/output и фактические effects.",
+                    "Не повторяй операцию до reconciliation неизвестного результата.",
+                ]
+                if capture_fault
+                else ["Проверь логи и trace.", "Повтори запуск auto после исправления."]
+            )
+            state["error"] = reason
+            if capture_fault:
+                state["error_code"] = "tool_capture_failed"
             self._set_status(state, AutoRunStatus.FAILED_INTERNAL)
             return AutoRunOutcome(
                 text=self.parent._format_stop_response(
                     what="Auto-run остановлен: внутренняя ошибка",
-                    why=str(exc),
-                    next_steps=[
-                        "Проверь логи и trace.",
-                        "Повтори запуск auto после исправления.",
-                    ],
+                    why=reason,
+                    next_steps=steps,
                     stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
                     route="auto",
                     plan_summary="Auto v1 tool loop завершился внутренней ошибкой.",
-                    execution_summary=str(exc),
+                    execution_summary=reason,
                     skill=_skill_state(state),
                 ),
                 status=AutoRunStatus.FAILED_INTERNAL,
                 stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
                 verifier=None,
-                next_steps=[
-                    "Проверь логи и trace.",
-                    "Повтори запуск auto после исправления.",
-                ],
+                next_steps=steps,
             )
 
     def pending_run_id(self, continuation: ToolLoopContinuation) -> str:

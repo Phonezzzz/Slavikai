@@ -20,6 +20,13 @@ from shared.task_run import (
     TaskRun,
     TransitionAuthority,
 )
+from shared.tool_capture import (
+    MAX_CAPTURE_BYTES,
+    MAX_VIEW_BYTES,
+    ProcessObservation,
+    StoredToolObservation,
+    ToolOperation,
+)
 
 _ADMISSION_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS task_revisions (
@@ -93,12 +100,17 @@ class TaskRunStore:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version == 4:
+                self._validate_v3_schema(conn, capture=True)
+                return
             if version == 3:
                 self._validate_v3_schema(conn)
+                self._upgrade_capture(conn)
                 return
             if version == 2:
                 self._validate_v2_schema(conn)
                 self._upgrade_submissions(conn)
+                self._upgrade_capture(conn)
                 return
             occupied = conn.execute(
                 "SELECT count(*) FROM sqlite_master "
@@ -109,6 +121,7 @@ class TaskRunStore:
             for statement in _ADMISSION_SCHEMA:
                 conn.execute(statement)
             self._upgrade_submissions(conn)
+            self._upgrade_capture(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -117,7 +130,7 @@ class TaskRunStore:
         return conn
 
     @staticmethod
-    def _validate_v3_schema(conn: sqlite3.Connection) -> None:
+    def _validate_v3_schema(conn: sqlite3.Connection, *, capture: bool = False) -> None:
         columns = {
             "task_revisions": (
                 "task_id",
@@ -158,6 +171,35 @@ class TaskRunStore:
                 "created_at",
             ),
         }
+        if capture:
+            columns["tool_operations"] = (
+                "operation_id",
+                "tool_attempt_id",
+                "task_run_id",
+                "run_attempt_id",
+                "run_version",
+                "model_call_id",
+                "request_path",
+                "created_at",
+                "capture_limit",
+                "view_limit",
+            )
+            columns["tool_observations"] = (
+                "result_id",
+                "operation_id",
+                "stdout",
+                "stderr",
+                "stdout_seen",
+                "stderr_seen",
+                "stdout_eof",
+                "stderr_eof",
+                "exit_code",
+                "timed_out",
+                "capture_error",
+                "captured_at",
+                "stdout_digest",
+                "stderr_digest",
+            )
         tables = {
             row[0]
             for row in conn.execute(
@@ -176,11 +218,18 @@ class TaskRunStore:
             "immutable_submission_delete",
             "submitted_result_binding",
         }
+        if capture:
+            required |= {
+                "immutable_operation_update",
+                "immutable_operation_delete",
+                "immutable_observation_update",
+                "immutable_observation_delete",
+            }
         if tables != set(columns) or not required <= triggers:
-            raise RuntimeError("Unsupported task/run v3 schema")
+            raise RuntimeError("Unsupported task/run current schema")
         for table, names in columns.items():
             if tuple(row[1] for row in conn.execute(f"PRAGMA table_info({table})")) != names:
-                raise RuntimeError("Unsupported task/run v3 schema")
+                raise RuntimeError("Unsupported task/run current schema")
 
     @staticmethod
     def _validate_v2_schema(conn: sqlite3.Connection) -> None:
@@ -234,6 +283,207 @@ class TaskRunStore:
             BEGIN SELECT RAISE(ABORT, 'submission binding required'); END"""
         )
         conn.execute("PRAGMA user_version = 3")
+
+    @staticmethod
+    def _upgrade_capture(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """CREATE TABLE tool_operations (
+                operation_id TEXT PRIMARY KEY NOT NULL,
+                tool_attempt_id TEXT NOT NULL UNIQUE,
+                task_run_id TEXT NOT NULL REFERENCES task_runs(task_run_id),
+                run_attempt_id TEXT NOT NULL,
+                run_version INTEGER NOT NULL,
+                model_call_id TEXT NOT NULL,
+                request_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                capture_limit INTEGER NOT NULL CHECK (capture_limit = 1048576),
+                view_limit INTEGER NOT NULL CHECK (view_limit = 32768),
+                FOREIGN KEY (task_run_id, run_version)
+                REFERENCES run_transitions(task_run_id, version)
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE tool_observations (
+                result_id TEXT PRIMARY KEY NOT NULL,
+                operation_id TEXT NOT NULL UNIQUE REFERENCES tool_operations(operation_id),
+                stdout BLOB NOT NULL CHECK (typeof(stdout) = 'blob'),
+                stderr BLOB NOT NULL CHECK (typeof(stderr) = 'blob'),
+                stdout_seen INTEGER NOT NULL CHECK (stdout_seen >= 0),
+                stderr_seen INTEGER NOT NULL CHECK (stderr_seen >= 0),
+                stdout_eof INTEGER NOT NULL CHECK (stdout_eof IN (0, 1)),
+                stderr_eof INTEGER NOT NULL CHECK (stderr_eof IN (0, 1)),
+                exit_code INTEGER,
+                timed_out INTEGER NOT NULL CHECK (timed_out IN (0, 1)),
+                capture_error TEXT,
+                captured_at TEXT NOT NULL,
+                stdout_digest TEXT NOT NULL,
+                stderr_digest TEXT NOT NULL,
+                CHECK (length(stdout) = min(stdout_seen, 1048576)),
+                CHECK (length(stderr) = min(stderr_seen, 1048576))
+            )"""
+        )
+        for name, table in (("operation", "tool_operations"), ("observation", "tool_observations")):
+            for operation in ("UPDATE", "DELETE"):
+                conn.execute(
+                    f"CREATE TRIGGER immutable_{name}_{operation.lower()} "
+                    f"BEFORE {operation} ON {table} "
+                    f"BEGIN SELECT RAISE(ABORT, 'immutable {name}'); END"
+                )
+        conn.execute("PRAGMA user_version = 4")
+
+    def begin_tool_operation(
+        self, run: TaskRun, *, model_call_id: str, request_path: str
+    ) -> ToolOperation:
+        for value, maximum in ((model_call_id, 4096), (request_path, 16384)):
+            if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum:
+                raise ValueError("Invalid captured operation input")
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._record(run.scope, self._owned_row(conn, run.scope, run.task_run_id))
+            if current != run or current.state != RunState.RUNNING:
+                raise RunConflictError("Capture requires the original current running admission")
+            mode = conn.execute(
+                "SELECT mode FROM task_revisions WHERE task_id=? AND revision=?",
+                (run.task_id, run.task_revision),
+            ).fetchone()[0]
+            if mode != "auto":
+                raise RunConflictError("Process capture requires an admitted Auto run")
+            identity, attempt = str(uuid4()), str(uuid4())
+            now = datetime.now(UTC).isoformat()
+            conn.execute(
+                "INSERT INTO tool_operations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    identity,
+                    attempt,
+                    run.task_run_id,
+                    run.attempt_id,
+                    run.version,
+                    model_call_id,
+                    request_path,
+                    now,
+                    MAX_CAPTURE_BYTES,
+                    MAX_VIEW_BYTES,
+                ),
+            )
+            return self._tool_operation(conn, run.scope, run.task_run_id, identity)
+
+    def get_tool_operation(
+        self, scope: RunScope, task_run_id: str, operation_id: str
+    ) -> ToolOperation:
+        """Intent без observation остаётся unresolved и не разрешает replay."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN")
+            return self._tool_operation(conn, scope, task_run_id, operation_id)
+
+    def _tool_operation(
+        self, conn: sqlite3.Connection, scope: RunScope, run_id: str, operation_id: str
+    ) -> ToolOperation:
+        row = conn.execute(
+            "SELECT o.*, r.task_id, r.task_revision FROM tool_operations o "
+            "JOIN task_runs r ON r.task_run_id=o.task_run_id AND r.attempt_id=o.run_attempt_id "
+            "JOIN task_revisions t ON t.task_id=r.task_id AND t.revision=r.task_revision "
+            "WHERE o.operation_id=? AND o.task_run_id=? AND t.principal_id=? AND t.session_id=?",
+            (operation_id, run_id, scope.principal_id, scope.session_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError("Tool capture unavailable in this scope")
+        self._owned_row(conn, scope, run_id)
+        started = conn.execute(
+            "SELECT state FROM run_transitions WHERE task_run_id=? AND version=?",
+            (run_id, row["run_version"]),
+        ).fetchone()
+        if (
+            started is None
+            or started[0] != RunState.RUNNING
+            or row["capture_limit"] != MAX_CAPTURE_BYTES
+            or row["view_limit"] != MAX_VIEW_BYTES
+        ):
+            raise RuntimeError("Tool capture binding/policy is invalid")
+        return ToolOperation(
+            scope,
+            row["task_id"],
+            row["task_revision"],
+            run_id,
+            row["run_attempt_id"],
+            row["run_version"],
+            row["operation_id"],
+            row["tool_attempt_id"],
+            row["model_call_id"],
+            row["request_path"],
+            row["created_at"],
+        )
+
+    def record_tool_observation(
+        self, operation: ToolOperation, observation: ProcessObservation
+    ) -> str:
+        if not isinstance(observation, ProcessObservation):
+            raise ValueError("Typed raw process observation required")
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            stored = self._tool_operation(
+                conn, operation.scope, operation.task_run_id, operation.operation_id
+            )
+            if stored != operation:
+                raise RunConflictError("Tool observation does not match its original intent")
+            identity = str(uuid4())
+            conn.execute(
+                "INSERT INTO tool_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    identity,
+                    operation.operation_id,
+                    sqlite3.Binary(observation.stdout),
+                    sqlite3.Binary(observation.stderr),
+                    observation.stdout_seen,
+                    observation.stderr_seen,
+                    int(observation.stdout_eof),
+                    int(observation.stderr_eof),
+                    observation.exit_code,
+                    int(observation.timed_out),
+                    observation.capture_error,
+                    datetime.now(UTC).isoformat(),
+                    hashlib.sha256(observation.stdout).hexdigest(),
+                    hashlib.sha256(observation.stderr).hexdigest(),
+                ),
+            )
+            return identity
+
+    def get_tool_observation(
+        self, scope: RunScope, task_run_id: str, operation_id: str, tool_attempt_id: str
+    ) -> StoredToolObservation:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN")
+            operation = self._tool_operation(conn, scope, task_run_id, operation_id)
+            if operation.tool_attempt_id != tool_attempt_id:
+                raise LookupError("Tool capture unavailable in this scope")
+            row = conn.execute(
+                "SELECT * FROM tool_observations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError("Tool capture unavailable in this scope")
+            observation = ProcessObservation(
+                row["stdout"],
+                row["stderr"],
+                row["stdout_seen"],
+                row["stderr_seen"],
+                bool(row["stdout_eof"]),
+                bool(row["stderr_eof"]),
+                row["exit_code"],
+                bool(row["timed_out"]),
+                row["capture_error"],
+            )
+            if (
+                hashlib.sha256(observation.stdout).hexdigest() != row["stdout_digest"]
+                or hashlib.sha256(observation.stderr).hexdigest() != row["stderr_digest"]
+            ):
+                raise RuntimeError("Stored raw process digest is invalid")
+            return StoredToolObservation(
+                operation,
+                row["result_id"],
+                observation,
+                row["stdout_digest"],
+                row["stderr_digest"],
+                row["captured_at"],
+            )
 
     def submit_result(
         self,

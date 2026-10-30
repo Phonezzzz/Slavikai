@@ -8,6 +8,7 @@ from core.auto_runtime import AutoOrchestrator, AutoRunOutcome
 from core.skills.index import SkillResolution
 from core.tracer import Tracer
 from shared.models import JSONValue
+from shared.tool_capture import CaptureBinding
 
 if TYPE_CHECKING:
     from core.agent import Agent
@@ -42,9 +43,12 @@ class AutoAgent:
         goal: str,
         *,
         skill_resolution: SkillResolution | None = None,
+        capture_binding: CaptureBinding | None = None,
     ) -> AutoRunOutcome:
         self.tracer.log("auto_invoke", f"AgentToolLoop->Verifier: {goal}")
-        return self.orchestrator.run_v1(goal, skill_resolution=skill_resolution)
+        return self.orchestrator.run_v1(
+            goal, skill_resolution=skill_resolution, capture_binding=capture_binding
+        )
 
     def resume_outcome(
         self,

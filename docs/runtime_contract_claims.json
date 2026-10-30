@@ -863,6 +863,23 @@
         "tests/test_sandbox_execution_fence.py"
       ],
       "summary": "Explicit pinned rootless Podman profile admits only native workspace_run through scoped Gateway and ComputerBackend. Principal-owned managed workspaces coordinate six writers, once approval binds immutable workspace/environment revision, finite explicit kernel tmpfs byte/inode slots bound active and retained private nofollow stages (one per principal), container logs are disabled, unknown mount ownership denies reuse, and bounded transfer plus atomic publication requires original content/revision after container settlement. Unknown/conflict stops subsequent tool/model calls without publication/replay. Raw bytes and actual exit exist internally; durable capture, run-intent fencing/recovery, other process consumers and production activation remain outside this partial slice. Unit tests do not independently prove OS isolation; real synthetic qualification evidence is recorded separately."
+    },
+    {
+      "id": "runtime.lifecycle.workspace_run_capture",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
+      "verified_by": [
+        "tests/test_tool_capture_storage.py",
+        "tests/test_tool_capture_streams.py",
+        "tests/test_tool_capture_loop.py",
+        "tests/test_workspace_capture_projection.py",
+        "tests/test_workspace_python_execution.py",
+        "tests/ui_api/test_qualified_workspace_capture.py"
+      ],
+      "summary": "Only admitted synchronous Auto UI/API workspace_run and its captured native approval carry the original scoped run binding to the qualified rootless byte boundary. Existing guards precede durable operation intent, which is required before container start. Raw separate prefixes (1MiB/stream), observed counts/EOF, actual child exit or unknown, timeout/capture errors and digests commit atomically before opaque refs and bounded 32KiB UTF-8 views. Capture/store faults stop subsequent dispatch without replay; late historical observations cannot resurrect aborted runs. Additive Store v3-to-v4 preserves prior producer reports and history; sensitive raw bytes may remain indefinitely without aggregate DB quota or GC. Other tools/entrypoints, full canonical capture, acceptance and recovery remain target. Pytest stubs OS/engine boundaries; actual qualified synthetic evidence is separate."
     }
   ]
 }

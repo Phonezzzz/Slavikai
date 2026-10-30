@@ -97,7 +97,7 @@ class DummyAgent:
 
         raise ChatApprovalUnavailable("approval_continuation_unavailable")
 
-    def respond(self, messages) -> AgentResponse:
+    def respond(self, messages, *, auto_capture=None) -> AgentResponse:
         return AgentResponse("ok")
 
     def reconfigure_models(self, main_config, main_api_key=None, *, persist=True) -> None:
@@ -833,6 +833,12 @@ async def _create_client(
     *,
     desktop_policy_store: DesktopPolicyStore | None = None,
 ) -> TestClient:
+    # Fixture использует identity production scoped factory вместо чужого default principal.
+    from core.agent import Agent
+    from server.http.common.auth import _principal_id_from_token
+
+    if isinstance(agent, Agent):
+        agent.user_id = _principal_id_from_token(TEST_API_TOKEN)
     app = create_app(
         agent=agent,
         max_request_bytes=1_000_000,

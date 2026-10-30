@@ -257,6 +257,8 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
                 project_root / "core" / "rootless_podman.py",
                 project_root / "core" / "managed_workspace.py",
                 project_root / "core" / "workspace_python_execution.py",
+                project_root / "core" / "task_run_storage.py",
+                project_root / "shared" / "tool_capture.py",
                 project_root / "requirements.in",
                 project_root / "requirements.txt",
                 project_root / "constraints.txt",

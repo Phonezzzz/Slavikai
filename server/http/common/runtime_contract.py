@@ -30,6 +30,7 @@ from server.ui_hub import UIHub
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
 from shared.task_run import TaskRun
+from shared.tool_capture import CaptureBinding
 
 
 class SessionApprovalStore:
@@ -145,7 +146,9 @@ class AgentProtocol(Protocol):
         enforce_plan_guard: bool,
     ) -> None: ...
 
-    def respond(self, messages: list[LLMMessage]) -> AgentResponse: ...
+    def respond(
+        self, messages: list[LLMMessage], *, auto_capture: CaptureBinding | None = None
+    ) -> AgentResponse: ...
 
     def bind_chat_approval_run(
         self,
@@ -183,6 +186,8 @@ class AgentProtocol(Protocol):
         self,
         messages: list[LLMMessage],
         cancellation_token: asyncio.Event | None = None,
+        *,
+        auto_capture: CaptureBinding | None = None,
     ) -> Iterator[StreamEvent]: ...
 
     def update_tools_enabled(self, state: dict[str, bool]) -> None: ...

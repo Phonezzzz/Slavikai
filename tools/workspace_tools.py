@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.sandbox_execution import sandbox_execution_failure
+from shared.tool_capture import MAX_CAPTURE_BYTES, MAX_VIEW_BYTES, ToolCaptureFault
 from tools.terminal_tool import TerminalTool
 
 if TYPE_CHECKING:
@@ -579,6 +580,12 @@ class ApplyPatchTool:
             return ToolResult.failure(str(exc))
 
 
+def _captured_process_view(raw: bytes, seen: int) -> tuple[str, bool]:
+    encoded = raw[:MAX_VIEW_BYTES].decode("utf-8", errors="replace").encode("utf-8")
+    view = encoded[:MAX_VIEW_BYTES].decode("utf-8", errors="ignore")
+    return view, seen > len(raw[:MAX_VIEW_BYTES]) or len(encoded) > MAX_VIEW_BYTES
+
+
 class RunCodeTool:
     def __init__(self, timeout: int = 3, *, backend: ComputerBackend | None = None) -> None:
         self.timeout = timeout
@@ -606,7 +613,10 @@ class RunCodeTool:
                     request.workspace_binding,
                     resolved.relative_to(get_workspace_root()).as_posix(),
                     timeout=self.timeout,
+                    capture=request.capture,
                 )
+            except ToolCaptureFault:
+                raise
             except Exception:  # noqa: BLE001
                 logging.getLogger("SlavikAI.Workspace").exception(
                     "isolated Python outcome unavailable"
@@ -622,15 +632,49 @@ class RunCodeTool:
                 )
             if outcome.reason_code == "sandbox_execution_unavailable":
                 return sandbox_execution_failure()
-            # Только view. Полные bytes остаются на внутренней backend boundary для R2b.
-            stdout = outcome.stdout.decode("utf-8", errors="replace")
-            stderr = outcome.stderr.decode("utf-8", errors="replace")
+            # Только view; для admitted Auto raw observation уже committed в Store.
+            receipt = outcome.capture_receipt
+            if request.capture is not None and outcome.execution_started is not False:
+                if receipt is None:
+                    raise ToolCaptureFault("workspace_capture_receipt_unavailable")
+            if receipt is not None:
+                stdout, stdout_truncated = _captured_process_view(
+                    outcome.stdout, receipt.observation.stdout_seen
+                )
+                stderr, stderr_truncated = _captured_process_view(
+                    outcome.stderr, receipt.observation.stderr_seen
+                )
+            else:
+                stdout = outcome.stdout.decode("utf-8", errors="replace")
+                stderr = outcome.stderr.decode("utf-8", errors="replace")
             data: dict[str, JSONValue] = {
-                "output": stdout + ("\nSTDERR:\n" + stderr if stderr else ""),
+                "output": stdout
+                if receipt is not None
+                else stdout + ("\nSTDERR:\n" + stderr if stderr else ""),
                 "stdout": stdout,
                 "stderr": stderr,
                 "publication": outcome.publication,
             }
+            if receipt is not None:
+                observation = receipt.observation
+                data["capture"] = {
+                    "result_id": receipt.result_id,
+                    "operation_id": receipt.operation.operation_id,
+                    "tool_attempt_id": receipt.operation.tool_attempt_id,
+                    "view_encoding": "utf-8-replace",
+                    "capture_limit_bytes": MAX_CAPTURE_BYTES,
+                    "view_limit_bytes": MAX_VIEW_BYTES,
+                    "stdout_seen": observation.stdout_seen,
+                    "stderr_seen": observation.stderr_seen,
+                    "stdout_complete": observation.stdout_complete,
+                    "stderr_complete": observation.stderr_complete,
+                    "timed_out": observation.timed_out,
+                    "capture_error": observation.capture_error,
+                    "stdout_resource_limited": observation.stdout_seen > MAX_CAPTURE_BYTES,
+                    "stderr_resource_limited": observation.stderr_seen > MAX_CAPTURE_BYTES,
+                    "stdout_view_truncated": stdout_truncated,
+                    "stderr_view_truncated": stderr_truncated,
+                }
             if outcome.exit_code is not None:
                 data["exit_code"] = outcome.exit_code
             review_required = (
@@ -663,6 +707,8 @@ class RunCodeTool:
             else:
                 error = "Изолированное исполнение недоступно для текущей привязки workspace."
             return ToolResult.failure(error, meta=meta, data=data)
+        except ToolCaptureFault:
+            raise
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(f"Ошибка запуска: {exc}")
 

@@ -295,7 +295,10 @@ qualified environment; граница tools/verifier/manual terminal/Git/import/
 authority. Узкое принятое исключение native `workspace_run` требует qualified rootless
 ComputerBackend, managed principal owner/revision, original approval/environment binding,
 private byte staging и guarded publication после settlement. Unknown не публикуется и не
-повторяется; остальные process paths fenced. Это не полная целевая isolation/recovery.
+повторяется; остальные process paths fenced. Для admitted sync Auto UI/API и captured
+approval original TaskRun binding также фиксирует pre-start intent и bounded raw
+observation в TaskRunStore schema4 до lossy view; полный capture/recovery остаётся target.
+Это не полная целевая isolation/recovery.
 
 
 - Policy/scope/budgets/verifier фиксируются в packet и становятся immutable для Act.

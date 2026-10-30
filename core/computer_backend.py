@@ -6,6 +6,7 @@ from typing import Protocol, runtime_checkable
 from core.tool_gateway import ToolGateway
 from core.workspace_python_execution import WorkspacePythonOutcome, unavailable_python_execution
 from shared.models import ToolRequest, ToolResult
+from shared.tool_capture import ToolCaptureContext
 from shared.workspace_binding import WorkspaceBinding
 
 
@@ -34,7 +35,12 @@ class ComputerBackend(Protocol):
     def check(self) -> ToolResult: ...
 
     def execute_python(
-        self, binding: WorkspaceBinding, script: str, *, timeout: float
+        self,
+        binding: WorkspaceBinding,
+        script: str,
+        *,
+        timeout: float,
+        capture: ToolCaptureContext | None = None,
     ) -> WorkspacePythonOutcome: ...
 
 
@@ -49,7 +55,12 @@ class LocalComputerBackend:
     gateway: ToolGateway
 
     def execute_python(
-        self, binding: WorkspaceBinding, script: str, *, timeout: float
+        self,
+        binding: WorkspaceBinding,
+        script: str,
+        *,
+        timeout: float,
+        capture: ToolCaptureContext | None = None,
     ) -> WorkspacePythonOutcome:
         return unavailable_python_execution()
 

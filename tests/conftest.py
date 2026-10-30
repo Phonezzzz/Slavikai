@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -28,13 +29,14 @@ def _isolate_skill_candidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 @pytest.fixture(autouse=True)
 def _close_sqlite_stores(monkeypatch: pytest.MonkeyPatch) -> None:
     tracked: list[object] = []
-    connections: list[sqlite3.Connection] = []
+    connections: list[tuple[int, bool, sqlite3.Connection]] = []
 
     original_connect = sqlite3.connect
 
     def _connect(*args: object, **kwargs: object) -> sqlite3.Connection:
         conn = original_connect(*args, **kwargs)
-        connections.append(conn)
+        same_thread = kwargs.get("check_same_thread", args[4] if len(args) > 4 else True)
+        connections.append((threading.get_ident(), bool(same_thread), conn))
         return conn
 
     monkeypatch.setattr(sqlite3, "connect", _connect)
@@ -65,8 +67,10 @@ def _close_sqlite_stores(monkeypatch: pytest.MonkeyPatch) -> None:
         if callable(close):
             close()
 
-    for conn in connections:
-        conn.close()
+    for owner_thread, same_thread, conn in connections:
+        # Thread-affine соединения worker закрываются в контексте владеющего Store.
+        if not same_thread or owner_thread == threading.get_ident():
+            conn.close()
 
 
 @pytest.fixture(autouse=True)

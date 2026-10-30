@@ -1151,7 +1151,7 @@ def test_ui_chat_send_in_auto_mode_returns_auto_state_and_progress_event() -> No
         def drain_auto_progress_events(self):  # noqa: ANN001
             return [dict(self.last_auto_state)]
 
-        def respond(self, messages) -> AgentResponse:  # noqa: ANN001
+        def respond(self, messages, *, auto_capture=None) -> AgentResponse:  # noqa: ANN001
             del messages
             return AgentResponse("auto ok")
 
@@ -1265,7 +1265,7 @@ def test_ui_chat_send_in_auto_mode_chat_like_request_skips_root_gate() -> None:
 
 def test_ui_chat_send_appends_guidance_for_auto_missing_target_path() -> None:
     class AutoMissingPathAgent(DummyAgent):
-        def respond(self, messages) -> AgentResponse:  # noqa: ANN001
+        def respond(self, messages, *, auto_capture=None) -> AgentResponse:  # noqa: ANN001
             del messages
             self.last_auto_state = {
                 "run_id": "auto-missing-path-1",

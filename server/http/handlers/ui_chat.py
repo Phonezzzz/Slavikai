@@ -96,6 +96,7 @@ from server.preferences_store import PreferencesStore
 from server.ui_hub import MessageHistoryConflictError, UIHub
 from shared.models import JSONValue, LLMMessage
 from shared.task_run import RunScope, RunState, TaskRun, TransitionAuthority
+from shared.tool_capture import CaptureBinding
 from tools.workspace_tools import set_workspace_root as set_runtime_workspace_root
 from tools.workspace_tools import workspace_root_context
 
@@ -1140,6 +1141,11 @@ async def _handle_ui_send_impl(
             )
             response_raw: str
             agent_response: AgentResponse | None = None
+            auto_capture_args = (
+                {"auto_capture": CaptureBinding(run_store, admitted_run)}
+                if mode == "auto" and admitted_run is not None
+                else {}
+            )
             respond_stream_method = getattr(agent, "respond_stream", None)
             if callable(respond_stream_method):
                 stream_text = ""
@@ -1163,6 +1169,7 @@ async def _handle_ui_send_impl(
                         respond_stream_method(
                             llm_messages,
                             cancellation_token=active_generation.token,
+                            **auto_capture_args,
                         )
                     )
                     async for stream_item in _iterate_stream_in_thread(
@@ -1416,7 +1423,7 @@ async def _handle_ui_send_impl(
                         auto_progress_task.cancel()
                         await asyncio.gather(auto_progress_task, return_exceptions=True)
             else:
-                agent_response = agent.respond(llm_messages)
+                agent_response = agent.respond(llm_messages, **auto_capture_args)
                 response_raw = agent_response.text
             if (
                 admitted_run is not None

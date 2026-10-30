@@ -60,7 +60,8 @@ verifier, manual terminal/Git/import и unqualified container commands отка�
 authority сохраняются. Узкое explicit исключение — native `workspace_run` через
 qualified rootless ComputerBackend и principal-owned managed workspace; точные
 admission/publication/unknown boundaries описаны там же. Без explicit profile I0
-сохраняется. Raw durable capture и завершение R2b этим не реализованы.
+сохраняется. Scoped R2b raw capture admitted Auto описан в
+TASK_RUN_STORAGE_CONTRACT.md; остальные consumers и полный R2 остаются target.
 
 
 Auto v1 применяет отдельный native tool-call cap перед каждым следующим call,
@@ -146,7 +147,7 @@ Providers без complete reported usage не могут продолжить м
 ## Submitted producer report
 
 Existing admitted UI/API Ask/Auto и captured approval continuation атомарно сохраняют
-producer-report envelope вместе с result_submitted/history в TaskRunStore schema3. Envelope
+producer-report envelope вместе с result_submitted/history в TaskRunStore (ныне schema4). Envelope
 связан с exact principal/session/task revision/run/attempt/version; scope и digest проверяются
 при чтении. Явный additive v2→v3 upgrade сохраняет старую историю без fabricated payload:
 старые reports остаются unavailable. Oversize/invalid report или storage failure не дают

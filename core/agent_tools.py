@@ -79,6 +79,7 @@ from shared.policy_models import PolicyAction, PolicyRule, PolicyScope
 from shared.sandbox import normalize_sandbox_path
 from shared.sandbox_execution import sandbox_execution_failure
 from shared.task_run import TaskRun
+from shared.tool_capture import CaptureBinding
 from tools.workspace_tools import MAX_FILE_BYTES, WORKSPACE_ROOT
 
 SKILL_CANDIDATE_TOOL_ERROR_THRESHOLD = 3
@@ -1283,12 +1284,14 @@ class AgentToolsMixin:
         goal: str,
         *,
         skill_resolution: SkillResolution | None = None,
+        capture_binding: CaptureBinding | None = None,
     ) -> AutoRunOutcome:
         goal_clean = goal.strip() or "auto run"
         self.tracer.log("auto_invoke", f"Auto v1 tool loop: {goal_clean}")
         return self.auto_agent.run_outcome(
             goal_clean,
             skill_resolution=skill_resolution,
+            capture_binding=capture_binding,
         )
 
     def cancel_auto_run(

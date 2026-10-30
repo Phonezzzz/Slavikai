@@ -132,7 +132,9 @@ cleanup требует review. Shutdown с живыми allocations сохран
 чистое завершение требует доставленной команды и подтверждённого unmount.
 При ошибке удаления контейнер может остаться, settlement не объявляется успешным.
 
-Raw bytes пока доступны внутренней boundary только на время вызова; native ToolResult
-содержит decoded view. Durable canonical capture, original run/attempt intent и recovery
-относятся к незавершённому R2b. Required process verifier остаётся ERROR/unavailable;
+Для admitted синхронного Auto UI/API и captured approval R2b сохраняет original
+run/attempt intent и bounded raw stdout/stderr observation в existing TaskRunStore
+до lossy ToolResult view; точный scope — TASK_RUN_STORAGE_CONTRACT.md. Остальные
+native callers не получают hidden capture. Полный canonical capture, recovery и
+terminal acceptance остаются target. Required process verifier остаётся ERROR/unavailable;
 этот backend не завершает R2/R1 и не включает production activation.

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
+from shared.tool_capture import ToolCaptureContext
 from shared.workspace_binding import WorkspaceBinding
 
 JSONPrimitive = str | bytes | int | float | bool | None
@@ -21,6 +22,7 @@ class ToolRequest:
     name: str
     args: dict[str, JSONValue] = field(default_factory=dict)
     workspace_binding: WorkspaceBinding | None = field(default=None, repr=False, compare=False)
+    capture: ToolCaptureContext | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

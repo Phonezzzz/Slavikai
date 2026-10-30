@@ -40,6 +40,7 @@ from server.http_api import (
 )
 from shared.models import JSONValue
 from shared.task_run import RunScope, RunState, TaskRun, TransitionAuthority
+from shared.tool_capture import CaptureBinding
 from tools.workspace_tools import workspace_root_context
 
 
@@ -298,7 +299,12 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                     code="task_run_context_changed",
                 )
             with workspace_root_context(accepted_root):
-                agent_response = agent.respond(parsed.messages)
+                if runtime_mode == "auto" and admitted_run is not None:
+                    agent_response = agent.respond(
+                        parsed.messages, auto_capture=CaptureBinding(run_store, admitted_run)
+                    )
+                else:
+                    agent_response = agent.respond(parsed.messages)
             if admitted_run is not None:
                 if getattr(agent, "last_approval_source_endpoint", None) == "chat.tool_continue":
                     pending = agent.last_approval_resume_payload

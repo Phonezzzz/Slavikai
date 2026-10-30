@@ -253,7 +253,7 @@ def test_v2_upgrade_preserves_history_without_fabricating_report(tmp_path) -> No
     with pytest.raises(LookupError, match="Submission unavailable"):
         store.get_submission(scope, "run")
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         assert conn.execute("SELECT count(*) FROM run_submissions").fetchone()[0] == 0
     # Old running/admitted records are not grandfathered into future payload-free submissions.
     with sqlite3.connect(path) as conn, pytest.raises(sqlite3.IntegrityError, match="binding"):

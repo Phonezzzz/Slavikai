@@ -6,7 +6,7 @@
 
 ## Outcome — контракт generic process results; Sandbox execution недоступен
 
-Current I0: `shell`, terminal oneshot и `workspace_run` возвращают execution unavailable
+Default I0: `shell`, terminal oneshot и `workspace_run` возвращают execution unavailable
 до запуска по [SANDBOX_PROCESS_FENCE.md](SANDBOX_PROCESS_FENCE.md), без выдуманных
 exit code/raw output. Следующая семантика outcome остаётся контрактом для реально
 полученного process result; она не означает доступный qualified executor.
@@ -24,6 +24,17 @@ Compressor, model response и verifier не могут переписать exec
 HTTP endpoints workspace run/terminal run возвращают отчёт завершившегося процесса с
 `ok`, `error`, stdout/stderr и exit code. HTTP 200 означает доставленный отчёт, в том числе
 `ok=false`; ошибки до запуска остаются HTTP 400, approval — HTTP 202.
+
+## Current bounded exception: admitted Auto workspace_run
+
+Qualified native workspace_run — единственное process исключение из I0; manual HTTP Run
+остаётся fenced. Только admitted синхронный Auto UI/API и captured native approval
+сохраняют pre-start intent и raw observation в TaskRunStore schema4 до model view.
+Scope, kernel staging bounds, raw1MiB/stream, view32KiB/stream, counts/EOF/unknown,
+post-effect store fault/no replay и indefinite sensitive storage описаны в
+TASK_RUN_STORAGE_CONTRACT.md и SANDBOX_PROCESS_FENCE.md. Operator backend guards
+сохраняются; prefix не выдаётся за full output. Это не generic capture всех tools,
+не terminal acceptance или recovery; общий readiness ниже остаётся BLOCKED.
 
 ## Полное canonical evidence — target
 
