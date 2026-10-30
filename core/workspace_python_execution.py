@@ -46,6 +46,7 @@ class _CaptureAttempt:
     script: str
     streams: RawProcessCapture = field(default_factory=RawProcessCapture)
     operation: ToolOperation | None = None
+    observed_child_exit: int | None = None
 
     def begin(self) -> None:
         try:
@@ -86,7 +87,7 @@ class _CaptureAttempt:
                 raise ToolCaptureFault("workspace_capture_intent_unavailable")
             return outcome
         observation = self.streams.observation(
-            exit_code=outcome.exit_code,
+            exit_code=self.observed_child_exit,
             timed_out=outcome.reason_code == "workspace_process_timeout",
             capture_error=(
                 "output_limit"
@@ -304,6 +305,8 @@ class RootlessPythonExecutor:
                 child_exit = self.profile.finished_exit(
                     prepared, cli_returncode=attached.returncode
                 )
+                if capture is not None:
+                    capture.observed_child_exit = child_exit
             if child_exit is None and reason is None:
                 reason = "workspace_transport_unknown"
         except ToolCaptureFault:

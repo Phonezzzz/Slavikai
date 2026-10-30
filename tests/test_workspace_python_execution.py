@@ -237,3 +237,107 @@ def test_foreign_capture_binding_refuses_before_any_engine_command(
             timeout=3,
             capture=ToolCaptureContext(CaptureBinding(store, run), "label"),
         )
+
+
+@pytest.mark.parametrize("cleanup_fault", ["refused", "exception"])
+def test_capture_preserves_observed_child_exit_when_settlement_is_unknown(
+    tmp_path, monkeypatch, cleanup_fault
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from core.rootless_podman import PreparedPythonContainer
+    from core.rootless_staging import BoundedStage, RootlessStagePool, StagingLimits
+    from core.task_run_storage import TaskRunStore
+    from shared.task_run import RunScope, RunState, TransitionAuthority
+    from shared.tool_capture import CaptureBinding, ToolCaptureContext
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "script.py").write_text("# synthetic; never executed on host")
+    binding = replace(
+        owner.bind(principal_id="alice", session_id="chat"), environment_revision="environment"
+    )
+    profile = RootlessPodmanProfile(tmp_path, os.geteuid(), os.getegid(), "revision", (), ())
+    pool = RootlessStagePool(profile, StagingLimits(4096, 32, 1))
+    monkeypatch.setattr(
+        RootlessStagePool, "execution_revision", property(lambda self: "environment")
+    )
+
+    def prepare(self, workspace, snapshot):
+        stage = workspace.stage(snapshot)
+        info = stage.root.stat()
+        return BoundedStage(stage, self, stage.root, stage.root, (info.st_dev, info.st_ino))
+
+    monkeypatch.setattr(RootlessStagePool, "prepare", prepare)
+    monkeypatch.setattr(RootlessStagePool, "check_stage", lambda *args: None)
+    monkeypatch.setattr(RootlessPodmanProfile, "check_current", lambda *args: None)
+    monkeypatch.setattr(RootlessPodmanProfile, "verify_created", lambda *args: None)
+    monkeypatch.setattr(
+        RootlessPodmanProfile,
+        "create_python_container",
+        lambda self, stage, script: PreparedPythonContainer(
+            "own", "own", stage, script, "revision"
+        ),
+    )
+    monkeypatch.setattr(RootlessPodmanProfile, "finished_exit", lambda *args, **kwargs: 23)
+
+    def remove(*args):
+        if cleanup_fault == "exception":
+            raise OSError("synthetic cleanup fault")
+        return False
+
+    monkeypatch.setattr(RootlessPodmanProfile, "remove_owned", remove)
+
+    def start(*args, **kwargs):
+        streams = []
+        for raw in (b"raw\xff\r\n", b"err\x00"):
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, raw)
+            os.close(write_fd)
+            streams.append(os.fdopen(read_fd, "rb"))
+        return SimpleNamespace(
+            stdout=streams[0],
+            stderr=streams[1],
+            returncode=23,
+            poll=lambda: 23,
+            wait=lambda **kwargs: 23,
+        )
+
+    monkeypatch.setattr("subprocess.Popen", start)
+    store = TaskRunStore(tmp_path / "runs.db")
+    scope = RunScope("alice", "chat")
+    admitted = store.admit(
+        scope, request_key="key", goal="synthetic", mode="auto", request_fingerprint="a" * 64
+    )
+    run = store.transition(
+        scope,
+        admitted.task_run_id,
+        expected_version=0,
+        state=RunState.RUNNING,
+        authority=TransitionAuthority.RUNTIME,
+        reason_code="started",
+    )
+    executor = RootlessPythonExecutor(
+        profile, owner, WorkspaceLimits(1024, 4096, 20, 8), 1024, pool
+    )
+    outcome = executor.execute_python(
+        binding,
+        "script.py",
+        timeout=3,
+        capture=ToolCaptureContext(CaptureBinding(store, run), "label"),
+    )
+    assert outcome.state == "unknown" and outcome.exit_code is None
+    assert outcome.publication == "retained"
+    assert outcome.capture_receipt is not None
+    receipt = outcome.capture_receipt
+    saved = TaskRunStore(store.path).get_tool_observation(
+        scope, run.task_run_id, receipt.operation.operation_id, receipt.operation.tool_attempt_id
+    )
+    assert saved.observation.exit_code == 23
+    assert saved.observation.capture_error == "cleanup_incomplete"
+    assert saved.observation.stdout == b"raw\xff\r\n"
+    assert saved.observation.stderr == b"err\x00"
+    assert saved.observation.stdout_eof and saved.observation.stderr_eof
+    assert store.get(scope, run.task_run_id) == run
