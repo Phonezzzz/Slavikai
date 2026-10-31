@@ -267,6 +267,7 @@ def test_auto_call_cap_is_run_scoped_and_retained_across_approval(tmp_path, monk
         with pytest.raises(ApprovalRequired):
             orchestrator.run_v1("count")
         assert dispatched == ["echo"]
+        assert agent.last_auto_state["execution_metrics"]["files_touched"] is None
         runs.append((orchestrator, agent, dispatched, agent.last_auto_state["run_id"]))
     monkeypatch.setenv(auto_runtime.AUTO_MAX_TOOL_CALLS_ENV, "100")
     for orchestrator, agent, dispatched, run_id in runs:
@@ -304,6 +305,8 @@ def test_auto_keeps_available_prefix_after_dispatch_observation_fault(tmp_path, 
     assert dispatched == ["echo", "second"]
     assert len(agent.last_auto_state["coders"]) == 1
     assert agent.last_auto_state["error"] == "tool_dispatch_failed"
+    # An already executed prefix, followed by a dispatch fault, has unknown effects.
+    assert agent.last_auto_state["execution_metrics"]["files_touched"] is None
     with pytest.raises(auto_runtime.AutoContinuationUnavailable):
         orchestrator.resume(agent.last_auto_state["run_id"])
 
