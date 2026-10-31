@@ -15,7 +15,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-from shared.workspace_binding import WorkspaceBinding, WorkspaceConflict, WorkspaceUnavailable
+from shared.workspace_binding import (
+    WorkspaceBinding,
+    WorkspaceConflict,
+    WorkspaceFileBudgetExceeded,
+    WorkspaceUnavailable,
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,34 @@ class WorkspaceSnapshot:
     files: tuple[WorkspaceFile, ...]
     directories: tuple[str, ...]
     fingerprints: tuple[tuple[str, tuple[int, ...]], ...]
+
+
+def changed_workspace_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> frozenset[str]:
+    """Compare validated snapshots, including content, mode and directory effects."""
+    if before.binding != after.binding:
+        raise WorkspaceConflict("workspace snapshots belong to different bindings")
+    original_files = {file.path: file for file in before.files}
+    output_files = {file.path: file for file in after.files}
+    changed = {
+        path
+        for path in original_files.keys() | output_files.keys()
+        if original_files.get(path) != output_files.get(path)
+    }
+    changed.update(set(before.directories) ^ set(after.directories))
+    # Staging can change permission bits without changing bytes or an
+    # executable flag. Do not compare inodes/mtimes: staging recreates them.
+    before_modes = {
+        path: stat.S_IMODE(fingerprint[2]) for path, fingerprint in before.fingerprints if path
+    }
+    after_modes = {
+        path: stat.S_IMODE(fingerprint[2]) for path, fingerprint in after.fingerprints if path
+    }
+    changed.update(
+        path
+        for path in before_modes.keys() & after_modes.keys()
+        if before_modes[path] != after_modes[path]
+    )
+    return frozenset(changed)
 
 
 @dataclass(frozen=True)
@@ -321,7 +354,13 @@ class ManagedWorkspace:
             os.close(parent_fd)
 
     def publish_bounded(
-        self, snapshot: WorkspaceSnapshot, stage: WorkspaceStage, *, limits: WorkspaceLimits
+        self,
+        snapshot: WorkspaceSnapshot,
+        stage: WorkspaceStage,
+        *,
+        limits: WorkspaceLimits,
+        max_files_touched: int | None = None,
+        already_touched: frozenset[str] = frozenset(),
     ) -> Path | None:
         """После settlement переносит только validated bytes в trusted host stage.
 
@@ -329,6 +368,19 @@ class ManagedWorkspace:
         capture limits, затем используется тот же owner/CAS/atomic exchange.
         Возвращает путь старого host tree только при cleanup warning после commit.
         """
+        if max_files_touched is not None and (
+            type(max_files_touched) is not int or max_files_touched < 0
+        ):
+            raise ValueError("max_files_touched must be a nonnegative integer")
+        if type(already_touched) is not frozenset or any(
+            type(path) is not str
+            or not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or path == "."
+            for path in already_touched
+        ):
+            raise ValueError("already_touched must contain valid relative paths")
         with self._lock, stage.publication():
             if stage._state != "settled":
                 raise WorkspaceUnavailable("bounded stage processes have not settled")
@@ -346,6 +398,12 @@ class ManagedWorkspace:
                     raise WorkspaceConflict("bounded output is still changing")
             finally:
                 os.close(fd)
+            if max_files_touched is not None:
+                changed = changed_workspace_paths(snapshot, output)
+                if len(changed | already_touched) > max_files_touched:
+                    raise WorkspaceFileBudgetExceeded(
+                        "workspace file budget exhausted before publication"
+                    )
             host_stage = self.stage(output)
             try:
                 self.publish(snapshot, host_stage, limits=limits)

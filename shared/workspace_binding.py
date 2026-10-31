@@ -14,6 +14,12 @@ class WorkspaceConflict(WorkspaceUnavailable):
     reason_code: ClassVar[str] = "workspace_conflict"
 
 
+class WorkspaceFileBudgetExceeded(WorkspaceUnavailable):
+    """File-effect budget denied the staged output before publication."""
+
+    reason_code: ClassVar[str] = "workspace_file_budget_exhausted"
+
+
 @dataclass(frozen=True)
 class WorkspaceBinding:
     """Доверенная привязка операции; не часть model tool arguments."""

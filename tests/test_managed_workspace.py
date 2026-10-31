@@ -559,3 +559,203 @@ def test_settled_external_stage_publishes_only_via_bounded_capture_and_atomic_ex
     assert list(parent.glob("stage-*")) == []
     with pytest.raises(WorkspaceConflict):
         owner.publish_bounded(snapshot, stage, limits=limits)
+
+
+@pytest.mark.parametrize(
+    ("stage_changes", "already_touched", "max_files", "allowed"),
+    [
+        ({"a.txt": b"modified"}, frozenset(), 1, True),
+        ({"a.txt": b"modified", "b.txt": b"created"}, frozenset(), 1, False),
+        ({"a.txt": b"modified", "b.txt": b"created"}, frozenset({"a.txt"}), 2, True),
+        ({"a.txt": b"modified", "b.txt": b"created"}, frozenset({"other.txt"}), 2, False),
+        ({"a.txt": b"modified"}, frozenset({"a.txt"}), 1, True),
+        ({"a.txt": b"original"}, frozenset(), 0, True),
+    ],
+)
+def test_bounded_publication_rejects_file_effects_before_exchange(
+    tmp_path, stage_changes, already_touched, max_files, allowed
+):
+    from shared.workspace_binding import WorkspaceFileBudgetExceeded
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "a.txt").write_bytes(b"original")
+    (owner.root / "a.txt").chmod(0o600)
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    snapshot = owner.capture(binding, limits=limits)
+    storage = tmp_path / "staging"
+    storage.mkdir(mode=0o700)
+    stage = owner.stage(snapshot, storage=storage)
+    stage.begin_process()
+    for path, content in stage_changes.items():
+        (stage.root / path).write_bytes(content)
+    stage.mark_settled()
+
+    if allowed:
+        assert (
+            owner.publish_bounded(
+                snapshot,
+                stage,
+                limits=limits,
+                max_files_touched=max_files,
+                already_touched=already_touched,
+            )
+            is None
+        )
+        for path, content in stage_changes.items():
+            assert (owner.root / path).read_bytes() == content
+    else:
+        with pytest.raises(WorkspaceFileBudgetExceeded, match="file budget"):
+            owner.publish_bounded(
+                snapshot,
+                stage,
+                limits=limits,
+                max_files_touched=max_files,
+                already_touched=already_touched,
+            )
+        assert owner.bind(principal_id="alice", session_id="chat") == binding
+        assert (owner.root / "a.txt").read_bytes() == b"original"
+        assert not (owner.root / "b.txt").exists()
+        for path, content in stage_changes.items():
+            assert (stage.root / path).read_bytes() == content
+
+
+def test_bounded_publication_counts_deletions_renames_and_empty_directories(tmp_path):
+    from shared.workspace_binding import WorkspaceFileBudgetExceeded
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "source.txt").write_text("source")
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    snapshot = owner.capture(binding, limits=limits)
+    storage = tmp_path / "staging"
+    storage.mkdir(mode=0o700)
+    stage = owner.stage(snapshot, storage=storage)
+    stage.begin_process()
+    (stage.root / "source.txt").rename(stage.root / "target.txt")
+    (stage.root / "empty").mkdir()
+    stage.mark_settled()
+
+    with pytest.raises(WorkspaceFileBudgetExceeded, match="file budget"):
+        owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=2)
+    assert owner.bind(principal_id="alice", session_id="chat") == binding
+    assert (owner.root / "source.txt").read_text() == "source"
+    assert not (owner.root / "target.txt").exists()
+    assert not (owner.root / "empty").exists()
+
+
+def test_bounded_publication_denies_empty_directory_creation_with_zero_budget(tmp_path):
+    from shared.workspace_binding import WorkspaceFileBudgetExceeded
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    snapshot = owner.capture(binding, limits=limits)
+    storage = tmp_path / "staging"
+    storage.mkdir(mode=0o700)
+    stage = owner.stage(snapshot, storage=storage)
+    stage.begin_process()
+    (stage.root / "empty").mkdir()
+    stage.mark_settled()
+    with pytest.raises(WorkspaceFileBudgetExceeded):
+        owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=0)
+    assert owner.bind(principal_id="alice", session_id="chat") == binding
+    assert not (owner.root / "empty").exists()
+
+
+@pytest.mark.parametrize("value", [True, -1, 1.2, "2"])
+def test_bounded_publication_rejects_invalid_file_limit(tmp_path, value):
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    snapshot = owner.capture(binding, limits=limits)
+    stage = owner.stage(snapshot)
+    with pytest.raises(ValueError, match="max_files_touched"):
+        owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=value)
+    assert owner.bind(principal_id="alice", session_id="chat") == binding
+
+
+def test_file_effect_paths_compare_executable_mode_without_inode_noise(tmp_path):
+    from core.managed_workspace import changed_workspace_paths
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "script.py").write_text("print('ok')")
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    before = owner.capture(binding, limits=limits)
+    # Metadata changes without published content/mode differences are not file effects.
+    os.utime(owner.root / "script.py")
+    same = owner.capture(binding, limits=limits)
+    assert changed_workspace_paths(before, same) == frozenset()
+    (owner.root / "script.py").chmod(0o700)
+    changed = owner.capture(binding, limits=limits)
+    assert changed_workspace_paths(before, changed) == frozenset({"script.py"})
+
+
+@pytest.mark.parametrize("bad", [frozenset({"../escape"}), frozenset({"/absolute"}), {"a.txt"}])
+def test_bounded_publication_rejects_invalid_prior_path_set(tmp_path, bad):
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    snapshot = owner.capture(binding, limits=limits)
+    stage = owner.stage(snapshot)
+    with pytest.raises(ValueError, match="already_touched"):
+        owner.publish_bounded(snapshot, stage, limits=limits, already_touched=bad)
+    assert owner.bind(principal_id="alice", session_id="chat") == binding
+
+
+def test_changed_workspace_paths_counts_permission_changes_beyond_executable_bit(tmp_path):
+    from core.managed_workspace import changed_workspace_paths
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    file_path = owner.root / "data.txt"
+    file_path.write_text("unchanged bytes")
+    file_path.chmod(0o600)
+    directory = owner.root / "existing"
+    directory.mkdir(mode=0o700)
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    before = owner.capture(binding, limits=limits)
+    file_path.chmod(0o644)
+    directory.chmod(0o755)
+    after = owner.capture(binding, limits=limits)
+    assert changed_workspace_paths(before, after) == frozenset({"data.txt", "existing"})
+
+
+def test_bounded_publication_denies_permission_only_change(tmp_path):
+    from shared.workspace_binding import WorkspaceFileBudgetExceeded
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "data.txt").write_text("same bytes")
+    (owner.root / "data.txt").chmod(0o600)
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    snapshot = owner.capture(binding, limits=limits)
+    storage = tmp_path / "staging"
+    storage.mkdir(mode=0o700)
+    stage = owner.stage(snapshot, storage=storage)
+    stage.begin_process()
+    (stage.root / "data.txt").chmod(0o644)
+    stage.mark_settled()
+    with pytest.raises(WorkspaceFileBudgetExceeded) as denied:
+        owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=0)
+    assert denied.value.reason_code == "workspace_file_budget_exhausted"
+    assert owner.bind(principal_id="alice", session_id="chat") == binding
+    assert (owner.root / "data.txt").stat().st_mode & 0o777 == 0o600
+    assert (stage.root / "data.txt").stat().st_mode & 0o777 == 0o644
