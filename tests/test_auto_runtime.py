@@ -463,6 +463,9 @@ def test_auto_agent_run_outcome_uses_auto_v1_tool_loop(monkeypatch) -> None:  # 
     verifier = agent.last_auto_state.get("verifier")
     assert isinstance(verifier, dict)
     assert verifier.get("verifier_profile") == "tool_outcomes"
+    # The fake echo ToolResult does not certify file effects; Auto cannot
+    # infer an authoritative count merely from a completed tool call.
+    assert agent.last_auto_state["execution_metrics"]["files_touched"] is None
 
 
 def test_auto_success_text_excludes_service_report(monkeypatch) -> None:  # noqa: ANN001
@@ -595,6 +598,8 @@ def test_auto_runtime_returns_conversation_without_forcing_tool_action(tmp_path)
     assert isinstance(verifier, dict)
     assert verifier.get("status") == VerificationStatus.PASSED.value
     assert verifier.get("verifier_profile") == "response_only"
+    # No native dispatch means the run itself cannot have changed workspace files.
+    assert agent.last_auto_state["execution_metrics"]["files_touched"] == 0
 
 
 def test_auto_runtime_injects_skill_per_run_without_changing_tools_or_brain(tmp_path) -> None:
