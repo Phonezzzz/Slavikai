@@ -38,6 +38,7 @@ class WorkspacePythonOutcome:
     cleanup_warning: bool = False
     container_id: str | None = None
     capture_receipt: ToolCaptureReceipt | None = None
+    changed_paths: frozenset[str] | None = None
 
 
 @dataclass
@@ -220,6 +221,8 @@ class RootlessPythonExecutor:
         *,
         timeout: float,
         capture: ToolCaptureContext | None = None,
+        max_files_touched: int | None = None,
+        already_touched: frozenset[str] = frozenset(),
     ) -> WorkspacePythonOutcome:
         if capture is not None and (
             not isinstance(capture, ToolCaptureContext)
@@ -228,7 +231,14 @@ class RootlessPythonExecutor:
         ):
             raise ToolCaptureFault("workspace_capture_scope_mismatch")
         attempt = _CaptureAttempt(capture, script) if capture is not None else None
-        outcome = self._execute_python(binding, script, timeout=timeout, capture=attempt)
+        outcome = self._execute_python(
+            binding,
+            script,
+            timeout=timeout,
+            capture=attempt,
+            max_files_touched=max_files_touched,
+            already_touched=already_touched,
+        )
         return attempt.finish(outcome) if attempt is not None else outcome
 
     def _execute_python(
@@ -238,6 +248,8 @@ class RootlessPythonExecutor:
         *,
         timeout: float,
         capture: _CaptureAttempt | None,
+        max_files_touched: int | None,
+        already_touched: frozenset[str],
     ) -> WorkspacePythonOutcome:
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("process timeout must be finite and positive")
@@ -355,7 +367,13 @@ class RootlessPythonExecutor:
         stage.mark_settled()
         try:
             pool.check_stage(bounded)
-            retained_host = self.workspace.publish_bounded(snapshot, stage, limits=self.limits)
+            publication = self.workspace.publish_bounded(
+                snapshot,
+                stage,
+                limits=self.limits,
+                max_files_touched=max_files_touched,
+                already_touched=already_touched,
+            )
         except (OSError, WorkspaceUnavailable) as exc:
             return WorkspacePythonOutcome(
                 "conflict" if isinstance(exc, WorkspaceConflict) else "unavailable",
@@ -370,7 +388,7 @@ class RootlessPythonExecutor:
                 stage.root,
             )
         try:
-            if retained_host is not None:
+            if publication.retired_host is not None:
                 raise WorkspaceUnavailable("retired host workspace cleanup unavailable")
             pool.release(bounded)
         except (OSError, WorkspaceUnavailable):
@@ -384,7 +402,15 @@ class RootlessPythonExecutor:
                 "published",
                 stage.root,
                 cleanup_warning=True,
+                changed_paths=publication.changed_paths,
             )
         return WorkspacePythonOutcome(
-            "finished", attached.stdout, attached.stderr, child_exit, True, None, "published"
+            "finished",
+            attached.stdout,
+            attached.stderr,
+            child_exit,
+            True,
+            None,
+            "published",
+            changed_paths=publication.changed_paths,
         )

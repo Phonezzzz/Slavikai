@@ -341,3 +341,118 @@ def test_capture_preserves_observed_child_exit_when_settlement_is_unknown(
     assert saved.observation.stderr == b"err\x00"
     assert saved.observation.stdout_eof and saved.observation.stderr_eof
     assert store.get(scope, run.task_run_id) == run
+
+
+def test_executor_forwards_trusted_publication_file_budget(tmp_path, monkeypatch):
+    from core.workspace_python_execution import WorkspacePythonOutcome
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    binding = owner.bind(principal_id="alice", session_id="chat")
+    profile = RootlessPodmanProfile(tmp_path, os.geteuid(), os.getegid(), "not-a-proof", (), ())
+    executor = RootlessPythonExecutor(
+        profile, owner, WorkspaceLimits(1024, 4096, 20, 8), max_output_bytes=1024
+    )
+    seen = []
+
+    def stub(self, bound, script, *, timeout, capture, max_files_touched, already_touched):
+        seen.append((bound, script, timeout, capture, max_files_touched, already_touched))
+        return WorkspacePythonOutcome("unavailable", b"", b"", None, False, "no_engine", "none")
+
+    monkeypatch.setattr(RootlessPythonExecutor, "_execute_python", stub)
+    result = executor.execute_python(
+        binding,
+        "script.py",
+        timeout=2,
+        max_files_touched=3,
+        already_touched=frozenset({"prior.txt"}),
+    )
+    assert result.reason_code == "no_engine"
+    assert seen == [(binding, "script.py", 2, None, 3, frozenset({"prior.txt"}))]
+
+
+@pytest.mark.parametrize(
+    "limit,expected,cleanup_fault",
+    [(0, "retained", False), (1, "published", False), (1, "published", True)],
+)
+def test_executor_file_budget_fences_staged_publication(
+    tmp_path, monkeypatch, limit, expected, cleanup_fault
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from core.rootless_podman import PreparedPythonContainer
+    from core.rootless_staging import BoundedStage, RootlessStagePool, StagingLimits
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "script.py").write_text("# before")
+    (owner.root / "script.py").chmod(0o600)
+    binding = replace(
+        owner.bind(principal_id="alice", session_id="chat"), environment_revision="env"
+    )
+    profile = RootlessPodmanProfile(tmp_path, os.geteuid(), os.getegid(), "revision", (), ())
+    pool = RootlessStagePool(profile, StagingLimits(4096, 32, 1))
+    monkeypatch.setattr(RootlessStagePool, "execution_revision", property(lambda self: "env"))
+
+    def prepare(self, workspace, snapshot):
+        stage = workspace.stage(snapshot)
+        (stage.root / "script.py").write_text("# after")
+        info = stage.root.stat()
+        return BoundedStage(stage, self, stage.root, stage.root, (info.st_dev, info.st_ino))
+
+    monkeypatch.setattr(RootlessStagePool, "prepare", prepare)
+    monkeypatch.setattr(RootlessStagePool, "check_stage", lambda *args: None)
+
+    def release(*args):
+        if cleanup_fault:
+            raise OSError("synthetic stage cleanup failure")
+
+    monkeypatch.setattr(RootlessStagePool, "release", release)
+    monkeypatch.setattr(RootlessPodmanProfile, "check_current", lambda *args: None)
+    monkeypatch.setattr(RootlessPodmanProfile, "verify_created", lambda *args: None)
+    monkeypatch.setattr(
+        RootlessPodmanProfile,
+        "create_python_container",
+        lambda self, stage, script: PreparedPythonContainer(
+            "own", "own", stage, script, "revision"
+        ),
+    )
+    monkeypatch.setattr(RootlessPodmanProfile, "finished_exit", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(RootlessPodmanProfile, "remove_owned", lambda *args: True)
+    monkeypatch.setattr(RootlessPodmanProfile, "argv", lambda *args: ["synthetic-podman"])
+    monkeypatch.setattr(RootlessPodmanProfile, "environment", lambda *args: {})
+
+    def start(*args, **kwargs):
+        streams = []
+        for raw in (b"hello", b""):
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, raw)
+            os.close(write_fd)
+            streams.append(os.fdopen(read_fd, "rb"))
+        return SimpleNamespace(
+            stdout=streams[0],
+            stderr=streams[1],
+            returncode=0,
+            poll=lambda: 0,
+            wait=lambda **kw: 0,
+        )
+
+    monkeypatch.setattr("subprocess.Popen", start)
+    executor = RootlessPythonExecutor(
+        profile, owner, WorkspaceLimits(1024, 4096, 20, 8), 1024, pool
+    )
+    outcome = executor.execute_python(binding, "script.py", timeout=3, max_files_touched=limit)
+    assert outcome.publication == expected
+    if expected == "retained":
+        assert outcome.reason_code == "workspace_file_budget_exhausted"
+        assert outcome.changed_paths is None
+        assert (owner.root / "script.py").read_text() == "# before"
+        assert owner.bind(principal_id="alice", session_id="chat").revision == binding.revision
+    else:
+        assert outcome.state == "finished" and outcome.changed_paths == frozenset({"script.py"})
+        assert outcome.cleanup_warning is cleanup_fault
+        assert (outcome.retained_stage is not None) is cleanup_fault
+        assert (owner.root / "script.py").read_text() == "# after"

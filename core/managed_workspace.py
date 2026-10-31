@@ -80,6 +80,12 @@ def changed_workspace_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot)
 
 
 @dataclass(frozen=True)
+class BoundedPublication:
+    changed_paths: frozenset[str]
+    retired_host: Path | None
+
+
+@dataclass(frozen=True)
 class WorkspaceStage:
     root: Path
     binding: WorkspaceBinding
@@ -361,7 +367,7 @@ class ManagedWorkspace:
         limits: WorkspaceLimits,
         max_files_touched: int | None = None,
         already_touched: frozenset[str] = frozenset(),
-    ) -> Path | None:
+    ) -> BoundedPublication:
         """После settlement переносит только validated bytes в trusted host stage.
 
         Worker никогда не получает writable host stage. Копирование ограничено
@@ -398,12 +404,11 @@ class ManagedWorkspace:
                     raise WorkspaceConflict("bounded output is still changing")
             finally:
                 os.close(fd)
-            if max_files_touched is not None:
-                changed = changed_workspace_paths(snapshot, output)
-                if len(changed | already_touched) > max_files_touched:
-                    raise WorkspaceFileBudgetExceeded(
-                        "workspace file budget exhausted before publication"
-                    )
+            changed = changed_workspace_paths(snapshot, output)
+            if max_files_touched is not None and len(changed | already_touched) > max_files_touched:
+                raise WorkspaceFileBudgetExceeded(
+                    "workspace file budget exhausted before publication"
+                )
             host_stage = self.stage(output)
             try:
                 self.publish(snapshot, host_stage, limits=limits)
@@ -413,8 +418,8 @@ class ManagedWorkspace:
             try:
                 self.discard_retired(snapshot, host_stage)
             except (OSError, WorkspaceUnavailable):
-                return host_stage.root
-            return None
+                return BoundedPublication(changed, host_stage.root)
+            return BoundedPublication(changed, None)
 
     def publish(
         self,
