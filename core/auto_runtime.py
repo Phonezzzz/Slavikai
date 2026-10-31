@@ -172,7 +172,9 @@ class AutoOrchestrator:
             "plan": None,
             "coders": [],
             "merge": {"status": "idle", "changed_paths": []},
-            "execution_metrics": None,
+            # The run has not established a trustworthy file-effect count yet.
+            # Keep unknown visible through approvals, failures and cancellation.
+            "execution_metrics": {"files_touched": None},
             "budgets": budgets.to_dict(),
             "verifier": None,
             "approval": None,
