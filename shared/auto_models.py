@@ -229,10 +229,21 @@ def normalize_auto_state(value: object) -> dict[str, JSONValue] | None:
         ),
         "missing_paths": _normalize_string_list(value.get("missing_paths")),
     }
-    metrics = _normalize_model_usage_metrics(value.get("execution_metrics"))
+    metrics = _normalize_execution_metrics(value.get("execution_metrics"))
     if metrics is not None:
         normalized["execution_metrics"] = metrics
     return normalized
+
+
+def _normalize_execution_metrics(value: object) -> dict[str, JSONValue] | None:
+    if not isinstance(value, dict):
+        return None
+    metrics = _normalize_model_usage_metrics(value) or {}
+    if "files_touched" in value:
+        count = value["files_touched"]
+        # Invalid/unobserved file effects stay unknown, never coerced to zero.
+        metrics["files_touched"] = count if type(count) is int and count >= 0 else None
+    return metrics or None
 
 
 def _normalize_model_usage_metrics(value: object) -> dict[str, JSONValue] | None:

@@ -122,6 +122,19 @@
       "summary": "Auto fences new model generation, post-model acceptance, each native/approved call and verifier admission at the original finite monotonic expiry, including approval wait and exact >= boundary. Captured continuation retains expiry across new loop/env settings; cancellation precedes expiry at loop and pre-verifier boundaries, completed prefix survives budget stop. Already-running operations are not interrupted and a verifier admitted before expiry can finish later. Expiry-less callers, R1a quota and existing authorization remain; no hard deadline, file/token/retry accounting, persistence or durable recovery claim."
     },
     {
+      "id": "runtime.auto.file_effects_truth",
+      "scope": "runtime",
+      "status": "partial",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_auto_runtime.py",
+        "tests/test_auto_usage_accounting.py"
+      ],
+      "summary": "Auto reports files_touched=0 only when no native tool calls ran; any completed native call without authoritative file-effect observation is unknown null, not a synthetic zero. Numeric Auto-state projection retains explicit nonnegative counts and unknown while rejecting malformed values. No changed-path capture, max_files_touched enforcement, pre-dispatch admission, file reconciliation or verifier effects are claimed; those remain separate architectural work."
+    },
+    {
       "id": "llm.reported_usage_completeness",
       "scope": "runtime",
       "status": "implemented",
