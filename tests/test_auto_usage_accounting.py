@@ -356,3 +356,19 @@ def test_projection_normalization_preserves_unknown_and_zero_calls():
         assert normalize_auto_state(state)["execution_metrics"]["tool_loop_model_usage"] == usage
         usage["reported_sum"]["total_tokens"] = 2
         assert "execution_metrics" not in normalize_auto_state(state)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(None, None), (0, 0), (4, 4), (-1, None), (True, None), ("0", None)],
+)
+def test_file_effects_projection_never_infers_zero(raw, expected):
+    from shared.auto_models import normalize_auto_state
+
+    state = {
+        "run_id": "fixture",
+        "status": "completed",
+        "execution_metrics": {"files_touched": raw, "private_raw": "SECRET"},
+    }
+    metrics = normalize_auto_state(state)["execution_metrics"]
+    assert metrics == {"files_touched": expected}

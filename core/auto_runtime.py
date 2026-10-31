@@ -311,10 +311,13 @@ class AutoOrchestrator:
                 "changed_paths": [],
                 "runtime": "auto_v1_tool_loop",
             }
+            # Auto v1 has no authoritative file-effects observation for native tools.
+            # A ToolResult (including workspace_run capture) cannot prove the number
+            # of changed paths; do not report a fabricated zero for executed calls.
             state["execution_metrics"] = {
                 "tool_calls_used": len(loop_result.tool_calls),
                 "iterations": loop_result.iterations,
-                "files_touched": 0,
+                "files_touched": 0 if not loop_result.tool_calls else None,
             }
             _record_model_usage(state, loop_result.model_usage)
             self._set_state(state)

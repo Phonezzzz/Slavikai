@@ -129,7 +129,11 @@ Providers без complete reported usage не могут продолжить м
   данные.
 - Plan: current contract — read-only tools только через `ToolGateway`; write/exec запрещены.
 - Auto: Auto v1 через `AgentToolLoop -> ToolGateway -> verifier` является current;
-  `Ask -> Plan -> Act` FSM является target.
+  `Ask -> Plan -> Act` FSM является target. `execution_metrics.files_touched` равен
+  `0` только при отсутствии native tool calls; после исполненных calls без
+  авторитетного наблюдения file effects он `null` (unknown), а не ложный ноль.
+  Это честный отчёт, не enforcement `max_files_touched`: file budget остаётся
+  отдельным не реализованным контрактом.
 - Public OpenAI-compatible API: current `implemented` contract — `slavik` является
   единственным публичным proxy model id; `/v1/chat/completions` отклоняет любой другой ID до
   Agent/session resolution.
