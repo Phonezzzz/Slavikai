@@ -51,6 +51,7 @@ def test_run_tool_publishes_only_committed_reference_and_bounded_utf8_view(tmp_p
             None,
             "published",
             capture_receipt=ToolCaptureReceipt(operation, result_id, observation),
+            changed_paths=frozenset({"created.txt", "script.py"}),
         )
 
     tool = RunCodeTool(backend=SimpleNamespace(execute_python=execute))
@@ -61,6 +62,7 @@ def test_run_tool_publishes_only_committed_reference_and_bounded_utf8_view(tmp_p
             )
         )
     assert result.ok
+    assert result.data["changed_paths"] == ["created.txt", "script.py"]
     assert len(result.data["stdout"].encode("utf-8")) <= MAX_VIEW_BYTES
     assert result.data["capture"]["stdout_view_truncated"] is True
     ref = result.data["capture"]
@@ -89,3 +91,38 @@ def test_capture_fault_propagates_through_registry_and_gateway_without_payload_l
     registry.register("workspace_run", fail, capability="exec")
     with pytest.raises(ToolCaptureFault, match="store_failed"):
         ToolGateway(registry).call(ToolRequest("workspace_run", {"path": "emit.py"}))
+
+
+def test_unpublished_workspace_run_does_not_expose_uncommitted_path_claims(tmp_path):
+    from types import SimpleNamespace
+
+    from core.managed_workspace import ManagedWorkspace
+    from core.workspace_python_execution import WorkspacePythonOutcome
+    from shared.models import ToolRequest
+    from tools.workspace_tools import RunCodeTool, workspace_root_context
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    owner = ManagedWorkspace.create(parent, principal_id="alice")
+    (owner.root / "script.py").write_text("# diagnostic")
+    binding = owner.bind(principal_id="alice", session_id="chat")
+
+    def execute(bound, path, *, timeout, capture=None):
+        return WorkspacePythonOutcome(
+            "unavailable",
+            b"stdout",
+            b"",
+            0,
+            True,
+            "workspace_file_budget_exhausted",
+            "retained",
+            changed_paths=frozenset({"not-published.txt"}),
+        )
+
+    with workspace_root_context(owner.root):
+        result = RunCodeTool(backend=SimpleNamespace(execute_python=execute)).handle(
+            ToolRequest("workspace_run", {"path": "script.py"}, workspace_binding=binding)
+        )
+    assert not result.ok
+    assert result.meta["reason_code"] == "workspace_file_budget_exhausted"
+    assert "changed_paths" not in result.data

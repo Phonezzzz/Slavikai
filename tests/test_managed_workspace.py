@@ -553,7 +553,9 @@ def test_settled_external_stage_publishes_only_via_bounded_capture_and_atomic_ex
     with pytest.raises(WorkspaceUnavailable, match="settled"):
         owner.publish_bounded(snapshot, stage, limits=limits)
     stage.mark_settled()
-    assert owner.publish_bounded(snapshot, stage, limits=limits) is None
+    publication = owner.publish_bounded(snapshot, stage, limits=limits)
+    assert publication.retired_host is None
+    assert publication.changed_paths == frozenset({"script.py"})
     assert (owner.root / "script.py").read_bytes() == b"verified output"
     assert (stage.root / "script.py").read_bytes() == b"verified output"
     assert list(parent.glob("stage-*")) == []
@@ -594,15 +596,18 @@ def test_bounded_publication_rejects_file_effects_before_exchange(
     stage.mark_settled()
 
     if allowed:
-        assert (
-            owner.publish_bounded(
-                snapshot,
-                stage,
-                limits=limits,
-                max_files_touched=max_files,
-                already_touched=already_touched,
-            )
-            is None
+        publication = owner.publish_bounded(
+            snapshot,
+            stage,
+            limits=limits,
+            max_files_touched=max_files,
+            already_touched=already_touched,
+        )
+        assert publication.retired_host is None
+        assert publication.changed_paths == frozenset(
+            path
+            for path, content in stage_changes.items()
+            if path != "a.txt" or content != b"original"
         )
         for path, content in stage_changes.items():
             assert (owner.root / path).read_bytes() == content

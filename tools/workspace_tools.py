@@ -677,6 +677,9 @@ class RunCodeTool:
                 }
             if outcome.exit_code is not None:
                 data["exit_code"] = outcome.exit_code
+            if outcome.publication == "published" and outcome.changed_paths is not None:
+                # Only backend-verified publication evidence, never model/stdio text.
+                data["changed_paths"] = sorted(outcome.changed_paths)
             review_required = (
                 outcome.state == "conflict"
                 or outcome.cleanup_warning
