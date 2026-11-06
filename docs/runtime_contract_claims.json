@@ -449,6 +449,18 @@
       "summary": "Canonical server startup acquires an exclusive local TaskRunStore inode lease before opening the store and atomically marks admitted, running and submitted runs recovery_required. Competing startup fails before reconciliation. The lease covers HTTP loop and executor drain. Terminal runs and stored evidence are preserved. Resume, replay and external-effect reconciliation remain separate."
     },
     {
+      "id": "runtime.lifecycle.recovery_evidence_read",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
+      "verified_by": [
+        "tests/ui_api/test_durable_submission.py"
+      ],
+      "summary": "The browser recovery-evidence read checks the originating session and principal and requires recovery_required. A bounded snapshot projects recorded operation intents and optional observation metadata and verified submission identity. Raw output and producer text are withheld. No reconciliation, transition or replay is performed."
+    },
+    {
       "id": "runtime.lifecycle.ordinary_browser_ask_acceptance",
       "scope": "runtime",
       "status": "implemented",

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+from shared.models import JSONValue
 from shared.task_run import (
     ProducerKind,
     ProducerReport,
@@ -894,6 +895,94 @@ class TaskRunStore:
             if row is None:
                 return None
             return self._record(scope, self._owned_row(conn, scope, row["task_run_id"]))
+
+    def recovery_evidence(
+        self, scope: RunScope, task_run_id: str, *, after: str = ""
+    ) -> dict[str, JSONValue]:
+        """Read one page of recorded evidence; never classify external effects as settled."""
+        page_size = 50
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN")
+            run = self._record(scope, self._owned_row(conn, scope, task_run_id))
+            if run.state != RunState.RECOVERY_REQUIRED:
+                raise LookupError("Recovery evidence unavailable")
+            recovery = conn.execute(
+                "SELECT reason_code FROM run_transitions WHERE task_run_id=? AND version=?",
+                (task_run_id, run.version),
+            ).fetchone()
+            try:
+                submission = self._read_submission(conn, run)
+            except LookupError:
+                submission = None
+            rows = conn.execute(
+                "SELECT o.operation_id, o.tool_attempt_id, o.run_attempt_id, o.run_version, "
+                "o.request_path, o.created_at, t.state AS admission_state, "
+                "e.result_id, e.exit_code, e.timed_out, e.capture_error, e.captured_at, "
+                "e.stdout_seen, e.stderr_seen, e.stdout_eof, e.stderr_eof, "
+                "length(e.stdout) AS stdout_retained, length(e.stderr) AS stderr_retained "
+                "FROM tool_operations o "
+                "LEFT JOIN run_transitions t ON t.task_run_id=o.task_run_id "
+                "AND t.version=o.run_version "
+                "LEFT JOIN tool_observations e ON e.operation_id=o.operation_id "
+                "WHERE o.task_run_id=? AND o.operation_id>? "
+                "ORDER BY o.operation_id LIMIT ?",
+                (task_run_id, after, page_size + 1),
+            ).fetchall()
+            operations: list[dict[str, JSONValue]] = []
+            for row in rows[:page_size]:
+                if (
+                    row["run_attempt_id"] != run.attempt_id
+                    or row["admission_state"] != RunState.RUNNING
+                ):
+                    raise RuntimeError("Stored recovery operation binding is invalid")
+                observation: dict[str, JSONValue] | None = None
+                if row["result_id"] is not None:
+                    observation = {
+                        "result_id": row["result_id"],
+                        "exit_code": row["exit_code"],
+                        "timed_out": bool(row["timed_out"]),
+                        "capture_error": row["capture_error"],
+                        "captured_at": row["captured_at"],
+                        "stdout_complete": bool(row["stdout_eof"])
+                        and row["stdout_seen"] == row["stdout_retained"],
+                        "stderr_complete": bool(row["stderr_eof"])
+                        and row["stderr_seen"] == row["stderr_retained"],
+                    }
+                operations.append(
+                    {
+                        "operation_id": row["operation_id"],
+                        "tool_attempt_id": row["tool_attempt_id"],
+                        "run_version": row["run_version"],
+                        "request_path": row["request_path"],
+                        "created_at": row["created_at"],
+                        "observation": observation,
+                    }
+                )
+            return {
+                "task_id": run.task_id,
+                "task_revision": run.task_revision,
+                "task_run_id": run.task_run_id,
+                "attempt_id": run.attempt_id,
+                "run_version": run.version,
+                "state": run.state.value,
+                "recovery_reason": recovery["reason_code"],
+                "external_effects": "unreconciled",
+                "submission": (
+                    {
+                        "submission_id": submission.submission_id,
+                        "version": submission.version,
+                        "kind": submission.report.kind.value,
+                        "content_digest": submission.content_digest,
+                        "has_failure": submission.report.failure_code is not None,
+                    }
+                    if submission is not None
+                    else None
+                ),
+                "operations": operations,
+                "next_cursor": rows[page_size - 1]["operation_id"]
+                if len(rows) > page_size
+                else None,
+            }
 
     def get(self, scope: RunScope, task_run_id: str) -> TaskRun:
         with closing(self._connect()) as conn, conn:

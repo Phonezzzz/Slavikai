@@ -13,7 +13,7 @@ from llm.brain_base import Brain
 from llm.types import LLMResult, LLMUsage, ModelConfig
 from server.http.common.idempotency import IdempotencyStore
 from shared.models import ToolResult
-from shared.task_run import ProducerKind, RunScope, RunState
+from shared.task_run import ProducerKind, ProducerReport, RunScope, RunState
 
 from .fakes import TEST_API_TOKEN, _create_client, _select_local_model
 
@@ -297,6 +297,85 @@ def test_browser_ask_stream_requires_provider_stop_for_acceptance(
             assert state == (
                 RunState.COMPLETED if finish_reason == "stop" else RunState.RESULT_SUBMITTED
             )
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agent):
+    from shared.task_run import TransitionAuthority
+    from shared.tool_capture import ProcessObservation
+
+    agent, brain = isolated_agent
+
+    async def run():
+        client = await _create_client(agent)
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            principal = await client.app["ui_hub"].get_session_principal_id(session)
+            scope = RunScope(principal, session)
+            store = client.app["task_run_store"]
+            admitted = store.admit(
+                scope,
+                request_key="recovery-evidence",
+                goal="private goal",
+                mode="auto",
+                request_fingerprint="a" * 64,
+            )
+            running = store.transition(
+                scope,
+                admitted.task_run_id,
+                expected_version=admitted.version,
+                state=RunState.RUNNING,
+                authority=TransitionAuthority.RUNTIME,
+                reason_code="start",
+            )
+            operations = [
+                store.begin_tool_operation(running, model_call_id=str(i), request_path="run.py")
+                for i in range(51)
+            ]
+            first = min(operations, key=lambda op: op.operation_id)
+            result_id = store.record_tool_observation(
+                first, ProcessObservation(b"private bytes", b"", 13, 0, True, True, 0, False)
+            )
+            submitted = store.submit_result(
+                scope,
+                running.task_run_id,
+                expected_version=running.version,
+                report=ProducerReport(ProducerKind.AUTO, "private producer text"),
+                reason_code="result_submitted",
+            )
+            url = f"/ui/api/sessions/{session}/runs/{running.task_run_id}/recovery-evidence"
+            assert (await client.get(url)).status == 404
+            recovery = store.transition(
+                scope,
+                running.task_run_id,
+                expected_version=submitted.version,
+                state=RunState.RECOVERY_REQUIRED,
+                authority=TransitionAuthority.RECOVERY,
+                reason_code="server_restart_requires_reconciliation",
+            )
+            response = await client.get(url)
+            assert response.status == 200, await response.text()
+            assert response.headers["Cache-Control"] == "no-store"
+            body = await response.json()
+            assert body["external_effects"] == "unreconciled"
+            assert body["run_version"] == recovery.version
+            assert body["submission"]["kind"] == "auto"
+            assert len(body["operations"]) == 50
+            assert body["operations"][0]["observation"]["result_id"] == result_id
+            assert body["operations"][1]["observation"] is None
+            assert "private" not in await response.text()
+            following = await (await client.get(url, params={"after": body["next_cursor"]})).json()
+            assert len(following["operations"]) == 1 and following["next_cursor"] is None
+            assert (await client.get(url, params={"after": "bad"})).status == 400
+
+            other = await client.app["ui_hub"].create_session(principal_id=principal)
+            other_url = url.replace(f"/sessions/{session}/", f"/sessions/{other}/")
+            assert (await client.get(other_url)).status == 404
+            assert store.get(scope, running.task_run_id) == recovery
+            assert brain.calls == 0
         finally:
             await client.close()
 

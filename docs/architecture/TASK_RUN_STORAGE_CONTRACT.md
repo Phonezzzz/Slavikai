@@ -65,6 +65,22 @@ resume, new attempt или implicit rerun, для которых ещё нет �
 Несогласованные history/current state отклоняются, без latest-timestamp эвристики.
 Revision/history immutable на SQL boundary; отказ history write откатывает весь transition.
 
+### Свидетельства для сверки восстановления
+
+`GET /ui/api/sessions/{session_id}/runs/{run_id}/recovery-evidence` доступен
+в браузерной auth lane только владельцу исходной сессии для `recovery_required`.
+В одном read-only SQLite snapshot читаются версия и причина перехода, ссылка и
+digest проверенного producer submission (если есть), до 50 сохранённых intents
+с метаданными process observation. Продолжение через `?after={next_cursor}`
+упорядочено по operation ID. Поздние наблюдения могут появиться при следующем чтении.
+
+Пустой список означает отсутствие записанных intents этого capture path. Он не
+доказывает отсутствие внешних эффектов. `observation: null` означает отсутствие
+сохранённого наблюдения. Наличие наблюдения или exit 0 не подтверждает публикацию
+изменений. `external_effects` остаётся `unreconciled`; endpoint не меняет состояние,
+не инициирует сверку/исполнение и не возвращает raw stdout/stderr или текст producer.
+Ответ не кэшируется.
+
 ### Приёмка обычного браузерного Ask
 
 Подтверждённое правило владельца от 2026-11-06: для обычного Ask без инструментов,
