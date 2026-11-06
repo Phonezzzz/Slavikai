@@ -73,7 +73,10 @@ Revision/history immutable на SQL boundary; отказ history write отка�
 состояние (recovery_prior_state) и время перехода (recovery_occurred_at) из
 сохранённой истории, ссылка и
 digest проверенного producer submission (если есть), до 50 сохранённых intents
-с метаданными process observation. Продолжение через `?after={next_cursor}`
+с метаданными process observation. Для stdout и stderr возвращаются число
+наблюдавшихся и сохранённых байтов и факт достижения EOF. Эти поля позволяют
+различить усечение сохранённого вывода и незавершённое чтение потока.
+Продолжение через `?after={next_cursor}`
 упорядочено по operation ID. Поздние наблюдения могут появиться при следующем чтении.
 
 Пустой список означает отсутствие записанных intents этого capture path. Он не

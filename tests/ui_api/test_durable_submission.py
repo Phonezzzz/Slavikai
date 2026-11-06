@@ -306,7 +306,11 @@ def test_browser_ask_stream_requires_provider_stop_for_acceptance(
 def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agent, tmp_path):
     from core.managed_workspace import ManagedWorkspacePool, WorkspaceLimits
     from shared.task_run import TransitionAuthority
-    from shared.tool_capture import ProcessObservation, WorkspacePublicationEvidence
+    from shared.tool_capture import (
+        MAX_CAPTURE_BYTES,
+        ProcessObservation,
+        WorkspacePublicationEvidence,
+    )
 
     agent, brain = isolated_agent
 
@@ -339,7 +343,16 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             first = min(operations, key=lambda op: op.operation_id)
             result_id = store.record_tool_observation(
                 first,
-                ProcessObservation(b"private bytes", b"", 13, 0, True, True, 0, False),
+                ProcessObservation(
+                    b"p" * MAX_CAPTURE_BYTES,
+                    b"abc",
+                    MAX_CAPTURE_BYTES + 1,
+                    3,
+                    True,
+                    False,
+                    0,
+                    False,
+                ),
                 publication=WorkspacePublicationEvidence(
                     cleanup_warning=True, snapshot_sha256="a" * 64
                 ),
@@ -397,7 +410,16 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             )
             assert body["submission"]["kind"] == "auto"
             assert len(body["operations"]) == 50
-            assert body["operations"][0]["observation"]["result_id"] == result_id
+            observation = body["operations"][0]["observation"]
+            assert observation["result_id"] == result_id
+            assert observation["stdout_bytes_seen"] == MAX_CAPTURE_BYTES + 1
+            assert observation["stdout_bytes_retained"] == MAX_CAPTURE_BYTES
+            assert observation["stdout_eof"] is True
+            assert observation["stdout_complete"] is False
+            assert observation["stderr_bytes_seen"] == 3
+            assert observation["stderr_bytes_retained"] == 3
+            assert observation["stderr_eof"] is False
+            assert observation["stderr_complete"] is False
             assert body["operations"][0]["publication"] == "published"
             assert body["operations"][0]["publication_source"] == "observation"
             assert body["operations"][0]["publication_cleanup_warning"] is True

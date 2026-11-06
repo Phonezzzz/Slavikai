@@ -1015,6 +1015,12 @@ class TaskRunStore:
                         "timed_out": bool(row["timed_out"]),
                         "capture_error": row["capture_error"],
                         "captured_at": row["captured_at"],
+                        "stdout_bytes_seen": row["stdout_seen"],
+                        "stdout_bytes_retained": row["stdout_retained"],
+                        "stdout_eof": bool(row["stdout_eof"]),
+                        "stderr_bytes_seen": row["stderr_seen"],
+                        "stderr_bytes_retained": row["stderr_retained"],
+                        "stderr_eof": bool(row["stderr_eof"]),
                         "stdout_complete": bool(row["stdout_eof"])
                         and row["stdout_seen"] == row["stdout_retained"],
                         "stderr_complete": bool(row["stderr_eof"])
