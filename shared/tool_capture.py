@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
+from uuid import UUID
 
 from shared.task_run import RunScope, RunState, TaskRun
 
@@ -88,6 +89,21 @@ class RawProcessCapture:
 
 
 @dataclass(frozen=True)
+class WorkspacePublicationMarker:
+    operation_id: str
+    tool_attempt_id: str
+
+    def encode(self) -> bytes:
+        return UUID(self.operation_id).bytes + UUID(self.tool_attempt_id).bytes
+
+    @classmethod
+    def decode(cls, data: bytes) -> WorkspacePublicationMarker | None:
+        if len(data) != 32:
+            return None
+        return cls(str(UUID(bytes=data[:16])), str(UUID(bytes=data[16:])))
+
+
+@dataclass(frozen=True)
 class ToolOperation:
     scope: RunScope
     task_id: str
@@ -100,6 +116,10 @@ class ToolOperation:
     model_call_id: str
     request_path: str
     created_at: str
+
+    @property
+    def publication_marker(self) -> WorkspacePublicationMarker:
+        return WorkspacePublicationMarker(self.operation_id, self.tool_attempt_id)
 
 
 @dataclass(frozen=True)

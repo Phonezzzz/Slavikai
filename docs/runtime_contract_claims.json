@@ -453,14 +453,15 @@
       "scope": "runtime",
       "status": "implemented",
       "owner": "runtime",
-      "version": 1,
+      "version": 2,
       "source": "docs/architecture/TASK_RUN_STORAGE_CONTRACT.md",
       "verified_by": [
         "tests/test_workspace_python_execution.py",
+        "tests/test_managed_workspace.py",
         "tests/test_tool_capture_storage.py",
         "tests/ui_api/test_durable_submission.py"
       ],
-      "summary": "Trusted captured workspace_run persists confirmed atomic exchange and a separate cleanup warning in the same immutable row as process observation, bound to the original operation attempt. Historical and unconfirmed cases remain unknown, including the exchange-to-commit crash window. Read-only recovery projection does not settle external effects, transition the run or replay execution."
+      "summary": "Trusted captured workspace_run persists confirmed atomic exchange and a separate cleanup warning in the same immutable row as process observation, bound to the original operation attempt. A scoped current-root marker can confirm publication across a process crash before the observation commit; missing or mismatched proof remains unknown. Read-only recovery projection does not settle external effects, transition the run or replay execution."
     },
     {
       "id": "runtime.lifecycle.recovery_evidence_read",

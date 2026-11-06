@@ -303,7 +303,8 @@ def test_browser_ask_stream_requires_provider_stop_for_acceptance(
     asyncio.run(run())
 
 
-def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agent):
+def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agent, tmp_path):
+    from core.managed_workspace import ManagedWorkspacePool, WorkspaceLimits
     from shared.task_run import TransitionAuthority
     from shared.tool_capture import ProcessObservation, WorkspacePublicationEvidence
 
@@ -345,6 +346,25 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
                 sorted(operations, key=lambda op: op.operation_id)[1],
                 ProcessObservation(b"", b"", 0, 0, True, True, 0, False),
             )
+            # Simulate process loss after exchange, before the observation insert.
+            private = tmp_path / "managed"
+            private.mkdir(mode=0o700)
+            pool = ManagedWorkspacePool(private / "workspaces")
+            client.app["managed_workspace_pool"] = pool
+            owner = pool.for_principal(principal)
+            limits = WorkspaceLimits(1024, 4096, 20, 8)
+            binding = owner.bind(principal_id=principal, session_id=session)
+            snapshot = owner.capture(binding, limits=limits)
+            worker = tmp_path / "worker"
+            worker.mkdir(mode=0o700)
+            stage = owner.stage(snapshot, storage=worker)
+            stage.begin_process()
+            (stage.root / "run.py").write_text("# published")
+            stage.mark_settled()
+            marker_operation = sorted(operations, key=lambda op: op.operation_id)[2]
+            owner.publish_bounded(
+                snapshot, stage, limits=limits, publication_operation=marker_operation
+            )
             submitted = store.submit_result(
                 scope,
                 running.task_run_id,
@@ -372,12 +392,16 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             assert len(body["operations"]) == 50
             assert body["operations"][0]["observation"]["result_id"] == result_id
             assert body["operations"][0]["publication"] == "published"
+            assert body["operations"][0]["publication_source"] == "observation"
             assert body["operations"][0]["publication_cleanup_warning"] is True
             assert body["operations"][1]["observation"]["exit_code"] == 0
             assert body["operations"][1]["publication"] == "unknown"
             assert body["operations"][1]["publication_cleanup_warning"] is None
             assert body["operations"][2]["observation"] is None
-            assert body["operations"][2]["publication"] == "unknown"
+            assert body["operations"][2]["publication"] == "published"
+            assert body["operations"][2]["publication_source"] == "workspace_root_marker"
+            assert body["operations"][2]["publication_cleanup_warning"] is None
+            assert body["operations"][3]["publication"] == "unknown"
             assert "private" not in await response.text()
             following = await (await client.get(url, params={"after": body["next_cursor"]})).json()
             assert len(following["operations"]) == 1 and following["next_cursor"] is None

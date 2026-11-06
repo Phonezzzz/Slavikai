@@ -386,6 +386,7 @@ class RootlessPythonExecutor:
                 limits=self.limits,
                 max_files_touched=max_files_touched,
                 already_touched=already_touched,
+                publication_operation=capture.operation if capture is not None else None,
             )
         except WorkspaceFileBudgetExceeded as exc:
             try:

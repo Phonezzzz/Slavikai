@@ -15,12 +15,15 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, Literal
 
+from shared.tool_capture import ToolOperation, WorkspacePublicationMarker
 from shared.workspace_binding import (
     WorkspaceBinding,
     WorkspaceConflict,
     WorkspaceFileBudgetExceeded,
     WorkspaceUnavailable,
 )
+
+_PUBLICATION_XATTR = "user.slavikai.publication.v1"
 
 
 @dataclass(frozen=True)
@@ -207,6 +210,16 @@ class ManagedWorkspace:
             os.close(fd)
             raise
 
+    def publication_marker(self) -> WorkspacePublicationMarker | None:
+        with self._lock:
+            fd = self._open_root()
+            try:
+                return WorkspacePublicationMarker.decode(os.getxattr(fd, _PUBLICATION_XATTR))
+            except OSError:
+                return None
+            finally:
+                os.close(fd)
+
     def bind(self, *, principal_id: str, session_id: str) -> WorkspaceBinding:
         with self._lock:
             if principal_id != self._principal_id or not session_id.strip():
@@ -367,6 +380,7 @@ class ManagedWorkspace:
         limits: WorkspaceLimits,
         max_files_touched: int | None = None,
         already_touched: frozenset[str] = frozenset(),
+        publication_operation: ToolOperation | None = None,
     ) -> BoundedPublication:
         """После settlement переносит только validated bytes в trusted host stage.
 
@@ -387,6 +401,14 @@ class ManagedWorkspace:
             for path in already_touched
         ):
             raise ValueError("already_touched must contain valid relative paths")
+        marker = None
+        if publication_operation is not None:
+            if (
+                publication_operation.scope.principal_id != snapshot.binding.principal_id
+                or publication_operation.scope.session_id != snapshot.binding.session_id
+            ):
+                raise WorkspaceUnavailable("workspace publication intent scope mismatch")
+            marker = publication_operation.publication_marker
         with self._lock, stage.publication():
             if stage._state != "settled":
                 raise WorkspaceUnavailable("bounded stage processes have not settled")
@@ -412,6 +434,7 @@ class ManagedWorkspace:
                     limits=limits,
                     max_files_touched=max_files_touched,
                     already_touched=already_touched,
+                    marker=marker,
                 )
             except BaseException:
                 self._discard_fresh(host_stage)
@@ -446,6 +469,7 @@ class ManagedWorkspace:
         limits: WorkspaceLimits,
         max_files_touched: int | None = None,
         already_touched: frozenset[str] = frozenset(),
+        marker: WorkspacePublicationMarker | None = None,
     ) -> tuple[WorkspaceBinding, frozenset[str]]:
         with self._lock, stage.publication():
             self._validate(snapshot.binding)
@@ -474,6 +498,9 @@ class ManagedWorkspace:
                         raise WorkspaceFileBudgetExceeded(
                             "workspace file budget exhausted before publication"
                         )
+                    if marker is not None:
+                        # The worker tree never supplies host inode metadata.
+                        os.setxattr(fd, _PUBLICATION_XATTR, marker.encode(), os.XATTR_CREATE)
                     _exchange(parent_fd, self.root.name, stage.root.name)
                     self._identity = stage.identity
                     self._revision = uuid.uuid4().hex
@@ -629,7 +656,13 @@ class ManagedWorkspacePool:
             # Живой Gateway/executor удерживает owner и его flock до settlement.
             self._owners.clear()
 
-    def for_principal(self, principal_id: str) -> ManagedWorkspace:
+    def publication_marker(self, principal_id: str) -> WorkspacePublicationMarker | None:
+        try:
+            return self.for_principal(principal_id, create=False).publication_marker()
+        except (OSError, WorkspaceUnavailable):
+            return None
+
+    def for_principal(self, principal_id: str, *, create: bool = True) -> ManagedWorkspace:
         if sys.platform != "linux":
             raise WorkspaceUnavailable("managed execution requires a qualified Linux host")
         import fcntl
@@ -644,10 +677,11 @@ class ManagedWorkspacePool:
                 parent_fd = _directory(self.root.parent)
                 try:
                     _private_directory(os.fstat(parent_fd))
-                    try:
-                        os.mkdir(self.root.name, mode=0o700, dir_fd=parent_fd)
-                    except FileExistsError:
-                        pass
+                    if create:
+                        try:
+                            os.mkdir(self.root.name, mode=0o700, dir_fd=parent_fd)
+                        except FileExistsError:
+                            pass
                     pool_fd = os.open(
                         self.root.name,
                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -659,7 +693,10 @@ class ManagedWorkspacePool:
                         name = "workspace-" + hashlib.sha256(principal_id.encode()).hexdigest()
                         lease_fd = os.open(
                             ".lock-" + name,
-                            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            os.O_RDWR
+                            | os.O_NOFOLLOW
+                            | os.O_CLOEXEC
+                            | (os.O_CREAT if create else 0),
                             mode=0o600,
                             dir_fd=pool_fd,
                         )
@@ -680,10 +717,11 @@ class ManagedWorkspacePool:
                                 raise WorkspaceUnavailable(
                                     "workspace already has another runtime owner"
                                 ) from exc
-                            try:
-                                os.mkdir(name, mode=0o700, dir_fd=pool_fd)
-                            except FileExistsError:
-                                pass
+                            if create:
+                                try:
+                                    os.mkdir(name, mode=0o700, dir_fd=pool_fd)
+                                except FileExistsError:
+                                    pass
                             child = os.open(
                                 name,
                                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,

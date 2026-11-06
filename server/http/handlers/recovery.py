@@ -6,10 +6,12 @@ from uuid import UUID
 
 from aiohttp import web
 
+from core.managed_workspace import ManagedWorkspacePool
 from core.task_run_storage import TaskRunStore
 from server.http.common.auth import _ensure_session_owned, _request_principal_id
 from server.http.common.responses import error_response, json_response
 from server.ui_hub import UIHub
+from shared.models import JSONValue
 from shared.task_run import RunScope
 
 
@@ -34,10 +36,15 @@ async def handle_recovery_evidence(request: web.Request) -> web.Response:
             code="invalid_recovery_evidence_id",
         )
     store = cast(TaskRunStore, request.app["task_run_store"])
+    pool = cast(ManagedWorkspacePool | None, request.app["managed_workspace_pool"])
+    scope = RunScope(principal, session_id)
+
+    def read_evidence() -> dict[str, JSONValue]:
+        marker = pool.publication_marker(scope.principal_id) if pool is not None else None
+        return store.recovery_evidence(scope, run_id, after=after, workspace_marker=marker)
+
     try:
-        evidence = await asyncio.to_thread(
-            store.recovery_evidence, RunScope(principal, session_id), run_id, after=after
-        )
+        evidence = await asyncio.to_thread(read_evidence)
     except LookupError:
         return error_response(
             status=404,

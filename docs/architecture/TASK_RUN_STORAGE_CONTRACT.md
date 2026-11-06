@@ -80,8 +80,17 @@ digest проверенного producer submission (если есть), до 50
 подтвердил успешный atomic exchange и записал этот факт в той же immutable строке
 и SQLite-транзакции, что и наблюдение исходной попытки. `publication_cleanup_warning`
 отдельно отражает сбой очистки после exchange. `publication=unknown` сохраняется
-для исторических наблюдений, отсутствующей записи и любого исхода без такого
-подтверждения. Crash между exchange и commit всё ещё оставляет unknown.
+для исходов без подтверждения. При отсутствии SQLite evidence браузерная сводка
+может прочитать маркер только на действующем canonical managed root под owner lease.
+Trusted collector устанавливает `user.slavikai.publication.v1` на host stage после
+проверки бюджета и до атомарного exchange. Маркер содержит operation ID и tool
+attempt ID; xattrs рабочего дерева не переносятся. Совпадение с точной scoped
+попыткой даёт `publication_source=workspace_root_marker` без утверждения об очистке.
+Сохранённое наблюдение имеет приоритет (`publication_source=observation`).
+При несовпадении, недоступности или отсутствии маркера исход остаётся unknown.
+Сверка не создаёт workspace, не ищет retained/retired trees и не доказывает текущие
+байты или устойчивость после отключения питания. Если запись маркера недоступна,
+captured операция отказывается от публикации до exchange.
 Наблюдение и exit 0 сами по себе не подтверждают публикацию или текущие байты. `external_effects` остаётся `unreconciled`; endpoint не меняет состояние,
 не инициирует сверку/исполнение и не возвращает raw stdout/stderr или текст producer.
 Ответ не кэшируется.

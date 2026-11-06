@@ -864,3 +864,65 @@ def test_auto_direct_writers_admit_paths_before_mutating(tmp_path, name, args, p
             ToolRequest("workspace_write", {"path": "extra.txt", "content": "x"})
         ).ok
         assert not (workspace.root / "extra.txt").exists()
+
+
+def test_recovery_reads_publication_marker_only_on_current_host_root(tmp_path, monkeypatch):
+    import core.managed_workspace as managed
+    from core.task_run_storage import TaskRunStore
+    from shared.task_run import RunScope, RunState, TransitionAuthority
+
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    pool = ManagedWorkspacePool(parent / "workspaces")
+    assert pool.publication_marker("alice") is None
+    assert not pool.root.exists()
+    owner = pool.for_principal("alice")
+    scope = RunScope("alice", "chat")
+    store = TaskRunStore(tmp_path / "runs.db")
+    run = store.admit(
+        scope, request_key="marker", goal="run", mode="auto", request_fingerprint="a" * 64
+    )
+    run = store.transition(
+        scope,
+        run.task_run_id,
+        expected_version=0,
+        state=RunState.RUNNING,
+        authority=TransitionAuthority.RUNTIME,
+        reason_code="started",
+    )
+    operation = store.begin_tool_operation(run, model_call_id="label", request_path="script.py")
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    snapshot = owner.capture(owner.bind(principal_id="alice", session_id="chat"), limits=limits)
+    worker_root = tmp_path / "worker"
+    worker_root.mkdir(mode=0o700)
+    stage = owner.stage(snapshot, storage=worker_root)
+    stage.begin_process()
+    (stage.root / "script.py").write_text("# output")
+    stage.mark_settled()
+    exchange = managed._exchange
+
+    def fail_before_exchange(*args):
+        assert pool.publication_marker("alice") is None
+        raise OSError("exchange interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(managed, "_exchange", fail_before_exchange)
+        with pytest.raises(OSError, match="exchange interrupted"):
+            owner.publish_bounded(snapshot, stage, limits=limits, publication_operation=operation)
+    assert not (owner.root / "script.py").exists()
+    assert managed._exchange is exchange
+    owner.publish_bounded(snapshot, stage, limits=limits, publication_operation=operation)
+    assert pool.publication_marker("alice") == operation.publication_marker
+    pool.close()
+    del owner
+
+    reopened = ManagedWorkspacePool(parent / "workspaces")
+    assert reopened.publication_marker("alice") == operation.publication_marker
+    assert reopened.publication_marker("bob") is None
+    owner = reopened.for_principal("alice")
+    new_snapshot = owner.capture(owner.bind(principal_id="alice", session_id="chat"), limits=limits)
+    replacement = owner.stage(new_snapshot)
+    owner.publish(new_snapshot, replacement, limits=limits)
+    assert reopened.publication_marker("alice") is None
+    # The retired tree still carries the old marker; the recovery read ignores it.
+    assert replacement.root.exists()

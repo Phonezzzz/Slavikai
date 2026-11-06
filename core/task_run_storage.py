@@ -31,6 +31,7 @@ from shared.tool_capture import (
     StoredToolObservation,
     ToolOperation,
     WorkspacePublicationEvidence,
+    WorkspacePublicationMarker,
 )
 
 _ADMISSION_SCHEMA = (
@@ -932,7 +933,12 @@ class TaskRunStore:
             return self._record(scope, self._owned_row(conn, scope, row["task_run_id"]))
 
     def recovery_evidence(
-        self, scope: RunScope, task_run_id: str, *, after: str = ""
+        self,
+        scope: RunScope,
+        task_run_id: str,
+        *,
+        after: str = "",
+        workspace_marker: WorkspacePublicationMarker | None = None,
     ) -> dict[str, JSONValue]:
         """Read one page of recorded evidence; never classify external effects as settled."""
         page_size = 50
@@ -985,6 +991,9 @@ class TaskRunStore:
                         and row["stderr_seen"] == row["stderr_retained"],
                     }
                 publication = self._read_publication(row["published_cleanup_warning"])
+                marker_matches = workspace_marker == WorkspacePublicationMarker(
+                    row["operation_id"], row["tool_attempt_id"]
+                )
                 operations.append(
                     {
                         "operation_id": row["operation_id"],
@@ -993,7 +1002,16 @@ class TaskRunStore:
                         "request_path": row["request_path"],
                         "created_at": row["created_at"],
                         "observation": observation,
-                        "publication": "published" if publication is not None else "unknown",
+                        "publication": (
+                            "published" if publication is not None or marker_matches else "unknown"
+                        ),
+                        "publication_source": (
+                            "observation"
+                            if publication is not None
+                            else "workspace_root_marker"
+                            if marker_matches
+                            else None
+                        ),
                         "publication_cleanup_warning": (
                             publication.cleanup_warning if publication is not None else None
                         ),

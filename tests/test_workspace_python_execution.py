@@ -477,6 +477,9 @@ def test_executor_file_budget_fences_staged_publication(
     stored = TaskRunStore(store.path).get_tool_observation(
         scope, running.task_run_id, operation.operation_id, operation.tool_attempt_id
     )
+    assert owner.publication_marker() == (
+        operation.publication_marker if expected == "published" else None
+    )
     assert (stored.publication is not None) is (expected == "published")
     if stored.publication is not None:
         assert stored.publication.cleanup_warning is cleanup_fault
