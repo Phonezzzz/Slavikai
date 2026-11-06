@@ -477,11 +477,17 @@ def test_executor_file_budget_fences_staged_publication(
     stored = TaskRunStore(store.path).get_tool_observation(
         scope, running.task_run_id, operation.operation_id, operation.tool_attempt_id
     )
-    assert owner.publication_marker() == (
-        operation.publication_marker if expected == "published" else None
-    )
+    marker = owner.publication_marker()
+    assert (marker is not None) is (expected == "published")
     assert (stored.publication is not None) is (expected == "published")
     if stored.publication is not None:
+        assert marker is not None
+        assert (marker.operation_id, marker.tool_attempt_id) == (
+            operation.operation_id,
+            operation.tool_attempt_id,
+        )
+        assert marker.snapshot_sha256 is not None
+        assert stored.publication.snapshot_sha256 == marker.snapshot_sha256
         assert stored.publication.cleanup_warning is cleanup_fault
     assert outcome.publication == expected
     if limit == 0:

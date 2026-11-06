@@ -45,6 +45,7 @@ class WorkspacePythonOutcome:
     container_id: str | None = None
     capture_receipt: ToolCaptureReceipt | None = None
     changed_paths: frozenset[str] | None = None
+    snapshot_sha256: str | None = None
 
 
 @dataclass
@@ -108,7 +109,7 @@ class _CaptureAttempt:
         )
         try:
             publication = (
-                WorkspacePublicationEvidence(outcome.cleanup_warning)
+                WorkspacePublicationEvidence(outcome.cleanup_warning, outcome.snapshot_sha256)
                 if outcome.publication == "published"
                 else None
             )
@@ -441,6 +442,7 @@ class RootlessPythonExecutor:
                 stage.root,
                 cleanup_warning=True,
                 changed_paths=publication.changed_paths,
+                snapshot_sha256=publication.snapshot_sha256,
             )
         return WorkspacePythonOutcome(
             "finished",
@@ -451,4 +453,5 @@ class RootlessPythonExecutor:
             None,
             "published",
             changed_paths=publication.changed_paths,
+            snapshot_sha256=publication.snapshot_sha256,
         )

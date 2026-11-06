@@ -106,18 +106,26 @@ class TaskRunStore:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version in {3, 4, 5}:
-                self._validate_v3_schema(conn, capture=version >= 4, publication=version == 5)
+            if version in {3, 4, 5, 6}:
+                self._validate_v3_schema(
+                    conn,
+                    capture=version >= 4,
+                    publication=version >= 5,
+                    snapshot_digest=version >= 6,
+                )
                 if version == 3:
                     self._upgrade_capture(conn)
                 if version < 5:
                     self._upgrade_publication(conn)
+                if version < 6:
+                    self._upgrade_snapshot_digest(conn)
                 return
             if version == 2:
                 self._validate_v2_schema(conn)
                 self._upgrade_submissions(conn)
                 self._upgrade_capture(conn)
                 self._upgrade_publication(conn)
+                self._upgrade_snapshot_digest(conn)
                 return
             occupied = conn.execute(
                 "SELECT count(*) FROM sqlite_master "
@@ -130,6 +138,7 @@ class TaskRunStore:
             self._upgrade_submissions(conn)
             self._upgrade_capture(conn)
             self._upgrade_publication(conn)
+            self._upgrade_snapshot_digest(conn)
 
     def _mark_unfinished_for_recovery(self) -> None:
         """Canonical server startup calls this under the exclusive DB lease."""
@@ -163,7 +172,11 @@ class TaskRunStore:
 
     @staticmethod
     def _validate_v3_schema(
-        conn: sqlite3.Connection, *, capture: bool = False, publication: bool = False
+        conn: sqlite3.Connection,
+        *,
+        capture: bool = False,
+        publication: bool = False,
+        snapshot_digest: bool = False,
     ) -> None:
         columns = {
             "task_revisions": (
@@ -236,6 +249,8 @@ class TaskRunStore:
             )
         if publication:
             columns["tool_observations"] += ("published_cleanup_warning",)
+        if snapshot_digest:
+            columns["tool_observations"] += ("published_snapshot_sha256",)
         tables = {
             row[0]
             for row in conn.execute(
@@ -377,12 +392,22 @@ class TaskRunStore:
         conn.execute("PRAGMA user_version = 5")
 
     @staticmethod
-    def _read_publication(value: object) -> WorkspacePublicationEvidence | None:
+    def _upgrade_snapshot_digest(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "ALTER TABLE tool_observations ADD COLUMN published_snapshot_sha256 TEXT "
+            "CHECK (published_snapshot_sha256 IS NULL OR (published_cleanup_warning IS NOT NULL "
+            "AND length(published_snapshot_sha256) = 64 "
+            "AND published_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'))"
+        )
+        conn.execute("PRAGMA user_version = 6")
+
+    @staticmethod
+    def _read_publication(value: object, digest: str | None) -> WorkspacePublicationEvidence | None:
         if value is None:
             return None
         if type(value) is not int or value not in (0, 1):
             raise RuntimeError("Stored workspace publication evidence is invalid")
-        return WorkspacePublicationEvidence(bool(value))
+        return WorkspacePublicationEvidence(bool(value), digest)
 
     def begin_tool_operation(
         self, run: TaskRun, *, model_call_id: str, request_path: str
@@ -489,7 +514,8 @@ class TaskRunStore:
                 "INSERT INTO tool_observations (result_id, operation_id, stdout, stderr, "
                 "stdout_seen, stderr_seen, stdout_eof, stderr_eof, exit_code, timed_out, "
                 "capture_error, captured_at, stdout_digest, stderr_digest, "
-                "published_cleanup_warning) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "published_cleanup_warning, published_snapshot_sha256) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     identity,
                     operation.operation_id,
@@ -506,6 +532,7 @@ class TaskRunStore:
                     hashlib.sha256(observation.stdout).hexdigest(),
                     hashlib.sha256(observation.stderr).hexdigest(),
                     int(publication.cleanup_warning) if publication is not None else None,
+                    publication.snapshot_sha256 if publication is not None else None,
                 ),
             )
             return identity
@@ -546,7 +573,9 @@ class TaskRunStore:
                 row["stdout_digest"],
                 row["stderr_digest"],
                 row["captured_at"],
-                self._read_publication(row["published_cleanup_warning"]),
+                self._read_publication(
+                    row["published_cleanup_warning"], row["published_snapshot_sha256"]
+                ),
             )
 
     def submit_result(
@@ -961,7 +990,7 @@ class TaskRunStore:
                 "o.request_path, o.created_at, t.state AS admission_state, "
                 "e.result_id, e.exit_code, e.timed_out, e.capture_error, e.captured_at, "
                 "e.stdout_seen, e.stderr_seen, e.stdout_eof, e.stderr_eof, "
-                "e.published_cleanup_warning, "
+                "e.published_cleanup_warning, e.published_snapshot_sha256, "
                 "length(e.stdout) AS stdout_retained, length(e.stderr) AS stderr_retained "
                 "FROM tool_operations o "
                 "LEFT JOIN run_transitions t ON t.task_run_id=o.task_run_id "
@@ -991,9 +1020,15 @@ class TaskRunStore:
                         "stderr_complete": bool(row["stderr_eof"])
                         and row["stderr_seen"] == row["stderr_retained"],
                     }
-                publication = self._read_publication(row["published_cleanup_warning"])
-                marker_matches = workspace_marker == WorkspacePublicationMarker(
-                    row["operation_id"], row["tool_attempt_id"]
+                publication = self._read_publication(
+                    row["published_cleanup_warning"], row["published_snapshot_sha256"]
+                )
+                matching_marker = (
+                    workspace_marker
+                    if workspace_marker is not None
+                    and workspace_marker.operation_id == row["operation_id"]
+                    and workspace_marker.tool_attempt_id == row["tool_attempt_id"]
+                    else None
                 )
                 operations.append(
                     {
@@ -1004,13 +1039,22 @@ class TaskRunStore:
                         "created_at": row["created_at"],
                         "observation": observation,
                         "publication": (
-                            "published" if publication is not None or marker_matches else "unknown"
+                            "published"
+                            if publication is not None or matching_marker is not None
+                            else "unknown"
                         ),
                         "publication_source": (
                             "observation"
                             if publication is not None
                             else "workspace_root_marker"
-                            if marker_matches
+                            if matching_marker is not None
+                            else None
+                        ),
+                        "publication_snapshot_sha256": (
+                            publication.snapshot_sha256
+                            if publication is not None and publication.snapshot_sha256 is not None
+                            else matching_marker.snapshot_sha256
+                            if matching_marker is not None
                             else None
                         ),
                         "publication_cleanup_warning": (

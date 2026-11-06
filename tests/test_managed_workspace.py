@@ -911,13 +911,22 @@ def test_recovery_reads_publication_marker_only_on_current_host_root(tmp_path, m
             owner.publish_bounded(snapshot, stage, limits=limits, publication_operation=operation)
     assert not (owner.root / "script.py").exists()
     assert managed._exchange is exchange
-    owner.publish_bounded(snapshot, stage, limits=limits, publication_operation=operation)
-    assert pool.publication_marker("alice") == operation.publication_marker
+    published = owner.publish_bounded(
+        snapshot, stage, limits=limits, publication_operation=operation
+    )
+    marker = pool.publication_marker("alice")
+    assert marker is not None
+    assert (marker.operation_id, marker.tool_attempt_id) == (
+        operation.operation_id,
+        operation.tool_attempt_id,
+    )
+    assert marker.snapshot_sha256 == published.snapshot_sha256
+    assert marker.snapshot_sha256 is not None
     pool.close()
     del owner
 
     reopened = ManagedWorkspacePool(parent / "workspaces")
-    assert reopened.publication_marker("alice") == operation.publication_marker
+    assert reopened.publication_marker("alice") == marker
     assert reopened.publication_marker("bob") is None
     owner = reopened.for_principal("alice")
     new_snapshot = owner.capture(owner.bind(principal_id="alice", session_id="chat"), limits=limits)
@@ -926,3 +935,33 @@ def test_recovery_reads_publication_marker_only_on_current_host_root(tmp_path, m
     assert reopened.publication_marker("alice") is None
     # The retired tree still carries the old marker; the recovery read ignores it.
     assert replacement.root.exists()
+
+
+def test_publication_snapshot_digest_tracks_content_paths_modes_and_empty_dirs(tmp_path):
+    from contextlib import closing
+
+    from core.managed_workspace import _snapshot_sha256
+
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    with closing(ManagedWorkspacePool(private / "workspaces")) as pool:
+        owner = pool.for_principal("alice")
+        binding = owner.bind(principal_id="alice", session_id="chat")
+        limits = WorkspaceLimits(1024, 4096, 20, 8)
+        path = owner.root / "out"
+        path.write_bytes(b"first")
+        path.chmod(0o600)
+        initial = _snapshot_sha256(owner.capture(binding, limits=limits))
+        path.unlink()
+        path.write_bytes(b"first")
+        path.chmod(0o600)
+        assert _snapshot_sha256(owner.capture(binding, limits=limits)) == initial
+        path.write_bytes(b"second")
+        content_changed = _snapshot_sha256(owner.capture(binding, limits=limits))
+        path.chmod(0o700)
+        mode_changed = _snapshot_sha256(owner.capture(binding, limits=limits))
+        path.rename(owner.root / "other")
+        path_changed = _snapshot_sha256(owner.capture(binding, limits=limits))
+        (owner.root / "empty").mkdir()
+        directory_added = _snapshot_sha256(owner.capture(binding, limits=limits))
+        assert len({initial, content_changed, mode_changed, path_changed, directory_added}) == 5

@@ -86,6 +86,7 @@ def changed_workspace_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot)
 class BoundedPublication:
     changed_paths: frozenset[str]
     retired_host: Path | None
+    snapshot_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -428,7 +429,7 @@ class ManagedWorkspace:
                 os.close(fd)
             host_stage = self.stage(output)
             try:
-                _, changed = self._publish(
+                _, changed, digest = self._publish(
                     snapshot,
                     host_stage,
                     limits=limits,
@@ -442,8 +443,8 @@ class ManagedWorkspace:
             try:
                 self.discard_retired(snapshot, host_stage)
             except (OSError, WorkspaceUnavailable):
-                return BoundedPublication(changed, host_stage.root)
-            return BoundedPublication(changed, None)
+                return BoundedPublication(changed, host_stage.root, digest)
+            return BoundedPublication(changed, None, digest)
 
     def publish(
         self,
@@ -458,7 +459,7 @@ class ManagedWorkspace:
         stage.root до cleanup collector; никакого check-then-copy по отдельным файлам.
         Неконтролируемые host roots этой authority не получают.
         """
-        binding, _ = self._publish(snapshot, stage, limits=limits)
+        binding, _, _ = self._publish(snapshot, stage, limits=limits)
         return binding
 
     def _publish(
@@ -470,7 +471,7 @@ class ManagedWorkspace:
         max_files_touched: int | None = None,
         already_touched: frozenset[str] = frozenset(),
         marker: WorkspacePublicationMarker | None = None,
-    ) -> tuple[WorkspaceBinding, frozenset[str]]:
+    ) -> tuple[WorkspaceBinding, frozenset[str], str | None]:
         with self._lock, stage.publication():
             self._validate(snapshot.binding)
             if stage.binding != snapshot.binding or stage.root.parent != self.root.parent:
@@ -498,7 +499,12 @@ class ManagedWorkspace:
                         raise WorkspaceFileBudgetExceeded(
                             "workspace file budget exhausted before publication"
                         )
+                    digest = None
                     if marker is not None:
+                        digest = _snapshot_sha256(output)
+                        marker = WorkspacePublicationMarker(
+                            marker.operation_id, marker.tool_attempt_id, digest
+                        )
                         # The worker tree never supplies host inode metadata.
                         os.setxattr(fd, _PUBLICATION_XATTR, marker.encode(), os.XATTR_CREATE)
                     _exchange(parent_fd, self.root.name, stage.root.name)
@@ -511,11 +517,28 @@ class ManagedWorkspace:
                         self._revision,
                         stage.binding.environment_revision,
                     )
-                    return binding, changed
+                    return binding, changed, digest
                 finally:
                     os.close(fd)
             finally:
                 os.close(parent_fd)
+
+
+def _snapshot_sha256(snapshot: WorkspaceSnapshot) -> str:
+    digest = hashlib.sha256(b"slavikai.workspace.snapshot.v1\0")
+
+    def field(value: bytes) -> None:
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+
+    files = {file.path: file.content for file in snapshot.files}
+    for path, fingerprint in sorted(snapshot.fingerprints):
+        digest.update(b"F" if path in files else b"D")
+        field(os.fsencode(path))
+        digest.update(stat.S_IMODE(fingerprint[2]).to_bytes(2, "big"))
+        if path in files:
+            field(files[path])
+    return digest.hexdigest()
 
 
 def _relative_path(value: str) -> None:

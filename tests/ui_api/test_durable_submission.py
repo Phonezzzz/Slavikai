@@ -340,7 +340,9 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             result_id = store.record_tool_observation(
                 first,
                 ProcessObservation(b"private bytes", b"", 13, 0, True, True, 0, False),
-                publication=WorkspacePublicationEvidence(cleanup_warning=True),
+                publication=WorkspacePublicationEvidence(
+                    cleanup_warning=True, snapshot_sha256="a" * 64
+                ),
             )
             store.record_tool_observation(
                 sorted(operations, key=lambda op: op.operation_id)[1],
@@ -399,9 +401,11 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             assert body["operations"][0]["publication"] == "published"
             assert body["operations"][0]["publication_source"] == "observation"
             assert body["operations"][0]["publication_cleanup_warning"] is True
+            assert body["operations"][0]["publication_snapshot_sha256"] == "a" * 64
             assert body["operations"][1]["observation"]["exit_code"] == 0
             assert body["operations"][1]["publication"] == "unknown"
             assert body["operations"][1]["publication_cleanup_warning"] is None
+            assert body["operations"][1]["publication_snapshot_sha256"] is None
             assert body["operations"][2]["observation"] is None
             assert body["operations"][2]["publication"] == "published"
             assert body["operations"][2]["publication_source"] == "workspace_root_marker"
@@ -531,6 +535,14 @@ with open_task_run_server(Path(database)) as store:
                         [operation] = body["operations"]
                         assert operation["operation_id"] == operation_id
                         assert operation["observation"] is None
+                        digest = operation["publication_snapshot_sha256"]
+                        if after_exchange:
+                            marker = pool.publication_marker(principal)
+                            assert marker is not None
+                            assert isinstance(digest, str) and len(digest) == 64
+                            assert digest == marker.snapshot_sha256
+                        else:
+                            assert digest is None
                         assert operation["publication"] == (
                             "published" if after_exchange else "unknown"
                         )

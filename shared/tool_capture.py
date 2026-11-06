@@ -93,14 +93,21 @@ class WorkspacePublicationMarker:
     operation_id: str
     tool_attempt_id: str
 
+    snapshot_sha256: str | None = None
+
     def encode(self) -> bytes:
-        return UUID(self.operation_id).bytes + UUID(self.tool_attempt_id).bytes
+        identity = UUID(self.operation_id).bytes + UUID(self.tool_attempt_id).bytes
+        if self.snapshot_sha256 is None:
+            return identity
+        return identity + bytes.fromhex(self.snapshot_sha256)
 
     @classmethod
     def decode(cls, data: bytes) -> WorkspacePublicationMarker | None:
-        if len(data) != 32:
+        if len(data) not in (32, 64):
             return None
-        return cls(str(UUID(bytes=data[:16])), str(UUID(bytes=data[16:])))
+        return cls(
+            str(UUID(bytes=data[:16])), str(UUID(bytes=data[16:32])), data[32:].hex() or None
+        )
 
 
 @dataclass(frozen=True)
@@ -127,10 +134,18 @@ class WorkspacePublicationEvidence:
     """Trusted executor evidence that the atomic exchange returned successfully."""
 
     cleanup_warning: bool
+    snapshot_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.cleanup_warning) is not bool:
             raise ValueError("Invalid publication cleanup evidence")
+        digest = self.snapshot_sha256
+        if digest is not None and (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise ValueError("Invalid publication snapshot digest")
 
 
 @dataclass(frozen=True)

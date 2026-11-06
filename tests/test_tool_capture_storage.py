@@ -67,7 +67,7 @@ def test_additive_v3_upgrade_preserves_original_history_and_has_no_fake_tool_cap
     run_id = "a17b0a38-0af1-475e-a0a1-83f225cbcec0"
     assert store.get_submission(scope, run_id).report.text == "producer-v3"
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         for table, rows in originals.items():
             assert conn.execute(f"SELECT * FROM {table}").fetchall() == rows
         assert conn.execute("SELECT count(*) FROM tool_operations").fetchone()[0] == 0
@@ -252,6 +252,7 @@ def test_publication_migration_preserves_legacy_observation_and_rolls_back(tmp_p
     observation = ProcessObservation(b"old", b"", 3, 0, True, True, 0, False)
     result_id = store.record_tool_observation(operation, observation)
     with sqlite3.connect(store.path) as conn:
+        conn.execute("ALTER TABLE tool_observations DROP COLUMN published_snapshot_sha256")
         conn.execute("ALTER TABLE tool_observations DROP COLUMN published_cleanup_warning")
         conn.execute("PRAGMA user_version = 4")
         legacy = conn.execute("SELECT * FROM tool_observations").fetchone()

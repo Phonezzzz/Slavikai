@@ -86,7 +86,14 @@ digest проверенного producer submission (если есть), до 50
 может прочитать маркер только на действующем canonical managed root под owner lease.
 Trusted collector устанавливает `user.slavikai.publication.v1` на host stage после
 проверки бюджета и до атомарного exchange. Маркер содержит operation ID и tool
-attempt ID; xattrs рабочего дерева не переносятся. Совпадение с точной scoped
+attempt ID. Новая запись дополнительно содержит SHA-256 проверенного host stage,
+вычисленный до обмена. В хеш входят относительные пути, каталоги, права и байты
+файлов с версионированным префиксом и однозначным кодированием полей.
+Xattrs рабочего дерева не переносятся. После успешного обмена тот же digest
+сохраняется вместе с immutable observation. GET возвращает
+publication_snapshot_sha256 из observation или из маркера точной попытки.
+При отсутствии digest возвращается null, включая старые наблюдения и маркеры.
+Текущие файлы для этого не перечитываются, список путей не возвращается. Совпадение с точной scoped
 попыткой даёт `publication_source=workspace_root_marker` без утверждения об очистке.
 Сохранённое наблюдение имеет приоритет (`publication_source=observation`).
 При несовпадении, недоступности или отсутствии маркера исход остаётся unknown.
@@ -124,9 +131,9 @@ Foreign и missing IDs дают одинаковый unavailable error. Reattach
 Session prune не вызывает удаление task/run DB: session attachment не является lifetime.
 
 DB создаётся mode 0600, новый parent directory — 0700; file symlink отклоняется.
-Existing parent directory должен быть доверенным bootstrap directory. Schema version — 5;
+Existing parent directory должен быть доверенным bootstrap directory. Schema version — 6;
 явно принятые additive upgrades v2→v3 (producer report), v3→v4 (bounded tool capture)
-и v4→v5 (workspace publication evidence)
+v4→v5 (workspace publication evidence) и v5→v6 (publication snapshot digest)
 выполняются транзакционно после проверки исходной shipped schema. Старые IDs/state/history сохраняются; неизвестная/посторонняя
 schema отклоняется. Ни reset, ни backfill результата из prose/logs не выполняются.
 Никакие raw tool payloads или secrets не копируются в events; reason — bounded code.
