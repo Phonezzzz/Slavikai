@@ -56,6 +56,23 @@ def _text_response_events(
     yield Done()
 
 
+def _ordinary_chat_result(
+    result: AgentToolLoopResult | LLMResult, web: WebSearchEvidence, blocked: str | None
+) -> bool:
+    return (
+        blocked is None
+        and not web.requested
+        and not web.executed
+        and not web.tool_call_seen
+        and not result.tool_calls
+        and bool(result.text.strip())
+        and (
+            not isinstance(result, AgentToolLoopResult)
+            or (not result.error and not result.cancelled)
+        )
+    )
+
+
 def _tool_stream_observations(
     events: Generator[StreamEvent, None, AgentToolLoopResult],
 ) -> Generator[StreamEvent, None, AgentToolLoopResult]:
@@ -654,6 +671,7 @@ class AgentRoutingMixin:
                         response_text=reviewed,
                     ),
                     runtime_result=runtime_result,
+                    ordinary_ask=_ordinary_chat_result(tool_loop_result, web_evidence, blocked),
                 )
             reply = self._get_main_brain().generate(messages_with_context)
             runtime_result = reply
@@ -673,6 +691,7 @@ class AgentRoutingMixin:
                     response_text=reviewed,
                 ),
                 runtime_result=runtime_result,
+                ordinary_ask=_ordinary_chat_result(reply, web_evidence, blocked),
             )
         except ApprovalRequired as exc:
             self._capture_chat_approval(
@@ -925,7 +944,17 @@ class AgentRoutingMixin:
                 response_text=reviewed,
             )
             self.last_stream_response_raw = response_text
-            yield ResponseProduced(AgentResponse(response_text, runtime_result))
+            yield ResponseProduced(
+                AgentResponse(
+                    response_text,
+                    runtime_result,
+                    ordinary_ask=(
+                        isinstance(runtime_result, AgentToolLoopResult)
+                        and runtime_result.provider_stopped
+                        and _ordinary_chat_result(runtime_result, web_evidence, blocked)
+                    ),
+                )
+            )
             yield Done()
             return
         except ApprovalRequired as exc:

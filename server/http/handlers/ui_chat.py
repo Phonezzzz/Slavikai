@@ -1441,14 +1441,15 @@ async def _handle_ui_send_impl(
                                 {"tools": execution_security[0], "policy": execution_security[1]}
                             ),
                         )
+            submitted_report = None
             if admitted_run is not None and agent_response is not None:
-                # Submission is not acceptance or completion; pending approval remains owned.
                 if agent_response.runtime_result is not None:
+                    submitted_report = agent_response.producer_report()
                     admitted_run = run_store.submit_result(
                         run_scope,
                         admitted_run.task_run_id,
                         expected_version=admitted_run.version,
-                        report=agent_response.producer_report(),
+                        report=submitted_report,
                         reason_code="runtime_result_submitted",
                     )
             drain_consumed_rules = getattr(agent, "drain_consumed_desktop_rule_ids", None)
@@ -1488,6 +1489,24 @@ async def _handle_ui_send_impl(
             approval_request = _serialize_approval_request(
                 getattr(agent, "last_approval_request", None),
             )
+            if (
+                mode == "ask"
+                and admitted_run is not None
+                and submitted_report is not None
+                and agent_response.ordinary_ask
+                and agent_response.failure is None
+                and generation_error is None
+                and not active_generation.token.is_set()
+                and decision is None
+                and approval_request is None
+                and not force_canvas
+            ):
+                admitted_run = run_store.accept_ordinary_ask(
+                    run_scope,
+                    admitted_run.task_run_id,
+                    expected_version=admitted_run.version,
+                    report=submitted_report,
+                )
             latest_auto_state = _normalize_auto_state(getattr(agent, "last_auto_state", None))
             drain_auto_progress = getattr(agent, "drain_auto_progress_events", None)
             if callable(drain_auto_progress):

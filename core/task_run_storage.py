@@ -553,65 +553,128 @@ class TaskRunStore:
         """Read the scoped producer report; absence never authorizes execution/replay."""
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN")
-            row = conn.execute(
-                "SELECT s.* FROM run_submissions s JOIN task_runs r USING(task_run_id) "
-                "JOIN task_revisions t ON t.task_id=r.task_id AND t.revision=r.task_revision "
-                "WHERE s.task_run_id=? AND t.principal_id=? AND t.session_id=?",
-                (task_run_id, scope.principal_id, scope.session_id),
-            ).fetchone()
-            if row is None:
-                raise LookupError("Submission unavailable in this scope")
-            run = self._record(scope, self._owned_row(conn, scope, task_run_id))
-            event = conn.execute(
-                "SELECT * FROM run_transitions WHERE task_run_id=? AND version=?",
-                (task_run_id, row["version"]),
-            ).fetchone()
-            digest = hashlib.sha256(row["payload"].encode("utf-8")).hexdigest()
-            data = json.loads(row["payload"])
-            expected = {
-                "schema_version": 1,
-                "submission_id": row["submission_id"],
-                "principal_id": scope.principal_id,
-                "session_id": scope.session_id,
-                "task_id": run.task_id,
-                "task_revision": run.task_revision,
-                "task_run_id": run.task_run_id,
-                "attempt_id": run.attempt_id,
-                "version": row["version"],
-                "created_at": row["created_at"],
-            }
-            if (
-                digest != row["content_digest"]
-                or not isinstance(data, dict)
-                or set(data)
-                != set(expected) | {"producer_kind", "text", "failure_code", "failure_message"}
-                or any(
-                    data.get(key) != value or type(data.get(key)) is not type(value)
-                    for key, value in expected.items()
-                )
-                or event is None
-                or event["state"] != RunState.RESULT_SUBMITTED
-                or event["submission_id"] != row["submission_id"]
-                or event["occurred_at"] != row["created_at"]
-            ):
-                raise RuntimeError("Stored submission binding/integrity is invalid")
-            report = ProducerReport(
-                ProducerKind(data["producer_kind"]),
-                data["text"],
-                data["failure_code"],
-                data["failure_message"],
+            try:
+                run = self._record(scope, self._owned_row(conn, scope, task_run_id))
+            except LookupError as exc:
+                raise LookupError("Submission unavailable in this scope") from exc
+            return self._read_submission(conn, run)
+
+    @staticmethod
+    def _read_submission(conn: sqlite3.Connection, run: TaskRun) -> RunSubmission:
+        scope, task_run_id = run.scope, run.task_run_id
+        row = conn.execute(
+            "SELECT s.* FROM run_submissions s JOIN task_runs r USING(task_run_id) "
+            "JOIN task_revisions t ON t.task_id=r.task_id AND t.revision=r.task_revision "
+            "WHERE s.task_run_id=? AND t.principal_id=? AND t.session_id=?",
+            (task_run_id, scope.principal_id, scope.session_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError("Submission unavailable in this scope")
+        event = conn.execute(
+            "SELECT * FROM run_transitions WHERE task_run_id=? AND version=?",
+            (task_run_id, row["version"]),
+        ).fetchone()
+        digest = hashlib.sha256(row["payload"].encode("utf-8")).hexdigest()
+        data = json.loads(row["payload"])
+        expected = {
+            "schema_version": 1,
+            "submission_id": row["submission_id"],
+            "principal_id": scope.principal_id,
+            "session_id": scope.session_id,
+            "task_id": run.task_id,
+            "task_revision": run.task_revision,
+            "task_run_id": run.task_run_id,
+            "attempt_id": run.attempt_id,
+            "version": row["version"],
+            "created_at": row["created_at"],
+        }
+        if (
+            digest != row["content_digest"]
+            or not isinstance(data, dict)
+            or set(data)
+            != set(expected) | {"producer_kind", "text", "failure_code", "failure_message"}
+            or any(
+                data.get(key) != value or type(data.get(key)) is not type(value)
+                for key, value in expected.items()
             )
-            return RunSubmission(
-                row["submission_id"],
-                run.task_id,
-                run.task_revision,
-                run.task_run_id,
-                run.attempt_id,
+            or event is None
+            or event["state"] != RunState.RESULT_SUBMITTED
+            or event["submission_id"] != row["submission_id"]
+            or event["occurred_at"] != row["created_at"]
+        ):
+            raise RuntimeError("Stored submission binding/integrity is invalid")
+        report = ProducerReport(
+            ProducerKind(data["producer_kind"]),
+            data["text"],
+            data["failure_code"],
+            data["failure_message"],
+        )
+        return RunSubmission(
+            row["submission_id"],
+            run.task_id,
+            run.task_revision,
+            run.task_run_id,
+            run.attempt_id,
+            scope,
+            row["version"],
+            row["created_at"],
+            report,
+            digest,
+        )
+
+    def accept_ordinary_ask(
+        self,
+        scope: RunScope,
+        task_run_id: str,
+        *,
+        expected_version: int,
+        report: ProducerReport,
+    ) -> TaskRun:
+        """Accept the exact submission after browser Ask supplies no-tool evidence."""
+        if (
+            not isinstance(report, ProducerReport)
+            or report.kind not in {ProducerKind.MODEL, ProducerKind.NATIVE_LOOP}
+            or report.failure_code is not None
+            or not report.text.strip()
+        ):
+            raise RunConflictError("An ordinary Ask result is required")
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = self._record(scope, self._owned_row(conn, scope, task_run_id))
+            mode = conn.execute(
+                "SELECT mode FROM task_revisions WHERE task_id=? AND revision=?",
+                (run.task_id, run.task_revision),
+            ).fetchone()[0]
+            if mode != "ask" or run.state not in {RunState.RESULT_SUBMITTED, RunState.COMPLETED}:
+                raise RunConflictError("Acceptance requires a submitted Ask result")
+            submission = self._read_submission(conn, run)
+            if submission.version != expected_version or submission.report != report:
+                raise RunConflictError("Submission evidence is stale or different")
+            if run.state == RunState.COMPLETED:
+                return run
+
+            now = datetime.now(UTC).isoformat()
+            accepted = self._transition(
+                conn,
                 scope,
-                row["version"],
-                row["created_at"],
-                report,
-                digest,
+                task_run_id,
+                expected_version=expected_version,
+                state=RunState.ACCEPTED,
+                authority=TransitionAuthority.ACCEPTANCE,
+                reason_code="ordinary_ask_accepted_full",
+                now=now,
+                acceptance=True,
+            )
+            return self._transition(
+                conn,
+                scope,
+                task_run_id,
+                expected_version=accepted.version,
+                state=RunState.COMPLETED,
+                authority=TransitionAuthority.ACCEPTANCE,
+                reason_code="accepted_ask_completed",
+                now=now,
+                acceptance=True,
             )
 
     def admit(
@@ -726,6 +789,7 @@ class TaskRunStore:
         reason_code: str,
         now: str,
         submission_id: str | None = None,
+        acceptance: bool = False,
     ) -> TaskRun:
         if not isinstance(state, RunState) or not isinstance(authority, TransitionAuthority):
             raise ValueError("Typed transition state/authority required")
@@ -749,13 +813,23 @@ class TaskRunStore:
         }
         if submission_id is not None:
             allowed.add((RunState.RUNNING, RunState.RESULT_SUBMITTED, TransitionAuthority.RUNTIME))
-        if state == RunState.ABORTED and current.state != RunState.ABORTED:
+        if acceptance:
+            allowed.update(
+                {
+                    (RunState.RESULT_SUBMITTED, RunState.ACCEPTED, TransitionAuthority.ACCEPTANCE),
+                    (RunState.ACCEPTED, RunState.COMPLETED, TransitionAuthority.ACCEPTANCE),
+                }
+            )
+        if state == RunState.ABORTED and current.state not in {
+            RunState.ABORTED,
+            RunState.COMPLETED,
+        }:
             valid = authority in {TransitionAuthority.USER, TransitionAuthority.RECOVERY}
         else:
             valid = (current.state, state, authority) in allowed
         if not valid:
             raise RunConflictError("Transition/authority is not permitted")
-        terminal_at = now if state == RunState.ABORTED else None
+        terminal_at = now if state in {RunState.ABORTED, RunState.COMPLETED} else None
         conn.execute(
             "UPDATE task_runs SET state = ?, version = version + 1, terminal_at = ? "
             "WHERE task_run_id = ? AND version = ?",
@@ -844,7 +918,11 @@ class TaskRunStore:
             or history[0]["occurred_at"] != row["created_at"]
         ):
             raise RuntimeError("Admission history is inconsistent")
-        expected_terminal = history[-1]["occurred_at"] if previous == RunState.ABORTED else None
+        expected_terminal = (
+            history[-1]["occurred_at"]
+            if previous in {RunState.ABORTED, RunState.COMPLETED}
+            else None
+        )
         if row["terminal_at"] != expected_terminal:
             raise RuntimeError("Terminal history is inconsistent")
         return cast(sqlite3.Row, row)

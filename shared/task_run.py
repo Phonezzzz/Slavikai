@@ -8,12 +8,15 @@ class RunState(StrEnum):
     ADMITTED = "admitted"
     RUNNING = "running"
     RESULT_SUBMITTED = "result_submitted"
+    ACCEPTED = "accepted"
+    COMPLETED = "completed"
     RECOVERY_REQUIRED = "recovery_required"
     ABORTED = "aborted"
 
 
 class TransitionAuthority(StrEnum):
     RUNTIME = "runtime"
+    ACCEPTANCE = "acceptance"
     RECOVERY = "recovery"
     USER = "user"
 

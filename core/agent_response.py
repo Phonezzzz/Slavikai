@@ -45,6 +45,7 @@ class AgentResponse:
     text: str
     runtime_result: RuntimeResult | None = None
     failure: ResponseFailure | None = None
+    ordinary_ask: bool = False
 
     def producer_report(self) -> ProducerReport:
         """Explicit allowlist; never persist the runtime object, messages or private metadata."""

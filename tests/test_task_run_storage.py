@@ -431,3 +431,95 @@ def test_require_new_admission_has_only_one_owner(tmp_path) -> None:
     run_id = next(result for result in outcomes if result != "already_admitted")
     assert TaskRunStore(path).get(scope, run_id).state == RunState.ADMITTED
     assert len(TaskRunStore(path).events(scope, run_id)) == 1
+
+
+def test_ordinary_ask_acceptance_is_scoped_idempotent_and_atomic(tmp_path) -> None:
+    store = TaskRunStore(tmp_path / "runs.db")
+    scope = RunScope("alice", "session-a")
+    run = store.admit(
+        scope, request_fingerprint="a" * 64, request_key="ask", goal="explain", mode="ask"
+    )
+    run = store.transition(
+        scope,
+        run.task_run_id,
+        expected_version=run.version,
+        state=RunState.RUNNING,
+        authority=TransitionAuthority.RUNTIME,
+        reason_code="execution_started",
+    )
+    report = ProducerReport(ProducerKind.MODEL, "answer")
+    run = store.submit_result(
+        scope,
+        run.task_run_id,
+        expected_version=run.version,
+        report=report,
+        reason_code="result_submitted",
+    )
+    with pytest.raises(LookupError):
+        store.accept_ordinary_ask(
+            RunScope("alice", "session-b"),
+            run.task_run_id,
+            expected_version=run.version,
+            report=report,
+        )
+    with pytest.raises(RunConflictError):
+        store.accept_ordinary_ask(
+            scope,
+            run.task_run_id,
+            expected_version=run.version,
+            report=ProducerReport(ProducerKind.MODEL, "different answer"),
+        )
+    with pytest.raises(RunConflictError):
+        store.transition(
+            scope,
+            run.task_run_id,
+            expected_version=run.version,
+            state=RunState.ACCEPTED,
+            authority=TransitionAuthority.ACCEPTANCE,
+            reason_code="bypass",
+        )
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "CREATE TRIGGER fault BEFORE INSERT ON run_transitions WHEN NEW.state='completed' "
+            "BEGIN SELECT RAISE(ABORT, 'completion fault'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="completion fault"):
+        store.accept_ordinary_ask(
+            scope,
+            run.task_run_id,
+            expected_version=run.version,
+            report=report,
+        )
+    assert store.get(scope, run.task_run_id) == run
+    assert store.events(scope, run.task_run_id)[-1].state == RunState.RESULT_SUBMITTED
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DROP TRIGGER fault")
+    completed = store.accept_ordinary_ask(
+        scope,
+        run.task_run_id,
+        expected_version=run.version,
+        report=report,
+    )
+    assert completed.terminal_at is not None
+    assert TaskRunStore(store.path).get(scope, run.task_run_id) == completed
+    assert (
+        store.accept_ordinary_ask(
+            scope,
+            run.task_run_id,
+            expected_version=run.version,
+            report=report,
+        )
+        == completed
+    )
+    history = store.events(scope, run.task_run_id)
+    assert [event.state for event in history][-2:] == [RunState.ACCEPTED, RunState.COMPLETED]
+    assert history[-2].authority == TransitionAuthority.ACCEPTANCE
+    with pytest.raises(RunConflictError):
+        store.transition(
+            scope,
+            run.task_run_id,
+            expected_version=completed.version,
+            state=RunState.ABORTED,
+            authority=TransitionAuthority.USER,
+            reason_code="abort",
+        )

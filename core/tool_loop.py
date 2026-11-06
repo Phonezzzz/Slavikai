@@ -75,6 +75,7 @@ class AgentToolLoopResult:
     error: str | None = None
     cancelled: bool = False
     model_usage: ModelUsageSummary | None = None
+    provider_stopped: bool = False
 
 
 class ToolLoopExecutionError(RuntimeError):
@@ -465,6 +466,7 @@ class AgentToolLoop:
             iteration_text = ""
             pending_calls: list[ToolCall] = []
             stream_error: str | None = None
+            provider_stopped = False
             stream_tools = tools if tools else None
             try:
                 if cancellation_token is None:
@@ -507,6 +509,7 @@ class AgentToolLoop:
                         yield event
                         continue
                     if isinstance(event, Done):
+                        provider_stopped = event.finish_reason == "stop"
                         if event.finish_reason == "cancelled":
                             yield event
                             return AgentToolLoopResult(
@@ -606,6 +609,7 @@ class AgentToolLoop:
                     messages=history,
                     tool_calls=executed,
                     iterations=iteration,
+                    provider_stopped=provider_stopped,
                 )
 
             for call_index, tool_call in enumerate(pending_calls):

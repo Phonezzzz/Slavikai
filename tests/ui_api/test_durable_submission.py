@@ -121,14 +121,21 @@ def test_http_submission_commits_before_projection_without_replay(
                     reopened.get_submission(scope, run_id)
                 assert len(reopened.events(scope, run_id)) == 2
             else:
-                assert state == RunState.RESULT_SUBMITTED
+                ordinary_ask = endpoint == "ui" and mode == "ask" and fault is None
+                assert state == ("completed" if ordinary_ask else RunState.RESULT_SUBMITTED)
                 saved = reopened.get_submission(scope, run_id)
                 assert saved.report.text == captured[-1].text
                 assert saved.report.kind == (
                     ProducerKind.AUTO if mode == "auto" else ProducerKind.NATIVE_LOOP
                 )
                 assert saved.report.failure_code is None
-                assert reopened.get(scope, run_id).terminal_at is None
+                assert (reopened.get(scope, run_id).terminal_at is not None) is ordinary_ask
+                if ordinary_ask:
+                    assert [event.state for event in reopened.events(scope, run_id)][-3:] == [
+                        "result_submitted",
+                        "accepted",
+                        "completed",
+                    ]
             client.app["task_run_store"] = reopened
             client.app["idempotency_store"] = IdempotencyStore()
             repeated = await client.post(url, headers=headers, json=payload)
@@ -255,6 +262,41 @@ def test_ui_stream_error_preserves_received_producer_report(isolated_agent, monk
             assert saved.report.failure_code is not None
             assert saved.report.failure_message
             assert store.get(RunScope(principal, session), run_id).terminal_at is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "length", None])
+def test_browser_ask_stream_requires_provider_stop_for_acceptance(
+    isolated_agent, monkeypatch, finish_reason
+):
+    from llm.stream_model import Done, TextDelta
+
+    agent, brain = isolated_agent
+
+    def stream(*args, **kwargs):
+        yield TextDelta(text="ordinary answer")
+        if finish_reason is not None:
+            yield Done(finish_reason=finish_reason)
+
+    monkeypatch.setattr(brain, "generate_stream_events", stream)
+
+    async def run():
+        client = await _create_client(agent)
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            await _select_local_model(client, session)
+            response = await client.post(
+                "/ui/api/chat/send", headers={"X-Slavik-Session": session}, json={"content": "hi"}
+            )
+            assert response.status == 200
+            with sqlite3.connect(client.app["task_run_store"].path) as conn:
+                (state,) = conn.execute("SELECT state FROM task_runs").fetchone()
+            assert state == (
+                RunState.COMPLETED if finish_reason == "stop" else RunState.RESULT_SUBMITTED
+            )
         finally:
             await client.close()
 

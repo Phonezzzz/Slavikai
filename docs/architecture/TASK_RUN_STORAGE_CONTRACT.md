@@ -48,13 +48,32 @@ Read использует consistent transaction snapshot. Ошибки DB не 
 logical task revision и не публикует semantic final. `result_submitted` и
 `recovery_required` non-terminal; model text, verifier pass или worker done не превращаются
 в completed. Завершение с acceptance/disposition и structured runtime signals — следующий
-обязательный срез. B1 намеренно не предоставляет completed/failed/cancelled transitions,
+обязательный срез. Исходный B1 намеренно не предоставлял completed/failed/cancelled transitions,
 resume, new attempt или implicit rerun, для которых ещё нет интегрированной authority.
 
 Restart читает ровно committed state/history. Он сам ничего не помечает completed или
 recovery_required: reconciliation требует отдельного controller и fencing живых owners.
 Несогласованные history/current state отклоняются, без latest-timestamp эвристики.
 Revision/history immutable на SQL boundary; отказ history write откатывает весь transition.
+
+### Приёмка обычного браузерного Ask
+
+Подтверждённое правило владельца от 2026-11-06: для обычного Ask без инструментов,
+записи и ожидающего подтверждения достаточно проверить принадлежность и целостность
+точного producer submission. Отдельный verifier не требуется. Runtime определяет
+пригодность по структурированному исходу генерации. Для stream требуется явный
+нормальный stop провайдера; EOF, усечённый результат, ошибка, отмена и поиск в сети
+не допускаются к приёмке. HTTP применяет правило к начальной отправке браузерного Ask.
+
+После сохранения `result_submitted` специализированный метод TaskRunStore проверяет
+principal/session, task revision, версию, digest и точное совпадение результата.
+Два события `accepted` (полная приёмка) и `completed` записываются по порядку
+в одной SQLite-транзакции отдельной authority `acceptance`. Каждое событие связано
+с единственным immutable submission через тот же run и последовательность версий.
+Сбой завершения откатывает приёмку; точный повтор возвращает уже сохранённый run.
+Обычный transition API не может записать эти состояния. Исторические submission
+автоматически не принимаются. Семантический final, логическая task revision,
+approval continuations и /v1 в этот срез не входят.
 
 ## Isolation и storage lifecycle
 
