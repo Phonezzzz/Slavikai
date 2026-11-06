@@ -780,3 +780,87 @@ def test_bounded_publication_checks_published_permissions(
         assert (owner.root / "data.txt").stat().st_mode & 0o777 == 0o600
 
     assert (stage.root / "data.txt").stat().st_mode & 0o777 == 0o644
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "paths"),
+    [
+        (
+            "workspace_write",
+            {"path": "new/sub/file.txt", "content": "x"},
+            {"new", "new/sub", "new/sub/file.txt"},
+        ),
+        ("workspace_create", {"path": "new/file.txt"}, {"new", "new/file.txt"}),
+        (
+            "workspace_move",
+            {"from_path": "tree", "to_path": "new/tree"},
+            {"tree", "tree/file.txt", "new", "new/tree", "new/tree/file.txt"},
+        ),
+        (
+            "workspace_rename",
+            {"old_path": "tree", "new_path": "new/tree"},
+            {"tree", "tree/file.txt", "new", "new/tree", "new/tree/file.txt"},
+        ),
+        ("workspace_delete", {"path": "tree", "recursive": True}, {"tree", "tree/file.txt"}),
+        (
+            "workspace_patch",
+            {"path": "tree/file.txt", "patch": "@@ -1 +1 @@\n-old\n+new\n"},
+            {"tree/file.txt"},
+        ),
+    ],
+)
+def test_auto_direct_writers_admit_paths_before_mutating(tmp_path, name, args, paths):
+    from core.approval_policy import ApprovalContext
+    from core.tool_gateway import AutoFileEffects, ToolGateway
+    from shared.models import ToolRequest
+    from tools.tool_logger import ToolCallLogger
+    from tools.tool_registry import ToolRegistry
+    from tools.workspace_tools import (
+        ApplyPatchTool,
+        CreateFileTool,
+        DeleteFileTool,
+        MoveFileTool,
+        RenameFileTool,
+        WriteFileTool,
+        workspace_root_context,
+    )
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    workspace = ManagedWorkspace.create(parent, principal_id="alice")
+    (workspace.root / "tree").mkdir()
+    (workspace.root / "tree/file.txt").write_text("old\n")
+    registry = ToolRegistry(call_logger=ToolCallLogger(tmp_path / "tools.log"))
+    for tool_name, handler in {
+        "workspace_write": WriteFileTool(),
+        "workspace_create": CreateFileTool(),
+        "workspace_move": MoveFileTool(),
+        "workspace_rename": RenameFileTool(),
+        "workspace_delete": DeleteFileTool(),
+        "workspace_patch": ApplyPatchTool(),
+    }.items():
+        registry.register(tool_name, handler, capability="write")
+    registry.set_execution_policy(mode="auto")
+    effects = AutoFileEffects(len(paths) - 1)
+    gateway = ToolGateway(
+        registry,
+        approval_context=ApprovalContext(False, "chat", set()),
+        workspace_access=WorkspaceAccess(workspace, "alice", "chat"),
+        auto_file_effects=effects,
+    )
+    with workspace_root_context(workspace.root):
+        rejected = gateway.call(ToolRequest(name, args))
+        assert not rejected.ok
+        assert rejected.meta["reason_code"] == "workspace_file_budget_exhausted"
+        assert effects.count == 0
+        assert (workspace.root / "tree/file.txt").read_text() == "old\n"
+        assert not (workspace.root / "new").exists()
+        effects.limit = len(paths)
+        effects.touched_paths.add(sorted(paths)[0])
+        assert gateway.call(ToolRequest(name, args)).ok
+        assert effects.touched_paths == paths
+        assert effects.count == len(paths)
+        assert not gateway.call(
+            ToolRequest("workspace_write", {"path": "extra.txt", "content": "x"})
+        ).ok
+        assert not (workspace.root / "extra.txt").exists()

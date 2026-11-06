@@ -132,7 +132,7 @@
         "tests/test_auto_runtime.py",
         "tests/test_auto_usage_accounting.py"
       ],
-      "summary": "Auto projects the count of known unique published workspace_run paths. Read-only calls and refusals that provably did not publish add no effects. Incomplete observation becomes null. Numeric projection retains explicit nonnegative counts and unknown while rejecting malformed values. Direct writes, verifier effects and reconciliation remain outside this accounting contract."
+      "summary": "Auto projects the count of known unique published workspace_run and admitted direct-writer paths. Read-only calls and refusals that provably did not publish add no effects. Incomplete observation becomes null. Numeric projection retains explicit nonnegative counts and unknown while rejecting malformed values. Verifier effects and reconciliation remain outside this accounting contract."
     },
     {
       "id": "llm.reported_usage_completeness",
@@ -160,7 +160,19 @@
         "tests/test_auto_runtime.py",
         "tests/test_managed_workspace.py"
       ],
-      "summary": "Auto retains the original staged workspace_run limit and unique published paths across approval. ToolGateway supplies trusted limits and the verified host-stage snapshot is checked before atomic exchange. A budget refusal with confirmed cleanup consumes no paths and allows retry; retained or unknown effects prevent further staged execution. Direct writes have no file-budget fence."
+      "summary": "Auto retains the original staged workspace_run limit and unique published paths across approval. ToolGateway supplies trusted limits and the verified host-stage snapshot is checked before atomic exchange. A budget refusal with confirmed cleanup consumes no paths and allows retry; retained or unknown effects prevent further staged execution. Direct writers share this ledger and have a separate pre-admission check."
+    },
+    {
+      "id": "runtime.auto.direct_file_budget",
+      "scope": "runtime",
+      "status": "implemented",
+      "owner": "runtime",
+      "version": 1,
+      "source": "docs/SOURCE_OF_TRUTH.md",
+      "verified_by": [
+        "tests/test_managed_workspace.py"
+      ],
+      "summary": "Managed Auto write, create, rename, move, delete and patch check unique prospective paths inside the mutation guard before the first write. A successful operation adds those paths to the same ledger as staged publication. A partial failure invalidates further file admission."
     },
     {
       "id": "runtime.auto.sync_model_usage_accounting",

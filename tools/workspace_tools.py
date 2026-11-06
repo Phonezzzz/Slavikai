@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -11,6 +13,7 @@ from typing import TYPE_CHECKING
 from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.sandbox_execution import sandbox_execution_failure
 from shared.tool_capture import MAX_CAPTURE_BYTES, MAX_VIEW_BYTES, ToolCaptureFault
+from shared.workspace_binding import WorkspaceFileBudgetExceeded, WorkspaceUnavailable
 from tools.terminal_tool import TerminalTool
 
 if TYPE_CHECKING:
@@ -424,6 +427,68 @@ class ReadFileTool:
             return ToolResult.failure(str(exc))
 
 
+def _workspace_subtree(path: Path) -> Iterator[Path]:
+    yield path
+    with os.scandir(path) as entries:
+        for entry in entries:
+            child = Path(entry.path)
+            if entry.is_dir(follow_symlinks=False):
+                yield from _workspace_subtree(child)
+            else:
+                yield child
+
+
+def _admit_workspace_write(
+    request: ToolRequest,
+    path: Path,
+    *,
+    destination: Path | None = None,
+    create_parents: bool = False,
+    subtree: bool = False,
+    writes_bytes: bool = False,
+) -> dict[str, JSONValue] | None:
+    budget = request.workspace_file_budget
+    if budget is None:
+        return None
+
+    root = get_workspace_root()
+    if writes_bytes:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise WorkspaceUnavailable("Файловые эффекты записи нельзя ограничить одним путём.")
+
+    paths: set[str] = set()
+    remaining = budget.limit - len(budget.touched_paths)
+
+    def include(candidate: Path) -> None:
+        nonlocal remaining
+        relative = candidate.relative_to(root).as_posix()
+        if relative == ".":
+            raise WorkspaceUnavailable("Изменение корня workspace запрещено.")
+        if relative not in paths and relative not in budget.touched_paths:
+            if remaining <= 0:
+                raise WorkspaceFileBudgetExceeded("Файловый бюджет исчерпан до начала записи.")
+            remaining -= 1
+        paths.add(relative)
+
+    for source in _workspace_subtree(path) if subtree else (path,):
+        include(source)
+        if destination is not None:
+            include(destination / source.relative_to(path))
+
+    if create_parents:
+        parent = (destination or path).parent
+        while not parent.exists():
+            include(parent)
+            parent = parent.parent
+
+    return {"workspace_changed_paths": sorted(paths)}
+
+
 class WriteFileTool:
     def handle(self, request: ToolRequest) -> ToolResult:
         raw_path = str(request.args.get("path") or "").strip()
@@ -436,9 +501,12 @@ class WriteFileTool:
             path = _ensure_in_workspace(raw_path)
             if not _is_allowed_workspace_file(path):
                 return ToolResult.failure("Расширение файла запрещено для записи.")
+            effects = _admit_workspace_write(request, path, create_parents=True, writes_bytes=True)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-            return ToolResult.success({"output": "Файл сохранён.", "path": str(path)})
+            return ToolResult.success({"output": "Файл сохранён.", "path": str(path)}, meta=effects)
+        except WorkspaceUnavailable:
+            raise  # ToolRegistry records the refusal before execution.
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(str(exc))
 
@@ -460,9 +528,12 @@ class CreateFileTool:
                 return ToolResult.failure("По указанному пути уже существует директория.")
             if path.exists() and not overwrite:
                 return ToolResult.failure("Файл уже существует. Укажите overwrite=true.")
+            effects = _admit_workspace_write(request, path, create_parents=True, writes_bytes=True)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
-            return ToolResult.success({"output": "Файл создан.", "path": str(path)})
+            return ToolResult.success({"output": "Файл создан.", "path": str(path)}, meta=effects)
+        except WorkspaceUnavailable:
+            raise  # ToolRegistry records the refusal before execution.
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(str(exc))
 
@@ -482,6 +553,13 @@ class RenameFileTool:
                 return ToolResult.failure("Расширение файла запрещено для переименования.")
             if new_path.exists():
                 return ToolResult.failure("Целевой путь уже существует.")
+            effects = _admit_workspace_write(
+                request,
+                old_path,
+                destination=new_path,
+                create_parents=True,
+                subtree=old_path.is_dir(),
+            )
             new_path.parent.mkdir(parents=True, exist_ok=True)
             old_path.rename(new_path)
             return ToolResult.success(
@@ -489,8 +567,11 @@ class RenameFileTool:
                     "output": "Файл переименован.",
                     "old_path": str(old_path),
                     "new_path": str(new_path),
-                }
+                },
+                meta=effects,
             )
+        except WorkspaceUnavailable:
+            raise  # ToolRegistry records the refusal before execution.
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(str(exc))
 
@@ -510,6 +591,9 @@ class MoveFileTool:
                 return ToolResult.failure("Расширение файла запрещено для перемещения.")
             if target.exists():
                 return ToolResult.failure("Целевой путь уже существует.")
+            effects = _admit_workspace_write(
+                request, source, destination=target, create_parents=True, subtree=source.is_dir()
+            )
             target.parent.mkdir(parents=True, exist_ok=True)
             source.rename(target)
             return ToolResult.success(
@@ -517,8 +601,11 @@ class MoveFileTool:
                     "output": "Файл перемещён.",
                     "from_path": str(source),
                     "to_path": str(target),
-                }
+                },
+                meta=effects,
             )
+        except WorkspaceUnavailable:
+            raise  # ToolRegistry records the refusal before execution.
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(str(exc))
 
@@ -538,10 +625,14 @@ class DeleteFileTool:
             if target.is_dir():
                 if not recursive:
                     return ToolResult.failure("Удаление директории требует recursive=true.")
+            effects = _admit_workspace_write(request, target, subtree=target.is_dir())
+            if target.is_dir():
                 shutil.rmtree(target)
             else:
                 target.unlink()
-            return ToolResult.success({"output": "Удалено.", "path": str(target)})
+            return ToolResult.success({"output": "Удалено.", "path": str(target)}, meta=effects)
+        except WorkspaceUnavailable:
+            raise  # ToolRegistry records the refusal before execution.
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(str(exc))
 
@@ -565,7 +656,11 @@ class ApplyPatchTool:
                 patched = _apply_unified_patch(original, diff_text)
             except Exception as exc:  # noqa: BLE001
                 return ToolResult.failure(f"Патч не применён: {exc}")
+            effects: dict[str, JSONValue] = (
+                {"workspace_changed_paths": []} if request.workspace_file_budget else {}
+            )
             if not dry_run:
+                effects = _admit_workspace_write(request, path, writes_bytes=True) or {}
                 path.write_text(patched, encoding="utf-8")
             return ToolResult.success(
                 {
@@ -574,8 +669,10 @@ class ApplyPatchTool:
                     "content": patched,
                     "dry_run": dry_run,
                 },
-                meta={"bytes": len(patched.encode("utf-8"))},
+                meta={**effects, "bytes": len(patched.encode("utf-8"))},
             )
+        except WorkspaceUnavailable:
+            raise  # ToolRegistry records the refusal before execution.
         except Exception as exc:  # noqa: BLE001
             return ToolResult.failure(str(exc))
 

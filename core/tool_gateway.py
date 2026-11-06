@@ -71,23 +71,27 @@ class AutoFileEffects:
         publication = result.data.get("publication")
         if name == "workspace_run" and publication == "published":
             paths = result.data.get("changed_paths")
-            if isinstance(paths, list) and all(
-                isinstance(path, str)
-                and path not in {"", "."}
-                and "\x00" not in path
-                and not PurePosixPath(path).is_absolute()
-                and ".." not in PurePosixPath(path).parts
-                and PurePosixPath(path).as_posix() == path
-                for path in paths
-            ):
-                self.touched_paths.update(paths)
-                return
+        elif name in _WORKSPACE_WRITERS and result.ok:
+            paths = meta.get("workspace_changed_paths")
         elif meta.get("execution_started") is False or (
             name == "workspace_run"
             and publication == "none"
             and meta.get("execution_review_required") is False
             and meta.get("reason_code") == WorkspaceFileBudgetExceeded.reason_code
         ):
+            return
+        else:
+            paths = None
+        if isinstance(paths, list) and all(
+            isinstance(path, str)
+            and path not in {"", "."}
+            and "\x00" not in path
+            and not PurePosixPath(path).is_absolute()
+            and ".." not in PurePosixPath(path).parts
+            and PurePosixPath(path).as_posix() == path
+            for path in paths
+        ):
+            self.touched_paths.update(paths)
             return
         self.complete = False
 
@@ -273,7 +277,13 @@ class ToolGateway:
                         },
                     )
         effects = self.auto_file_effects
-        if effects is not None and request.name == "workspace_run":
+        if effects is not None and (
+            request.name == "workspace_run" or request.name in _WORKSPACE_WRITERS
+        ):
+            if request.name in _WORKSPACE_WRITERS and binding is None:
+                return _workspace_failure(
+                    WorkspaceUnavailable("Файловый бюджет требует managed workspace.")
+                )
             if not effects.complete:
                 return ToolResult.failure(
                     "Нельзя проверить файловый лимит. Эффекты предыдущего вызова неизвестны.",
@@ -318,6 +328,7 @@ class ToolGateway:
             result = ToolResult.failure(f"Ошибка инструмента {request.name}: {exc}")
         if effects is not None and (
             request.name == "workspace_run"
+            or request.name in _WORKSPACE_WRITERS
             or self.registry.get_capability(request.name) in {"write", "exec"}
         ):
             effects.observe(request.name, result)
