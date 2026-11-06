@@ -608,12 +608,15 @@ class RunCodeTool:
                 return ToolResult.failure("Скрипт вне рабочей директории запрещён.")
             if self.backend is None or request.workspace_binding is None:
                 return sandbox_execution_failure()
+            budget = request.workspace_file_budget
             try:
                 outcome = self.backend.execute_python(
                     request.workspace_binding,
                     resolved.relative_to(get_workspace_root()).as_posix(),
                     timeout=self.timeout,
                     capture=request.capture,
+                    max_files_touched=budget.limit if budget is not None else None,
+                    already_touched=budget.touched_paths if budget is not None else frozenset(),
                 )
             except ToolCaptureFault:
                 raise

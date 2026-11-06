@@ -37,7 +37,9 @@ def test_run_tool_publishes_only_committed_reference_and_bounded_utf8_view(tmp_p
     context = ToolCaptureContext(CaptureBinding(store, run), "label")
     raw = b"\xff" * MAX_VIEW_BYTES
 
-    def execute(bound, script, *, timeout, capture=None):
+    def execute(
+        bound, script, *, timeout, capture=None, max_files_touched=None, already_touched=frozenset()
+    ):
         assert bound == binding and script == "emit.py" and capture is context
         operation = store.begin_tool_operation(run, model_call_id="label", request_path=script)
         observation = ProcessObservation(raw, b"", len(raw), 0, True, True, 0, False)
@@ -107,7 +109,9 @@ def test_unpublished_workspace_run_does_not_expose_uncommitted_path_claims(tmp_p
     (owner.root / "script.py").write_text("# diagnostic")
     binding = owner.bind(principal_id="alice", session_id="chat")
 
-    def execute(bound, path, *, timeout, capture=None):
+    def execute(
+        bound, path, *, timeout, capture=None, max_files_touched=None, already_touched=frozenset()
+    ):
         return WorkspacePythonOutcome(
             "unavailable",
             b"stdout",

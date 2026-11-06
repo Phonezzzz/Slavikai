@@ -267,7 +267,7 @@ def test_auto_call_cap_is_run_scoped_and_retained_across_approval(tmp_path, monk
         with pytest.raises(ApprovalRequired):
             orchestrator.run_v1("count")
         assert dispatched == ["echo"]
-        assert agent.last_auto_state["execution_metrics"]["files_touched"] is None
+        assert agent.last_auto_state["execution_metrics"]["files_touched"] == 0
         runs.append((orchestrator, agent, dispatched, agent.last_auto_state["run_id"]))
     monkeypatch.setenv(auto_runtime.AUTO_MAX_TOOL_CALLS_ENV, "100")
     for orchestrator, agent, dispatched, run_id in runs:
@@ -760,3 +760,124 @@ def test_auto_does_not_claim_process_free_verification_when_git_context_is_ambig
     assert calls == []
     assert result.status == AutoRunStatus.FAILED_VERIFIER
     assert result.verifier.error == "canonical_repo_verifier_unavailable"
+
+
+@pytest.mark.parametrize("case", ["retry", "cleanup_failure", "missing_evidence"])
+def test_auto_file_budget_survives_approval_and_blocks_publication(tmp_path, monkeypatch, case):
+    from types import SimpleNamespace
+
+    from core.approval_policy import ApprovalContext
+    from core.managed_workspace import ManagedWorkspace, WorkspaceAccess, WorkspaceLimits
+    from core.workspace_python_execution import WorkspacePythonOutcome
+    from shared.workspace_binding import WorkspaceFileBudgetExceeded
+    from tests.test_tool_call_cap import BatchBrain
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(auto_runtime.AUTO_MAX_FILES_TOUCHED_ENV, "2")
+    agent = _AutoV1Agent()
+    workspace = ManagedWorkspace.create(tmp_path, principal_id=agent.user_id)
+    storage = tmp_path / "staging"
+    storage.mkdir(mode=0o700)
+    for script in ("initial.py", "repeat.py", "extra.py"):
+        (workspace.root / script).write_text("# test input")
+        (workspace.root / script).chmod(0o600)
+    limits = WorkspaceLimits(1024, 4096, 20, 8)
+    executed = []
+
+    def execute(
+        binding, script, *, timeout, capture, max_files_touched=None, already_touched=frozenset()
+    ):
+        executed.append(script)
+        snapshot = workspace.capture(binding, limits=limits)
+        stage = workspace.stage(snapshot, storage=storage)
+        stage.begin_process()
+        if script == "initial.py":
+            (stage.root / "folder").mkdir(exist_ok=True)
+            (stage.root / "data").write_text("first")
+        elif script == "repeat.py":
+            (stage.root / "data").write_text("second")
+        else:
+            (stage.root / "excess").mkdir()
+        stage.mark_settled()
+        try:
+            publication = workspace.publish_bounded(
+                snapshot,
+                stage,
+                limits=limits,
+                max_files_touched=max_files_touched,
+                already_touched=already_touched,
+            )
+        except WorkspaceFileBudgetExceeded as exc:
+            return WorkspacePythonOutcome(
+                "unavailable",
+                b"",
+                b"",
+                0,
+                True,
+                exc.reason_code,
+                "retained" if case == "cleanup_failure" else "none",
+                cleanup_warning=case == "cleanup_failure",
+            )
+        return WorkspacePythonOutcome(
+            "finished",
+            b"",
+            b"",
+            0,
+            True,
+            None,
+            "published",
+            changed_paths=None
+            if case == "missing_evidence" and script == "repeat.py"
+            else publication.changed_paths,
+        )
+
+    agent.tool_registry.register(
+        "workspace_run",
+        RunCodeTool(backend=SimpleNamespace(execute_python=execute)).handle,
+        capability="exec",
+    )
+    agent._brain = BatchBrain(
+        [
+            [
+                ToolCall(id="1", name="workspace_run", arguments={"path": "initial.py"}),
+                ToolCall(
+                    id="3",
+                    name="workspace_run",
+                    arguments={"path": "repeat.py", "config_path": "repeat.py"},
+                ),
+                ToolCall(
+                    id="4",
+                    name="workspace_run",
+                    arguments={"path": "extra.py", "max_files_touched": 99},
+                ),
+                ToolCall(id="5", name="workspace_run", arguments={"path": "initial.py"}),
+            ]
+        ]
+    )
+    agent._build_tool_gateway = lambda: ToolGateway(
+        agent.tool_registry,
+        approval_context=ApprovalContext(True, agent.session_id, {"EXEC_ARBITRARY"}),
+        workspace_access=WorkspaceAccess(workspace, agent.user_id, agent.session_id),
+    )
+    orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=workspace.root)
+    with workspace_root_context(workspace.root):
+        with pytest.raises(ApprovalRequired) as paused:
+            orchestrator.run_v1("modify")
+        assert paused.value.request.tool == "workspace_run"
+        assert (workspace.root / "folder").is_dir()
+        paused_state = agent.last_auto_state
+        monkeypatch.setenv(auto_runtime.AUTO_MAX_FILES_TOUCHED_ENV, "100")
+        orchestrator.resume(paused_state["run_id"])
+
+    expected_scripts = ["initial.py", "repeat.py"]
+    if case != "missing_evidence":
+        expected_scripts.append("extra.py")
+    if case == "retry":
+        expected_scripts.append("initial.py")
+    assert executed == expected_scripts
+    assert not (workspace.root / "excess").exists()
+    assert (workspace.root / "data").read_text() == ("first" if case == "retry" else "second")
+    assert paused_state["execution_metrics"]["files_touched"] == 2
+    assert agent.last_auto_state["execution_metrics"]["files_touched"] == (
+        2 if case == "retry" else None
+    )

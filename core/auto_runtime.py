@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,6 +27,7 @@ from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.response_preferences import compose_response_preferences
 from core.skills.index import SkillResolution
 from core.skills.runtime import skill_run_metadata, skill_run_report
+from core.tool_gateway import AutoFileEffects
 from core.tool_loop import (
     AgentToolLoop,
     AgentToolLoopResult,
@@ -110,6 +111,7 @@ class _RunFrame:
     principal_id: str
     session_id: str | None
     runtime_root: str | None
+    file_effects: AutoFileEffects
     capture_binding: CaptureBinding | None = None
 
 
@@ -201,6 +203,7 @@ class AutoOrchestrator:
             self.parent.user_id,
             self.parent.session_id,
             self.parent.runtime_workspace_root,
+            AutoFileEffects(budgets.max_files_touched),
             capture_binding,
         )
         return self._execute_frame(frame)
@@ -279,7 +282,9 @@ class AutoOrchestrator:
                 self._set_state(state)
 
             self._set_status(state, AutoRunStatus.CODING)
-            gateway = self.parent._build_tool_gateway()
+            gateway = replace(
+                self.parent._build_tool_gateway(), auto_file_effects=frame.file_effects
+            )
             tool_specs = self.parent.tool_registry.list_tool_specs()
             system_prompt = AUTO_V1_SYSTEM_PROMPT
             if skill_resolution is not None:
@@ -313,13 +318,10 @@ class AutoOrchestrator:
                 "changed_paths": [],
                 "runtime": "auto_v1_tool_loop",
             }
-            # Auto v1 has no authoritative file-effects observation for native tools.
-            # A ToolResult (including workspace_run capture) cannot prove the number
-            # of changed paths; do not report a fabricated zero for executed calls.
             state["execution_metrics"] = {
                 "tool_calls_used": len(loop_result.tool_calls),
                 "iterations": loop_result.iterations,
-                "files_touched": 0 if not loop_result.tool_calls else None,
+                "files_touched": frame.file_effects.count,
             }
             _record_model_usage(state, loop_result.model_usage)
             self._set_state(state)
@@ -540,6 +542,9 @@ class AutoOrchestrator:
         except ApprovalRequired as exc:
             if exc.continuation is None:
                 raise AutoContinuationUnavailable("auto_continuation_unavailable") from exc
+            metrics = state.get("execution_metrics")
+            if isinstance(metrics, dict):
+                metrics["files_touched"] = frame.file_effects.count
             _record_model_usage(state, exc.continuation.model_usage)
             if cancellation_token is not None and cancellation_token.is_set():
                 state["coders"] = [
@@ -567,6 +572,9 @@ class AutoOrchestrator:
             raise
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, ToolLoopExecutionError):
+                metrics = state.get("execution_metrics")
+                if isinstance(metrics, dict):
+                    metrics["files_touched"] = None
                 _record_model_usage(state, exc.result.model_usage)
                 state["coders"] = [_auto_v1_tool_call_state(item) for item in exc.result.tool_calls]
             capture_cause = (

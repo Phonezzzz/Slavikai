@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Literal
 
 from shared.tool_capture import ToolCaptureContext
-from shared.workspace_binding import WorkspaceBinding
+from shared.workspace_binding import WorkspaceBinding, WorkspaceFileBudget
 
 JSONPrimitive = str | bytes | int | float | bool | None
 JSONValue = JSONPrimitive | Sequence["JSONValue"] | Mapping[str, "JSONValue"]
@@ -23,6 +23,9 @@ class ToolRequest:
     args: dict[str, JSONValue] = field(default_factory=dict)
     workspace_binding: WorkspaceBinding | None = field(default=None, repr=False, compare=False)
     capture: ToolCaptureContext | None = field(default=None, repr=False, compare=False)
+    workspace_file_budget: WorkspaceFileBudget | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass

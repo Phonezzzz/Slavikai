@@ -29,3 +29,11 @@ class WorkspaceBinding:
     session_id: str
     revision: str
     environment_revision: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkspaceFileBudget:
+    """Снимок бюджета, выданный шлюзом на один вызов."""
+
+    limit: int
+    touched_paths: frozenset[str]

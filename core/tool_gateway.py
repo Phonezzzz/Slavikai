@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from pathlib import PurePosixPath
 
 from core.approval_policy import (
     ApprovalContext,
@@ -15,7 +16,13 @@ from core.approval_policy import (
 from core.managed_workspace import ManagedWorkspacePool, WorkspaceAccess
 from shared.models import JSONValue, ToolRequest, ToolResult
 from shared.tool_capture import ToolCaptureFault
-from shared.workspace_binding import WorkspaceBinding, WorkspaceConflict, WorkspaceUnavailable
+from shared.workspace_binding import (
+    WorkspaceBinding,
+    WorkspaceConflict,
+    WorkspaceFileBudget,
+    WorkspaceFileBudgetExceeded,
+    WorkspaceUnavailable,
+)
 from tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger("SlavikAI.ToolGateway")
@@ -50,6 +57,42 @@ def _workspace_failure(exc: OSError | WorkspaceUnavailable) -> ToolResult:
 
 
 @dataclass
+class AutoFileEffects:
+    limit: int
+    touched_paths: set[str] = field(default_factory=set)
+    complete: bool = True
+
+    @property
+    def count(self) -> int | None:
+        return len(self.touched_paths) if self.complete else None
+
+    def observe(self, name: str, result: ToolResult) -> None:
+        meta = result.meta or {}
+        publication = result.data.get("publication")
+        if name == "workspace_run" and publication == "published":
+            paths = result.data.get("changed_paths")
+            if isinstance(paths, list) and all(
+                isinstance(path, str)
+                and path not in {"", "."}
+                and "\x00" not in path
+                and not PurePosixPath(path).is_absolute()
+                and ".." not in PurePosixPath(path).parts
+                and PurePosixPath(path).as_posix() == path
+                for path in paths
+            ):
+                self.touched_paths.update(paths)
+                return
+        elif meta.get("execution_started") is False or (
+            name == "workspace_run"
+            and publication == "none"
+            and meta.get("execution_review_required") is False
+            and meta.get("reason_code") == WorkspaceFileBudgetExceeded.reason_code
+        ):
+            return
+        self.complete = False
+
+
+@dataclass
 class ToolGateway:
     registry: ToolRegistry
     pre_call: Callable[[ToolRequest], object | None] | None = None
@@ -61,6 +104,7 @@ class ToolGateway:
     approved_workspace_binding: WorkspaceBinding | None = None
     workspace_pool: ManagedWorkspacePool | None = None
     workspace_principal_id: str | None = None
+    auto_file_effects: AutoFileEffects | None = None
 
     def _workspace_binding(self, request: ToolRequest) -> WorkspaceBinding | None:
         if request.name not in _WORKSPACE_OPERATIONS:
@@ -142,7 +186,7 @@ class ToolGateway:
         except (OSError, WorkspaceUnavailable) as exc:
             return _workspace_failure(exc)
         # Python-only binding всегда выдаётся этим scoped Gateway, не tool arguments.
-        request = replace(request, workspace_binding=binding)
+        request = replace(request, workspace_binding=binding, workspace_file_budget=None)
         bypass_safe_mode = False
         confirmed_server_tool = False
         if self.confirmed_decision:
@@ -228,6 +272,22 @@ class ToolGateway:
                             "policy_rule_id": decision.policy_rule_id,
                         },
                     )
+        effects = self.auto_file_effects
+        if effects is not None and request.name == "workspace_run":
+            if not effects.complete:
+                return ToolResult.failure(
+                    "Нельзя проверить файловый лимит. Эффекты предыдущего вызова неизвестны.",
+                    meta={
+                        "reason_code": "workspace_file_effects_unknown",
+                        "execution_started": False,
+                    },
+                )
+            request = replace(
+                request,
+                workspace_file_budget=WorkspaceFileBudget(
+                    effects.limit, frozenset(effects.touched_paths)
+                ),
+            )
         context = self.pre_call(request) if self.pre_call else None
         try:
             guard = None
@@ -256,6 +316,11 @@ class ToolGateway:
         except Exception as exc:  # noqa: BLE001
             logger.error("Ошибка инструмента %s: %s", request.name, exc)
             result = ToolResult.failure(f"Ошибка инструмента {request.name}: {exc}")
+        if effects is not None and (
+            request.name == "workspace_run"
+            or self.registry.get_capability(request.name) in {"write", "exec"}
+        ):
+            effects.observe(request.name, result)
         if self.post_call:
             self.post_call(request, result, context)
         return result
