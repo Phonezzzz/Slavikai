@@ -523,3 +523,141 @@ def test_ordinary_ask_acceptance_is_scoped_idempotent_and_atomic(tmp_path) -> No
             authority=TransitionAuthority.USER,
             reason_code="abort",
         )
+
+
+def test_server_restart_fences_unfinished_runs_without_replay(tmp_path) -> None:
+    from core.task_run_storage import open_task_run_server
+
+    path = tmp_path / "runs.db"
+    scope = RunScope("alice", "session-a")
+    with open_task_run_server(path) as first:
+
+        def admit(key):
+            return first.admit(
+                scope, request_fingerprint="a" * 64, request_key=key, goal="inspect", mode="auto"
+            )
+
+        pending = admit("pending")
+        running = first.transition(
+            scope,
+            admit("running").task_run_id,
+            expected_version=0,
+            state=RunState.RUNNING,
+            authority=TransitionAuthority.RUNTIME,
+            reason_code="execution_started",
+        )
+        intent = first.begin_tool_operation(running, model_call_id="x", request_path="a.py")
+        submitted = first.transition(
+            scope,
+            admit("submitted").task_run_id,
+            expected_version=0,
+            state=RunState.RUNNING,
+            authority=TransitionAuthority.RUNTIME,
+            reason_code="execution_started",
+        )
+        submitted = first.submit_result(
+            scope,
+            submitted.task_run_id,
+            expected_version=submitted.version,
+            report=ProducerReport(ProducerKind.AUTO, "candidate"),
+            reason_code="result_submitted",
+        )
+        aborted = first.transition(
+            scope,
+            admit("aborted").task_run_id,
+            expected_version=0,
+            state=RunState.ABORTED,
+            authority=TransitionAuthority.USER,
+            reason_code="user_aborted",
+        )
+        answer = first.admit(
+            scope, request_fingerprint="b" * 64, request_key="ask", goal="explain", mode="ask"
+        )
+        answer = first.transition(
+            scope,
+            answer.task_run_id,
+            expected_version=answer.version,
+            state=RunState.RUNNING,
+            authority=TransitionAuthority.RUNTIME,
+            reason_code="execution_started",
+        )
+        report = ProducerReport(ProducerKind.MODEL, "answer")
+        answer = first.submit_result(
+            scope,
+            answer.task_run_id,
+            expected_version=answer.version,
+            report=report,
+            reason_code="result_submitted",
+        )
+        completed = first.accept_ordinary_ask(
+            scope,
+            answer.task_run_id,
+            expected_version=answer.version,
+            report=report,
+        )
+        with pytest.raises(RuntimeError, match="already owned"):
+            with open_task_run_server(path):
+                pytest.fail("another live server acquired the same store")
+        assert first.get(scope, running.task_run_id) == running
+        assert first.get(scope, pending.task_run_id) == pending
+        assert first.get(scope, submitted.task_run_id) == submitted
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TRIGGER fault BEFORE INSERT ON run_transitions "
+            "WHEN NEW.state='recovery_required' AND NEW.prior_state='result_submitted' "
+            "BEGIN SELECT RAISE(ABORT, 'recovery fault'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="recovery fault"):
+        with open_task_run_server(path):
+            pytest.fail("partial recovery must not start serving")
+    for old in (pending, running, submitted):
+        assert first.get(scope, old.task_run_id) == old
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER fault")
+
+    with open_task_run_server(path) as restarted:
+        for old in (pending, running, submitted):
+            current = restarted.get(scope, old.task_run_id)
+            assert current.state == RunState.RECOVERY_REQUIRED
+            assert current.version == old.version + 1
+            event = restarted.events(scope, old.task_run_id)[-1]
+            assert event.authority == TransitionAuthority.RECOVERY
+            assert event.reason_code == "server_restart_requires_reconciliation"
+        assert restarted.get(scope, aborted.task_run_id) == aborted
+        assert restarted.get(scope, completed.task_run_id) == completed
+        assert restarted.get_submission(scope, submitted.task_run_id).report.text == "candidate"
+        assert (
+            restarted.get_tool_operation(scope, running.task_run_id, intent.operation_id) == intent
+        )
+        with pytest.raises(RunConflictError):
+            restarted.begin_tool_operation(running, model_call_id="y", request_path="a.py")
+
+    with open_task_run_server(path) as restarted:
+        assert restarted.get(scope, running.task_run_id).version == running.version + 1
+
+
+def test_task_run_server_lease_excludes_a_separate_process(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    from core.task_run_storage import open_task_run_server
+
+    path = tmp_path / "runs.db"
+    probe = [
+        sys.executable,
+        "-c",
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from core.task_run_storage import open_task_run_server\n"
+        "with open_task_run_server(Path(sys.argv[1])):\n"
+        "    print('acquired')\n",
+        str(path),
+    ]
+    with open_task_run_server(path):
+        competing = subprocess.run(probe, capture_output=True, text=True, timeout=10)
+        assert competing.returncode != 0
+        assert "already owned" in competing.stderr
+    restarted = subprocess.run(probe, capture_output=True, text=True, timeout=10)
+    assert restarted.returncode == 0, restarted.stderr
+    assert restarted.stdout.strip() == "acquired"

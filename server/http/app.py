@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from typing import cast
 
@@ -28,7 +31,7 @@ from core.managed_workspace import (
 )
 from core.rootless_podman import QUALIFIED_PYTHON_IMAGE, RootlessPodmanProfile
 from core.rootless_staging import RootlessStagePool, StagingLimits
-from core.task_run_storage import TaskRunStore
+from core.task_run_storage import TaskRunStore, open_task_run_server
 from core.workspace_python_execution import RootlessPythonExecutor
 from llm.types import ModelConfig
 from server import http_api as api
@@ -347,16 +350,27 @@ def create_app(
 def run_server(config: HttpServerConfig) -> None:
     _load_project_dotenv()
     auth_config = ensure_http_auth_boot_config()
-    app = create_app(
-        max_request_bytes=config.max_request_bytes,
-        auth_config=auth_config,
-    )
-    web.run_app(
-        app,
-        host=config.host,
-        port=config.port,
-        shutdown_timeout=8.0,
-    )
+    path = api.PROJECT_ROOT / ".run" / "task_runs.db"
+    with (
+        open_task_run_server(path) as task_run_store,
+        ThreadPoolExecutor() as workers,
+        closing(asyncio.new_event_loop()) as loop,
+    ):
+        loop.set_default_executor(workers)
+        app = create_app(
+            max_request_bytes=config.max_request_bytes,
+            auth_config=auth_config,
+            task_run_store=task_run_store,
+        )
+        # aiohttp closes the loop without joining running to_thread calls.
+        # The executor context drains them before the DB lease is released.
+        web.run_app(
+            app,
+            host=config.host,
+            port=config.port,
+            shutdown_timeout=8.0,
+            loop=loop,
+        )
 
 
 def main() -> None:

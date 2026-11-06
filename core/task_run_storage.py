@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import sqlite3
-from contextlib import closing
+import stat
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -122,6 +125,30 @@ class TaskRunStore:
                 conn.execute(statement)
             self._upgrade_submissions(conn)
             self._upgrade_capture(conn)
+
+    def _mark_unfinished_for_recovery(self) -> None:
+        """Canonical server startup calls this under the exclusive DB lease."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            pending = conn.execute(
+                "SELECT r.task_run_id, r.version, t.principal_id, t.session_id "
+                "FROM task_runs r JOIN task_revisions t "
+                "ON t.task_id=r.task_id AND t.revision=r.task_revision "
+                "WHERE r.state IN (?, ?, ?)",
+                (RunState.ADMITTED, RunState.RUNNING, RunState.RESULT_SUBMITTED),
+            ).fetchall()
+            now = datetime.now(UTC).isoformat()
+            for row in pending:
+                self._transition(
+                    conn,
+                    RunScope(row["principal_id"], row["session_id"]),
+                    row["task_run_id"],
+                    expected_version=row["version"],
+                    state=RunState.RECOVERY_REQUIRED,
+                    authority=TransitionAuthority.RECOVERY,
+                    reason_code="server_restart_requires_reconciliation",
+                    now=now,
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -804,6 +831,7 @@ class TaskRunStore:
             raise RunConflictError("Stale run version")
         allowed = {
             (RunState.ADMITTED, RunState.RUNNING, TransitionAuthority.RUNTIME),
+            (RunState.ADMITTED, RunState.RECOVERY_REQUIRED, TransitionAuthority.RECOVERY),
             (RunState.RUNNING, RunState.RECOVERY_REQUIRED, TransitionAuthority.RECOVERY),
             (
                 RunState.RESULT_SUBMITTED,
@@ -940,3 +968,26 @@ class TaskRunStore:
             created_at=row["created_at"],
             terminal_at=row["terminal_at"],
         )
+
+
+@contextmanager
+def open_task_run_server(path: Path) -> Iterator[TaskRunStore]:
+    """Hold the DB inode lease through startup, serving and executor settlement."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise RuntimeError("TaskRunStore lease requires an owned regular DB file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("TaskRunStore is already owned by a live server") from exc
+        current = path.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise RuntimeError("TaskRunStore path changed while acquiring its lease")
+        store = TaskRunStore(path)
+        store._mark_unfinished_for_recovery()
+        yield store
+    finally:
+        os.close(fd)

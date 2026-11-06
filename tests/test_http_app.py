@@ -45,8 +45,15 @@ def test_create_app_invokes_dotenv_loader(monkeypatch) -> None:
     assert calls == ["loaded"]
 
 
-def test_run_server_loads_dotenv_before_auth_validation(monkeypatch) -> None:
+def test_run_server_loads_dotenv_before_auth_validation(monkeypatch, tmp_path) -> None:
+    from threading import Event
+
+    import pytest
+
+    from core.task_run_storage import open_task_run_server
+
     calls: list[str] = []
+    monkeypatch.setattr(http_app.api, "PROJECT_ROOT", tmp_path)
     auth_config = HttpAuthConfig(
         api_token="from-dotenv",
         allow_unauth_local=False,
@@ -62,15 +69,36 @@ def test_run_server_loads_dotenv_before_auth_validation(monkeypatch) -> None:
     def _create_app(**kwargs):  # noqa: ANN003, ANN202
         calls.append("app")
         assert kwargs["auth_config"] == auth_config
+        with pytest.raises(RuntimeError, match="already owned"):
+            with open_task_run_server(kwargs["task_run_store"].path):
+                pytest.fail("server construction must run under the lease")
         return object()
 
     monkeypatch.setattr(http_app, "ensure_http_auth_boot_config", _ensure_auth)
     monkeypatch.setattr(http_app, "create_app", _create_app)
-    monkeypatch.setattr(http_app.web, "run_app", lambda *args, **kwargs: None)
+    loop_closed = Event()
+    worker_settled = Event()
+
+    def run_app(app, *, loop, **kwargs):
+        def worker():
+            assert loop_closed.wait(timeout=5)
+            with pytest.raises(RuntimeError, match="already owned"):
+                with open_task_run_server(tmp_path / ".run" / "task_runs.db"):
+                    pytest.fail("the lease must remain held during worker settlement")
+            worker_settled.set()
+
+        loop.run_in_executor(None, worker)
+        loop.close()
+        loop_closed.set()
+
+    monkeypatch.setattr(http_app.web, "run_app", run_app)
 
     http_app.run_server(HttpServerConfig())
 
     assert calls == ["dotenv", "auth", "app"]
+    assert worker_settled.is_set()
+    with open_task_run_server(tmp_path / ".run" / "task_runs.db"):
+        pass
 
 
 def test_load_project_dotenv_skips_when_dependency_missing(monkeypatch) -> None:

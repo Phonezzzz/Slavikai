@@ -40,7 +40,7 @@ Read использует consistent transaction snapshot. Ошибки DB не 
 | --- | --- | --- |
 | admitted | running | runtime |
 | running | result_submitted | runtime |
-| running / result_submitted | recovery_required | recovery |
+| admitted / running / result_submitted | recovery_required | recovery |
 | любой non-terminal state | aborted | user / recovery |
 
 `aborted` terminal для данного run, без assertion domain failure. `terminal_at` записывается
@@ -51,8 +51,17 @@ logical task revision и не публикует semantic final. `result_submitt
 обязательный срез. Исходный B1 намеренно не предоставлял completed/failed/cancelled transitions,
 resume, new attempt или implicit rerun, для которых ещё нет интегрированной authority.
 
-Restart читает ровно committed state/history. Он сам ничего не помечает completed или
-recovery_required: reconciliation требует отдельного controller и fencing живых owners.
+Канонический запуск сервера (`python -m server` и CLI `slavikai`) требует одного
+владельца файла TaskRunStore. На локальной файловой системе сервер берёт exclusive
+`flock` на inode DB до открытия хранилища, затем одной транзакцией помечает
+`admitted`, `running` и `result_submitted` как `recovery_required`.
+Сохраняются task/attempt identities, прежние переходы, submissions и наблюдения.
+Уже помеченные и terminal runs сохраняют свои версии. Второй сервер прекращает
+запуск до изменения run state. Lease удерживается до завершения HTTP loop и
+его фоновых потоков. Каталог DB доверенный; переименование и подмена файла
+во время работы сервера не поддерживаются. Обычное открытие хранилища из библиотеки
+не запускает startup reconciliation. Этот срез блокирует повторный dispatch старого
+запуска; replay, resume и сверка внешних эффектов остаются отдельной задачей.
 Несогласованные history/current state отклоняются, без latest-timestamp эвристики.
 Revision/history immutable на SQL boundary; отказ history write откатывает весь transition.
 
