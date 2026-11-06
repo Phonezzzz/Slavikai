@@ -1036,6 +1036,12 @@ class TaskRunStore:
                     and workspace_marker.tool_attempt_id == row["tool_attempt_id"]
                     else None
                 )
+                digest = publication.snapshot_sha256 if publication is not None else None
+                digest_source = "observation" if digest is not None else None
+                if digest is None and matching_marker is not None:
+                    digest = matching_marker.snapshot_sha256
+                    if digest is not None:
+                        digest_source = "workspace_root_marker"
                 operations.append(
                     {
                         "operation_id": row["operation_id"],
@@ -1056,13 +1062,8 @@ class TaskRunStore:
                             if matching_marker is not None
                             else None
                         ),
-                        "publication_snapshot_sha256": (
-                            publication.snapshot_sha256
-                            if publication is not None and publication.snapshot_sha256 is not None
-                            else matching_marker.snapshot_sha256
-                            if matching_marker is not None
-                            else None
-                        ),
+                        "publication_snapshot_sha256": digest,
+                        "publication_snapshot_source": digest_source,
                         "publication_cleanup_warning": (
                             publication.cleanup_warning if publication is not None else None
                         ),

@@ -380,6 +380,11 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             owner.publish_bounded(
                 snapshot, stage, limits=limits, publication_operation=marker_operation
             )
+            store.record_tool_observation(
+                marker_operation,
+                ProcessObservation(b"", b"", 0, 0, True, True, 0, False),
+                publication=WorkspacePublicationEvidence(cleanup_warning=False),
+            )
             submitted = store.submit_result(
                 scope,
                 running.task_run_id,
@@ -428,10 +433,14 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             assert body["operations"][1]["publication"] == "unknown"
             assert body["operations"][1]["publication_cleanup_warning"] is None
             assert body["operations"][1]["publication_snapshot_sha256"] is None
-            assert body["operations"][2]["observation"] is None
+            assert body["operations"][2]["observation"] is not None
             assert body["operations"][2]["publication"] == "published"
-            assert body["operations"][2]["publication_source"] == "workspace_root_marker"
-            assert body["operations"][2]["publication_cleanup_warning"] is None
+            assert body["operations"][2]["publication_source"] == "observation"
+            assert body["operations"][2]["publication_cleanup_warning"] is False
+            assert body["operations"][2]["publication_snapshot_source"] == "workspace_root_marker"
+            assert body["operations"][2]["publication_snapshot_sha256"] is not None
+            assert body["operations"][0]["publication_snapshot_source"] == "observation"
+            assert body["operations"][1]["publication_snapshot_source"] is None
             assert body["operations"][3]["publication"] == "unknown"
             assert "private" not in await response.text()
             following = await (await client.get(url, params={"after": body["next_cursor"]})).json()
