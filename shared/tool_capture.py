@@ -103,6 +103,17 @@ class ToolOperation:
 
 
 @dataclass(frozen=True)
+class WorkspacePublicationEvidence:
+    """Trusted executor evidence that the atomic exchange returned successfully."""
+
+    cleanup_warning: bool
+
+    def __post_init__(self) -> None:
+        if type(self.cleanup_warning) is not bool:
+            raise ValueError("Invalid publication cleanup evidence")
+
+
+@dataclass(frozen=True)
 class StoredToolObservation:
     operation: ToolOperation
     result_id: str
@@ -110,6 +121,7 @@ class StoredToolObservation:
     stdout_digest: str
     stderr_digest: str
     captured_at: str
+    publication: WorkspacePublicationEvidence | None = None
 
 
 class ToolCaptureStore(Protocol):
@@ -118,7 +130,11 @@ class ToolCaptureStore(Protocol):
     ) -> ToolOperation: ...
 
     def record_tool_observation(
-        self, operation: ToolOperation, observation: ProcessObservation
+        self,
+        operation: ToolOperation,
+        observation: ProcessObservation,
+        *,
+        publication: WorkspacePublicationEvidence | None = None,
     ) -> str: ...
 
 

@@ -30,6 +30,7 @@ from shared.tool_capture import (
     ProcessObservation,
     StoredToolObservation,
     ToolOperation,
+    WorkspacePublicationEvidence,
 )
 
 _ADMISSION_SCHEMA = (
@@ -104,17 +105,18 @@ class TaskRunStore:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 4:
-                self._validate_v3_schema(conn, capture=True)
-                return
-            if version == 3:
-                self._validate_v3_schema(conn)
-                self._upgrade_capture(conn)
+            if version in {3, 4, 5}:
+                self._validate_v3_schema(conn, capture=version >= 4, publication=version == 5)
+                if version == 3:
+                    self._upgrade_capture(conn)
+                if version < 5:
+                    self._upgrade_publication(conn)
                 return
             if version == 2:
                 self._validate_v2_schema(conn)
                 self._upgrade_submissions(conn)
                 self._upgrade_capture(conn)
+                self._upgrade_publication(conn)
                 return
             occupied = conn.execute(
                 "SELECT count(*) FROM sqlite_master "
@@ -126,6 +128,7 @@ class TaskRunStore:
                 conn.execute(statement)
             self._upgrade_submissions(conn)
             self._upgrade_capture(conn)
+            self._upgrade_publication(conn)
 
     def _mark_unfinished_for_recovery(self) -> None:
         """Canonical server startup calls this under the exclusive DB lease."""
@@ -158,7 +161,9 @@ class TaskRunStore:
         return conn
 
     @staticmethod
-    def _validate_v3_schema(conn: sqlite3.Connection, *, capture: bool = False) -> None:
+    def _validate_v3_schema(
+        conn: sqlite3.Connection, *, capture: bool = False, publication: bool = False
+    ) -> None:
         columns = {
             "task_revisions": (
                 "task_id",
@@ -228,6 +233,8 @@ class TaskRunStore:
                 "stdout_digest",
                 "stderr_digest",
             )
+        if publication:
+            columns["tool_observations"] += ("published_cleanup_warning",)
         tables = {
             row[0]
             for row in conn.execute(
@@ -359,6 +366,23 @@ class TaskRunStore:
                 )
         conn.execute("PRAGMA user_version = 4")
 
+    @staticmethod
+    def _upgrade_publication(conn: sqlite3.Connection) -> None:
+        # NULL preserves uncertainty for every historical observation.
+        conn.execute(
+            "ALTER TABLE tool_observations ADD COLUMN published_cleanup_warning INTEGER "
+            "CHECK (published_cleanup_warning IN (0, 1))"
+        )
+        conn.execute("PRAGMA user_version = 5")
+
+    @staticmethod
+    def _read_publication(value: object) -> WorkspacePublicationEvidence | None:
+        if value is None:
+            return None
+        if type(value) is not int or value not in (0, 1):
+            raise RuntimeError("Stored workspace publication evidence is invalid")
+        return WorkspacePublicationEvidence(bool(value))
+
     def begin_tool_operation(
         self, run: TaskRun, *, model_call_id: str, request_path: str
     ) -> ToolOperation:
@@ -442,8 +466,14 @@ class TaskRunStore:
         )
 
     def record_tool_observation(
-        self, operation: ToolOperation, observation: ProcessObservation
+        self,
+        operation: ToolOperation,
+        observation: ProcessObservation,
+        *,
+        publication: WorkspacePublicationEvidence | None = None,
     ) -> str:
+        if publication is not None and not isinstance(publication, WorkspacePublicationEvidence):
+            raise ValueError("Typed workspace publication evidence required")
         if not isinstance(observation, ProcessObservation):
             raise ValueError("Typed raw process observation required")
         with closing(self._connect()) as conn, conn:
@@ -455,7 +485,10 @@ class TaskRunStore:
                 raise RunConflictError("Tool observation does not match its original intent")
             identity = str(uuid4())
             conn.execute(
-                "INSERT INTO tool_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO tool_observations (result_id, operation_id, stdout, stderr, "
+                "stdout_seen, stderr_seen, stdout_eof, stderr_eof, exit_code, timed_out, "
+                "capture_error, captured_at, stdout_digest, stderr_digest, "
+                "published_cleanup_warning) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     identity,
                     operation.operation_id,
@@ -471,6 +504,7 @@ class TaskRunStore:
                     datetime.now(UTC).isoformat(),
                     hashlib.sha256(observation.stdout).hexdigest(),
                     hashlib.sha256(observation.stderr).hexdigest(),
+                    int(publication.cleanup_warning) if publication is not None else None,
                 ),
             )
             return identity
@@ -511,6 +545,7 @@ class TaskRunStore:
                 row["stdout_digest"],
                 row["stderr_digest"],
                 row["captured_at"],
+                self._read_publication(row["published_cleanup_warning"]),
             )
 
     def submit_result(
@@ -919,6 +954,7 @@ class TaskRunStore:
                 "o.request_path, o.created_at, t.state AS admission_state, "
                 "e.result_id, e.exit_code, e.timed_out, e.capture_error, e.captured_at, "
                 "e.stdout_seen, e.stderr_seen, e.stdout_eof, e.stderr_eof, "
+                "e.published_cleanup_warning, "
                 "length(e.stdout) AS stdout_retained, length(e.stderr) AS stderr_retained "
                 "FROM tool_operations o "
                 "LEFT JOIN run_transitions t ON t.task_run_id=o.task_run_id "
@@ -948,6 +984,7 @@ class TaskRunStore:
                         "stderr_complete": bool(row["stderr_eof"])
                         and row["stderr_seen"] == row["stderr_retained"],
                     }
+                publication = self._read_publication(row["published_cleanup_warning"])
                 operations.append(
                     {
                         "operation_id": row["operation_id"],
@@ -956,6 +993,10 @@ class TaskRunStore:
                         "request_path": row["request_path"],
                         "created_at": row["created_at"],
                         "observation": observation,
+                        "publication": "published" if publication is not None else "unknown",
+                        "publication_cleanup_warning": (
+                            publication.cleanup_warning if publication is not None else None
+                        ),
                     }
                 )
             return {

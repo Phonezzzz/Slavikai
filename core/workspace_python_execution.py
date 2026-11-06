@@ -19,6 +19,7 @@ from shared.tool_capture import (
     ToolCaptureFault,
     ToolCaptureReceipt,
     ToolOperation,
+    WorkspacePublicationEvidence,
 )
 from shared.workspace_binding import (
     WorkspaceBinding,
@@ -106,7 +107,14 @@ class _CaptureAttempt:
             ),
         )
         try:
-            result_id = self.context.binding.store.record_tool_observation(operation, observation)
+            publication = (
+                WorkspacePublicationEvidence(outcome.cleanup_warning)
+                if outcome.publication == "published"
+                else None
+            )
+            result_id = self.context.binding.store.record_tool_observation(
+                operation, observation, publication=publication
+            )
         except Exception as exc:
             raise ToolCaptureFault("workspace_capture_store_failed", observation) from exc
         return replace(

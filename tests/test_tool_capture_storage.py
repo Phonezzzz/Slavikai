@@ -67,7 +67,7 @@ def test_additive_v3_upgrade_preserves_original_history_and_has_no_fake_tool_cap
     run_id = "a17b0a38-0af1-475e-a0a1-83f225cbcec0"
     assert store.get_submission(scope, run_id).report.text == "producer-v3"
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         for table, rows in originals.items():
             assert conn.execute(f"SELECT * FROM {table}").fetchall() == rows
         assert conn.execute("SELECT count(*) FROM tool_operations").fetchone()[0] == 0
@@ -228,3 +228,53 @@ def test_raw_payload_digest_is_verified_when_reading_committed_evidence(tmp_path
         store.get_tool_observation(
             scope, run.task_run_id, operation.operation_id, operation.tool_attempt_id
         )
+
+
+def test_publication_migration_preserves_legacy_observation_and_rolls_back(tmp_path, monkeypatch):
+    import sqlite3
+
+    from shared.tool_capture import ProcessObservation
+
+    store = TaskRunStore(tmp_path / "runs.db")
+    scope = RunScope("alice", "chat")
+    run = store.admit(
+        scope, request_key="legacy", goal="run", mode="auto", request_fingerprint="a" * 64
+    )
+    run = store.transition(
+        scope,
+        run.task_run_id,
+        expected_version=0,
+        state=RunState.RUNNING,
+        authority=TransitionAuthority.RUNTIME,
+        reason_code="started",
+    )
+    operation = store.begin_tool_operation(run, model_call_id="call", request_path="script.py")
+    observation = ProcessObservation(b"old", b"", 3, 0, True, True, 0, False)
+    result_id = store.record_tool_observation(operation, observation)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("ALTER TABLE tool_observations DROP COLUMN published_cleanup_warning")
+        conn.execute("PRAGMA user_version = 4")
+        legacy = conn.execute("SELECT * FROM tool_observations").fetchone()
+
+    upgrade = TaskRunStore._upgrade_publication
+
+    def interrupted(conn):
+        upgrade(conn)
+        raise OSError("synthetic publication upgrade failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(TaskRunStore, "_upgrade_publication", staticmethod(interrupted))
+        with pytest.raises(OSError, match="synthetic publication upgrade failure"):
+            TaskRunStore(store.path)
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("SELECT * FROM tool_observations").fetchone() == legacy
+
+    reopened = TaskRunStore(store.path)
+    stored = reopened.get_tool_observation(
+        scope, run.task_run_id, operation.operation_id, operation.tool_attempt_id
+    )
+    assert stored.result_id == result_id
+    assert stored.observation == observation
+    assert stored.publication is None
+    assert reopened.get(scope, run.task_run_id) == run

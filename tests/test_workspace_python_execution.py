@@ -384,6 +384,9 @@ def test_executor_file_budget_fences_staged_publication(
 
     from core.rootless_podman import PreparedPythonContainer
     from core.rootless_staging import BoundedStage, RootlessStagePool, StagingLimits
+    from core.task_run_storage import TaskRunStore
+    from shared.task_run import RunScope, RunState, TransitionAuthority
+    from shared.tool_capture import CaptureBinding, ToolCaptureContext
 
     parent = tmp_path / "managed"
     parent.mkdir(mode=0o700)
@@ -449,7 +452,34 @@ def test_executor_file_budget_fences_staged_publication(
     executor = RootlessPythonExecutor(
         profile, owner, WorkspaceLimits(1024, 4096, 20, 8), 1024, pool
     )
-    outcome = executor.execute_python(binding, "script.py", timeout=3, max_files_touched=limit)
+    store = TaskRunStore(tmp_path / "runs.db")
+    scope = RunScope("alice", "chat")
+    admitted = store.admit(
+        scope, request_key="run", goal="run script", mode="auto", request_fingerprint="a" * 64
+    )
+    running = store.transition(
+        scope,
+        admitted.task_run_id,
+        expected_version=admitted.version,
+        state=RunState.RUNNING,
+        authority=TransitionAuthority.RUNTIME,
+        reason_code="started",
+    )
+    outcome = executor.execute_python(
+        binding,
+        "script.py",
+        timeout=3,
+        max_files_touched=limit,
+        capture=ToolCaptureContext(CaptureBinding(store, running), "call"),
+    )
+    assert outcome.capture_receipt is not None
+    operation = outcome.capture_receipt.operation
+    stored = TaskRunStore(store.path).get_tool_observation(
+        scope, running.task_run_id, operation.operation_id, operation.tool_attempt_id
+    )
+    assert (stored.publication is not None) is (expected == "published")
+    if stored.publication is not None:
+        assert stored.publication.cleanup_warning is cleanup_fault
     assert outcome.publication == expected
     if limit == 0:
         assert bool(pool._allocations) is cleanup_fault

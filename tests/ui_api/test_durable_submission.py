@@ -305,7 +305,7 @@ def test_browser_ask_stream_requires_provider_stop_for_acceptance(
 
 def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agent):
     from shared.task_run import TransitionAuthority
-    from shared.tool_capture import ProcessObservation
+    from shared.tool_capture import ProcessObservation, WorkspacePublicationEvidence
 
     agent, brain = isolated_agent
 
@@ -337,7 +337,13 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             ]
             first = min(operations, key=lambda op: op.operation_id)
             result_id = store.record_tool_observation(
-                first, ProcessObservation(b"private bytes", b"", 13, 0, True, True, 0, False)
+                first,
+                ProcessObservation(b"private bytes", b"", 13, 0, True, True, 0, False),
+                publication=WorkspacePublicationEvidence(cleanup_warning=True),
+            )
+            store.record_tool_observation(
+                sorted(operations, key=lambda op: op.operation_id)[1],
+                ProcessObservation(b"", b"", 0, 0, True, True, 0, False),
             )
             submitted = store.submit_result(
                 scope,
@@ -365,7 +371,13 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             assert body["submission"]["kind"] == "auto"
             assert len(body["operations"]) == 50
             assert body["operations"][0]["observation"]["result_id"] == result_id
-            assert body["operations"][1]["observation"] is None
+            assert body["operations"][0]["publication"] == "published"
+            assert body["operations"][0]["publication_cleanup_warning"] is True
+            assert body["operations"][1]["observation"]["exit_code"] == 0
+            assert body["operations"][1]["publication"] == "unknown"
+            assert body["operations"][1]["publication_cleanup_warning"] is None
+            assert body["operations"][2]["observation"] is None
+            assert body["operations"][2]["publication"] == "unknown"
             assert "private" not in await response.text()
             following = await (await client.get(url, params={"after": body["next_cursor"]})).json()
             assert len(following["operations"]) == 1 and following["next_cursor"] is None

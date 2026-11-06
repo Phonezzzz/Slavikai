@@ -76,8 +76,13 @@ digest проверенного producer submission (если есть), до 50
 
 Пустой список означает отсутствие записанных intents этого capture path. Он не
 доказывает отсутствие внешних эффектов. `observation: null` означает отсутствие
-сохранённого наблюдения. Наличие наблюдения или exit 0 не подтверждает публикацию
-изменений. `external_effects` остаётся `unreconciled`; endpoint не меняет состояние,
+сохранённого наблюдения. `publication=published` означает, что trusted executor
+подтвердил успешный atomic exchange и записал этот факт в той же immutable строке
+и SQLite-транзакции, что и наблюдение исходной попытки. `publication_cleanup_warning`
+отдельно отражает сбой очистки после exchange. `publication=unknown` сохраняется
+для исторических наблюдений, отсутствующей записи и любого исхода без такого
+подтверждения. Crash между exchange и commit всё ещё оставляет unknown.
+Наблюдение и exit 0 сами по себе не подтверждают публикацию или текущие байты. `external_effects` остаётся `unreconciled`; endpoint не меняет состояние,
 не инициирует сверку/исполнение и не возвращает raw stdout/stderr или текст producer.
 Ответ не кэшируется.
 
@@ -108,8 +113,9 @@ Foreign и missing IDs дают одинаковый unavailable error. Reattach
 Session prune не вызывает удаление task/run DB: session attachment не является lifetime.
 
 DB создаётся mode 0600, новый parent directory — 0700; file symlink отклоняется.
-Existing parent directory должен быть доверенным bootstrap directory. Schema version — 4;
-явно принятые additive upgrades v2→v3 (producer report) и v3→v4 (bounded tool capture)
+Existing parent directory должен быть доверенным bootstrap directory. Schema version — 5;
+явно принятые additive upgrades v2→v3 (producer report), v3→v4 (bounded tool capture)
+и v4→v5 (workspace publication evidence)
 выполняются транзакционно после проверки исходной shipped schema. Старые IDs/state/history сохраняются; неизвестная/посторонняя
 schema отклоняется. Ни reset, ни backfill результата из prose/logs не выполняются.
 Никакие raw tool payloads или secrets не копируются в events; reason — bounded code.
