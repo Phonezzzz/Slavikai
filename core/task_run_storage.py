@@ -948,7 +948,8 @@ class TaskRunStore:
             if run.state != RunState.RECOVERY_REQUIRED:
                 raise LookupError("Recovery evidence unavailable")
             recovery = conn.execute(
-                "SELECT reason_code FROM run_transitions WHERE task_run_id=? AND version=?",
+                "SELECT reason_code, prior_state, occurred_at FROM run_transitions "
+                "WHERE task_run_id=? AND version=?",
                 (task_run_id, run.version),
             ).fetchone()
             try:
@@ -1025,6 +1026,8 @@ class TaskRunStore:
                 "run_version": run.version,
                 "state": run.state.value,
                 "recovery_reason": recovery["reason_code"],
+                "recovery_prior_state": recovery["prior_state"],
+                "recovery_occurred_at": recovery["occurred_at"],
                 "external_effects": "unreconciled",
                 "submission": (
                     {

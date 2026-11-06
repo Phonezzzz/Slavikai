@@ -388,6 +388,11 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             body = await response.json()
             assert body["external_effects"] == "unreconciled"
             assert body["run_version"] == recovery.version
+            assert body["recovery_prior_state"] == "result_submitted"
+            assert (
+                body["recovery_occurred_at"]
+                == store.events(scope, running.task_run_id)[-1].occurred_at
+            )
             assert body["submission"]["kind"] == "auto"
             assert len(body["operations"]) == 50
             assert body["operations"][0]["observation"]["result_id"] == result_id
@@ -518,6 +523,11 @@ with open_task_run_server(Path(database)) as store:
                         body = await response.json()
                         assert body["external_effects"] == "unreconciled"
                         assert body["run_version"] == recovered.version
+                        assert body["recovery_prior_state"] == "running"
+                        assert (
+                            body["recovery_occurred_at"]
+                            == restarted.events(scope, run_id)[-1].occurred_at
+                        )
                         [operation] = body["operations"]
                         assert operation["operation_id"] == operation_id
                         assert operation["observation"] is None

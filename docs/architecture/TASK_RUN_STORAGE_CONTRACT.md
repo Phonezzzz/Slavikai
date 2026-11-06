@@ -69,7 +69,9 @@ Revision/history immutable на SQL boundary; отказ history write отка�
 
 `GET /ui/api/sessions/{session_id}/runs/{run_id}/recovery-evidence` доступен
 в браузерной auth lane только владельцу исходной сессии для `recovery_required`.
-В одном read-only SQLite snapshot читаются версия и причина перехода, ссылка и
+В одном read-only SQLite snapshot читаются версия и причина перехода, исходное
+состояние (recovery_prior_state) и время перехода (recovery_occurred_at) из
+сохранённой истории, ссылка и
 digest проверенного producer submission (если есть), до 50 сохранённых intents
 с метаданными process observation. Продолжение через `?after={next_cursor}`
 упорядочено по operation ID. Поздние наблюдения могут появиться при следующем чтении.
