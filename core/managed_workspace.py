@@ -398,15 +398,15 @@ class ManagedWorkspace:
                     raise WorkspaceConflict("bounded output is still changing")
             finally:
                 os.close(fd)
-            if max_files_touched is not None:
-                changed = changed_workspace_paths(snapshot, output)
-                if len(changed | already_touched) > max_files_touched:
-                    raise WorkspaceFileBudgetExceeded(
-                        "workspace file budget exhausted before publication"
-                    )
             host_stage = self.stage(output)
             try:
-                self.publish(snapshot, host_stage, limits=limits)
+                self._publish(
+                    snapshot,
+                    host_stage,
+                    limits=limits,
+                    max_files_touched=max_files_touched,
+                    already_touched=already_touched,
+                )
             except BaseException:
                 self._discard_fresh(host_stage)
                 raise
@@ -429,6 +429,17 @@ class ManagedWorkspace:
         stage.root до cleanup collector; никакого check-then-copy по отдельным файлам.
         Неконтролируемые host roots этой authority не получают.
         """
+        return self._publish(snapshot, stage, limits=limits)
+
+    def _publish(
+        self,
+        snapshot: WorkspaceSnapshot,
+        stage: WorkspaceStage,
+        *,
+        limits: WorkspaceLimits,
+        max_files_touched: int | None = None,
+        already_touched: frozenset[str] = frozenset(),
+    ) -> WorkspaceBinding:
         with self._lock, stage.publication():
             self._validate(snapshot.binding)
             if stage.binding != snapshot.binding or stage.root.parent != self.root.parent:
@@ -448,6 +459,12 @@ class ManagedWorkspace:
                     output = _capture_tree(fd, binding=stage.binding, limits=limits)
                     if _capture_tree(fd, binding=stage.binding, limits=limits) != output:
                         raise WorkspaceConflict("workspace output is still changing")
+                    if max_files_touched is not None:
+                        changed = changed_workspace_paths(snapshot, output)
+                        if len(changed | already_touched) > max_files_touched:
+                            raise WorkspaceFileBudgetExceeded(
+                                "workspace file budget exhausted before publication"
+                            )
                     _exchange(parent_fd, self.root.name, stage.root.name)
                     self._identity = stage.identity
                     self._revision = uuid.uuid4().hex

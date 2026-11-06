@@ -736,14 +736,15 @@ def test_changed_workspace_paths_counts_permission_changes_beyond_executable_bit
     assert changed_workspace_paths(before, after) == frozenset({"data.txt", "existing"})
 
 
-def test_bounded_publication_denies_permission_only_change(tmp_path):
+@pytest.mark.parametrize("original_mode", [0o600, 0o644])
+def test_bounded_publication_checks_published_permissions(tmp_path, original_mode):
     from shared.workspace_binding import WorkspaceFileBudgetExceeded
 
     parent = tmp_path / "managed"
     parent.mkdir(mode=0o700)
     owner = ManagedWorkspace.create(parent, principal_id="alice")
     (owner.root / "data.txt").write_text("same bytes")
-    (owner.root / "data.txt").chmod(0o600)
+    (owner.root / "data.txt").chmod(original_mode)
     limits = WorkspaceLimits(1024, 4096, 20, 8)
     binding = owner.bind(principal_id="alice", session_id="chat")
     snapshot = owner.capture(binding, limits=limits)
@@ -753,9 +754,15 @@ def test_bounded_publication_denies_permission_only_change(tmp_path):
     stage.begin_process()
     (stage.root / "data.txt").chmod(0o644)
     stage.mark_settled()
-    with pytest.raises(WorkspaceFileBudgetExceeded) as denied:
-        owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=0)
-    assert denied.value.reason_code == "workspace_file_budget_exhausted"
-    assert owner.bind(principal_id="alice", session_id="chat") == binding
-    assert (owner.root / "data.txt").stat().st_mode & 0o777 == 0o600
+    if original_mode == 0o600:
+        assert owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=0) is None
+        assert owner.bind(principal_id="alice", session_id="chat") != binding
+    else:
+        with pytest.raises(WorkspaceFileBudgetExceeded) as denied:
+            owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=0)
+        assert denied.value.reason_code == "workspace_file_budget_exhausted"
+        assert owner.bind(principal_id="alice", session_id="chat") == binding
+        assert list(parent.iterdir()) == [owner.root]
+
+    assert (owner.root / "data.txt").stat().st_mode & 0o777 == original_mode
     assert (stage.root / "data.txt").stat().st_mode & 0o777 == 0o644
