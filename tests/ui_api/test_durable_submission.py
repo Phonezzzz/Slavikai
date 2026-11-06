@@ -416,3 +416,122 @@ def test_browser_recovery_evidence_is_scoped_bounded_and_read_only(isolated_agen
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("after_exchange", [False, True])
+def test_browser_recovery_after_workspace_publisher_is_killed(
+    isolated_agent, tmp_path, after_exchange
+):
+    import signal
+    import subprocess
+    import sys
+
+    from core.managed_workspace import ManagedWorkspacePool
+    from core.task_run_storage import open_task_run_server
+
+    agent, brain = isolated_agent
+    crash_script = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+import core.managed_workspace as managed
+from core.task_run_storage import open_task_run_server
+from shared.task_run import RunScope, RunState, TransitionAuthority
+
+database, workspaces, worker, principal, session, after_exchange = sys.argv[1:]
+scope = RunScope(principal, session)
+with open_task_run_server(Path(database)) as store:
+    pool = managed.ManagedWorkspacePool(Path(workspaces))
+    owner = pool.for_principal(principal)
+    admitted = store.admit(
+        scope, request_key="crash", goal="run", mode="auto", request_fingerprint="a" * 64
+    )
+    running = store.transition(
+        scope, admitted.task_run_id, expected_version=admitted.version,
+        state=RunState.RUNNING, authority=TransitionAuthority.RUNTIME, reason_code="start",
+    )
+    operation = store.begin_tool_operation(running, model_call_id="tool", request_path="run.py")
+    limits = managed.WorkspaceLimits(1024, 4096, 20, 8)
+    snapshot = owner.capture(owner.bind(principal_id=principal, session_id=session), limits=limits)
+    stage = owner.stage(snapshot, storage=Path(worker))
+    stage.begin_process()
+    (stage.root / "run.py").write_text("# published")
+    stage.mark_settled()
+    exchange = managed._exchange
+
+    def crash(parent_fd, current, candidate):
+        if after_exchange == "1":
+            exchange(parent_fd, current, candidate)
+        print(running.task_run_id, operation.operation_id, running.version, flush=True)
+        os.kill(os.getpid(), signal.SIGKILL)
+
+    managed._exchange = crash
+    owner.publish_bounded(snapshot, stage, limits=limits, publication_operation=operation)
+"""
+
+    async def run():
+        client = await _create_client(agent)
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            principal = await client.app["ui_hub"].get_session_principal_id(session)
+            scope = RunScope(principal, session)
+            private = tmp_path / "private"
+            private.mkdir(mode=0o700)
+            worker = tmp_path / "worker"
+            worker.mkdir(mode=0o700)
+            database = tmp_path / "crash.db"
+            workspaces = private / "workspaces"
+            killed = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    sys.executable,
+                    "-c",
+                    crash_script,
+                    str(database),
+                    str(workspaces),
+                    str(worker),
+                    principal,
+                    session,
+                    str(int(after_exchange)),
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert killed.returncode == -signal.SIGKILL, killed.stderr
+            run_id, operation_id, version = killed.stdout.split()
+            pool = ManagedWorkspacePool(workspaces)
+            try:
+                with open_task_run_server(database) as restarted:
+                    client.app["task_run_store"] = restarted
+                    client.app["managed_workspace_pool"] = pool
+                    recovered = restarted.get(scope, run_id)
+                    assert recovered.state == RunState.RECOVERY_REQUIRED
+                    assert recovered.version == int(version) + 1
+                    url = f"/ui/api/sessions/{session}/runs/{run_id}/recovery-evidence"
+                    for _ in range(2):
+                        response = await client.get(url)
+                        assert response.status == 200, await response.text()
+                        body = await response.json()
+                        assert body["external_effects"] == "unreconciled"
+                        assert body["run_version"] == recovered.version
+                        [operation] = body["operations"]
+                        assert operation["operation_id"] == operation_id
+                        assert operation["observation"] is None
+                        assert operation["publication"] == (
+                            "published" if after_exchange else "unknown"
+                        )
+                        assert operation["publication_source"] == (
+                            "workspace_root_marker" if after_exchange else None
+                        )
+                    assert restarted.get(scope, run_id) == recovered
+                    assert brain.calls == 0
+            finally:
+                pool.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
