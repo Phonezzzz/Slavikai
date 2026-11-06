@@ -317,9 +317,15 @@ class RootlessStagePool:
             raise WorkspaceUnavailable("bounded staging binding changed")
 
     def release(self, bounded: BoundedStage) -> None:
+        self._release(bounded, expected_state="published")
+
+    def discard_budget_rejected(self, bounded: BoundedStage) -> None:
+        self._release(bounded, expected_state="settled")
+
+    def _release(self, bounded: BoundedStage, *, expected_state: str) -> None:
         self.check_stage(bounded)
-        if bounded.stage._state != "published":
-            raise WorkspaceUnavailable("unpublished staging must be retained")
+        if bounded.stage._state != expected_state:
+            raise WorkspaceUnavailable("staging state does not authorize cleanup")
         if not shutil.rmtree.avoids_symlink_attacks:
             raise WorkspaceUnavailable("safe bounded staging cleanup unavailable")
         with self._lock:

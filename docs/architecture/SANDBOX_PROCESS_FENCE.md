@@ -127,8 +127,9 @@ Concurrent writer даёт conflict, unknown/timeout/output limit — retained s
 проверка и новый запуск требуют явного решения. Retained stages не имеют GC/recovery
 UI и могут сохранять чувствительные bytes; автоматического cleanup unknown outputs нет.
 Retained outputs продолжают занимать bounded slot; exhaustion даёт unavailable.
-Slot освобождается только после publication и подтверждённого cleanup; ошибка
-cleanup требует review. Shutdown с живыми allocations сохраняет их mounts;
+Slot освобождается после подтверждённого cleanup опубликованного stage либо
+после явного отказа по файловому бюджету до публикации, если контейнер остановлен
+и удалён. При ошибке очистки slot остаётся занятым и требует review. Shutdown с живыми allocations сохраняет их mounts;
 чистое завершение требует доставленной команды и подтверждённого unmount.
 При ошибке удаления контейнер может остаться, settlement не объявляется успешным.
 

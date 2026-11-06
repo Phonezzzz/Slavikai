@@ -374,7 +374,7 @@ def test_executor_forwards_trusted_publication_file_budget(tmp_path, monkeypatch
 
 @pytest.mark.parametrize(
     "limit,expected,cleanup_fault",
-    [(0, "retained", False), (1, "published", False), (1, "published", True)],
+    [(0, "none", False), (0, "retained", True), (1, "published", False), (1, "published", True)],
 )
 def test_executor_file_budget_fences_staged_publication(
     tmp_path, monkeypatch, limit, expected, cleanup_fault
@@ -401,7 +401,9 @@ def test_executor_file_budget_fences_staged_publication(
         stage = workspace.stage(snapshot)
         (stage.root / "script.py").write_text("# after")
         info = stage.root.stat()
-        return BoundedStage(stage, self, stage.root, stage.root, (info.st_dev, info.st_ino))
+        bounded = BoundedStage(stage, self, stage.root, stage.root, (info.st_dev, info.st_ino))
+        self._allocations[stage.root] = bounded
+        return bounded
 
     monkeypatch.setattr(RootlessStagePool, "prepare", prepare)
     monkeypatch.setattr(RootlessStagePool, "check_stage", lambda *args: None)
@@ -410,7 +412,10 @@ def test_executor_file_budget_fences_staged_publication(
         if cleanup_fault:
             raise OSError("synthetic stage cleanup failure")
 
-    monkeypatch.setattr(RootlessStagePool, "release", release)
+    if limit != 0:
+        monkeypatch.setattr(RootlessStagePool, "release", release)
+    elif cleanup_fault:
+        monkeypatch.setattr("core.rootless_staging._private_directory", release)
     monkeypatch.setattr(RootlessPodmanProfile, "check_current", lambda *args: None)
     monkeypatch.setattr(RootlessPodmanProfile, "verify_created", lambda *args: None)
     monkeypatch.setattr(
@@ -446,7 +451,10 @@ def test_executor_file_budget_fences_staged_publication(
     )
     outcome = executor.execute_python(binding, "script.py", timeout=3, max_files_touched=limit)
     assert outcome.publication == expected
-    if expected == "retained":
+    if limit == 0:
+        assert bool(pool._allocations) is cleanup_fault
+        assert (outcome.retained_stage is not None) is cleanup_fault
+        assert outcome.cleanup_warning is cleanup_fault
         assert outcome.reason_code == "workspace_file_budget_exhausted"
         assert outcome.changed_paths is None
         assert (owner.root / "script.py").read_text() == "# before"

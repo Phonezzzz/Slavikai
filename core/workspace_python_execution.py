@@ -20,7 +20,12 @@ from shared.tool_capture import (
     ToolCaptureReceipt,
     ToolOperation,
 )
-from shared.workspace_binding import WorkspaceBinding, WorkspaceConflict, WorkspaceUnavailable
+from shared.workspace_binding import (
+    WorkspaceBinding,
+    WorkspaceConflict,
+    WorkspaceFileBudgetExceeded,
+    WorkspaceUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +378,30 @@ class RootlessPythonExecutor:
                 limits=self.limits,
                 max_files_touched=max_files_touched,
                 already_touched=already_touched,
+            )
+        except WorkspaceFileBudgetExceeded as exc:
+            try:
+                pool.discard_budget_rejected(bounded)
+            except (OSError, WorkspaceUnavailable):
+                return WorkspacePythonOutcome(
+                    "unavailable",
+                    attached.stdout,
+                    attached.stderr,
+                    child_exit,
+                    True,
+                    exc.reason_code,
+                    "retained",
+                    stage.root,
+                    cleanup_warning=True,
+                )
+            return WorkspacePythonOutcome(
+                "unavailable",
+                attached.stdout,
+                attached.stderr,
+                child_exit,
+                True,
+                exc.reason_code,
+                "none",
             )
         except (OSError, WorkspaceUnavailable) as exc:
             return WorkspacePythonOutcome(
