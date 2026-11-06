@@ -839,6 +839,7 @@ def test_auto_file_budget_survives_approval_and_blocks_publication(tmp_path, mon
     agent._brain = BatchBrain(
         [
             [
+                ToolCall(id="missing", name="workspace_run", arguments={"path": "missing.py"}),
                 ToolCall(id="1", name="workspace_run", arguments={"path": "initial.py"}),
                 ToolCall(
                     id="3",

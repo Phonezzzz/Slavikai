@@ -592,27 +592,33 @@ class RunCodeTool:
         self.backend = backend
 
     def handle(self, request: ToolRequest) -> ToolResult:
+        not_started: dict[str, JSONValue] = {"execution_started": False}
         raw_path = str(request.args.get("path") or "").strip()
         if not raw_path:
-            return ToolResult.failure("Не указан путь скрипта.")
+            return ToolResult.failure("Не указан путь скрипта.", meta=not_started)
         try:
             path = _ensure_in_workspace(raw_path)
             if path.suffix != ".py":
-                return ToolResult.failure("Можно запускать только .py файлы.")
+                return ToolResult.failure("Можно запускать только .py файлы.", meta=not_started)
             if not path.exists():
-                return ToolResult.failure("Файл не найден.")
+                return ToolResult.failure("Файл не найден.", meta=not_started)
             resolved = path.resolve()
             try:
-                resolved.relative_to(get_workspace_root())
+                relative_path = resolved.relative_to(get_workspace_root()).as_posix()
             except ValueError:
-                return ToolResult.failure("Скрипт вне рабочей директории запрещён.")
+                return ToolResult.failure(
+                    "Скрипт вне рабочей директории запрещён.", meta=not_started
+                )
+        except (OSError, RuntimeError, ValueError) as exc:
+            return ToolResult.failure(f"Ошибка запуска: {exc}", meta=not_started)
+        try:
             if self.backend is None or request.workspace_binding is None:
                 return sandbox_execution_failure()
             budget = request.workspace_file_budget
             try:
                 outcome = self.backend.execute_python(
                     request.workspace_binding,
-                    resolved.relative_to(get_workspace_root()).as_posix(),
+                    relative_path,
                     timeout=self.timeout,
                     capture=request.capture,
                     max_files_touched=budget.limit if budget is not None else None,
