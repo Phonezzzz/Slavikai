@@ -80,6 +80,12 @@ def changed_workspace_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot)
 
 
 @dataclass(frozen=True)
+class BoundedPublication:
+    changed_paths: frozenset[str]
+    retired_host: Path | None
+
+
+@dataclass(frozen=True)
 class WorkspaceStage:
     root: Path
     binding: WorkspaceBinding
@@ -361,12 +367,12 @@ class ManagedWorkspace:
         limits: WorkspaceLimits,
         max_files_touched: int | None = None,
         already_touched: frozenset[str] = frozenset(),
-    ) -> Path | None:
+    ) -> BoundedPublication:
         """После settlement переносит только validated bytes в trusted host stage.
 
         Worker никогда не получает writable host stage. Копирование ограничено
         capture limits, затем используется тот же owner/CAS/atomic exchange.
-        Возвращает путь старого host tree только при cleanup warning после commit.
+        Возвращает опубликованные пути и путь старого дерева при ошибке его очистки.
         """
         if max_files_touched is not None and (
             type(max_files_touched) is not int or max_files_touched < 0
@@ -400,7 +406,7 @@ class ManagedWorkspace:
                 os.close(fd)
             host_stage = self.stage(output)
             try:
-                self._publish(
+                _, changed = self._publish(
                     snapshot,
                     host_stage,
                     limits=limits,
@@ -413,8 +419,8 @@ class ManagedWorkspace:
             try:
                 self.discard_retired(snapshot, host_stage)
             except (OSError, WorkspaceUnavailable):
-                return host_stage.root
-            return None
+                return BoundedPublication(changed, host_stage.root)
+            return BoundedPublication(changed, None)
 
     def publish(
         self,
@@ -429,7 +435,8 @@ class ManagedWorkspace:
         stage.root до cleanup collector; никакого check-then-copy по отдельным файлам.
         Неконтролируемые host roots этой authority не получают.
         """
-        return self._publish(snapshot, stage, limits=limits)
+        binding, _ = self._publish(snapshot, stage, limits=limits)
+        return binding
 
     def _publish(
         self,
@@ -439,7 +446,7 @@ class ManagedWorkspace:
         limits: WorkspaceLimits,
         max_files_touched: int | None = None,
         already_touched: frozenset[str] = frozenset(),
-    ) -> WorkspaceBinding:
+    ) -> tuple[WorkspaceBinding, frozenset[str]]:
         with self._lock, stage.publication():
             self._validate(snapshot.binding)
             if stage.binding != snapshot.binding or stage.root.parent != self.root.parent:
@@ -459,22 +466,25 @@ class ManagedWorkspace:
                     output = _capture_tree(fd, binding=stage.binding, limits=limits)
                     if _capture_tree(fd, binding=stage.binding, limits=limits) != output:
                         raise WorkspaceConflict("workspace output is still changing")
-                    if max_files_touched is not None:
-                        changed = changed_workspace_paths(snapshot, output)
-                        if len(changed | already_touched) > max_files_touched:
-                            raise WorkspaceFileBudgetExceeded(
-                                "workspace file budget exhausted before publication"
-                            )
+                    changed = changed_workspace_paths(snapshot, output)
+                    if (
+                        max_files_touched is not None
+                        and len(changed | already_touched) > max_files_touched
+                    ):
+                        raise WorkspaceFileBudgetExceeded(
+                            "workspace file budget exhausted before publication"
+                        )
                     _exchange(parent_fd, self.root.name, stage.root.name)
                     self._identity = stage.identity
                     self._revision = uuid.uuid4().hex
-                    return WorkspaceBinding(
+                    binding = WorkspaceBinding(
                         self._workspace_id,
                         stage.binding.principal_id,
                         stage.binding.session_id,
                         self._revision,
                         stage.binding.environment_revision,
                     )
+                    return binding, changed
                 finally:
                     os.close(fd)
             finally:
