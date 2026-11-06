@@ -59,6 +59,8 @@ class ContainerComputerBackend:
         *,
         timeout: float,
         capture: ToolCaptureContext | None = None,
+        max_files_touched: int | None = None,
+        already_touched: frozenset[str] = frozenset(),
     ) -> WorkspacePythonOutcome:
         executor = self.python_executor
         if (
@@ -69,7 +71,14 @@ class ContainerComputerBackend:
             or self.project_root.absolute() != executor.workspace.root
         ):
             return unavailable_python_execution()
-        return executor.execute_python(binding, script, timeout=timeout, capture=capture)
+        return executor.execute_python(
+            binding,
+            script,
+            timeout=timeout,
+            capture=capture,
+            max_files_touched=max_files_touched,
+            already_touched=already_touched,
+        )
 
     def _qualified_file_call(self, request: ToolRequest) -> ToolResult:
         if self.file_gateway is None:

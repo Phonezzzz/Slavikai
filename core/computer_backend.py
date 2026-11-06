@@ -41,6 +41,8 @@ class ComputerBackend(Protocol):
         *,
         timeout: float,
         capture: ToolCaptureContext | None = None,
+        max_files_touched: int | None = None,
+        already_touched: frozenset[str] = frozenset(),
     ) -> WorkspacePythonOutcome: ...
 
 
@@ -61,6 +63,8 @@ class LocalComputerBackend:
         *,
         timeout: float,
         capture: ToolCaptureContext | None = None,
+        max_files_touched: int | None = None,
+        already_touched: frozenset[str] = frozenset(),
     ) -> WorkspacePythonOutcome:
         return unavailable_python_execution()
 

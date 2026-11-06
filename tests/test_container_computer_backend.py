@@ -195,3 +195,37 @@ def test_container_process_operations_cannot_use_even_injected_runner(
     assert result.meta["reason_code"] == "sandbox_execution_unavailable"
     assert fake_runner.calls == []
     assert list(tmp_path.iterdir()) == before
+
+
+def test_qualified_backend_forwards_trusted_file_effects_budget(tmp_path):
+    from types import SimpleNamespace
+
+    from core.container_computer_backend import QUALIFIED_PYTHON_IMAGE
+    from core.workspace_python_execution import unavailable_python_execution
+    from shared.workspace_binding import WorkspaceBinding
+
+    calls = []
+    binding = WorkspaceBinding("owner-workspace", "alice", "session", "rev")
+
+    def execute(bound, path, *, timeout, capture, max_files_touched, already_touched):
+        calls.append((bound, path, timeout, capture, max_files_touched, already_touched))
+        return unavailable_python_execution()
+
+    executor = SimpleNamespace(
+        workspace=SimpleNamespace(root=tmp_path.absolute()), execute_python=execute
+    )
+    backend = ContainerComputerBackend(
+        image=QUALIFIED_PYTHON_IMAGE,
+        project_root=tmp_path,
+        runtime="podman",
+        python_executor=executor,
+    )
+    outcome = backend.execute_python(
+        binding,
+        "script.py",
+        timeout=3,
+        max_files_touched=8,
+        already_touched=frozenset({"prior.txt"}),
+    )
+    assert outcome.state == "unavailable"
+    assert calls == [(binding, "script.py", 3, None, 8, frozenset({"prior.txt"}))]

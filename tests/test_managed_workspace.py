@@ -553,7 +553,9 @@ def test_settled_external_stage_publishes_only_via_bounded_capture_and_atomic_ex
     with pytest.raises(WorkspaceUnavailable, match="settled"):
         owner.publish_bounded(snapshot, stage, limits=limits)
     stage.mark_settled()
-    assert owner.publish_bounded(snapshot, stage, limits=limits) is None
+    publication = owner.publish_bounded(snapshot, stage, limits=limits)
+    assert publication.retired_host is None
+    assert publication.changed_paths == frozenset({"script.py"})
     assert (owner.root / "script.py").read_bytes() == b"verified output"
     assert (stage.root / "script.py").read_bytes() == b"verified output"
     assert list(parent.glob("stage-*")) == []
@@ -594,15 +596,18 @@ def test_bounded_publication_rejects_file_effects_before_exchange(
     stage.mark_settled()
 
     if allowed:
-        assert (
-            owner.publish_bounded(
-                snapshot,
-                stage,
-                limits=limits,
-                max_files_touched=max_files,
-                already_touched=already_touched,
-            )
-            is None
+        publication = owner.publish_bounded(
+            snapshot,
+            stage,
+            limits=limits,
+            max_files_touched=max_files,
+            already_touched=already_touched,
+        )
+        assert publication.retired_host is None
+        assert publication.changed_paths == frozenset(
+            path
+            for path, content in stage_changes.items()
+            if path != "a.txt" or content != b"original"
         )
         for path, content in stage_changes.items():
             assert (owner.root / path).read_bytes() == content
@@ -737,7 +742,10 @@ def test_changed_workspace_paths_counts_permission_changes_beyond_executable_bit
 
 
 @pytest.mark.parametrize("original_mode", [0o600, 0o644])
-def test_bounded_publication_checks_published_permissions(tmp_path, original_mode):
+@pytest.mark.parametrize("max_files_touched", [None, 0])
+def test_bounded_publication_checks_published_permissions(
+    tmp_path, original_mode, max_files_touched
+):
     from shared.workspace_binding import WorkspaceFileBudgetExceeded
 
     parent = tmp_path / "managed"
@@ -754,15 +762,21 @@ def test_bounded_publication_checks_published_permissions(tmp_path, original_mod
     stage.begin_process()
     (stage.root / "data.txt").chmod(0o644)
     stage.mark_settled()
-    if original_mode == 0o600:
-        assert owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=0) is None
-        assert owner.bind(principal_id="alice", session_id="chat") != binding
-    else:
+    if original_mode == 0o644 and max_files_touched == 0:
         with pytest.raises(WorkspaceFileBudgetExceeded) as denied:
             owner.publish_bounded(snapshot, stage, limits=limits, max_files_touched=0)
         assert denied.value.reason_code == "workspace_file_budget_exhausted"
         assert owner.bind(principal_id="alice", session_id="chat") == binding
         assert list(parent.iterdir()) == [owner.root]
+        assert (owner.root / "data.txt").stat().st_mode & 0o777 == original_mode
+    else:
+        publication = owner.publish_bounded(
+            snapshot, stage, limits=limits, max_files_touched=max_files_touched
+        )
+        assert publication.retired_host is None
+        expected_paths = frozenset({"data.txt"}) if original_mode == 0o644 else frozenset()
+        assert publication.changed_paths == expected_paths
+        assert owner.bind(principal_id="alice", session_id="chat") != binding
+        assert (owner.root / "data.txt").stat().st_mode & 0o777 == 0o600
 
-    assert (owner.root / "data.txt").stat().st_mode & 0o777 == original_mode
     assert (stage.root / "data.txt").stat().st_mode & 0o777 == 0o644
