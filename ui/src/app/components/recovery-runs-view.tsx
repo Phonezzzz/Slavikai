@@ -128,7 +128,9 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
       {evidence && selected && (
         <div className="space-y-2 break-all text-xs">
           <h4>Свидетельства запуска {selected}</h4>
-          <p>Причина перехода к сверке: {evidence.recovery_reason}</p>
+          <p>Причина перехода к сверке: {evidence.recovery_reason === 'server_restart_requires_reconciliation'
+            ? 'Сервер перезапустился до завершения запуска.'
+            : evidence.recovery_reason}</p>
           <div className="space-y-1">
             <h5>Сохранённый результат</h5>
             {evidence.submission ? (
@@ -146,7 +148,9 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
             )}
           </div>
           <p>Внешние эффекты: {evidence.external_effects}</p>
-          {!evidence.operations.length && <p>Сохранённых попыток нет.</p>}
+          {!evidence.operations.length && (
+            <p>Сохранённых попыток нет. Внешние эффекты всё ещё требуют сверки.</p>
+          )}
           <ul className="space-y-2">
             {evidence.operations.map((operation) => (
               <li key={operation.operation_id}>
