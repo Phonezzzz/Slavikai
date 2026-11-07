@@ -9,7 +9,10 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it('reads the selected run and pages its evidence using the originating session', async () => {
   const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
-    if (url.endsWith('/recovery')) return json({ runs: [run], next_cursor: null });
+    if (url.endsWith('/recovery')) return json({ runs: [run], next_cursor: 'run-cursor' });
+    if (url.endsWith('?after=run-cursor')) {
+      return json({ runs: [{ ...run, task_run_id: 'run-b' }], next_cursor: null });
+    }
     if (url.endsWith('?after=cursor')) return json({ operations: [], next_cursor: null, external_effects: 'unreconciled' });
     return json({
       operations: [{
@@ -27,11 +30,18 @@ it('reads the selected run and pages its evidence using the originating session'
   fireEvent.click(await screen.findByRole('button', { name: /run-a/ }));
   expect(await screen.findByText(/SHA-256: digest/)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Следующая страница свидетельств' }));
-  await screen.findByText('Сохранённых попыток нет.');
+  expect(screen.queryByText('Сохранённых попыток нет.')).toBeNull();
+  await act(async () => {});
+  expect(screen.getByText(/SHA-256: digest/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Следующая страница запусков' }));
+  await screen.findByRole('button', { name: /run-b/ });
+  expect(screen.getByRole('button', { name: /run-a/ })).toBeTruthy();
+  expect(screen.getByText(/SHA-256: digest/)).toBeTruthy();
   expect(fetch.mock.calls.map(([url]) => url)).toEqual([
     `/ui/api/sessions/${session}/runs/recovery`,
     `/ui/api/sessions/${session}/runs/${run.task_run_id}/recovery-evidence`,
     `/ui/api/sessions/${session}/runs/${run.task_run_id}/recovery-evidence?after=cursor`,
+    `/ui/api/sessions/${session}/runs/recovery?after=run-cursor`,
   ]);
   for (const [, init] of fetch.mock.calls) {
     expect(init?.headers).toEqual({ 'X-Test': 'A' });

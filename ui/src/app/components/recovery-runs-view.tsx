@@ -39,8 +39,8 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
     pending.current = controller;
     setLoading(true);
     setError(null);
-    if (!runId) setRuns(null);
-    if (!after || !runId) {
+    if (!runId && !after) setRuns(null);
+    if (!after) {
       setSelected(runId ?? null);
       setEvidence(null);
     }
@@ -57,8 +57,17 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
       if (!response.ok) throw new Error('Recovery unavailable');
       const body = await response.json();
       if (controller.signal.aborted) return;
-      if (runId) setEvidence(body as Evidence);
-      else setRuns(body as Runs);
+      if (runId) {
+        const page = body as Evidence;
+        setEvidence((previous) => after && previous
+          ? { ...page, operations: [...previous.operations, ...page.operations] }
+          : page);
+      } else {
+        const page = body as Runs;
+        setRuns((previous) => after && previous
+          ? { ...page, runs: [...previous.runs, ...page.runs] }
+          : page);
+      }
     } catch {
       if (!controller.signal.aborted) setError('Не удалось прочитать данные для сверки.');
     } finally {
@@ -92,7 +101,7 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
         </ul>
       )}
       {runs?.next_cursor && (
-        <button type="button" className="text-xs underline" onClick={() => void read(undefined, runs.next_cursor ?? undefined)}>Следующая страница запусков</button>
+        <button type="button" className="text-xs underline" disabled={loading} onClick={() => void read(undefined, runs.next_cursor ?? undefined)}>Следующая страница запусков</button>
       )}
       {evidence && selected && (
         <div className="space-y-2 break-all text-xs">
@@ -114,7 +123,7 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
             ))}
           </ul>
           {evidence.next_cursor && (
-            <button type="button" className="underline" onClick={() => void read(selected, evidence.next_cursor ?? undefined)}>
+            <button type="button" className="underline" disabled={loading} onClick={() => void read(selected, evidence.next_cursor ?? undefined)}>
               Следующая страница свидетельств
             </button>
           )}
