@@ -131,3 +131,14 @@ def test_rejects_preexisting_result(tmp_path):
     (root / "open.json").write_text('["A17","D42"]', encoding="utf-8")
     with pytest.raises(ValueError, match="должна быть пустой"):
         run_case(ScriptedBrain([]), root, complete=True)
+
+
+def test_accepts_equivalent_workspace_paths(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    actions = [
+        ("workspace_read", {"path": "./export.json"}),
+        ("workspace_write", {"path": "./open.json", "content": '["A17","D42"]'}),
+        ("workspace_read", {"path": "./open.json"}),
+    ]
+    assert run_case(ScriptedBrain(actions), root, complete=True) == ()

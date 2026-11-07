@@ -45,16 +45,26 @@ def run_case(brain: Brain, root: Path, *, complete: bool) -> tuple[str, ...]:
     for name, content in inputs.items():
         (root / name).write_text(content, encoding="utf-8")
 
+    root = root.resolve()
+
+    def workspace_path(raw_path: object) -> str | None:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return None
+        try:
+            return (root / raw_path.strip()).resolve().relative_to(root).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
     read_file = ReadFileTool()
     write_file = WriteFileTool()
 
     def read(request: ToolRequest) -> ToolResult:
-        if request.args.get("path") not in (*inputs, "open.json"):
+        if workspace_path(request.args.get("path")) not in (*inputs, "open.json"):
             return ToolResult.failure("Чтение за пределами задания запрещено.")
         return read_file.handle(request)
 
     def write(request: ToolRequest) -> ToolResult:
-        if request.args.get("path") != "open.json":
+        if workspace_path(request.args.get("path")) != "open.json":
             return ToolResult.failure("Запись разрешена только в open.json.")
         return write_file.handle(request)
 
@@ -97,7 +107,7 @@ def run_case(brain: Brain, root: Path, *, complete: bool) -> tuple[str, ...]:
     read_back = False
     written = False
     for item in result.tool_calls:
-        path = item.call.arguments.get("path")
+        path = workspace_path(item.call.arguments.get("path"))
         if item.call.name == "workspace_read" and isinstance(path, str):
             if path not in (*inputs, "open.json"):
                 errors.append("scope_violation")
