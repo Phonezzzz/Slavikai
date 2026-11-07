@@ -588,3 +588,67 @@ with open_task_run_server(Path(database)) as store:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_browser_recovery_run_list_is_scoped_paged_and_read_only(isolated_agent):
+    from shared.task_run import TransitionAuthority
+
+    agent, brain = isolated_agent
+
+    async def run():
+        client = await _create_client(agent)
+        try:
+            session = (await (await client.get("/ui/api/status")).json())["session_id"]
+            principal = await client.app["ui_hub"].get_session_principal_id(session)
+            scope = RunScope(principal, session)
+            store = client.app["task_run_store"]
+            url = f"/ui/api/sessions/{session}/runs/recovery"
+            assert await (await client.get(url)).json() == {"runs": [], "next_cursor": None}
+            expected = {}
+            other = await client.app["ui_hub"].create_session(principal_id=principal)
+            for i in range(54):
+                subject = scope if i < 52 else RunScope(principal, other)
+                run = store.admit(
+                    subject,
+                    request_key=str(i),
+                    goal="private goal",
+                    mode="auto",
+                    request_fingerprint="a" * 64,
+                )
+                if i == 51:
+                    continue
+                recovery = store.transition(
+                    subject,
+                    run.task_run_id,
+                    expected_version=run.version,
+                    state=RunState.RECOVERY_REQUIRED,
+                    authority=TransitionAuthority.RECOVERY,
+                    reason_code="server_restart_requires_reconciliation",
+                )
+                if i < 51:
+                    event = store.events(scope, run.task_run_id)[-1]
+                    expected[run.task_run_id] = {
+                        "task_run_id": run.task_run_id,
+                        "run_version": recovery.version,
+                        "recovery_prior_state": "admitted",
+                        "recovery_occurred_at": event.occurred_at,
+                    }
+            response = await client.get(url)
+            assert response.status == 200
+            assert response.headers["Cache-Control"] == "no-store"
+            first = await response.json()
+            ordered = [expected[key] for key in sorted(expected)]
+            assert first["runs"] == ordered[:50]
+            last = await (await client.get(url, params={"after": first["next_cursor"]})).json()
+            assert last == {"runs": ordered[50:], "next_cursor": None}
+            assert (await client.get(url, params={"after": "bad"})).status == 400
+            assert await (await client.get(url)).json() == first
+            assert brain.calls == 0
+            assert store.recovery_runs(RunScope("foreign", session))["runs"] == []
+            for row in ordered:
+                assert store.get(scope, row["task_run_id"]).state == RunState.RECOVERY_REQUIRED
+                assert len(store.events(scope, row["task_run_id"])) == 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())

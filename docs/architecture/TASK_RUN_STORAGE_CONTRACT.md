@@ -690,3 +690,13 @@ Native Auto checkpoint получает исходный scoped TaskRun и пр�
 канонического capture, terminal acceptance или restart recovery этот срез не добавляет.
 Проверка: `tests/ui_api/test_api_task_run_admission.py` — реальные Agent/ToolGateway,
 повтор с reopen store/app, storage faults и security context races для Ask/Auto.
+
+### Список запусков для сверки
+
+GET /ui/api/sessions/{session_id}/runs/recovery доступен только владельцу
+исходной browser-сессии. Возвращает runs с task_run_id, run_version,
+recovery_prior_state и recovery_occurred_at для recovery_required.
+Страница содержит до 50 строк в порядке task_run_id. Продолжение задаётся
+after=next_cursor; пустой результат имеет next_cursor=null. Каждая страница
+читается в отдельном SQLite snapshot, состав может измениться между запросами.
+Ответ no-store, без текста задачи, проверки workspace, изменения состояния и replay.

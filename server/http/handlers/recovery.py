@@ -55,3 +55,30 @@ async def handle_recovery_evidence(request: web.Request) -> web.Response:
     response = json_response(evidence)
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+async def handle_recovery_runs(request: web.Request) -> web.Response:
+    session_id = request.match_info["session_id"]
+    denied = await _ensure_session_owned(request, cast(UIHub, request.app["ui_hub"]), session_id)
+    if denied is not None:
+        return denied
+    principal = _request_principal_id(request)
+    assert principal is not None
+    after = request.query.get("after", "")
+    try:
+        if after and str(UUID(after)) != after:
+            raise ValueError("Non-canonical UUID")
+    except ValueError:
+        return error_response(
+            status=400,
+            message="Некорректный курсор списка запусков.",
+            error_type="invalid_request_error",
+            code="invalid_recovery_cursor",
+        )
+    store = cast(TaskRunStore, request.app["task_run_store"])
+    evidence = await asyncio.to_thread(
+        store.recovery_runs, RunScope(principal, session_id), after=after
+    )
+    response = json_response(evidence)
+    response.headers["Cache-Control"] = "no-store"
+    return response

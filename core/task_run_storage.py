@@ -961,6 +961,32 @@ class TaskRunStore:
                 return None
             return self._record(scope, self._owned_row(conn, scope, row["task_run_id"]))
 
+    def recovery_runs(self, scope: RunScope, *, after: str = "") -> dict[str, JSONValue]:
+        """Read one bounded page of owned runs awaiting reconciliation."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                "SELECT r.task_run_id, r.version, t.prior_state, t.occurred_at "
+                "FROM task_runs r JOIN task_revisions v "
+                "ON v.task_id=r.task_id AND v.revision=r.task_revision "
+                "JOIN run_transitions t ON t.task_run_id=r.task_run_id AND t.version=r.version "
+                "WHERE v.principal_id=? AND v.session_id=? AND r.state=? AND r.task_run_id>? "
+                "ORDER BY r.task_run_id LIMIT 51",
+                (scope.principal_id, scope.session_id, RunState.RECOVERY_REQUIRED, after),
+            ).fetchall()
+            return {
+                "runs": [
+                    {
+                        "task_run_id": row["task_run_id"],
+                        "run_version": row["version"],
+                        "recovery_prior_state": row["prior_state"],
+                        "recovery_occurred_at": row["occurred_at"],
+                    }
+                    for row in rows[:50]
+                ],
+                "next_cursor": rows[49]["task_run_id"] if len(rows) > 50 else None,
+            }
+
     def recovery_evidence(
         self,
         scope: RunScope,

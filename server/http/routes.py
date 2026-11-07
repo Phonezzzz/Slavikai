@@ -102,6 +102,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/folders", sessions.handle_ui_folders_create)
     app.router.add_get("/ui/api/sessions", sessions.handle_ui_sessions_list)
     app.router.add_post("/ui/api/sessions", sessions.handle_ui_sessions_create)
+    app.router.add_get("/ui/api/sessions/{session_id}/runs/recovery", recovery.handle_recovery_runs)
     app.router.add_get(
         "/ui/api/sessions/{session_id}/runs/{run_id}/recovery-evidence",
         recovery.handle_recovery_evidence,
