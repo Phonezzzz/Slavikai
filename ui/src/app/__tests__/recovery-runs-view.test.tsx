@@ -19,7 +19,12 @@ it('reads the selected run and pages its evidence using the originating session'
         operation_id: 'op', tool_attempt_id: 'attempt', request_path: 'script.py',
         publication: 'published', publication_source: 'observation',
         publication_snapshot_sha256: 'digest', publication_snapshot_source: 'workspace_root_marker',
-        observation: null,
+        publication_cleanup_warning: true,
+        observation: {
+          exit_code: null, capture_error: null, timed_out: true,
+          stdout_bytes_seen: 20, stdout_bytes_retained: 10, stdout_eof: true,
+          stderr_bytes_seen: 3, stderr_bytes_retained: 3, stderr_eof: false,
+        },
       }],
       next_cursor: 'cursor', external_effects: 'unreconciled',
     });
@@ -29,6 +34,10 @@ it('reads the selected run and pages its evidence using the originating session'
   fireEvent.click(screen.getByRole('button', { name: 'Показать запуски для сверки' }));
   fireEvent.click(await screen.findByRole('button', { name: /run-a/ }));
   expect(await screen.findByText(/SHA-256: digest/)).toBeTruthy();
+  expect(screen.getByText('Время выполнения истекло.')).toBeTruthy();
+  expect(screen.getByText('После публикации очистка завершилась с ошибкой.')).toBeTruthy();
+  expect(screen.getByText('stdout: сохранено 10 из 20 прочитанных байтов · EOF достигнут')).toBeTruthy();
+  expect(screen.getByText('stderr: сохранено 3 из 3 прочитанных байтов · EOF не достигнут')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Следующая страница свидетельств' }));
   expect(screen.queryByText('Сохранённых попыток нет.')).toBeNull();
   await act(async () => {});

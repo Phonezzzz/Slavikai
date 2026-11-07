@@ -14,7 +14,18 @@ type Operation = {
   publication_source: string | null;
   publication_snapshot_sha256: string | null;
   publication_snapshot_source: string | null;
-  observation: { exit_code: number | null; capture_error: string | null } | null;
+  publication_cleanup_warning: boolean | null;
+  observation: {
+    exit_code: number | null;
+    capture_error: string | null;
+    timed_out: boolean;
+    stdout_bytes_seen: number;
+    stdout_bytes_retained: number;
+    stdout_eof: boolean;
+    stderr_bytes_seen: number;
+    stderr_bytes_retained: number;
+    stderr_eof: boolean;
+  } | null;
 };
 
 type Page<T> = { next_cursor: string | null } & T;
@@ -119,6 +130,16 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
                 <p>{operation.observation
                   ? `Код выхода: ${operation.observation.exit_code ?? 'неизвестен'}${operation.observation.capture_error ? ` · ${operation.observation.capture_error}` : ''}`
                   : 'Наблюдение отсутствует'}</p>
+                {operation.publication_cleanup_warning === true && (
+                  <p>После публикации очистка завершилась с ошибкой.</p>
+                )}
+                {operation.observation && (
+                  <>
+                    {operation.observation.timed_out && <p>Время выполнения истекло.</p>}
+                    <p>stdout: сохранено {operation.observation.stdout_bytes_retained} из {operation.observation.stdout_bytes_seen} прочитанных байтов · {operation.observation.stdout_eof ? 'EOF достигнут' : 'EOF не достигнут'}</p>
+                    <p>stderr: сохранено {operation.observation.stderr_bytes_retained} из {operation.observation.stderr_bytes_seen} прочитанных байтов · {operation.observation.stderr_eof ? 'EOF достигнут' : 'EOF не достигнут'}</p>
+                  </>
+                )}
               </li>
             ))}
           </ul>
