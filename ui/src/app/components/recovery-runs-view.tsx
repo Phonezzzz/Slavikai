@@ -30,7 +30,18 @@ type Operation = {
 
 type Page<T> = { next_cursor: string | null } & T;
 type Runs = Page<{ runs: Run[] }>;
-type Evidence = Page<{ external_effects: string; operations: Operation[] }>;
+type Evidence = Page<{
+  recovery_reason: string;
+  external_effects: string;
+  submission: {
+    submission_id: string;
+    version: number;
+    kind: string;
+    content_digest: string;
+    has_failure: boolean;
+  } | null;
+  operations: Operation[];
+}>;
 
 export function RecoveryRunsView({ sessionId, sessionHeader }: {
   sessionId: string;
@@ -117,6 +128,23 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
       {evidence && selected && (
         <div className="space-y-2 break-all text-xs">
           <h4>Свидетельства запуска {selected}</h4>
+          <p>Причина перехода к сверке: {evidence.recovery_reason}</p>
+          <div className="space-y-1">
+            <h5>Сохранённый результат</h5>
+            {evidence.submission ? (
+              <>
+                <p>ID результата: {evidence.submission.submission_id}</p>
+                <p>Версия: {evidence.submission.version} · Источник: {evidence.submission.kind}</p>
+                <p>SHA-256 результата: {evidence.submission.content_digest}</p>
+                <p>{evidence.submission.has_failure
+                  ? 'В результате отмечен сбой.'
+                  : 'В результате сбой не отмечен.'}</p>
+                <p>Запись подтверждает отправку результата. Приёмка требует отдельного подтверждения.</p>
+              </>
+            ) : (
+              <p>Сохранённого результата для сверки нет.</p>
+            )}
+          </div>
           <p>Внешние эффекты: {evidence.external_effects}</p>
           {!evidence.operations.length && <p>Сохранённых попыток нет.</p>}
           <ul className="space-y-2">

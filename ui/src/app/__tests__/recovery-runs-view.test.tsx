@@ -13,7 +13,15 @@ it('reads the selected run and pages its evidence using the originating session'
     if (url.endsWith('?after=run-cursor')) {
       return json({ runs: [{ ...run, task_run_id: 'run-b' }], next_cursor: null });
     }
-    if (url.endsWith('?after=cursor')) return json({ operations: [], next_cursor: null, external_effects: 'unreconciled' });
+    if (url.endsWith('/run-b/recovery-evidence')) return json({
+      operations: [], next_cursor: null, external_effects: 'unreconciled',
+      recovery_reason: 'server_restart_requires_reconciliation', submission: null,
+    });
+    if (url.endsWith('?after=cursor')) return json({
+      operations: [], next_cursor: null, external_effects: 'unreconciled',
+      recovery_reason: 'server_restart_requires_reconciliation',
+      submission: { submission_id: 'submission-a', version: 2, kind: 'auto', content_digest: 'report-digest', has_failure: true },
+    });
     return json({
       operations: [{
         operation_id: 'op', tool_attempt_id: 'attempt', request_path: 'script.py',
@@ -27,6 +35,8 @@ it('reads the selected run and pages its evidence using the originating session'
         },
       }],
       next_cursor: 'cursor', external_effects: 'unreconciled',
+      recovery_reason: 'server_restart_requires_reconciliation',
+      submission: { submission_id: 'submission-a', version: 2, kind: 'auto', content_digest: 'report-digest', has_failure: true },
     });
   });
   vi.stubGlobal('fetch', fetch);
@@ -34,6 +44,11 @@ it('reads the selected run and pages its evidence using the originating session'
   fireEvent.click(screen.getByRole('button', { name: 'Показать запуски для сверки' }));
   fireEvent.click(await screen.findByRole('button', { name: /run-a/ }));
   expect(await screen.findByText(/SHA-256: digest/)).toBeTruthy();
+  expect(screen.getByText(/Причина перехода к сверке: server_restart_requires_reconciliation/)).toBeTruthy();
+  expect(screen.getByText('ID результата: submission-a')).toBeTruthy();
+  expect(screen.getByText('SHA-256 результата: report-digest')).toBeTruthy();
+  expect(screen.getByText('В результате отмечен сбой.')).toBeTruthy();
+  expect(screen.getByText(/Приёмка требует отдельного подтверждения/)).toBeTruthy();
   expect(screen.getByText('Время выполнения истекло.')).toBeTruthy();
   expect(screen.getByText('После публикации очистка завершилась с ошибкой.')).toBeTruthy();
   expect(screen.getByText('stdout: сохранено 10 из 20 прочитанных байтов · EOF достигнут')).toBeTruthy();
@@ -52,6 +67,9 @@ it('reads the selected run and pages its evidence using the originating session'
     `/ui/api/sessions/${session}/runs/${run.task_run_id}/recovery-evidence?after=cursor`,
     `/ui/api/sessions/${session}/runs/recovery?after=run-cursor`,
   ]);
+  fireEvent.click(screen.getByRole('button', { name: /run-b/ }));
+  await screen.findByText('Сохранённого результата для сверки нет.');
+  expect(screen.queryByText('ID результата: submission-a')).toBeNull();
   for (const [, init] of fetch.mock.calls) {
     expect(init?.headers).toEqual({ 'X-Test': 'A' });
     expect(init?.method ?? 'GET').toBe('GET');
