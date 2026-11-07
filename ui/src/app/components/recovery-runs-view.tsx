@@ -125,6 +125,16 @@ export function RecoveryRunsView({ sessionId, sessionHeader }: {
       {runs?.next_cursor && (
         <button type="button" className="text-xs underline" disabled={loading} onClick={() => void read(undefined, runs.next_cursor ?? undefined)}>Следующая страница запусков</button>
       )}
+      {selected && (
+        <button
+          type="button"
+          className="text-xs underline"
+          disabled={loading}
+          onClick={() => void read(selected)}
+        >
+          Обновить свидетельства выбранного запуска
+        </button>
+      )}
       {evidence && selected && (
         <div className="space-y-2 break-all text-xs">
           <h4>Свидетельства запуска {selected}</h4>

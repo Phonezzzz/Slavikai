@@ -90,3 +90,39 @@ it('aborts an old session read and discards a response that arrives after switch
   await act(async () => finish(json({ runs: [run], next_cursor: null })));
   expect(screen.queryByRole('button', { name: /run-a/ })).toBeNull();
 });
+
+it('retries a failed evidence read and explicitly refreshes late observations', async () => {
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(json({ runs: [run], next_cursor: null }))
+    .mockResolvedValueOnce(new Response(null, { status: 503 }))
+    .mockResolvedValueOnce(json({
+      recovery_reason: 'server_restart_requires_reconciliation',
+      external_effects: 'unreconciled', submission: null, next_cursor: null, operations: [],
+    }))
+    .mockResolvedValueOnce(json({
+      recovery_reason: 'server_restart_requires_reconciliation',
+      external_effects: 'unreconciled', submission: null, next_cursor: null,
+      operations: [{
+        operation_id: 'late', tool_attempt_id: 'attempt', request_path: 'late.py',
+        publication: 'unknown', publication_source: null, observation: null,
+      }],
+    }));
+  vi.stubGlobal('fetch', fetch);
+  render(<RecoveryRunsView sessionId="A" sessionHeader="X-Test" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Показать запуски для сверки' }));
+  fireEvent.click(await screen.findByRole('button', { name: /run-a/ }));
+  await screen.findByRole('alert');
+  const refresh = screen.getByRole('button', { name: 'Обновить свидетельства выбранного запуска' });
+  fireEvent.click(refresh);
+  await screen.findByText(/Сохранённых попыток нет/);
+  fireEvent.click(refresh);
+  await screen.findByText(/late.py/);
+  expect(screen.queryByRole('alert')).toBeNull();
+  const [, ...reads] = fetch.mock.calls;
+  expect(reads).toHaveLength(3);
+  for (const [url, init] of reads) {
+    expect(url).toBe(reads[0][0]);
+    expect(init.headers).toEqual({ 'X-Test': 'A' });
+    expect(init.method ?? 'GET').toBe('GET');
+  }
+});
