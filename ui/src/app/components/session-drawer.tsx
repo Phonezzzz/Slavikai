@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ToggleSwitch } from './ui/toggle-switch';
 import { PausedModelRequestView } from './paused-model-request-view';
+import { RecoveryRunsView } from './recovery-runs-view';
 import { ModelQualification } from './model-qualification';
 import { parseSessionSecurityRevision, parseSessionSecurityState, parseSessionToolSources, type SessionToolSources, type ToolKey, type PolicyProfile } from '../session-security';
 import { useFocusTrap } from '../use-focus-trap';
@@ -327,6 +328,9 @@ export function SessionDrawer({
                 <p className="text-xs text-zinc-400">{SESSION_MODE_LABELS[mode]} · Режим выбирается у поля сообщения.</p>
                 <button type="button" disabled={!sessionId || pausedLoading} onClick={() => void loadPausedRequest()} className="text-xs text-zinc-300 underline disabled:opacity-50">{pausedLoading ? 'Reading paused model request...' : 'Show paused model request'}</button>
                 {pausedSnapshot !== null ? <PausedModelRequestView snapshot={pausedSnapshot} sessionId={sessionId} /> : null}
+                {isOpen && sessionId && (
+                  <RecoveryRunsView key={sessionId} sessionId={sessionId} sessionHeader={sessionHeader} />
+                )}
               </section>
 
               {ready ? <fieldset disabled={saving} className="contents">
