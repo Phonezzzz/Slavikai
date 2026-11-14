@@ -21,20 +21,7 @@
 
 ## Обязательный workflow
 
-Смотри `docs/workflow/dev_workflow.md`.
-Коротко:
-
-1. `git checkout main` + `git pull --ff-only origin main`
-2. `git checkout -b pr-<id>-<slug>`
-3. `make preflight`
-4. изменения + targeted tests
-5. `make check`
-6. commit + `git push -u origin HEAD`
-7. если `origin/main` продвинулся: rebase PR-ветки, повторный `make check` и push
-8. `make git-check`
-9. после одобрения: `git checkout main` + `git merge --ff-only <pr-branch>`
-10. `git push origin main`
-11. `git checkout main`
+Следуй [порядку работы с PR](dev_workflow.md).
 
 ## Проверки качества
 

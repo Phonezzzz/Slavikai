@@ -53,14 +53,28 @@
 
 ## Non-negotiable rules
 
+- Штатная локальная рабочая папка — `/home/ki/Project/Slavikai`. Для последовательных PR
+  используется один checkout; создавать дополнительные `git worktree` или копии репозитория
+  без конкретной необходимости и явного согласования владельца запрещено.
+- Параллельные read-only subagents могут использовать этот checkout без отдельных worktrees;
+  параллельные изменения файлов требуют координации.
 - Работа никогда не ведётся напрямую в `main`.
 - Каждая задача выполняется в отдельной PR-ветке.
 - На новой чистой PR-ветке до изменений: `make preflight`.
 - Перед завершением: `make check`.
+- После commit и push открыть PR. До merge обязательны успешный CI, независимый Codex
+  review текущего опубликованного HEAD и прочие требования GitHub и проекта. Порядок
+  проверки Qodo, других reviewers и замечаний описан в `docs/workflow/dev_workflow.md`.
 - После commit и push перед merge: `make git-check`.
-- В `main` только `git merge --ff-only`.
-- После merge обязательно вернуться в `main`.
+- В `main` только `git merge --ff-only` с последующим `git push origin main`.
+- После merge обязательно вернуться в `main`, проверить результат и удалить только
+  подтверждённо завершённую PR-ветку локально и на GitHub.
+- Полный цикл согласованного PR до merge разрешён без дополнительного подтверждения,
+  если владелец прямо поручил такой цикл; иначе требуется решение владельца.
 - Если что-то неясно — остановиться и запросить решение у человека.
+- Детальный порядок и безопасное обращение с существующими worktrees:
+  `docs/workflow/dev_workflow.md`.
+
 ## Anti-pseudo audit перед implementation
 
 Перед implementation каждого PR worker обязан выполнить mini non-mutating audit не только по файлам/entrypoints, но и по признакам pseudo-runtime / pseudo-agent behavior.
@@ -92,14 +106,32 @@
 
 ## Workflow (кратко)
 
-1. `git checkout main` + `git pull --ff-only origin main`
-2. `git checkout -b pr-<id>-<name>`
-3. `make preflight`
-4. реализация + targeted tests
-5. `make check`
-6. commit + `git push -u origin HEAD`
-7. перед merge: fetch; если `origin/main` продвинулся — rebase PR-ветки, повторный
-   `make check` и push
-8. `make git-check`
-9. после одобрения: `git merge --ff-only` в `main`
-10. `git checkout main`
+1. Для новой задачи в чистом `/home/ki/Project/Slavikai` перейти на `main` и обновить её
+   через `git pull --ff-only origin main`. Незавершённый PR продолжать в его ветке.
+2. `git checkout -b pr-<id>-<name>`; `make preflight`.
+3. Реализация + targeted tests; `make check`.
+4. Commit + `git push -u origin HEAD`; открыть PR.
+5. Проверить обязательный CI, независимый Codex review текущего HEAD и остальные
+   требования по `docs/workflow/dev_workflow.md`. Исправить подтверждённые замечания,
+   после push повторить применимые проверки и review.
+6. Перед merge: fetch; если `origin/main` продвинулся — rebase PR-ветки, повторить
+   `make check`, push и необходимые review/checks.
+7. `make git-check`.
+8. После одобрения и при наличии мандата владельца на полный цикл:
+   `git merge --ff-only <pr-branch>` в `main` + `git push origin main`.
+9. Подтвердить вливание текущего HEAD в удалённый `main` и статус `merged` на GitHub,
+   удалить безопасно завершённую PR-ветку локально и на GitHub,
+   завершить на актуальном `main`. Не начинать следующий PR автоматически.
+
+## Code Review Rules
+
+Правила применяются к GitHub/Codex code review. Reviewer проводит независимую оценку PR; review не даёт разрешения менять код, создавать commits или выполнять merge.
+
+- Проверяй PR относительно его фактической base branch, учитывая затронутые reachable execution paths, а не только изменённые строки.
+- Сопоставляй реализацию с применимыми canonical contracts, `docs/runtime_contract_claims.json` и существующими runtime-механизмами. PR description и успешный CI сами по себе не доказывают архитектурную корректность.
+- Ищи конкретные регрессии correctness и security в изменяемом контуре: authorization, principal/session isolation, approvals, sandbox, state ownership, concurrency, persistence, budgets, errors и unknown outcomes — только где релевантно.
+- Проверяй отсутствие обходов typed interfaces, `ToolGateway`, policy enforcement и verifier, а также новых duplicate/legacy execution paths и silent fallbacks.
+- Проверяй, покрывают ли тесты реально изменённый механизм и значимые failure paths, а не только ожидаемый итоговый эффект.
+- Отличай дефекты, внесённые этим PR, от существующих проблем. Не выдавай unrelated legacy debt за blocker этого PR; существенные обнаруженные риски вне scope отмечай отдельно.
+- Для каждого actionable finding указывай файл и строку, воспроизводимое условие или конкретный путь отказа, ожидаемое и фактическое поведение, затронутый контракт и серьёзность. Не выдвигай гипотезу как подтверждённый дефект.
+- Не требуй рефакторинга, форматирования или дополнительных abstractions без доказанного влияния на корректность. Если замечаний нет, сообщи об этом, указав границы выполненной проверки.
