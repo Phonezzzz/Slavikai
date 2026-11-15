@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from shared.sandbox import crosses_nested_mount, read_mount_bindings, source_mount_root
+
 ProtectionLevel = Literal["normal", "ask", "deny"]
 
 
@@ -67,6 +69,7 @@ class DesktopPathSecurity:
         *,
         must_exist: bool = False,
         mutation: bool = False,
+        includes_descendants: bool = False,
     ) -> ResolvedDesktopPath:
         normalized = raw.strip()
         if not normalized or "\x00" in normalized:
@@ -80,12 +83,23 @@ class DesktopPathSecurity:
             lexical = candidate if candidate.is_absolute() else self.home / candidate
         lexical = Path(os.path.normpath(str(lexical))).absolute()
         canonical = lexical.resolve(strict=must_exist)
-        protection, reason = self._classify(canonical, mutation=mutation)
-        mount_root = self._mount_root_for(canonical)
-        if mount_root is not None:
+        protection, reason = self._classify(
+            canonical, mutation=mutation, includes_descendants=includes_descendants
+        )
+        try:
+            mounts = read_mount_bindings()
+        except (OSError, ValueError):
+            mounts = []
+        if includes_descendants and not mounts:
+            protection, reason = "deny", "mount_topology_unavailable"
+        elif includes_descendants and crosses_nested_mount(canonical, mounts):
+            protection, reason = "deny", "nested_mount"
+        mount_root = source_mount_root(canonical, mounts)
+        if mount_root is not None and protection != "deny":
             mounted_protection, mounted_reason = self._classify(
                 mount_root,
                 mutation=mutation,
+                includes_descendants=includes_descendants,
             )
             if mounted_protection == "deny":
                 protection = "deny"
@@ -107,27 +121,35 @@ class DesktopPathSecurity:
         *,
         must_exist: bool = False,
         mutation: bool = False,
+        includes_descendants: bool = False,
     ) -> ResolvedDesktopPath:
-        resolved = self.resolve(raw, must_exist=must_exist, mutation=mutation)
+        resolved = self.resolve(
+            raw, must_exist=must_exist, mutation=mutation, includes_descendants=includes_descendants
+        )
         if resolved.protection == "deny":
             raise PermissionError(f"PROTECTED_RESOURCE_DENY: {resolved.reason}")
         return resolved
 
-    def _classify(self, path: Path, *, mutation: bool) -> tuple[ProtectionLevel, str]:
+    def _classify(
+        self, path: Path, *, mutation: bool, includes_descendants: bool
+    ) -> tuple[ProtectionLevel, str]:
         if path == Path("/") or (mutation and path == self.home):
             return "deny", "filesystem_or_home_root"
-        if self.policy_store_root is not None and _is_within(path, self.policy_store_root):
+        if self.policy_store_root is not None and (
+            _is_within(path, self.policy_store_root)
+            or (includes_descendants and _is_within(self.policy_store_root, path))
+        ):
             return "deny", "desktop_policy_store"
         for prefix in self._protected_prefixes:
             if _is_within(path, prefix):
                 return "deny", "desktop_enforcement_or_config"
-            if mutation and _is_within(prefix, path):
+            if (mutation or includes_descendants) and _is_within(prefix, path):
                 return "deny", "ancestor_of_desktop_enforcement_or_config"
         for prefix in self._deny_prefixes:
             if _is_within(path, prefix):
                 return "deny", str(prefix)
         for prefix in self._credential_prefixes:
-            if _is_within(path, prefix):
+            if _is_within(path, prefix) or (includes_descendants and _is_within(prefix, path)):
                 return "deny", "credentials"
         lowered_name = path.name.lower()
         if lowered_name in {
@@ -148,32 +170,6 @@ class DesktopPathSecurity:
             if _is_within(path, prefix):
                 return "ask", str(prefix)
         return "normal", "ordinary_host_path"
-
-    def _mount_root_for(self, path: Path) -> Path | None:
-        mountinfo = Path("/proc/self/mountinfo")
-        if not mountinfo.exists():
-            return None
-        selected_mount: Path | None = None
-        selected_root: str | None = None
-        try:
-            lines = mountinfo.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return None
-        for line in lines:
-            fields = line.split()
-            if len(fields) < 6:
-                continue
-            root_raw = fields[3].replace("\\040", " ")
-            mount_raw = fields[4].replace("\\040", " ")
-            mount_path = Path(mount_raw)
-            if not _is_within(path, mount_path):
-                continue
-            if selected_mount is None or len(mount_path.parts) > len(selected_mount.parts):
-                selected_mount = mount_path
-                selected_root = root_raw
-        if selected_mount is None or selected_root in {None, "/"}:
-            return None
-        return Path(selected_root).resolve(strict=False)
 
 
 def _is_within(path: Path, prefix: Path) -> bool:

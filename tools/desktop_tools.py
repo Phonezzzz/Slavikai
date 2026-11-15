@@ -170,10 +170,12 @@ class DesktopFileTransferTool:
                 source_raw,
                 must_exist=True,
                 mutation=operation != "copy",
+                includes_descendants=True,
             ).canonical
             destination = self.security.require_not_denied(
                 destination_raw,
                 mutation=True,
+                includes_descendants=overwrite,
             ).canonical
             self.security.require_not_denied(str(destination.parent))
             backup: Path | None = None
@@ -239,6 +241,7 @@ class DesktopFileDeleteTool:
                 path_raw,
                 must_exist=True,
                 mutation=True,
+                includes_descendants=True,
             ).canonical
             self.security.require_not_denied(str(self.trash_root))
             self.trash_root.mkdir(parents=True, exist_ok=True)

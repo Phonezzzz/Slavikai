@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from shared.models import JSONValue, ToolRequest, ToolResult
-from shared.sandbox import is_private_runtime_path
+from shared.sandbox import (
+    crosses_nested_mount,
+    is_private_runtime_path,
+    read_mount_bindings,
+    source_mount_root,
+)
 from shared.sandbox_execution import sandbox_execution_failure
 from shared.tool_capture import MAX_CAPTURE_BYTES, MAX_VIEW_BYTES, ToolCaptureFault
 from shared.workspace_binding import WorkspaceFileBudgetExceeded, WorkspaceUnavailable
@@ -454,6 +459,16 @@ def _admit_workspace_write(
     subtree: bool = False,
     writes_bytes: bool = False,
 ) -> dict[str, JSONValue] | None:
+    if subtree:
+        mounts = read_mount_bindings()
+        if not mounts or crosses_nested_mount(path, mounts):
+            raise ValueError("Операция с каталогом требует проверяемых границ монтирования.")
+        mount_root = source_mount_root(path, mounts)
+        if is_private_runtime_path(path, includes_descendants=True) or (
+            mount_root is not None
+            and is_private_runtime_path(mount_root, includes_descendants=True)
+        ):
+            raise ValueError("Каталог содержит закрытое состояние SlavikAI.")
     budget = request.workspace_file_budget
     if budget is None:
         return None

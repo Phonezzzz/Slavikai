@@ -5,6 +5,8 @@ import time
 import zipfile
 from pathlib import Path
 
+import pytest
+
 import tools.desktop_tools as desktop_tools_module
 from core.desktop_security import DesktopPathSecurity
 from shared.models import ToolRequest, ToolResult
@@ -100,6 +102,62 @@ def test_archive_extraction_blocks_path_traversal(tmp_path: Path) -> None:
     assert not (tmp_path / "escape.txt").exists()
     assert not (tmp_path / "out").exists()
     assert not list(tmp_path.glob(".out.*.staging"))
+
+
+def test_directory_copy_checks_protected_descendants_before_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "application"
+    state = source / "state"
+    state.mkdir(parents=True)
+    destination = tmp_path / "output"
+    security = DesktopPathSecurity(home=tmp_path, protected_paths=(state,))
+
+    def reject_unexpected_copy(*args: object, **kwargs: object) -> None:
+        pytest.fail("Protected directory must be rejected before filesystem copy")
+
+    monkeypatch.setattr(desktop_tools_module.shutil, "copytree", reject_unexpected_copy)
+    result = DesktopFileTransferTool(security).handle(
+        ToolRequest(
+            "desktop_file_transfer",
+            {"operation": "copy", "source": str(source), "destination": str(destination)},
+        )
+    )
+
+    assert not result.ok
+    assert not destination.exists()
+
+
+def test_transfer_refuses_overwrite_before_renaming_mounted_destination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("sample", encoding="utf-8")
+    destination = tmp_path / "output"
+    destination.mkdir()
+    monkeypatch.setattr(
+        "core.desktop_security.read_mount_bindings",
+        lambda: [(Path("/"), Path("/")), (destination / "mounted", Path("/volume"))],
+    )
+
+    def reject_unexpected_rename(*args: object, **kwargs: object) -> None:
+        pytest.fail("The destination must be rejected before moving it")
+
+    monkeypatch.setattr(desktop_tools_module.os, "replace", reject_unexpected_rename)
+    result = DesktopFileTransferTool(_security(tmp_path)).handle(
+        ToolRequest(
+            "desktop_file_transfer",
+            {
+                "operation": "copy",
+                "source": str(source),
+                "destination": str(destination),
+                "overwrite": True,
+            },
+        )
+    )
+
+    assert not result.ok
+    assert destination.is_dir()
 
 
 def test_transfer_overwrite_restores_original_after_copy_failure(

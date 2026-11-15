@@ -327,6 +327,10 @@ def _desktop_default(
         resolved = security.resolve(
             action.target,
             mutation=_desktop_action_mutates_target(action),
+            includes_descendants=(
+                action.action in {"read_source", "move_source", "delete"}
+                or (action.tool == "desktop_file_transfer" and action.risk_class == "overwrite")
+            ),
         )
         if resolved.protection == "deny":
             return "deny", f"protected_resource:{resolved.reason}"

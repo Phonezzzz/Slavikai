@@ -194,7 +194,7 @@ export function ChatGptPlanAccounts({ available, onRefreshModels }: Props) {
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" className={BUTTON} disabled={busy} onClick={() => authorize(account.id)}>Войти повторно</button>
-            {account.provider !== null ? <button type="button" className={BUTTON} disabled={busy} onClick={() => disconnect(account.id)}>
+            {account.provider !== null || account.status === 'disabled' ? <button type="button" className={BUTTON} disabled={busy} onClick={() => disconnect(account.id)}>
               Отключить
             </button> : null}
           </div>

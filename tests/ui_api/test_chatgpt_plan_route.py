@@ -15,7 +15,12 @@ from server.http.common.request_identity import CloudflareAccessTokenError, Veri
 from server.http.common.workspace_runtime import _resolve_workspace_file
 from server.ui_session_storage import InMemoryUISessionStorage
 from shared.models import ToolRequest
-from tools.workspace_tools import ListFilesTool, ReadFileTool, workspace_root_context
+from tools.workspace_tools import (
+    ListFilesTool,
+    ReadFileTool,
+    RenameFileTool,
+    workspace_root_context,
+)
 
 PROVIDER = "chatgpt-plan-" + "a" * 32
 OWNER = "email:owner@example.com"
@@ -39,6 +44,25 @@ def test_plan_state_is_private_even_when_workspace_contains_it(
             assert not ReadFileTool().handle(ToolRequest("workspace_read", {"path": rel})).ok
             with pytest.raises(ValueError, match="outside workspace"):
                 _resolve_workspace_file(rel, workspace_root=tmp_path, max_download_bytes=100)
+        rename = RenameFileTool().handle(
+            ToolRequest(
+                "workspace_rename",
+                {"old_path": ".local/state/slavikai", "new_path": "relocated"},
+            )
+        )
+        assert not rename.ok
+        assert private_record.is_file()
+        source = tmp_path / "work"
+        source.mkdir()
+        monkeypatch.setattr(
+            "tools.workspace_tools.read_mount_bindings",
+            lambda: [(Path("/"), Path("/")), (source / "mounted", Path("/volume"))],
+        )
+        rename_with_mount = RenameFileTool().handle(
+            ToolRequest("workspace_rename", {"old_path": "work", "new_path": "relocated"})
+        )
+        assert not rename_with_mount.ok
+        assert source.is_dir()
 
 
 class Verifier:

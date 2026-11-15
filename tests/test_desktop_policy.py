@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -322,6 +323,61 @@ def test_transfer_checks_protected_source_and_destination(tmp_path: Path) -> Non
     assert decision.status == "block"
     assert scope is not None
     assert scope.action == "read_source"
+
+
+def test_desktop_copy_policy_denies_ancestor_of_protected_state(tmp_path: Path) -> None:
+    source = tmp_path / "application"
+    security = DesktopPathSecurity(home=tmp_path, protected_paths=(source / "state",))
+    context = replace(_context(tmp_path), desktop_security=security)
+    destination = str(tmp_path / "output")
+
+    blocked, scope = decide_request(
+        context=context,
+        request=ToolRequest(
+            "desktop_file_transfer",
+            {"operation": "copy", "source": str(source), "destination": destination},
+        ),
+    )
+    allowed, _ = decide_request(
+        context=context,
+        request=ToolRequest(
+            "desktop_file_transfer",
+            {"operation": "copy", "source": str(source / "public"), "destination": destination},
+        ),
+    )
+
+    assert blocked.status == "block"
+    assert scope is not None and scope.action == "read_source"
+    assert allowed.status == "allow"
+
+
+@pytest.mark.parametrize("mounted_side", ["read_source", "copy"])
+def test_desktop_copy_policy_refuses_nested_mount(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mounted_side: str
+) -> None:
+    source = tmp_path / "application"
+    destination = tmp_path / "output"
+    containing = source if mounted_side == "read_source" else destination
+    monkeypatch.setattr(
+        "core.desktop_security.read_mount_bindings",
+        lambda: [(Path("/"), Path("/")), (containing / "mounted", Path("/volume"))],
+    )
+    decision, scope = decide_request(
+        context=_context(tmp_path),
+        request=ToolRequest(
+            "desktop_file_transfer",
+            {
+                "operation": "copy",
+                "source": str(source),
+                "destination": str(destination),
+                "overwrite": True,
+            },
+        ),
+    )
+
+    assert decision.status == "block"
+    assert scope is not None and scope.action == mounted_side
+    assert decision.reason == "protected_resource:nested_mount"
 
 
 def test_symlink_and_traversal_resolve_to_protected_resource(tmp_path: Path) -> None:

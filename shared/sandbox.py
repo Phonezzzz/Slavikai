@@ -8,13 +8,48 @@ from typing import Final
 _WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 _UNC_RE = re.compile(r"^\\\\")
 
+_MOUNT_ESCAPE_RE = re.compile(r"\\(011|012|040|134)")
+
 SANDBOX_ROOT: Final[Path] = Path("sandbox").resolve()
 CHATGPT_PLAN_STORAGE: Final[Path] = Path.home() / ".local" / "state" / "slavikai" / "chatgpt-plan"
 
 
-def is_private_runtime_path(path: Path) -> bool:
+def read_mount_bindings() -> list[tuple[Path, Path]]:
+    bindings: list[tuple[Path, Path]] = []
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if len(fields) < 6:
+            raise ValueError("Невозможно проверить точки монтирования.")
+        mount, origin = (
+            Path(_MOUNT_ESCAPE_RE.sub(lambda match: chr(int(match[1], 8)), field))
+            for field in (fields[4], fields[3])
+        )
+        bindings.append((mount, origin))
+    return bindings
+
+
+def crosses_nested_mount(path: Path, bindings: list[tuple[Path, Path]]) -> bool:
+    return any(mount != path and mount.is_relative_to(path) for mount, _ in bindings)
+
+
+def source_mount_root(path: Path, bindings: list[tuple[Path, Path]]) -> Path | None:
+    binding = max(
+        ((mount, origin) for mount, origin in bindings if path.is_relative_to(mount)),
+        key=lambda item: len(item[0].parts),
+        default=None,
+    )
+    if binding is None or binding[1] == Path("/"):
+        return None
+    return binding[1].resolve()
+
+
+def is_private_runtime_path(path: Path, *, includes_descendants: bool = False) -> bool:
     try:
-        return path.resolve().is_relative_to(CHATGPT_PLAN_STORAGE.resolve())
+        resolved = path.resolve()
+        private = CHATGPT_PLAN_STORAGE.resolve()
+        return resolved.is_relative_to(private) or (
+            includes_descendants and private.is_relative_to(resolved)
+        )
     except (OSError, RuntimeError):
         return True
 

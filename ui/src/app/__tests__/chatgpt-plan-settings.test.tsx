@@ -42,13 +42,13 @@ function fakeSettings({ owner = true, available = true, loginUrl = authorization
   return {
     fetchMock,
     onRefreshModels,
-    completeAuthorization: () => {
-      authorizationStatus = 'connected';
+    completeAuthorization: (status: 'connected' | 'disabled' = 'connected') => {
+      authorizationStatus = status;
       accounts = [{
         id: accountId,
         label: 'Рабочий аккаунт',
-        provider: `chatgpt-plan-${accountId}`,
-        status: 'connected',
+        provider: status === 'connected' ? `chatgpt-plan-${accountId}` : null,
+        status,
       }];
     },
   };
@@ -81,6 +81,20 @@ it('connects and manages an account explicitly through Settings', async () => {
     .filter(([url]) => url === '/ui/api/chatgpt-plan/authorize')
     .map(([, init]) => JSON.parse(String(init?.body)));
   expect(authBodies).toEqual([{}, { account_id: accountId, reconsent: true }]);
+  const disconnect = fetchMock.mock.calls.find(([url]) => url === '/ui/api/chatgpt-plan/disconnect');
+  expect(JSON.parse(String(disconnect?.[1]?.body))).toEqual({ account_id: accountId });
+});
+
+it('lets the owner disconnect an account without a subscription grant', async () => {
+  const { fetchMock, completeAuthorization } = fakeSettings();
+  completeAuthorization('disabled');
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
+  const account = await screen.findByRole('group', { name: 'Рабочий аккаунт' });
+  expect(within(account).getByText('Доступ по подписке не разрешён')).toBeTruthy();
+  fireEvent.click(within(account).getByRole('button', { name: 'Отключить' }));
+
+  await within(account).findByText('Отключён');
   const disconnect = fetchMock.mock.calls.find(([url]) => url === '/ui/api/chatgpt-plan/disconnect');
   expect(JSON.parse(String(disconnect?.[1]?.body))).toEqual({ account_id: accountId });
 });
