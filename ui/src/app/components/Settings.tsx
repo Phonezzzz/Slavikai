@@ -13,6 +13,7 @@ import type { ChangeEvent, ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 
 import { DesktopApprovalsPanel } from '../../features/desktop/desktop-approvals-panel';
+import { ChatGptPlanAccounts } from './chatgpt-plan-accounts';
 import { ModelConfigView } from './model-config-view';
 import { ShellNumericDefaultsView } from './shell-numeric-defaults-view';
 import { SpeechToolDefaultsView } from './speech-tool-defaults-view';
@@ -29,6 +30,7 @@ interface SettingsProps {
   isOpen: boolean;
   onClose: () => void;
   onSaved?: () => void;
+  onRefreshModels?: () => Promise<unknown>;
   onOpenSessionControls?: () => void;
 }
 
@@ -89,6 +91,7 @@ type ParsedSettings = {
   preferencesEtag: string | null;
   preferencesSubject: string | null;
   canManageInstallation: boolean;
+  chatGptPlanAvailable: boolean | null;
   providers: ProviderSettings[];
   providerInstances: ProviderInstance[];
   ttsBackend: TtsBackendSettings;
@@ -352,6 +355,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     preferencesEtag: null,
     preferencesSubject: null,
     canManageInstallation: false,
+    chatGptPlanAvailable: null,
     providers: DEFAULT_PROVIDER_SETTINGS,
     providerInstances: [],
     ttsBackend: DEFAULT_TTS_BACKEND,
@@ -566,11 +570,12 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
-  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown; runtime_context_limits_snapshot?: unknown; search_backend_defaults_snapshot?: unknown; speech_tool_defaults_snapshot?: unknown; shell_numeric_defaults_snapshot?: unknown };
+  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; chatgpt_plan_available?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown; runtime_context_limits_snapshot?: unknown; search_backend_defaults_snapshot?: unknown; speech_tool_defaults_snapshot?: unknown; shell_numeric_defaults_snapshot?: unknown };
   return {
     preferencesEtag: typeof metadata.preferences_etag === 'string' ? metadata.preferences_etag : null,
     preferencesSubject: typeof metadata.preferences_subject === 'string' ? metadata.preferences_subject : null,
     canManageInstallation: metadata.can_manage_installation === true,
+    chatGptPlanAvailable: typeof metadata.chatgpt_plan_available === 'boolean' ? metadata.chatgpt_plan_available : null,
     contextBudgetSnapshot: metadata.context_budget_snapshot ?? null,
     modelConfigSnapshot: metadata.model_config_snapshot ?? null,
     attachmentLimitsSnapshot: metadata.attachment_limits_snapshot ?? null,
@@ -825,6 +830,7 @@ export function Settings({
   isOpen,
   onClose,
   onSaved,
+  onRefreshModels,
   onOpenSessionControls,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('personal');
@@ -839,6 +845,7 @@ export function Settings({
   const [modelConfigSnapshot, setModelConfigSnapshot] = useState<unknown>(null);
   const [showMemoryAdvanced, setShowMemoryAdvanced] = useState(false);
   const [canManageInstallation, setCanManageInstallation] = useState(false);
+  const [chatGptPlanAvailable, setChatGptPlanAvailable] = useState<boolean | null>(null);
   const [settingsReady, setSettingsReady] = useState(false);
   const preferencesEtag = useRef<string | null>(null);
   const preferencesSubject = useRef<string | null>(null);
@@ -981,6 +988,7 @@ export function Settings({
     setShellNumericDefaultsSnapshot(parsed.shellNumericDefaultsSnapshot);
     setSpeechToolDefaultsSnapshot(parsed.speechToolDefaultsSnapshot);
     setCanManageInstallation(parsed.canManageInstallation);
+    setChatGptPlanAvailable(parsed.chatGptPlanAvailable);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
     applyCredentialSnapshot(parsed);
@@ -1188,6 +1196,7 @@ export function Settings({
       setActiveTab((tab) => tab === 'developer' ? 'personal' : tab);
       setShowInputAdvanced(false);
       setCanManageInstallation(false);
+      setChatGptPlanAvailable(null);
       preferencesEtag.current = null;
       setTone('balanced');
       setSystemPrompt(DEFAULT_SYSTEM_PROMPT);
@@ -1866,6 +1875,18 @@ export function Settings({
 
                   {canManageInstallation && settingsReady && !loading && activeTab === 'api' ? (
                     <div>
+                      {chatGptPlanAvailable !== null ? (
+                        <SectionCard
+                          title="Подписка ChatGPT"
+                          description="Войдите в ChatGPT и выберите модель этого аккаунта в чате. Доступ определяется подпиской аккаунта."
+                        >
+                          <ChatGptPlanAccounts
+                            key={preferencesSubject.current}
+                            available={chatGptPlanAvailable}
+                            onRefreshModels={onRefreshModels}
+                          />
+                        </SectionCard>
+                      ) : null}
                       <SectionCard
                         title="Connection checks"
                         description="Connection status for providers and audio backends."

@@ -34,6 +34,7 @@ from llm.provider_http import is_loopback_url, proxies_for_provider_url
 from llm.types import (
     CUSTOM_PROVIDER_ID_PATTERN,
     ModelConfig,
+    is_chatgpt_plan_provider,
 )
 from llm.types import (
     CUSTOM_PROVIDER_PREFIX as CUSTOM_PROVIDER_PREFIX,
@@ -251,6 +252,8 @@ def _normalize_provider(raw_provider: str) -> str | None:
 
 
 def _build_model_config(provider: str, model_id: str) -> ModelConfig:
+    if is_chatgpt_plan_provider(provider):
+        return ModelConfig(provider=provider, model=model_id)
     instance = _load_provider_instance(provider)
     if instance is not None:
         return ModelConfig(
@@ -672,6 +675,8 @@ def _resolve_provider_api_key(
     settings_api_keys: dict[str, str] | None = None,
     api_keys_path: Path = API_KEYS_PATH,
 ) -> str | None:
+    if is_chatgpt_plan_provider(provider):
+        return None
     env_key = _load_provider_env_api_key(provider)
     if env_key is not None:
         return env_key

@@ -19,6 +19,7 @@ from core.mwv.routing import classify_request
 from core.response_preferences import ResponsePreferences
 from core.skills.index import SkillIndex
 from core.task_run_storage import RunAlreadyAdmittedError, RunConflictError, TaskRunStore
+from llm.chatgpt_plan import ChatGPTPlanError
 from llm.stream_model import Done, Error, StreamEvent, TextDelta
 from llm.types import ModelConfig
 from server.agent_provider import ScopedAgentProvider
@@ -45,11 +46,13 @@ from server.http.common.runtime_contract import (
     AgentProtocol,
     RuntimeModelResolverProtocol,
     SessionModelChangedError,
-    _require_custom_provider_owner,
+    _require_scoped_provider_access,
     _set_model_bound_decision,
+    _validate_chatgpt_plan_grant,
 )
 from server.http.common.session_end import begin_session_end, pending_session_end
 from server.http.common.ui_runtime import _decision_with_status
+from server.http.handlers.chatgpt_plan import chatgpt_plan_error
 from server.http_api import (
     MAX_CONTENT_CHARS,
     MAX_TOTAL_PAYLOAD_CHARS,
@@ -629,6 +632,8 @@ async def _handle_ui_send_impl(
                 request,
                 session_id,
             )
+            if selected_main_config is not None:
+                await _validate_chatgpt_plan_grant(request, selected_main_config.provider)
         except SessionModelChangedError as exc:
             await _abort_idempotency()
             return error_response(
@@ -641,10 +646,13 @@ async def _handle_ui_send_impl(
             await _abort_idempotency()
             return error_response(
                 status=403,
-                message="Owner access required for custom provider.",
+                message="Owner access required for this provider.",
                 error_type="invalid_request_error",
                 code="owner_required",
             )
+        except ChatGPTPlanError as exc:
+            await _abort_idempotency()
+            return chatgpt_plan_error(exc)
         except Exception as exc:  # noqa: BLE001
             await _abort_idempotency()
             return error_response(
@@ -1959,17 +1967,19 @@ async def handle_ui_chat_cancel(request: web.Request) -> web.Response:
                 and isinstance(identity, str)
                 and isinstance(decision_id, str)
             ):
-                agent, _ = await _resolve_agent_for_ui_session(request, resolved_session_id)
-                if agent is not None:
-                    async with _agent_lock_for_request(request, resolved_session_id):
-                        rejected = _decision_with_status(decision, status="rejected", resolved=True)
-                        updated, _ = await hub.transition_session_decision(
-                            resolved_session_id,
-                            expected_id=decision_id,
-                            expected_status="pending",
-                            next_decision=rejected,
-                        )
-                        if updated:
+                provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+                scope = _agent_scope(request, resolved_session_id)
+                agent = await provider.get_existing_for_current_task(scope)
+                async with provider.lock_for(scope):
+                    rejected = _decision_with_status(decision, status="rejected", resolved=True)
+                    updated, _ = await hub.transition_session_decision(
+                        resolved_session_id,
+                        expected_id=decision_id,
+                        expected_status="pending",
+                        next_decision=rejected,
+                    )
+                    if updated:
+                        if agent is not None:
                             await asyncio.to_thread(agent.cancel_chat_approval, identity)
                             if payload.get("execution_mode") == "auto":
                                 auto_state = _normalize_auto_state(
@@ -1982,15 +1992,15 @@ async def handle_ui_chat_cancel(request: web.Request) -> web.Response:
                                 await _drain_auto_progress(
                                     hub=hub, session_id=resolved_session_id, agent=agent
                                 )
-                            response = json_response(
-                                {
-                                    "session_id": resolved_session_id,
-                                    "stream_id": None,
-                                    "cancelled": True,
-                                }
-                            )
-                            response.headers[UI_SESSION_HEADER] = resolved_session_id
-                            return response
+                        response = json_response(
+                            {
+                                "session_id": resolved_session_id,
+                                "stream_id": None,
+                                "cancelled": True,
+                            }
+                        )
+                        response.headers[UI_SESSION_HEADER] = resolved_session_id
+                        return response
     if result is None:
         return error_response(
             status=409,
@@ -2128,11 +2138,12 @@ async def handle_ui_approval_continue(
             if source_web_search:
                 expected_config = replace(expected_config, web_search_enabled=True)
             try:
-                _require_custom_provider_owner(request, selected_config.provider, selected_config)
+                _require_scoped_provider_access(request, selected_config.provider, selected_config)
+                await _validate_chatgpt_plan_grant(request, selected_config.provider)
                 agent.validate_chat_approval_model(
                     identity, expected_config, _resolve_provider_api_key(selected_config.provider)
                 )
-            except (ChatApprovalUnavailable, ValueError, PermissionError):
+            except (ChatApprovalUnavailable, ChatGPTPlanError, ValueError, PermissionError):
                 return not_started("approval_continuation_unavailable")
             resume_security = None
             accepted_categories = await session_store.get_categories(scope)

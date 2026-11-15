@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.sandbox import is_private_runtime_path
 from shared.sandbox_execution import sandbox_execution_failure
 from shared.tool_capture import MAX_CAPTURE_BYTES, MAX_VIEW_BYTES, ToolCaptureFault
 from shared.workspace_binding import WorkspaceFileBudgetExceeded, WorkspaceUnavailable
@@ -93,6 +94,8 @@ def workspace_root_context(root: str | Path | None) -> Iterator[Path]:
 def _resolve_workspace_root(root: str | Path) -> Path:
     raw = Path(root).expanduser()
     candidate = raw.resolve()
+    if is_private_runtime_path(candidate):
+        raise ValueError("Путь относится к закрытому состоянию SlavikAI.")
     if not candidate.exists() or not candidate.is_dir():
         raise ValueError(f"Рабочая директория не найдена: {candidate}")
     return candidate
@@ -101,6 +104,8 @@ def _resolve_workspace_root(root: str | Path) -> Path:
 def _ensure_in_workspace(raw_path: str) -> Path:
     workspace_root = get_workspace_root()
     candidate = (workspace_root / raw_path).resolve()
+    if is_private_runtime_path(candidate):
+        raise ValueError("Путь относится к закрытому состоянию SlavikAI.")
     try:
         candidate.relative_to(workspace_root)
     except Exception as exc:  # noqa: BLE001
@@ -315,7 +320,9 @@ class ListFilesTool:
     def _dir_has_visible_children(self, path: Path) -> bool:
         try:
             for item in path.iterdir():
-                if item.name.startswith("."):
+                if item.name.startswith(".") or (
+                    item.is_symlink() and is_private_runtime_path(item)
+                ):
                     continue
                 if item.is_dir() and item.name not in IGNORED_DIR_NAMES:
                     return True
@@ -346,7 +353,7 @@ class ListFilesTool:
 
         visible_children = 0
         for item in iter_items:
-            if item.name.startswith("."):
+            if item.name.startswith(".") or (item.is_symlink() and is_private_runtime_path(item)):
                 continue
             is_dir = item.is_dir() and item.name not in IGNORED_DIR_NAMES
             is_file = item.is_file() and _is_allowed_workspace_file(item)

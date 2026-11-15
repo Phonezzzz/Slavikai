@@ -79,6 +79,8 @@ async def _open_post(
     timeout: int,
     *,
     streaming: bool = False,
+    direct: bool = False,
+    include_error_body: bool = False,
 ) -> AsyncIterator[aiohttp.ClientResponse]:
     # Dedicated resolver принадлежит попытке; blocking getaddrinfo/executor нет.
     resolver = aiohttp.AsyncResolver(timeout=timeout)
@@ -86,12 +88,15 @@ async def _open_post(
         async with aiohttp.TCPConnector(resolver=resolver) as connector:
             # Сохраняем разрешённую remote proxy policy requests, но не наследуем
             # env повторно в aiohttp и не разрешаем loopback proxy fallback.
-            with requests.Session() as settings_session:
-                settings = settings_session.merge_environment_settings(
-                    url, proxies_for_provider_url(url) or {}, False, True, None
-                )
-            proxy = select_proxy(url, settings["proxies"]) or None
-            verify = settings["verify"]
+            proxy = None
+            verify = None
+            if not direct:
+                with requests.Session() as settings_session:
+                    settings = settings_session.merge_environment_settings(
+                        url, proxies_for_provider_url(url) or {}, False, True, None
+                    )
+                proxy = select_proxy(url, settings["proxies"]) or None
+                verify = settings["verify"]
             ssl_context = ssl.create_default_context(
                 cafile=verify if isinstance(verify, str) else DEFAULT_CA_BUNDLE_PATH
             )
@@ -114,7 +119,9 @@ async def _open_post(
                     ssl=ssl_context,
                 ) as upstream:
                     response = _response_metadata(upstream, url)
-                    # Не читаем error body перед status/retry и не принимаем redirect.
+                    # SIWC reports typed admission errors from a bounded body, without retry.
+                    if include_error_body and response.status_code >= 400:
+                        response._content = await _bounded_error_body(upstream)
                     response.raise_for_status()
                     if 300 <= response.status_code < 400:
                         raise requests.HTTPError("Provider redirect rejected", response=response)
@@ -125,6 +132,18 @@ async def _open_post(
         raise requests.ConnectionError("Provider transport failed") from exc
     finally:
         await resolver.close()
+
+
+async def _bounded_error_body(response: aiohttp.ClientResponse) -> bytes:
+    limit = 8192
+    try:
+        async with asyncio.timeout(2):
+            await response.content.readexactly(limit + 1)
+    except asyncio.IncompleteReadError as exc:
+        return exc.partial
+    except (aiohttp.ClientError, TimeoutError):
+        pass
+    return b""
 
 
 def _response_metadata(upstream: aiohttp.ClientResponse, url: str) -> requests.Response:
@@ -145,20 +164,37 @@ async def _post(
 
 
 async def _stream_post(
-    url: str, headers: dict[str, str], payload: dict[str, JSONValue], timeout: int
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, JSONValue],
+    timeout: int,
+    *,
+    direct: bool,
+    include_error_body: bool,
 ) -> AsyncGenerator[str, None]:
-    async with _open_post(url, headers, payload, timeout, streaming=True) as upstream:
+    async with _open_post(
+        url,
+        headers,
+        payload,
+        timeout,
+        streaming=True,
+        direct=direct,
+        include_error_body=include_error_body,
+    ) as upstream:
         decoder = codecs.getincrementaldecoder("utf-8")()
         pending = ""
         # Framing не зависит от aiohttp readline limit: большой tool delta
         # может занимать одну SSE строку. Сам протокол разбирает stream_model.
         async for chunk in upstream.content.iter_any():
-            lines = (pending + decoder.decode(chunk)).splitlines(keepends=True)
-            pending = ""
-            if lines and not lines[-1].endswith(("\n", "\r")):
-                pending = lines.pop()
+            incoming = pending + decoder.decode(chunk)
+            # A CR at the chunk boundary may be the first byte of CRLF.
+            suffix = "\r" if incoming.endswith("\r") else ""
+            if suffix:
+                incoming = incoming[:-1]
+            lines = incoming.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            pending = lines.pop() + suffix
             for line in lines:
-                yield line
+                yield line + "\n"
         pending += decoder.decode(b"", final=True)
         if pending:
             yield pending
@@ -177,12 +213,16 @@ def post_stream_lines(
     payload: dict[str, JSONValue],
     timeout: int,
     cancellation_token: asyncio.Event | None,
+    direct: bool = False,
+    include_error_body: bool = False,
 ) -> Generator[str, None, None]:
     # Один запрос без replay/retry после начала SSE; тот же generation worker.
     with asyncio.Runner() as runner:
         operation = _ProviderOperation(runner.get_loop())
         with bind_cancellation_resource(cancellation_token, operation):
-            stream = _stream_post(url, headers, payload, timeout)
+            stream = _stream_post(
+                url, headers, payload, timeout, direct=direct, include_error_body=include_error_body
+            )
             try:
                 while True:
                     try:

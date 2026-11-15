@@ -22,7 +22,8 @@ from core.mwv.models import (
     with_task_packet_hash,
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
-from llm.types import ModelConfig
+from llm.chatgpt_plan import ChatGPTPlan, ChatGPTPlanError
+from llm.types import ModelConfig, is_chatgpt_plan_provider
 from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.http.common.plan_cancellation import PlanCancellationRegistry
 from server.http.common.ui_settings import _resolve_provider_api_key
@@ -788,7 +789,6 @@ async def run_plan_runner(
         )
         return False
     scope = AgentScope(principal_id=principal_id, session_id=session_id)
-    agent = await provider.get_for_current_task(scope, main_config)
     agent_lock = provider.lock_for(scope)
 
     async def _security_loader(
@@ -843,7 +843,9 @@ async def run_plan_runner(
                 session_id, mode="act", active_plan=cancelled_plan, active_task=cancelled_task
             )
             if resume_checkpoint_id is not None:
-                agent.cancel_mwv_approval(resume_checkpoint_id)
+                existing = await provider.get_existing_for_current_task(scope)
+                if existing is not None:
+                    existing.cancel_mwv_approval(resume_checkpoint_id)
 
         try:
             current_workflow = await hub.get_session_workflow(session_id)
@@ -876,6 +878,16 @@ async def run_plan_runner(
                         session_id, active_plan=failed_plan, active_task=failed_task
                     )
                 return False
+            agent = await provider.get_for_current_task(scope, main_config)
+            if main_config is not None and is_chatgpt_plan_provider(main_config.provider):
+                subscription = cast(ChatGPTPlan | None, app.get("chatgpt_plan"))
+                if subscription is None:
+                    raise ChatGPTPlanError(
+                        "chatgpt_plan_unavailable",
+                        "Подключение подписки ChatGPT недоступно для этой сессии.",
+                        status=503,
+                    )
+                await asyncio.to_thread(subscription.access, principal_id, main_config.provider)
             packet = deserialize_task_packet_payload(task.get("task_packet"))
             reconfigure_models = getattr(agent, "reconfigure_models", None)
             if (
@@ -1059,7 +1071,7 @@ async def run_plan_runner(
             failed_task["execution"] = {
                 "runner": "mwv_packet_runner",
                 "status": "failed",
-                "error": str(exc),
+                "error": exc.code if isinstance(exc, ChatGPTPlanError) else str(exc),
             }
             await hub.set_session_workflow(
                 session_id,

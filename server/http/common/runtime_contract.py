@@ -15,7 +15,7 @@ from core.mwv.models import RunContext, TaskPacket
 from core.response_preferences import ResponsePreferences
 from llm.capabilities import NativeToolQualification
 from llm.stream_model import StreamEvent
-from llm.types import ModelConfig
+from llm.types import ModelConfig, is_chatgpt_plan_provider
 from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.http.common.auth import _ensure_session_owned, _request_identity, _request_principal_id
 from server.http.common.responses import error_response as _error_response
@@ -26,6 +26,7 @@ from server.http.common.ui_settings import (
     _load_provider_instance,
     _resolve_provider_api_key,
 )
+from server.http.handlers.chatgpt_plan import require_chatgpt_plan
 from server.ui_hub import UIHub
 from shared.memory_companion_models import FeedbackLabel, FeedbackRating
 from shared.models import JSONValue, LLMMessage, ToolResult
@@ -333,7 +334,7 @@ async def _resolve_agent(
     if main_config is None and not provider.is_static:
         return None
     if main_config is not None:
-        _require_custom_provider_owner(request, main_config.provider, main_config)
+        _require_scoped_provider_access(request, main_config.provider, main_config)
     try:
         scope = _agent_scope(request, session_id)
         return await _get_scoped_agent(
@@ -357,7 +358,7 @@ async def _resolve_agent_for_base_http(
     if main_config is None and not provider.is_static:
         return None
     if main_config is not None:
-        _require_custom_provider_owner(request, main_config.provider, main_config)
+        _require_scoped_provider_access(request, main_config.provider, main_config)
     try:
         scope = _agent_scope(request, session_id)
         return await _get_scoped_agent(
@@ -375,9 +376,11 @@ def _selected_model_snapshot(main_config: ModelConfig) -> dict[str, str]:
     return {"provider": main_config.provider, "model": main_config.model}
 
 
-def _require_custom_provider_owner(
+def _require_scoped_provider_access(
     request: web.Request, provider: str, config: ModelConfig | None = None
 ) -> None:
+    if is_chatgpt_plan_provider(provider):
+        require_chatgpt_plan(request)
     if provider.startswith(CUSTOM_PROVIDER_PREFIX):
         identity = _request_identity(request)
         if identity is None or identity.role != "owner":
@@ -387,6 +390,12 @@ def _require_custom_provider_owner(
             raise ValueError("Custom provider configuration unavailable.")
         if config is not None and config.base_url != f"{instance['base_url']}/chat/completions":
             raise ValueError("Custom provider endpoint differs from saved configuration.")
+
+
+async def _validate_chatgpt_plan_grant(request: web.Request, provider: str) -> None:
+    if is_chatgpt_plan_provider(provider):
+        plan, principal = require_chatgpt_plan(request)
+        await asyncio.to_thread(plan.access, principal, provider)
 
 
 class SessionModelChangedError(RuntimeError):
@@ -404,7 +413,7 @@ async def _sync_session_runtime_override(
     model_id = selected_model.get("model")
     if not isinstance(provider, str) or not isinstance(model_id, str):
         return None
-    _require_custom_provider_owner(request, provider)
+    _require_scoped_provider_access(request, provider)
     main_config = _build_model_config(provider, model_id)
     store = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
     hub = cast(UIHub, request.app["ui_hub"])
@@ -457,7 +466,7 @@ async def _resolve_agent_for_ui_session(
     main_config = await _resolve_runtime_main_for_session(request, session_id)
     if main_config is None:
         return None, None
-    _require_custom_provider_owner(request, main_config.provider, main_config)
+    _require_scoped_provider_access(request, main_config.provider, main_config)
     provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
     try:
         scope = _agent_scope(request, session_id)

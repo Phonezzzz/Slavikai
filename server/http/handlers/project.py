@@ -6,6 +6,7 @@ from typing import Literal, cast
 
 from aiohttp import web
 
+from llm.chatgpt_plan import ChatGPTPlanError
 from llm.types import ModelConfig
 from server import http_api as api
 from server.http.common.chat_payload import (
@@ -19,7 +20,9 @@ from server.http.common.runtime_contract import (
     RuntimeModelStateProtocol,
     SessionModelChangedError,
     _resolve_runtime_main_for_session,
+    _validate_chatgpt_plan_grant,
 )
+from server.http.handlers.chatgpt_plan import chatgpt_plan_error
 from server.http_api import (
     UI_GITHUB_REQUIRED_CATEGORIES,
     UI_PROJECT_COMMANDS,
@@ -129,6 +132,8 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
                 request,
                 session_id,
             )
+            if selected_main_config is not None:
+                await _validate_chatgpt_plan_grant(request, selected_main_config.provider)
         except SessionModelChangedError as exc:
             return error_response(
                 status=409,
@@ -139,10 +144,12 @@ async def handle_ui_project_command(request: web.Request) -> web.Response:
         except PermissionError:
             return error_response(
                 status=403,
-                message="Owner access required for custom provider.",
+                message="Owner access required for this provider.",
                 error_type="invalid_request_error",
                 code="owner_required",
             )
+        except ChatGPTPlanError as exc:
+            return chatgpt_plan_error(exc)
         except Exception as exc:  # noqa: BLE001
             return error_response(
                 status=400,

@@ -6,6 +6,7 @@ from typing import Final
 
 from server.ui_hub import UIHub
 from shared.models import JSONValue
+from shared.sandbox import is_private_runtime_path
 
 MAX_BROWSE_ENTRIES: Final[int] = 200
 
@@ -19,7 +20,7 @@ async def workspace_root_for_session(
     stored_root = await hub.get_workspace_root(session_id)
     if isinstance(stored_root, str) and stored_root.strip():
         candidate = Path(stored_root).expanduser().resolve()
-        if candidate.exists() and candidate.is_dir():
+        if not is_private_runtime_path(candidate) and candidate.is_dir():
             return candidate
     return fallback_root
 
@@ -31,6 +32,8 @@ def resolve_workspace_root_candidate(
     workspace_root: Path,
 ) -> Path:
     candidate = Path(path_raw).expanduser().resolve()
+    if is_private_runtime_path(candidate):
+        raise ValueError("Путь относится к закрытому состоянию SlavikAI.")
     if not candidate.exists() or not candidate.is_dir():
         raise ValueError(f"Директория не найдена: {candidate}")
     if policy_profile == "sandbox":
@@ -70,6 +73,8 @@ def browse_directories(
 
     normalized = path_raw.strip()
     candidate = (base / normalized).resolve() if normalized else base
+    if is_private_runtime_path(candidate):
+        raise ValueError("Путь вне разрешённой области просмотра.")
 
     try:
         candidate.relative_to(base)
@@ -106,7 +111,7 @@ def browse_directories(
             resolved = full_path.resolve()
         except OSError:
             continue
-        if not resolved.is_dir():
+        if is_private_runtime_path(resolved) or not resolved.is_dir():
             continue
         if full_path.is_symlink():
             try:

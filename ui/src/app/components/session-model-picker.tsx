@@ -1,5 +1,6 @@
 import { ChevronRight, LoaderCircle, Play, Server } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { isChatGptPlanProvider } from '../session-payload';
 import type { ProviderModels } from '../types';
 
 type SessionModelPickerProps = {
@@ -58,13 +59,17 @@ export function SessionModelPicker({ sessionId, modelLabel, providerModels, sele
   const [startingOllama, setStartingOllama] = useState(false);
 
   const sortedProviders = sortProviders(providerModels);
-  const currentProvider =
-    sortedProviders.find((item) => item.provider === activeProvider) ?? sortedProviders[0] ?? null;
+  const currentProvider = sortedProviders.find((item) => item.provider === activeProvider)
+    ?? sortedProviders.find((item) => selectedModelValue?.startsWith(`${item.provider}::`))
+    ?? sortedProviders[0] ?? null;
   const currentProviderName = currentProvider?.provider ?? null;
+  const currentProviderIsPlan = isChatGptPlanProvider(currentProviderName);
   const currentProviderLoaded =
     currentProviderName !== null && loadedProviders.has(currentProviderName);
   const currentProviderError = currentProvider?.error ?? null;
-  const currentProviderModels = (currentProvider?.models ?? []).filter((model) => model.toLowerCase().includes(search.trim().toLowerCase()));
+  const query = search.trim().toLowerCase();
+  const currentProviderModels = (currentProvider?.models ?? []).filter((model) =>
+    model.toLowerCase().includes(query) || currentProvider?.modelDisplayNames?.get(model)?.toLowerCase().includes(query));
   const manualModelAllowed = !modelsLoading && currentProviderName?.startsWith('custom-')
     && (currentProvider?.status === 'models_unavailable' || currentProvider?.status === 'provider_unavailable');
 
@@ -97,6 +102,8 @@ export function SessionModelPicker({ sessionId, modelLabel, providerModels, sele
           next.add(provider);
           return next;
         });
+      } else if (isChatGptPlanProvider(provider)) {
+        setStatus('Каталог моделей этого аккаунта ChatGPT недоступен.');
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : `Failed to load ${provider} models.`;
@@ -169,7 +176,7 @@ export function SessionModelPicker({ sessionId, modelLabel, providerModels, sele
                   >
                     <span className="inline-flex min-w-0 items-center gap-1.5">
                       <Server className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">{label}</span>
+                      <span className="truncate" title={label}>{label}</span>
                     </span>
                     <ChevronRight className="h-3 w-3 shrink-0 text-zinc-500" />
                   </button>
@@ -216,6 +223,10 @@ export function SessionModelPicker({ sessionId, modelLabel, providerModels, sele
                 </div>
               ) : null}
 
+              {currentProviderIsPlan && currentProviderLoaded && !status && !currentProviderError
+              && (currentProvider?.models.length ?? 0) === 0 ? (
+                <p className="text-xs text-zinc-400">Для этого аккаунта ChatGPT нет доступных моделей.</p>
+              ) : null}
               {search.trim() && currentProviderModels.length === 0 && (currentProvider?.models.length ?? 0) > 0
                 ? <p className="text-xs text-zinc-400">Модели не найдены.</p> : null}
               {currentProviderModels.length > 0 ? (
@@ -223,6 +234,7 @@ export function SessionModelPicker({ sessionId, modelLabel, providerModels, sele
                   {currentProviderModels.map((model) => {
                     const value = `${currentProviderName}::${model}`;
                     const selected = selectedModelValue === value;
+                    const label = currentProvider?.modelDisplayNames?.get(model) ?? model;
                     return (
                       <button
                         key={value}
@@ -232,14 +244,15 @@ export function SessionModelPicker({ sessionId, modelLabel, providerModels, sele
                             onSelectModel(currentProviderName, model);
                           }
                         }}
-                        disabled={savingModel || !sessionId}
+                        disabled={savingModel || !sessionId || (currentProviderIsPlan && (modelsLoading || status !== null))}
+                        title={label === model ? model : `${label} (${model})`}
                         className={`w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors ${
                           selected
                             ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100'
                             : 'border-transparent bg-transparent text-zinc-300 hover:border-zinc-800 hover:bg-zinc-800'
                         } disabled:opacity-50`}
                       >
-                        <span className="block truncate">{model}</span>
+                        <span className="block truncate">{label}</span>
                       </button>
                     );
                   })}

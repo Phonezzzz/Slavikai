@@ -9,6 +9,14 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[a-zA-Z]:")
 _UNC_RE = re.compile(r"^\\\\")
 
 SANDBOX_ROOT: Final[Path] = Path("sandbox").resolve()
+CHATGPT_PLAN_STORAGE: Final[Path] = Path.home() / ".local" / "state" / "slavikai" / "chatgpt-plan"
+
+
+def is_private_runtime_path(path: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(CHATGPT_PLAN_STORAGE.resolve())
+    except (OSError, RuntimeError):
+        return True
 
 
 class SandboxViolationError(ValueError):

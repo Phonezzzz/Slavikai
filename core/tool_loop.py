@@ -76,6 +76,7 @@ class AgentToolLoopResult:
     cancelled: bool = False
     model_usage: ModelUsageSummary | None = None
     provider_stopped: bool = False
+    error_code: str | None = None
 
 
 class ToolLoopExecutionError(RuntimeError):
@@ -101,6 +102,7 @@ class ToolLoopContinuation:
     model_usage: ModelUsageSummary | None = None
     max_model_tokens: int | None = None
     capture_binding: CaptureBinding | None = None
+    dispatch_guard: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 class AgentToolLoop:
@@ -183,6 +185,7 @@ class AgentToolLoop:
             if continuation is not None
             else self.expires_at_monotonic
         )
+        current_guard = brain.tool_dispatch_guard(config) if isinstance(brain, Brain) else None
         for iteration in range(first_iteration, maximum + 1):
             if cancellation_requested(cancellation_token):
                 return AgentToolLoopResult(
@@ -199,6 +202,9 @@ class AgentToolLoop:
             if expired is not None:
                 return expired
             resuming = continuation is not None and iteration == first_iteration
+            dispatch_guard = current_guard
+            if resuming and continuation is not None and continuation.dispatch_guard is not None:
+                dispatch_guard = continuation.dispatch_guard
             try:
                 if resuming and continuation is not None:
                     result = LLMResult(text=final_text, tool_calls=continuation.pending_calls)
@@ -215,7 +221,10 @@ class AgentToolLoop:
                         )
                     if model_usage is not None:
                         model_usage = model_usage.start_call()
-                    result = brain.generate(history, config=config, tools=tools)
+                    if isinstance(brain, Brain):
+                        result = brain.generate_for_run(history, config, tools, cancellation_token)
+                    else:
+                        result = brain.generate(history, config=config, tools=tools)
                     if model_usage is not None and result.usage is not None:
                         model_usage = model_usage.with_reported(result.usage)
             except GenerationCancelled:
@@ -260,6 +269,7 @@ class AgentToolLoop:
                         text=result.text,
                         tool_calls=result.tool_calls,
                         reasoning=result.reasoning,
+                        responses_items=result.responses_items,
                     )
                 )
 
@@ -317,6 +327,18 @@ class AgentToolLoop:
                         iterations=iteration,
                         error="tool_call_budget_exhausted",
                     )
+                _validate_dispatch_guard(
+                    dispatch_guard, final_text, history, executed, iteration, model_usage
+                )
+                if dispatch_guard is not None and cancellation_requested(cancellation_token):
+                    return AgentToolLoopResult(
+                        text=final_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        cancelled=True,
+                        model_usage=model_usage,
+                    )
                 try:
                     if resuming and call_index == 0 and continuation is not None:
                         tool_result = gateway.call_approved_once(
@@ -347,6 +369,7 @@ class AgentToolLoop:
                             model_usage,
                             token_cap,
                             capture_binding,
+                            dispatch_guard,
                         )
                     )
                     raise
@@ -442,6 +465,7 @@ class AgentToolLoop:
         executed: list[ExecutedToolCall] = []
         visible_text = ""
         allowed_tool_names = {tool.name for tool in tools}
+        dispatch_guard = brain.tool_dispatch_guard(config) if isinstance(brain, Brain) else None
 
         for iteration in range(1, self.max_iterations + 1):
             if cancellation_requested(cancellation_token):
@@ -465,8 +489,9 @@ class AgentToolLoop:
                 return expired
             iteration_text = ""
             pending_calls: list[ToolCall] = []
-            stream_error: str | None = None
+            stream_error: Error | None = None
             provider_stopped = False
+            responses_items: tuple[dict[str, JSONValue], ...] = ()
             stream_tools = tools if tools else None
             try:
                 if cancellation_token is None:
@@ -505,11 +530,12 @@ class AgentToolLoop:
                         pending_calls.append(event.call)
                         continue
                     if isinstance(event, Error):
-                        stream_error = event.message
+                        stream_error = event
                         yield event
                         continue
                     if isinstance(event, Done):
                         provider_stopped = event.finish_reason == "stop"
+                        responses_items = event.responses_items
                         if event.finish_reason == "cancelled":
                             yield event
                             return AgentToolLoopResult(
@@ -570,7 +596,8 @@ class AgentToolLoop:
                     messages=history,
                     tool_calls=executed,
                     iterations=iteration,
-                    error=stream_error,
+                    error=stream_error.message,
+                    error_code=stream_error.code,
                 )
 
             history.append(
@@ -578,6 +605,7 @@ class AgentToolLoop:
                     text=iteration_text,
                     tool_calls=pending_calls,
                     reasoning=None,
+                    responses_items=responses_items,
                 )
             )
             if not pending_calls:
@@ -645,6 +673,16 @@ class AgentToolLoop:
                         iterations=iteration,
                         error="tool_call_budget_exhausted",
                     )
+                _validate_dispatch_guard(dispatch_guard, visible_text, history, executed, iteration)
+                if dispatch_guard is not None and cancellation_requested(cancellation_token):
+                    yield Done(finish_reason="cancelled")
+                    return AgentToolLoopResult(
+                        text=visible_text,
+                        messages=history,
+                        tool_calls=executed,
+                        iterations=iteration,
+                        cancelled=True,
+                    )
                 try:
                     tool_result = _dispatch_model_tool_call(
                         gateway=gateway, tool_call=tool_call, allowed_tool_names=allowed_tool_names
@@ -663,6 +701,7 @@ class AgentToolLoop:
                             config,
                             self.max_tool_calls,
                             self.expires_at_monotonic,
+                            dispatch_guard=dispatch_guard,
                         )
                     )
                     raise
@@ -760,6 +799,32 @@ def _expiry_stop(
     )
 
 
+def _validate_dispatch_guard(
+    guard: Callable[[], None] | None,
+    text: str,
+    history: list[LLMMessage],
+    executed: list[ExecutedToolCall],
+    iteration: int,
+    model_usage: ModelUsageSummary | None = None,
+) -> None:
+    if guard is None:
+        return
+    try:
+        guard()
+    except Exception as exc:
+        raise ToolLoopExecutionError(
+            AgentToolLoopResult(
+                text=text,
+                messages=history,
+                tool_calls=executed,
+                iterations=iteration,
+                error="provider_dispatch_denied",
+                model_usage=model_usage,
+            ),
+            exc,
+        ) from exc
+
+
 def _dispatch_model_tool_call(
     *,
     gateway: ToolGateway,
@@ -797,6 +862,7 @@ def _assistant_message(
     text: str,
     tool_calls: list[ToolCall],
     reasoning: str | None,
+    responses_items: tuple[dict[str, JSONValue], ...],
 ) -> LLMMessage:
     assistant_tool_calls: list[dict[str, JSONValue]] | None = None
     if tool_calls:
@@ -816,6 +882,7 @@ def _assistant_message(
         content=text,
         tool_calls=assistant_tool_calls,
         reasoning_content=reasoning,
+        responses_items=responses_items,
     )
 
 

@@ -270,14 +270,23 @@ export const parseProviderModels = (value: unknown): ProviderModels[] => {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    const candidate = item as { provider?: unknown; display_name?: unknown; models?: unknown; error?: unknown; status?: unknown };
+    const candidate = item as {
+      provider?: unknown; display_name?: unknown; models?: unknown;
+      model_display_names?: unknown; error?: unknown; status?: unknown;
+    };
     if (typeof candidate.provider !== 'string' || !Array.isArray(candidate.models)) {
       continue;
     }
+    const displayNames = candidate.model_display_names;
+    const modelDisplayNames = displayNames && typeof displayNames === 'object' && !Array.isArray(displayNames)
+      ? new Map(Object.entries(displayNames).filter((entry): entry is [string, string] =>
+        typeof entry[1] === 'string' && Boolean(entry[1].trim())))
+      : undefined;
     providers.push({
       provider: candidate.provider,
       displayName: typeof candidate.display_name === 'string' ? candidate.display_name : undefined,
       models: candidate.models.filter((entry): entry is string => typeof entry === 'string'),
+      ...(modelDisplayNames && { modelDisplayNames }),
       error:
         typeof candidate.error === 'string' || candidate.error === null ? candidate.error : null,
       status: typeof candidate.status === 'string' ? candidate.status : null,
@@ -285,6 +294,9 @@ export const parseProviderModels = (value: unknown): ProviderModels[] => {
   }
   return providers;
 };
+
+export const isChatGptPlanProvider = (provider: string | null): boolean =>
+  provider !== null && /^chatgpt-plan-[0-9a-f]{32}$/.test(provider);
 
 export const sortSessionsByUpdated = (value: SessionSummary[]): SessionSummary[] => {
   return [...value].sort((a, b) => {

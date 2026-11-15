@@ -19,6 +19,10 @@ def is_custom_provider_id(provider: str) -> bool:
     return CUSTOM_PROVIDER_ID_PATTERN.fullmatch(provider) is not None
 
 
+def is_chatgpt_plan_provider(provider: str) -> bool:
+    return re.fullmatch(r"chatgpt-plan-[0-9a-f]{32}", provider) is not None
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     provider: str
@@ -83,6 +87,7 @@ class LLMResult:
     citations: list[JSONValue] | None = None
     web_search_evidence: WebSearchEvidence | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    responses_items: tuple[dict[str, JSONValue], ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)

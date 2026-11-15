@@ -7,6 +7,7 @@ def register_routes(app: web.Application) -> None:
     from server.http.handlers import (
         auth,
         chat,
+        chatgpt_plan,
         decision,
         desktop,
         embeddings,
@@ -64,6 +65,13 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/ui/api/plan/cancel", plan.handle_ui_plan_cancel)
     app.router.add_get("/ui/api/settings", settings.handle_ui_settings)
     app.router.add_post("/ui/api/settings", settings.handle_ui_settings_update)
+    app.router.add_get("/ui/api/chatgpt-plan", chatgpt_plan.handle_chatgpt_plan_status)
+    app.router.add_post(
+        "/ui/api/chatgpt-plan/authorize", chatgpt_plan.handle_chatgpt_plan_authorize
+    )
+    app.router.add_post(
+        "/ui/api/chatgpt-plan/disconnect", chatgpt_plan.handle_chatgpt_plan_disconnect
+    )
     app.router.add_post("/ui/api/provider-instances/probe", settings.handle_ui_provider_probe)
     app.router.add_post("/ui/api/provider-instances", settings.handle_ui_provider_create)
     app.router.add_get("/ui/api/embeddings/status", embeddings.handle_embeddings_status)

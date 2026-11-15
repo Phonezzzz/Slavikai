@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from llm.types import ModelConfig
+from llm.types import ModelConfig, is_chatgpt_plan_provider
 
 
 class RuntimeModelStateStore:
@@ -15,7 +15,11 @@ class RuntimeModelStateStore:
     """
 
     def __init__(self, global_main: ModelConfig | None = None) -> None:
-        self._global_main = global_main
+        self._global_main = (
+            None
+            if global_main is not None and is_chatgpt_plan_provider(global_main.provider)
+            else global_main
+        )
         self._session_overrides: dict[str, ModelConfig] = {}
         self._session_revisions: dict[str, int] = {}
         self._lock = asyncio.Lock()
@@ -28,6 +32,8 @@ class RuntimeModelStateStore:
             return self._global_main
 
     async def set_global_main(self, main: ModelConfig | None) -> None:
+        if main is not None and is_chatgpt_plan_provider(main.provider):
+            raise ValueError("ChatGPT subscription is available only for an owner session.")
         async with self._lock:
             self._global_main = main
 

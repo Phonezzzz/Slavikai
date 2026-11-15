@@ -24,7 +24,7 @@ from server.http.common.runtime_contract import (
     AgentProtocol,
     RuntimeModelResolverProtocol,
     RuntimeModelStateProtocol,
-    _require_custom_provider_owner,
+    _require_scoped_provider_access,
 )
 from server.http_api import (
     TOOL_PIPELINE_ENABLED,
@@ -185,7 +185,9 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             if execution_config is None:
                 return _model_not_selected_response()
             try:
-                _require_custom_provider_owner(request, execution_config.provider, execution_config)
+                _require_scoped_provider_access(
+                    request, execution_config.provider, execution_config
+                )
             except PermissionError:
                 return error_response(
                     status=403,

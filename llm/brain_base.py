@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from llm.cancellation import cancellation_requested
 from llm.capabilities import CapabilityEvidence, NativeToolCapability
@@ -39,6 +39,19 @@ class Brain(ABC):
     ) -> LLMResult:
         """Сгенерировать ответ на основе списка сообщений."""
         raise NotImplementedError
+
+    def generate_for_run(
+        self,
+        messages: list[LLMMessage],
+        config: ModelConfig | None,
+        tools: list[ToolSpec],
+        cancellation_token: asyncio.Event | None,
+    ) -> LLMResult:
+        return self.generate(messages, config=config, tools=tools)
+
+    def tool_dispatch_guard(self, config: ModelConfig | None) -> Callable[[], None] | None:
+        """Return a grant check bound to the provider route of this tool loop, if needed."""
+        return None
 
     def generate_stream_events(
         self,

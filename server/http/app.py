@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -33,6 +34,7 @@ from core.rootless_podman import QUALIFIED_PYTHON_IMAGE, RootlessPodmanProfile
 from core.rootless_staging import RootlessStagePool, StagingLimits
 from core.task_run_storage import TaskRunStore, open_task_run_server
 from core.workspace_python_execution import RootlessPythonExecutor
+from llm.chatgpt_plan import ChatGPTPlan
 from llm.types import ModelConfig
 from server import http_api as api
 from server.agent_provider import AgentScope, ScopedAgentProvider
@@ -54,6 +56,7 @@ from server.preferences_store import PreferencesStore
 from server.principal_storage import principal_storage_paths
 from server.ui_hub import UIHub
 from server.ui_session_storage import SQLiteUISessionStorage, UISessionStorage
+from shared.sandbox import CHATGPT_PLAN_STORAGE
 from shared.workspace_binding import WorkspaceUnavailable
 from tools.terminal_tool import TerminalTool
 
@@ -132,6 +135,7 @@ def create_app(
         middlewares=[api.auth_gate_middleware],
     )
     app["auth_config"] = resolved_auth_config
+    chatgpt_plan: ChatGPTPlan | None = None
     if (
         resolved_auth_config.browser_auth_mode == "cloudflare"
         and not resolved_auth_config.allow_unauth_local
@@ -143,6 +147,9 @@ def create_app(
                 audience=resolved_auth_config.cloudflare_access_aud,
             )
         )
+        if os.environ.get("SLAVIK_CHATGPT_PLAN_LOCAL") == "true":
+            chatgpt_plan = ChatGPTPlan(CHATGPT_PLAN_STORAGE)
+            app["chatgpt_plan"] = chatgpt_plan
     app["preferences_store"] = PreferencesStore(api.PROJECT_ROOT / ".run" / "preferences.db")
     app["http_api_logger"] = logger
     app["settings_snapshot_builder"] = api._build_settings_payload
@@ -218,6 +225,8 @@ def create_app(
                 memory_root=api.PROJECT_ROOT / "memory",
             )
             workspace_kwargs: dict[str, object] = {}
+            if chatgpt_plan is not None and scope.principal_id == owner_principal_id:
+                workspace_kwargs["chatgpt_plan"] = chatgpt_plan
             if workspace_pool is not None:
                 workspace_kwargs["workspace_pool"] = workspace_pool
                 owner: ManagedWorkspace | None = None
@@ -322,6 +331,13 @@ def create_app(
     app.on_cleanup.append(_close_terminal_manager)
     app.on_cleanup.append(_close_embedding_downloads)
     app.on_cleanup.append(_close_agent_provider)
+    if chatgpt_plan is not None:
+
+        async def _close_chatgpt_plan(app: web.Application) -> None:
+            plan = cast(ChatGPTPlan, app["chatgpt_plan"])
+            await asyncio.to_thread(plan.close)
+
+        app.on_cleanup.append(_close_chatgpt_plan)
     if workspace_pool is not None:
 
         async def _close_workspace_pool(_app: web.Application) -> None:

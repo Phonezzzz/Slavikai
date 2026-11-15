@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from llm.types import LLMResult, LLMUsage, ToolCall
@@ -58,6 +58,7 @@ class Error(StreamEvent):
 @dataclass(frozen=True, slots=True)
 class Done(StreamEvent):
     finish_reason: str | None = None
+    responses_items: tuple[dict[str, JSONValue], ...] = field(default=(), repr=False)
 
 
 @dataclass(slots=True)

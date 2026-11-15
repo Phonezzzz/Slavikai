@@ -8,6 +8,7 @@ from typing import Final
 from config.ui_embeddings_settings import UIEmbeddingsSettings
 from memory.vector_index import VectorIndex
 from shared.models import JSONValue
+from shared.sandbox import is_private_runtime_path
 from shared.sandbox_execution import SANDBOX_EXECUTION_MESSAGE
 
 DEFAULT_IGNORED_DIRS: Final[set[str]] = {
@@ -115,8 +116,15 @@ def _index_workspace_root_with_index(
     skipped = 0
     root_resolved = Path(os.path.realpath(root))
     for current_root, dirs, files in os.walk(root):
-        dirs[:] = [name for name in dirs if name not in ignored_dirs]
         current = Path(current_root)
+        if is_private_runtime_path(current):
+            dirs.clear()
+            continue
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in ignored_dirs and not is_private_runtime_path(current / name)
+        ]
         for filename in files:
             full_path = current / filename
             if filename.endswith(".sqlite"):
@@ -127,6 +135,9 @@ def _index_workspace_root_with_index(
                 skipped += 1
                 continue
             resolved = full_path.resolve()
+            if is_private_runtime_path(resolved):
+                skipped += 1
+                continue
             try:
                 resolved.relative_to(root_resolved)
             except ValueError:

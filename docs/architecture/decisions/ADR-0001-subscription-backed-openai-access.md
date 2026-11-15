@@ -65,6 +65,9 @@ ADR принимает обязательность capability, но не выд
 
 ## Consequences
 
+- Поддерживаемый локальный вариант SIWC, границы развёртывания и сценарий приёмки
+  описаны в [документе подключения подписки ChatGPT](../CHATGPT_SUBSCRIPTION.md).
+
 - Capability Discovery обязана включить model/provider access и subscription/account access в
   системную карту; точная domain decomposition остаётся открытой.
 - Provider/model registry должен в будущем различать model family, Access Mode, auth identity,

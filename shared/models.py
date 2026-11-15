@@ -61,6 +61,8 @@ class LLMMessage:
     tool_call_id: str | None = None
     tool_calls: list[dict[str, JSONValue]] | None = None
     reasoning_content: str | None = None
+    # Stateless Responses context for this native tool loop only.
+    responses_items: tuple[dict[str, JSONValue], ...] = field(default=(), repr=False)
 
     def to_provider_dict(self) -> dict[str, JSONValue]:
         payload: dict[str, JSONValue] = {"role": self.role, "content": self.content}

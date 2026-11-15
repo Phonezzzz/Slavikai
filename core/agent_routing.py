@@ -919,7 +919,12 @@ class AgentRoutingMixin:
                         response_text=error_text,
                     )
                     self.last_stream_response_raw = error_text
-                    yield ResponseProduced(AgentResponse(error_text, runtime_result))
+                    failure = (
+                        ResponseFailure(tool_loop_result.error_code, tool_loop_result.error)
+                        if tool_loop_result.error_code is not None
+                        else None
+                    )
+                    yield ResponseProduced(AgentResponse(error_text, runtime_result, failure))
                     yield Done(finish_reason="error")
                     return
             if cancellation_requested(cancellation_token):

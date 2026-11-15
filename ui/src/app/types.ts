@@ -239,6 +239,7 @@ export type ProviderModels = {
   provider: string;
   displayName?: string;
   models: string[];
+  modelDisplayNames?: ReadonlyMap<string, string>;
   error: string | null;
   status?: string | null;
 };

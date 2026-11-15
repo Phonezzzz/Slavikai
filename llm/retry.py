@@ -11,6 +11,8 @@ from typing import Literal
 
 import requests
 
+from llm.chatgpt_plan import ChatGPTPlanError
+
 ProviderErrorKind = Literal["network", "timeout", "model"]
 
 logger = logging.getLogger("SlavikAI.LLMRetry")
@@ -199,6 +201,8 @@ def _retry_after_seconds(
 
 
 def visible_provider_error(exc: Exception) -> tuple[str, str, ProviderErrorKind]:
+    if isinstance(exc, ChatGPTPlanError):
+        return exc.code, str(exc), "model"
     if isinstance(exc, ProviderRequestError):
         return exc.code, exc.user_message, exc.kind
     if isinstance(exc, requests.RequestException):

@@ -25,6 +25,7 @@ from server.http.common.runtime_contract import (
     _agent_scope,
     _resolve_agent,
 )
+from server.http.handlers.chatgpt_plan import chatgpt_plan_context
 from server.preferences_store import PERSONAL_FIELDS, PreferencesConflictError, PreferencesStore
 from server.ui_hub import UIHub
 from shared.models import JSONValue
@@ -251,6 +252,8 @@ def _settings_response(request: web.Request) -> web.Response:
     settings["preferences_etag"] = snapshot.etag
     settings["preferences_subject"] = snapshot.subject
     settings["can_manage_installation"] = owner
+    if owner:
+        settings["chatgpt_plan_available"] = chatgpt_plan_context(request) is not None
     response = json_response(payload)
     response.headers["Cache-Control"] = "no-store"
     return response

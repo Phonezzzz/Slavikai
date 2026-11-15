@@ -1397,6 +1397,43 @@ def test_ui_plan_execute_rejects_second_start_when_running(monkeypatch) -> None:
     asyncio.run(run())
 
 
+def test_ui_plan_execute_records_unavailable_subscription(monkeypatch) -> None:  # noqa: ANN001
+    from server.http.handlers import plan
+
+    runner = plan._run_plan_runner
+
+    async def run() -> None:
+        finished = asyncio.Event()
+
+        async def tracked_runner(**kwargs):  # noqa: ANN003, ANN202
+            try:
+                return await runner(**kwargs)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(plan, "_run_plan_runner", tracked_runner)
+        client = await _create_client(DummyAgent())
+        try:
+            session_id = (await (await client.get("/ui/api/status")).json())["session_id"]
+            binding = await _prepare_approved_plan(client, session_id, switch_to_act=True)
+            hub = client.server.app["ui_hub"]
+            await hub.set_session_model(session_id, "chatgpt-plan-" + "a" * 32, "gpt")
+            response = await client.post(
+                "/ui/api/plan/execute",
+                headers={"X-Slavik-Session": session_id},
+                json=binding,
+            )
+            assert response.status == 200
+            await asyncio.wait_for(finished.wait(), timeout=2)
+            active_task = (await hub.get_session_workflow(session_id))["active_task"]
+            assert active_task["status"] == "failed"
+            assert active_task["execution"]["error"] == "chatgpt_plan_unavailable"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_ui_plan_execute_parallel_race_allows_only_one_runner(monkeypatch) -> None:  # noqa: ANN001
     async def _slow_runner(**kwargs) -> None:  # noqa: ANN003
         del kwargs

@@ -1561,7 +1561,10 @@ async def _complete_ui_decision(
         if source_endpoint == "chat.tool_continue":
             identity = resume_payload.get("continuation_id")
             if isinstance(identity, str):
-                agent = await _resolve_agent(request, session_id)
+                provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+                agent = await provider.get_existing_for_current_task(
+                    _agent_scope(request, session_id)
+                )
                 if agent is not None:
                     async with _agent_lock_for_request(request, session_id):
                         await asyncio.to_thread(agent.cancel_chat_approval, identity)
@@ -1588,7 +1591,10 @@ async def _complete_ui_decision(
                 run_id_raw.strip() if isinstance(run_id_raw, str) and run_id_raw.strip() else ""
             )
             if run_id:
-                agent = await _resolve_agent(request, session_id)
+                provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+                agent = await provider.get_existing_for_current_task(
+                    _agent_scope(request, session_id)
+                )
                 if agent is not None:
                     async with agent_lock:
                         await _apply_agent_runtime_state(

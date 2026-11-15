@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from llm.types import ModelConfig
+from llm.types import ModelConfig, is_chatgpt_plan_provider
 
 MODEL_CONFIG_PATH = Path("config/model_config.json")
 
@@ -51,6 +51,8 @@ def load_model_configs(path: Path = MODEL_CONFIG_PATH) -> ModelConfig | None:
 def save_model_configs(main: ModelConfig | None, path: Path = MODEL_CONFIG_PATH) -> None:
     payload: dict[str, Any] = {}
     if main:
+        if is_chatgpt_plan_provider(main.provider):
+            raise ValueError("ChatGPT subscription is available only for an owner session.")
         payload["main"] = model_config_to_dict(main)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

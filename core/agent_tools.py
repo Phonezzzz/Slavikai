@@ -51,6 +51,7 @@ from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.cancellation import cancellation_requested
 from llm.capabilities import NativeToolQualification
+from llm.chatgpt_plan import ChatGPTPlanError
 from llm.local_http_brain import LocalHttpBrain
 from llm.types import ModelConfig, WebSearchEvidence
 from shared.memory_companion_models import (
@@ -636,7 +637,13 @@ class AgentToolsMixin:
                 )
             )
         except ToolLoopExecutionError as exc:
-            error_text = "[Ошибка модели при продолжении]"
+            cause = exc.cause
+            failure = (
+                ResponseFailure(cause.code, str(cause))
+                if isinstance(cause, ChatGPTPlanError)
+                else ResponseFailure("provider_generation_failed", "Ошибка модели при продолжении")
+            )
+            error_text = f"[{failure.message}]"
             try:
                 self._log_chat_interaction(raw_input=pending.raw_input, response_text=error_text)
                 if pending.record_in_history:
@@ -646,9 +653,7 @@ class AgentToolsMixin:
             return AgentResponse(
                 error_text,
                 runtime_result=exc.result,
-                failure=ResponseFailure(
-                    "provider_generation_failed", "Ошибка модели при продолжении"
-                ),
+                failure=failure,
             )
         except Exception:
             self.logger.exception("Chat continuation failed after claim")

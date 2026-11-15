@@ -24,7 +24,7 @@ from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import (
     AgentProtocol,
     _agent_scope,
-    _require_custom_provider_owner,
+    _require_scoped_provider_access,
     _resolve_runtime_main_for_session,
 )
 from server.http.common.ui_settings import _load_provider_instance
@@ -87,7 +87,7 @@ async def handle_model_capabilities(request: web.Request) -> web.Response:
     config = await _resolve_runtime_main_for_session(request, session_id)
     if config is None or not is_custom_provider_id(config.provider):
         return json_response({"state": "unknown", "can_check": False})
-    _require_custom_provider_owner(request, config.provider, config)
+    _require_scoped_provider_access(request, config.provider, config)
     provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
     scope = _agent_scope(request, session_id)
     lock = provider.lock_for(scope)
@@ -147,7 +147,7 @@ async def handle_model_qualify(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="custom_model_required",
         )
-    _require_custom_provider_owner(request, config.provider, config)
+    _require_scoped_provider_access(request, config.provider, config)
     agent = await provider.get_for_current_task(_agent_scope(request, session_id), config)
     if lock.locked() or agent.last_approval_request is not None:
         return error_response(

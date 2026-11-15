@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SessionModelPicker } from '../components/session-model-picker';
+import { parseProviderModels } from '../session-payload';
 import type { ProviderModels } from '../types';
 
 afterEach(() => {
@@ -20,7 +21,7 @@ function renderPicker(result: ProviderModels, onSelectModel = vi.fn()) {
   const onLoadProviderModels = vi.fn(async (_selectedProvider: string) => result);
   function Wrapper() {
     const [providers, setProviders] = useState<ProviderModels[]>([
-      { provider, displayName: 'Example', models: [], error: null },
+      { provider: result.provider, displayName: result.displayName ?? 'Example', models: [], error: null },
     ]);
     return <SessionModelPicker
     sessionId="session-test"
@@ -93,5 +94,37 @@ describe('chat session model picker for generic providers', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Example' }));
     await screen.findByText('API key rejected.');
     expect(screen.queryByLabelText('Manual model ID')).toBeNull();
+  });
+
+  it('finds a subscription model by its display name and selects its exact account and slug', async () => {
+    const planProvider = 'chatgpt-plan-0123456789abcdef0123456789abcdef';
+    const accountLabel = 'Подписка ChatGPT · Рабочий аккаунт';
+    const [catalog] = parseProviderModels([{
+      provider: planProvider,
+      display_name: accountLabel,
+      models: ['opaque/slug', 'other-model'],
+      model_display_names: { 'opaque/slug': 'GPT Work' },
+    }]);
+    const { onLoadProviderModels, onSelectModel } = renderPicker(catalog);
+    fireEvent.click(screen.getByRole('button', { name: accountLabel }));
+    await screen.findByRole('button', { name: 'GPT Work' });
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Поиск модели' }), { target: { value: 'GPT WORK' } });
+    expect(screen.queryByRole('button', { name: 'other-model' })).toBeNull();
+    expect(onSelectModel).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'GPT Work' }));
+    expect(onLoadProviderModels).toHaveBeenCalledWith(planProvider);
+    expect(onSelectModel).toHaveBeenCalledWith(planProvider, 'opaque/slug');
+  });
+
+  it('explains an empty subscription catalog without offering manual model selection', async () => {
+    const planProvider = 'chatgpt-plan-0123456789abcdef0123456789abcdef';
+    const accountLabel = 'Подписка ChatGPT · Рабочий аккаунт';
+    const { onSelectModel } = renderPicker({
+      provider: planProvider, displayName: accountLabel, models: [], error: null,
+    });
+    fireEvent.click(screen.getByRole('button', { name: accountLabel }));
+    await screen.findByText('Для этого аккаунта ChatGPT нет доступных моделей.');
+    expect(screen.queryByLabelText('Manual model ID')).toBeNull();
+    expect(onSelectModel).not.toHaveBeenCalled();
   });
 });

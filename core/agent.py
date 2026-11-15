@@ -40,6 +40,7 @@ from llm.brain_base import Brain
 from llm.brain_factory import create_brain
 from llm.brain_manager import BrainManager
 from llm.capabilities import NativeToolQualification
+from llm.chatgpt_plan import ChatGPTPlan
 from llm.types import ModelConfig
 from memory.atom_embedding_index import AtomEmbeddingIndex
 from memory.canonical_aggregator import CanonicalAggregator
@@ -62,6 +63,7 @@ from shared.models import (
     ToolResult,
     WorkspaceDiffEntry,
 )
+from shared.sandbox import CHATGPT_PLAN_STORAGE
 from tools.desktop_browser_tool import DesktopBrowserTool
 from tools.desktop_gui_tool import DesktopGuiTool
 from tools.desktop_system_tools import (
@@ -185,6 +187,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         workspace_executor: RootlessPythonExecutor | None = None,
         workspace_access: WorkspaceAccess | None = None,
         workspace_pool: ManagedWorkspacePool | None = None,
+        chatgpt_plan: ChatGPTPlan | None = None,
     ) -> None:
         if workspace_access is not None and workspace_access.principal_id != user_id:
             raise ValueError("workspace principal mismatch")
@@ -200,6 +203,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
         self._workspace_executor = workspace_executor
         self._workspace_access = workspace_access
         self._workspace_pool = workspace_pool
+        self._chatgpt_plan = chatgpt_plan
         self._python_backend: ComputerBackend | None = (
             ContainerComputerBackend(
                 image=QUALIFIED_PYTHON_IMAGE,
@@ -245,6 +249,7 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             protected_paths=(
                 *((workspace_pool.protected_root,) if workspace_pool is not None else ()),
                 project_root / "config",
+                CHATGPT_PLAN_STORAGE,
                 project_root / "core" / "approval_policy.py",
                 project_root / "core" / "agent.py",
                 project_root / "core" / "desktop_policy.py",
@@ -430,6 +435,8 @@ class Agent(AgentRoutingMixin, AgentMWVMixin, AgentToolsMixin, AgentMemoryMixin)
             self.main_config,
             api_key=self.main_api_key,
             qualification=self._native_tool_qualification,
+            chatgpt_plan=self._chatgpt_plan,
+            principal=self.user_id,
         )
         return main_brain
 

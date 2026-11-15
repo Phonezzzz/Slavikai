@@ -19,6 +19,7 @@ import {
   extractErrorMessage,
   extractFilenameFromDisposition,
   groupSessionByDate,
+  isChatGptPlanProvider,
   parseComposerSettings,
   parseFolders,
   parseProviderModels,
@@ -69,6 +70,7 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [folders, setFolders] = useState<FolderSummary[]>([]);
   const [providerModels, setProviderModels] = useState<ProviderModels[]>([]);
+  const modelSummaryGeneration = useRef(0);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [composerSettings, setComposerSettings] = useState<ComposerUiSettings>(
     DEFAULT_COMPOSER_SETTINGS,
@@ -105,6 +107,7 @@ export default function App() {
   };
 
   const loadModels = async (): Promise<ProviderModels[]> => {
+    const generation = ++modelSummaryGeneration.current;
     setModelsLoading(true);
     try {
       const response = await fetch('/ui/api/models?summary=1');
@@ -113,7 +116,7 @@ export default function App() {
         throw new Error(extractErrorMessage(payload, 'Failed to load models.'));
       }
       const parsed = parseProviderModels((payload as { providers?: unknown }).providers);
-      setProviderModels(parsed);
+      if (modelSummaryGeneration.current === generation) setProviderModels(parsed);
       return parsed;
     } finally {
       setModelsLoading(false);
@@ -125,6 +128,7 @@ export default function App() {
     if (!normalized) {
       return null;
     }
+    const generation = modelSummaryGeneration.current;
     setModelsLoading(true);
     try {
       const params = new URLSearchParams({ provider: normalized, strict: '1' });
@@ -134,11 +138,11 @@ export default function App() {
         throw new Error(extractErrorMessage(payload, `Failed to load ${normalized} models.`));
       }
       const parsed = parseProviderModels((payload as { providers?: unknown }).providers);
-      const next = parsed[0] ?? null;
-      if (next) {
+      const next = parsed.find((item) => item.provider === normalized) ?? null;
+      if (next && modelSummaryGeneration.current === generation) {
         setProviderModels((current) => upsertProviderModels(current, next));
       }
-      return next;
+      return modelSummaryGeneration.current === generation ? next : null;
     } finally {
       setModelsLoading(false);
     }
@@ -220,8 +224,11 @@ export default function App() {
     onStatusMessage: setStatusMessage,
   });
 
+  const selectedProvider = providerModels.find((item) => item.provider === runtime.selectedModel?.provider);
   const modelLabel = runtime.selectedModel
-    ? `${runtime.selectedModel.provider}/${runtime.selectedModel.model}`
+    ? isChatGptPlanProvider(runtime.selectedModel.provider)
+      ? `${selectedProvider?.displayName ?? 'Подписка ChatGPT'} · ${selectedProvider?.modelDisplayNames?.get(runtime.selectedModel.model) ?? runtime.selectedModel.model}`
+      : `${runtime.selectedModel.provider}/${runtime.selectedModel.model}`
     : 'Model not selected';
   const sessionTitle =
     sessions.find((session) => session.session_id === runtime.selectedConversation)?.title ??
@@ -807,6 +814,7 @@ export default function App() {
         onSaved={() => {
           void handleSettingsSaved();
         }}
+        onRefreshModels={loadModels}
         onOpenSessionControls={runtime.selectedConversation ? () => overlays.setSessionDrawerOpen(true) : undefined}
       />
     </div>

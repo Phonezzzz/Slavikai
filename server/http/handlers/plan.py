@@ -9,6 +9,7 @@ from aiohttp import web
 
 from core.mwv.verifier_runtime import canonical_check_command, has_canonical_repo_verifier
 from core.plan_compiler import PlanCompilationError
+from llm.chatgpt_plan import ChatGPTPlanError
 from server.agent_provider import ScopedAgentProvider
 from server.http.common.idempotency import (
     IdempotencyStore,
@@ -24,7 +25,9 @@ from server.http.common.runtime_contract import (
     SessionModelChangedError,
     _resolve_runtime_main_for_session,
     _set_model_bound_decision,
+    _validate_chatgpt_plan_grant,
 )
+from server.http.handlers.chatgpt_plan import chatgpt_plan_error
 from server.http_api import (
     UI_SESSION_HEADER,
     _agent_lock_for_request,
@@ -154,6 +157,8 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
         agent = await _resolve_agent(request, session_id)
         if agent is None:
             return _model_not_selected_response()
+        if expected_model is not None:
+            await _validate_chatgpt_plan_grant(request, expected_model.provider)
         root = await _workspace_root_for_session(hub, session_id)
         async with _agent_lock_for_request(request, session_id):
             if (
@@ -193,6 +198,8 @@ async def handle_ui_plan_draft(request: web.Request) -> web.Response:
             error_type="configuration_error",
             code=exc.code,
         )
+    except ChatGPTPlanError as exc:
+        return chatgpt_plan_error(exc)
     except Exception as exc:  # noqa: BLE001
         return error_response(
             status=400,

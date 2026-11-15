@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from shared.models import JSONValue, ToolRequest, ToolResult
+from shared.sandbox import is_private_runtime_path
 
 
 def _resolve_workspace_file(
@@ -18,6 +19,8 @@ def _resolve_workspace_file(
     if not normalized:
         raise ValueError("path required")
     candidate = (workspace_root / normalized).resolve()
+    if is_private_runtime_path(candidate):
+        raise ValueError("path outside workspace")
     try:
         candidate.relative_to(workspace_root)
     except ValueError as exc:

@@ -13,6 +13,8 @@ from typing import Literal, cast
 
 from aiohttp import web
 
+from llm.chatgpt_plan import ChatGPTPlanError
+from llm.types import is_chatgpt_plan_provider
 from server import http_api as api
 from server.agent_provider import AgentScope, ScopedAgentProvider
 from server.http.common import ui_settings
@@ -30,6 +32,13 @@ from server.http.common.runtime_contract import (
     _resolve_runtime_main_for_session,
 )
 from server.http.common.ui_settings import _load_provider_instance, _load_provider_instances
+from server.http.handlers.chatgpt_plan import (
+    chatgpt_plan_context,
+    chatgpt_plan_error,
+    chatgpt_plan_forbidden,
+    check_chatgpt_plan_origin,
+    require_chatgpt_plan,
+)
 from server.http_api import (
     SUPPORTED_MODEL_PROVIDERS,
     UI_SESSION_HEADER,
@@ -169,6 +178,8 @@ async def handle_ui_models(request: web.Request) -> web.Response:
         "true",
         "yes",
     }
+    if is_chatgpt_plan_provider(provider_query):
+        return await _chatgpt_plan_model_catalog(request, provider_query)
     providers: list[str]
     if provider_query:
         normalized = _normalize_provider(provider_query)
@@ -203,7 +214,7 @@ async def handle_ui_models(request: web.Request) -> web.Response:
                     "catalog_source": "not_checked",
                 }
             )
-        return json_response({"providers": payload_items})
+        return await _provider_list_response(request, payload_items, include_plan=True)
     for provider in providers:
         instance = _load_provider_instance(provider)
         if instance is not None and skip_custom_probe and not provider_query:
@@ -261,7 +272,69 @@ async def handle_ui_models(request: web.Request) -> web.Response:
                 "catalog_source": catalog_source,
             }
         )
-    return json_response({"providers": payload_items})
+    return await _provider_list_response(request, payload_items, include_plan=not provider_query)
+
+
+def _plan_catalog_row(
+    provider: str, label: str, models: dict[str, str] | None = None
+) -> dict[str, JSONValue]:
+    return {
+        "provider": provider,
+        "display_name": f"Подписка ChatGPT · {label}",
+        "models": list(models) if models is not None else [],
+        "model_display_names": dict[str, JSONValue](models or {}),
+        "error": None,
+        "catalog_source": "endpoint" if models is not None else "not_checked",
+    }
+
+
+async def _provider_list_response(
+    request: web.Request, items: list[dict[str, JSONValue]], *, include_plan: bool
+) -> web.Response:
+    context = chatgpt_plan_context(request) if include_plan else None
+    if context is not None:
+        plan, principal = context
+        try:
+            accounts = await asyncio.to_thread(plan.accounts, principal)
+        except ChatGPTPlanError:
+            # The owner can inspect the account status in Settings.
+            accounts = []
+        for account in accounts:
+            provider, label = account.get("provider"), account.get("label")
+            if (
+                isinstance(provider, str)
+                and is_chatgpt_plan_provider(provider)
+                and isinstance(label, str)
+            ):
+                items.append(_plan_catalog_row(provider, label))
+    response = json_response({"providers": items})
+    if include_plan:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+async def _chatgpt_plan_model_catalog(request: web.Request, provider: str) -> web.Response:
+    try:
+        plan, principal = require_chatgpt_plan(request)
+        accounts = await asyncio.to_thread(plan.accounts, principal)
+        label = next(
+            (account.get("label") for account in accounts if account.get("provider") == provider),
+            None,
+        )
+        if not isinstance(label, str):
+            raise ChatGPTPlanError(
+                "chatgpt_plan_grant_unavailable",
+                "Выбранное подключение ChatGPT больше недоступно.",
+                status=409,
+            )
+        models = await asyncio.to_thread(plan.catalog, principal, provider)
+    except PermissionError:
+        return chatgpt_plan_forbidden()
+    except ChatGPTPlanError as exc:
+        return chatgpt_plan_error(exc)
+    response = json_response({"providers": [_plan_catalog_row(provider, label, models)]})
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _fetch_local_ollama_models() -> tuple[list[str], str | None]:
@@ -372,7 +445,8 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
             error_type="invalid_request_error",
             code="invalid_request_error",
         )
-    provider = _normalize_provider(provider_raw)
+    plan_provider = is_chatgpt_plan_provider(provider_raw)
+    provider = provider_raw if plan_provider else _normalize_provider(provider_raw)
     if provider is None:
         return error_response(
             status=400,
@@ -385,6 +459,16 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
         owner_error = _require_owner(request)
         if owner_error is not None:
             return owner_error
+    plan_context = None
+    if plan_provider:
+        try:
+            plan_context = require_chatgpt_plan(request)
+        except PermissionError:
+            return chatgpt_plan_forbidden()
+        except ChatGPTPlanError as exc:
+            return chatgpt_plan_error(exc)
+        if (origin_error := check_chatgpt_plan_origin(request)) is not None:
+            return origin_error
     session_id, session_error = await _resolve_ui_session_id_for_principal(request, hub)
     if session_error is not None or session_id is None:
         return session_error or _session_forbidden_response()
@@ -401,7 +485,14 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
         )
     runtime_model_state = cast(RuntimeModelStateProtocol, request.app["runtime_model_state"])
     expected_revision = await runtime_model_state.get_session_revision(session_id)
-    if instance is not None:
+    if plan_context is not None:
+        plan, principal = plan_context
+        try:
+            catalog = await asyncio.to_thread(plan.catalog, principal, provider)
+        except ChatGPTPlanError as exc:
+            return chatgpt_plan_error(exc)
+        models, fetch_error = list(catalog), None
+    elif instance is not None:
         key = api._resolve_provider_api_key(provider)
         if not key:
             return error_response(
@@ -511,6 +602,12 @@ async def handle_ui_session_model(request: web.Request) -> web.Response:
                         code="model_change_pending_approval",
                     )
                 existing.set_native_tool_qualification(None)
+        if plan_context is not None:
+            plan, principal = plan_context
+            try:
+                await asyncio.to_thread(plan.validate_grant, principal, provider)
+            except ChatGPTPlanError as exc:
+                return chatgpt_plan_error(exc)
         await runtime_model_state.set_session_override(session_id, model_config)
         await hub.set_session_model(session_id, provider, model_raw)
     response = json_response(
