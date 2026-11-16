@@ -1,20 +1,20 @@
 # SlavikAI Worker State
 
-**Source of truth:** [ROADMAP.md](ROADMAP.md) · [Рабочее соглашение Muse](slavikai-how-to-work-with-muse.md) · [Git workflow](docs/workflow/dev_workflow.md). Это зафиксированный снимок от 2026-11-16; перед любым действием Muse перепроверяет Git, CI, review и актуальный `main`.
+**Source of truth:** [ROADMAP.md](ROADMAP.md) · [Рабочее соглашение Muse](slavikai-how-to-work-with-muse.md) · [Git workflow](docs/workflow/dev_workflow.md). Это зафиксированный снимок от 2026-11-16, синхронизирован с merge PR #152 (main `fca51c2`); перед любым действием Muse перепроверяет Git, CI, review и актуальный `main`.
 
 ## Два Git worktree — подтверждено на ПК владельца 2026-11-16
 
 | Назначение | Путь | Ветка на момент фиксации | HEAD | Право Muse |
 |---|---|---|---|---|
-| Исходный проект владельца | `/home/ki/Project/Slavikai` | `main` | `470a9a63280f9dac392f559a6fe99115db2e50d0` | **Только read-only без изменения checkout** |
-| Перестройка под Muse | `/home/ki/Project/Slavikai-rebuild` | `muse/slavikai-rebuild` | `470a9a63280f9dac392f559a6fe99115db2e50d0` | **Единственная рабочая директория для roadmap** |
+| Исходный проект владельца | `/home/ki/Project/Slavikai` | `main` | `fca51c2fdcecd5d2b37c554105af44e3d925f348` | **Только read-only без изменения checkout** |
+| Перестройка под Muse | `/home/ki/Project/Slavikai-rebuild` | `muse/slavikai-rebuild` | `fca51c2fdcecd5d2b37c554105af44e3d925f348` | **Единственная рабочая директория для roadmap** |
 
-- Команда `git worktree list --porcelain` подтвердила обе записи. Второе дерево создано от текущего `main`; **никаких implementation-изменений внутри не выполнялось**.
-- `origin/main` на момент проверки: `470a9a63280f9dac392f559a6fe99115db2e50d0`; `main` оригинального checkout совпадает с remote.
+- Команда `git worktree list --porcelain` подтвердила обе записи. Второе дерево создано от `main` на `470a9a6` и синхронизировано самой Мусей fast-forward до `fca51c2` 2026-11-16; **никаких implementation-изменений внутри не выполнялось**.
+- `origin/main` на момент проверки: `fca51c2fdcecd5d2b37c554105af44e3d925f348`; `main` оригинального checkout совпадает с remote.
 - Исходный checkout: tracked-файлы clean, имеется один **посторонний untracked** `ystemctl status cloudflared.service`. Не удалять, не включать в PR и не пытаться очищать.
 - Ветку `muse/slavikai-rebuild` использовать как служебную точку возвращения, не коммитить тикеты в неё. На каждый тикет Muse создаёт новую PR-ветку от актуального `origin/main`.
 - Третьи worktree или копии без отдельного согласования не создавать; параллельные implementation-тикеты запрещены.
-- **Worktree не backup**: исходный baseline зафиксирован immutable commit `470a9a63280f9dac392f559a6fe99115db2e50d0`. Историю и изменения исходного checkout не переписывать.
+- **Worktree не backup**: исходный code baseline зафиксирован immutable commit `470a9a63280f9dac392f559a6fe99115db2e50d0` (merge PR #151); текущий `main` — `fca51c2fdcecd5d2b37c554105af44e3d925f348` (docs PR #152 поверх baseline). Историю и изменения исходного checkout не переписывать.
 
 ## PR #151 — завершён
 
@@ -22,26 +22,26 @@
 - GPT subscription и исправления Desktop/approval/UI находятся в `main`; PR #151 больше не блокирует E00 и архитектурную очередь.
 - Muse не занимается исправлением/очисткой старого PR без нового поручения.
 
-## Docs bootstrap: PR #152 (не merged)
+## Docs bootstrap: PR #152 — merged
 
-- [PR #152](https://github.com/Phonezzzz/Slavikai/pull/152), branch `docs/muse-roadmap-2026-11-16`.
-- Содержимое после этого обновления: `ROADMAP.md`, `STATE.md`, `slavikai-how-to-work-with-muse.md`, `AGENTS.md`, `docs/workflow/dev_workflow.md`. Runtime-код не меняется.
-- Ранее опубликованный docs commit имел GitHub CI success, но Codex нашёл **два P1 документационных противоречия**: merge-gate и Outcome/ADR-0002. Изменения этого обновления должны получить **новые** CI и независимое review; старые результаты не засчитывать как pass нового HEAD.
-- Ветка docs-PR создана от старого `main` до PR #151. Перед merge **требуется проверить и синхронизировать её с текущим `main` fast-forward-compatible способом**, выполнить актуальные gates. Без auto-merge/force push без отдельного разрешения.
-- **Статус:** `AWAITING_REVIEW_CI_AND_BASE_SYNC`. Не начинать E01 до того, как docs PR принят и E00-T03 выполнен.
+- [PR #152](https://github.com/Phonezzzz/Slavikai/pull/152), branch `docs/muse-roadmap-2026-11-16`: **MERGED** 2026-11-16, GitHub Rebase and merge, новый `main` — `fca51c2fdcecd5d2b37c554105af44e3d925f348`.
+- Содержимое: `ROADMAP.md`, `STATE.md`, `slavikai-how-to-work-with-muse.md`, `AGENTS.md`, `docs/workflow/dev_workflow.md`. Runtime-код не меняется.
+- Gates пройдены на последнем HEAD: GitHub CI success, независимое Codex review без замечаний. Два P1 документационных противоречия (merge-gate и Outcome/ADR-0002), найденные Codex ранее, исправлены в PR.
+- Локальный `make git-check` для этой docs-ветки не выполнялся; проверками были успешный GitHub CI и чистое Codex review.
+- **Статус:** `DONE`. E01 не начинать до завершения E00-T03.
 
 ## Текущая очередь
 
 - **E00-T01 — DONE** (read-only baseline, разрешение PR #151, проверка двух worktree). Evidence: Git `worktree list`, local/remote `main` SHA, merge status PR #151.
-- **E00-T02 — IN_PROGRESS** (публикация и согласование пяти Markdown-файлов PR #152). Следующие gates: Codex review current HEAD, CI current HEAD, согласование с актуальным main, `make git-check` и ручной FF merge.
-- **E00-T03 — NOT_STARTED**. Создать evidence checklist с verified call paths, после принятия docs PR.
+- **E00-T02 — DONE** (публикация и согласование пяти Markdown-файлов PR #152). Evidence: PR #152 merged 2026-11-16, GitHub CI success, Codex review без замечаний, `main` — `fca51c2`.
+- **E00-T03 — IN_PROGRESS**. Создать evidence checklist с verified call paths. Evidence research идёт (read-only сверка аудитов с кодом на `fca51c2`).
 - **E01-T01 — BLOCKED: E00**. Только после завершения E00.
 
 ## Readiness: 62 последовательных тикета
 
 | Epic | IDs | Count | Status |
 |---|---|---:|---|
-| E00 | T01–T03 | 3 | E00-T01 done; E00-T02 review pending |
+| E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done (merged 2026-11-16); E00-T03 in progress |
 | E01 | T01–T09 | 9 | READY после E00 |
 | E02 | T01–T08 | 8 | READY после E01 |
 | E03 | T01–T11 | 11 | READY после E02 |
@@ -63,4 +63,4 @@
 
 ## Resume
 
-**Next active:** E00-T02 / PR #152 docs review & main synchronization. **Next implementation after docs:** E00-T03. **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E00-T03 evidence checklist (research underway). **Next implementation after docs:** E00-T03. **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
