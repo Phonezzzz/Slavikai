@@ -121,7 +121,8 @@ class _FakeAgent:
     def _get_main_brain(self):
         return self._brain
 
-    def _build_tool_gateway(self):
+    def _build_tool_gateway(self, *, budget=None):
+        del budget
         raise RuntimeError("not-used")
 
     def _append_report_block(self, text: str, **kwargs):  # noqa: ANN003
@@ -191,7 +192,8 @@ class _AutoV1Agent(_FakeAgent):
             },
         )
 
-    def _build_tool_gateway(self):
+    def _build_tool_gateway(self, *, budget=None):
+        del budget
         return ToolGateway(self.tool_registry)
 
 
@@ -262,7 +264,7 @@ def test_auto_call_cap_is_run_scoped_and_retained_across_approval(tmp_path, monk
         gateway = ToolGateway(
             agent.tool_registry, approval_context=ApprovalContext(True, principal, set())
         )
-        agent._build_tool_gateway = lambda current=gateway: current
+        agent._build_tool_gateway = lambda current=gateway, budget=None: current
         orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
         with pytest.raises(ApprovalRequired):
             orchestrator.run_v1("count")
@@ -298,7 +300,9 @@ def test_auto_keeps_available_prefix_after_dispatch_observation_fault(tmp_path, 
         if request.name == "second":
             raise RuntimeError("observation failed after handler")
 
-    agent._build_tool_gateway = lambda: ToolGateway(agent.tool_registry, post_call=observe)
+    agent._build_tool_gateway = lambda budget=None: ToolGateway(
+        agent.tool_registry, post_call=observe
+    )
     orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
     outcome = orchestrator.run_v1("observe")
     assert outcome.status == AutoRunStatus.FAILED_INTERNAL
@@ -348,7 +352,8 @@ class _RecoveryAgent(_FakeAgent):
             parameters_schema={"type": "object", "properties": {}, "required": []},
         )
 
-    def _build_tool_gateway(self):
+    def _build_tool_gateway(self, *, budget=None):
+        del budget
         return ToolGateway(self.tool_registry)
 
 
@@ -358,7 +363,8 @@ class _ResponseOnlyAgent(_FakeAgent):
         self._brain = _ResponseOnlyBrain()
         self.tool_registry = ToolRegistry()
 
-    def _build_tool_gateway(self):
+    def _build_tool_gateway(self, *, budget=None):
+        del budget
         return ToolGateway(self.tool_registry)
 
 
@@ -555,7 +561,8 @@ class _CorrectiveRecoveryAgent(_FakeAgent):
             parameters_schema={"type": "object", "properties": {}, "required": []},
         )
 
-    def _build_tool_gateway(self):
+    def _build_tool_gateway(self, *, budget=None):
+        del budget
         return ToolGateway(self.tool_registry)
 
 
@@ -855,7 +862,7 @@ def test_auto_file_budget_survives_approval_and_blocks_publication(tmp_path, mon
             ]
         ]
     )
-    agent._build_tool_gateway = lambda: ToolGateway(
+    agent._build_tool_gateway = lambda budget=None: ToolGateway(
         agent.tool_registry,
         approval_context=ApprovalContext(True, agent.session_id, {"EXEC_ARBITRARY"}),
         workspace_access=WorkspaceAccess(workspace, agent.user_id, agent.session_id),

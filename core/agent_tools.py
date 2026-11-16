@@ -37,6 +37,7 @@ from core.mwv.models import (
 )
 from core.mwv.routing import RouteDecision
 from core.rule_engine import PolicyApplication
+from core.run_contract import RunBudget, RunSpec, build_run_spec
 from core.skills.candidates import CandidateDraft, sanitize_text, suggest_patterns
 from core.skills.index import SkillMatch, SkillResolution
 from core.skills.models import SkillRisk
@@ -754,6 +755,16 @@ class AgentToolsMixin:
             return
         self.runtime_workspace_root = str(candidate)
 
+    def _run_spec(self, *, budget: RunBudget | None = None) -> RunSpec:
+        """Derive the run contract from the Agent's runtime state."""
+        return build_run_spec(
+            mode=getattr(self, "runtime_mode", "act"),
+            active_plan=getattr(self, "runtime_active_plan", None),
+            active_task=getattr(self, "runtime_active_task", None),
+            enforce_plan_guard=bool(getattr(self, "runtime_plan_guard_enabled", False)),
+            budget=budget,
+        )
+
     def _approval_context(self, *, safe_mode_override: bool | None = None) -> ApprovalContext:
         safe_mode = bool(self.tools_enabled.get("safe_mode", False))
         if safe_mode_override is not None:
@@ -777,13 +788,12 @@ class AgentToolsMixin:
         post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
         safe_mode_override: bool | None = None,
         confirmed_decision: bool = False,
+        budget: RunBudget | None = None,
     ) -> ToolGateway:
-        self.tool_registry.set_execution_policy(
-            mode=getattr(self, "runtime_mode", "act"),
-            active_plan=getattr(self, "runtime_active_plan", None),
-            active_task=getattr(self, "runtime_active_task", None),
-            enforce_plan_guard=bool(getattr(self, "runtime_plan_guard_enabled", False)),
-        )
+        # E01-T02: the run carries its own policy snapshot, built here
+        # from the runtime state. The global ToolRegistry mode is no
+        # longer mutated on the run path.
+        spec = self._run_spec(budget=budget)
 
         computer_log: ComputerActivityLog | None = getattr(self, "_computer_log", None)
 
@@ -822,6 +832,7 @@ class AgentToolsMixin:
                 else None
             ),
             workspace_principal_id=self.user_id,
+            run_policy=spec.policy,
         )
 
     def _track_tool_error(self, request: ToolRequest, result: ToolResult) -> None:

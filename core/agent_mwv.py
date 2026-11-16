@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
     from core.decision.handler import DecisionHandler
     from core.decision.models import DecisionPacket
+    from core.run_contract import RunBudget
     from core.skills.index import SkillMatch
     from core.tool_gateway import ToolGateway
     from core.tracer import Tracer
@@ -220,6 +221,7 @@ class AgentMWVMixin:
             post_call: (Callable[[ToolRequest, ToolResult, object | None], None] | None) = None,
             safe_mode_override: bool | None = None,
             confirmed_decision: bool = False,
+            budget: RunBudget | None = None,
         ) -> ToolGateway: ...
         def _workspace_diff_pre_call(self, request: ToolRequest) -> str | None: ...
         def _workspace_diff_post_call(

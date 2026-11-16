@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from core.desktop_runtime import DesktopRunOutcome, DesktopRuntime
     from core.mwv.models import VerificationResult
     from core.rule_engine import PolicyApplication
+    from core.run_contract import RunBudget
     from core.skills.index import SkillIndex, SkillMatch, SkillResolution
     from core.tool_gateway import ToolGateway
     from core.tracer import Tracer
@@ -212,6 +213,7 @@ class AgentRoutingMixin:
             post_call: Callable[[ToolRequest, ToolResult, object | None], None] | None = None,
             safe_mode_override: bool | None = None,
             confirmed_decision: bool = False,
+            budget: RunBudget | None = None,
         ) -> ToolGateway: ...
         def _append_report_block(
             self,

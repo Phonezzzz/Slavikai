@@ -72,7 +72,7 @@ def test_expiry_before_verifier_and_cancellation_precedence(tmp_path, clock, can
         risk_classes=["network"],
     )
     gateway = ToolGateway(agent.tool_registry, approval_context=ApprovalContext(True, "s", set()))
-    agent._build_tool_gateway = lambda: gateway
+    agent._build_tool_gateway = lambda budget=None: gateway
     token = asyncio.Event()
 
     def progress(state):
@@ -214,7 +214,7 @@ def test_auto_runs_keep_separate_original_expiry_after_env_change(tmp_path, cloc
         gateway = ToolGateway(
             agent.tool_registry, approval_context=ApprovalContext(True, principal, set())
         )
-        agent._build_tool_gateway = lambda current=gateway: current
+        agent._build_tool_gateway = lambda current=gateway, budget=None: current
         orchestrator = auto_runtime.AutoOrchestrator(agent, workspace_root=tmp_path)
         with pytest.raises(ApprovalRequired):
             orchestrator.run_v1("go")

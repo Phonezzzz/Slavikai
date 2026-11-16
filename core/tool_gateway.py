@@ -5,6 +5,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
 from core.approval_policy import (
     ApprovalContext,
@@ -24,6 +25,9 @@ from shared.workspace_binding import (
     WorkspaceUnavailable,
 )
 from tools.tool_registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from core.run_contract import RunPolicy
 
 logger = logging.getLogger("SlavikAI.ToolGateway")
 
@@ -109,6 +113,7 @@ class ToolGateway:
     workspace_pool: ManagedWorkspacePool | None = None
     workspace_principal_id: str | None = None
     auto_file_effects: AutoFileEffects | None = None
+    run_policy: RunPolicy | None = None
 
     def _workspace_binding(self, request: ToolRequest) -> WorkspaceBinding | None:
         if request.name not in _WORKSPACE_OPERATIONS:
@@ -312,12 +317,14 @@ class ToolGateway:
                     bypass_safe_mode=bypass_safe_mode,
                     confirmed_decision=self.confirmed_decision,
                     effect_guard=guard,
+                    policy=self.run_policy,
                 )
             else:
                 result = self.registry.call(
                     request,
                     bypass_safe_mode=bypass_safe_mode,
                     confirmed_decision=self.confirmed_decision,
+                    policy=self.run_policy,
                 )
         except WorkspaceUnavailable as exc:
             result = _workspace_failure(exc)

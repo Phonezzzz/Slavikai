@@ -13,6 +13,7 @@ from core.approval_policy import ApprovalRequired
 from core.mwv.models import VerificationResult, VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.response_preferences import ResponsePreferences, compose_response_preferences
+from core.run_contract import RunBudget
 from core.tool_gateway import ToolGateway
 from core.tool_loop import (
     AgentToolLoop,
@@ -61,7 +62,7 @@ class DesktopAgentProtocol(Protocol):
 
     def _get_main_brain(self) -> Brain: ...
 
-    def _build_tool_gateway(self) -> ToolGateway: ...
+    def _build_tool_gateway(self, *, budget: RunBudget | None = None) -> ToolGateway: ...
 
     def close_desktop_resources(self) -> None: ...
 
@@ -314,7 +315,8 @@ class DesktopRuntime:
                 verification=verification,
                 loop_result=empty,
             )
-        gateway = self.parent._build_tool_gateway()
+        run_budget = RunBudget(max_iterations=self.max_iterations)
+        gateway = self.parent._build_tool_gateway(budget=run_budget)
         registry = self.parent.tool_registry
         list_specs = getattr(registry, "list_tool_specs", None)
         if not callable(list_specs):
@@ -329,7 +331,7 @@ class DesktopRuntime:
                 verification=verification,
                 loop_result=empty,
             )
-        tool_specs_raw = list_specs()
+        tool_specs_raw = list_specs(policy=gateway.run_policy)
         tool_specs: list[ToolSpec] = [item for item in tool_specs_raw if isinstance(item, ToolSpec)]
 
         def _final_gate(calls: Sequence[ExecutedToolCall]) -> str | None:
@@ -340,7 +342,7 @@ class DesktopRuntime:
 
         self.parent.desktop_execution_control.bind(cancellation_token)
         try:
-            loop_result = AgentToolLoop(max_iterations=self.max_iterations).run(
+            loop_result = AgentToolLoop(**run_budget.loop_kwargs()).run(
                 brain=brain,
                 gateway=gateway,
                 messages=compose_response_preferences(

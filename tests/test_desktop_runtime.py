@@ -53,7 +53,8 @@ class DesktopParent:
     def _get_main_brain(self) -> Brain:
         return self.brain
 
-    def _build_tool_gateway(self) -> ToolGateway:
+    def _build_tool_gateway(self, *, budget=None) -> ToolGateway:
+        del budget
         return ToolGateway(
             self.tool_registry,
             pre_call=lambda request: self.gateway_requests.append(request),

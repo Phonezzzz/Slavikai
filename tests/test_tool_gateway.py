@@ -14,8 +14,9 @@ class _OkRegistry:
         *,
         bypass_safe_mode: bool = False,
         confirmed_decision: bool = False,
+        policy: object = None,
     ) -> ToolResult:
-        del bypass_safe_mode, confirmed_decision
+        del bypass_safe_mode, confirmed_decision, policy
         self.called = True
         return ToolResult.success({"value": "ok"})
 
@@ -27,8 +28,9 @@ class _BoomRegistry:
         *,
         bypass_safe_mode: bool = False,
         confirmed_decision: bool = False,
+        policy: object = None,
     ) -> ToolResult:
-        del request, bypass_safe_mode, confirmed_decision
+        del request, bypass_safe_mode, confirmed_decision, policy
         raise RuntimeError("boom")
 
 

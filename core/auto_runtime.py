@@ -25,6 +25,7 @@ from core.mwv.verifier_runtime import (
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.response_preferences import compose_response_preferences
+from core.run_contract import RunBudget
 from core.skills.index import SkillResolution
 from core.skills.runtime import skill_run_metadata, skill_run_report
 from core.tool_gateway import AutoFileEffects
@@ -282,18 +283,22 @@ class AutoOrchestrator:
                 self._set_state(state)
 
             self._set_status(state, AutoRunStatus.CODING)
-            gateway = replace(
-                self.parent._build_tool_gateway(), auto_file_effects=frame.file_effects
+            run_budget = RunBudget(
+                max_iterations=budgets.max_tool_calls,
+                max_tool_calls=budgets.max_tool_calls,
+                max_model_tokens=budgets.max_llm_tokens,
+                max_runtime_seconds=budgets.max_runtime_seconds,
             )
-            tool_specs = self.parent.tool_registry.list_tool_specs()
+            gateway = replace(
+                self.parent._build_tool_gateway(budget=run_budget),
+                auto_file_effects=frame.file_effects,
+            )
+            tool_specs = self.parent.tool_registry.list_tool_specs(policy=gateway.run_policy)
             system_prompt = AUTO_V1_SYSTEM_PROMPT
             if skill_resolution is not None:
                 system_prompt = f"{system_prompt}\n\n{skill_resolution.system_instruction()}"
             loop_result = AgentToolLoop(
-                max_iterations=budgets.max_tool_calls,
-                max_tool_calls=budgets.max_tool_calls,
-                max_model_tokens=budgets.max_llm_tokens,
-                expires_at_monotonic=started_monotonic + budgets.max_runtime_seconds,
+                **run_budget.loop_kwargs(started_monotonic=started_monotonic)
             ).run(
                 brain=brain,
                 gateway=gateway,

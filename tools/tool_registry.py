@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from llm.types import ToolSpec
 from shared.models import JSONValue, ToolCallRecord, ToolRequest, ToolResult
@@ -12,6 +12,9 @@ from shared.tool_capture import ToolCaptureFault
 from shared.workspace_binding import WorkspaceConflict, WorkspaceUnavailable
 from tools.protocols import Tool
 from tools.tool_logger import ToolCallLogger
+
+if TYPE_CHECKING:
+    from core.run_contract import RunPolicy
 
 ToolHandler = Callable[[ToolRequest], ToolResult]
 ToolCapability = Literal["read", "write", "exec"]
@@ -133,7 +136,8 @@ class ToolRegistry:
     def get_descriptor(self, name: str) -> ToolDescriptor | None:
         return self._tools.get(name)
 
-    def list_tool_specs(self) -> list[ToolSpec]:
+    def list_tool_specs(self, *, policy: RunPolicy | None = None) -> list[ToolSpec]:
+        target = policy.execution_target if policy is not None else self._execution_target
         return [
             ToolSpec(
                 name=descriptor.name,
@@ -144,7 +148,7 @@ class ToolRegistry:
             if (
                 descriptor.enabled
                 and descriptor.model_exposed
-                and self._execution_target in descriptor.execution_targets
+                and target in descriptor.execution_targets
             )
         ]
 
@@ -155,6 +159,7 @@ class ToolRegistry:
         bypass_safe_mode: bool = False,
         confirmed_decision: bool = False,
         effect_guard: AbstractContextManager[object] | None = None,
+        policy: RunPolicy | None = None,
     ) -> ToolResult:
         descriptor = self._tools.get(request.name)
         if not descriptor:
@@ -179,14 +184,14 @@ class ToolRegistry:
             self._log_call(request.name, ok=False, error=error, args=request.args)
             return ToolResult.failure(error)
 
-        if self._execution_target not in descriptor.execution_targets:
+        effective_target = policy.execution_target if policy is not None else self._execution_target
+        if effective_target not in descriptor.execution_targets:
             error = (
-                f"EXECUTION_TARGET_BLOCK: tool '{request.name}' недоступен для "
-                f"{self._execution_target}."
+                f"EXECUTION_TARGET_BLOCK: tool '{request.name}' недоступен для {effective_target}."
             )
             self._logger.info(
                 "tool_execution_target_blocked",
-                extra={"tool": request.name, "execution_target": self._execution_target},
+                extra={"tool": request.name, "execution_target": effective_target},
             )
             self._log_call(request.name, ok=False, error=error, args=request.args)
             return ToolResult.failure(error)
@@ -195,9 +200,13 @@ class ToolRegistry:
             request.name,
             descriptor.capability,
             confirmed_decision=(confirmed_decision and descriptor.confirmed_decision_only),
+            policy=policy,
         )
         if mode_error is not None:
-            self._logger.info("tool_mode_blocked", extra={"tool": request.name, "mode": self._mode})
+            effective_mode = policy.mode if policy is not None else self._mode
+            self._logger.info(
+                "tool_mode_blocked", extra={"tool": request.name, "mode": effective_mode}
+            )
             self._log_call(request.name, ok=False, error=mode_error, args=request.args)
             return ToolResult.failure(mode_error)
 
@@ -384,20 +393,25 @@ class ToolRegistry:
         capability: ToolCapability,
         *,
         confirmed_decision: bool = False,
+        policy: RunPolicy | None = None,
     ) -> str | None:
+        mode = policy.mode if policy is not None else self._mode
+        enforce_plan_guard = (
+            policy.enforce_plan_guard if policy is not None else self._enforce_plan_guard
+        )
         if confirmed_decision:
             return None
-        if self._mode == "ask" and capability != "read":
+        if mode == "ask" and capability != "read":
             return "ASK_READ_ONLY_BLOCK: ask-режим допускает только read-only инструменты."
-        if self._mode == "plan" and capability != "read":
+        if mode == "plan" and capability != "read":
             return "PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only инструменты."
-        if self._mode not in {"act", "auto"} or not self._enforce_plan_guard:
+        if mode not in {"act", "auto"} or not enforce_plan_guard:
             return None
-        return self._plan_guard_error(tool_name)
+        return self._plan_guard_error(tool_name, policy=policy)
 
-    def _plan_guard_error(self, tool_name: str) -> str | None:
-        active_plan = self._active_plan
-        active_task = self._active_task
+    def _plan_guard_error(self, tool_name: str, *, policy: RunPolicy | None = None) -> str | None:
+        active_plan = policy.active_plan if policy is not None else self._active_plan
+        active_task = policy.active_task if policy is not None else self._active_task
         if not isinstance(active_plan, dict) or not isinstance(active_task, dict):
             return "BLOCKED_OUTSIDE_PLAN: отсутствует активный план/таск."
         plan_id = active_plan.get("plan_id")

@@ -40,6 +40,7 @@ from shared.policy_models import (
 
 if TYPE_CHECKING:
     from config.memory_config import MemoryConfig
+    from core.run_contract import RunBudget
     from core.tool_gateway import ToolGateway
     from core.tracer import Tracer
     from memory.atom_embedding_index import AtomEmbeddingIndex
@@ -99,6 +100,7 @@ class AgentMemoryMixin:
             post_call: Callable[[ToolRequest, ToolResult, object | None], None] | None = None,
             safe_mode_override: bool | None = None,
             confirmed_decision: bool = False,
+            budget: RunBudget | None = None,
         ) -> ToolGateway: ...
         def _log_tool_interaction(
             self,

@@ -418,7 +418,7 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01-T01 DONE; E01-T02 next |
+| E01 — canonical execution | 9 | E01-T02 DONE; E01-T03 next |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | NEEDS_REFINEMENT |
@@ -690,6 +690,33 @@ Only three places in `server/` call `agent.respond` at all: `project.py:418`, `u
 **Delete-vs-wrap.** Существующие mode fields временно остаются только как callers; новый contract становится source of truth.
 
 **Forbidden.** Изменение пользовательского UX в этом PR.
+
+##### E01-T02 implementation — verified 2026-11-17 (baseline 58ce9f4)
+
+**Status:** DONE. `make check` green on branch `pr-e01-t02-runspec` (2476 passed, coverage 83.56%).
+
+**Files.**
+- New: `core/run_contract.py` — `RunIntent` (`"answer" | "plan" | "execute"`), `RunBudget` (frozen; `loop_kwargs()` → `AgentToolLoop` kwargs, `expires_at_monotonic` from `started_monotonic + max_runtime_seconds`), `RunPolicy` (frozen; deep-copies `active_plan`/`active_task` in `__post_init__`), `RunSpec` (frozen: `intent/target/policy/budget`), `intent_for_mode` / `target_for_mode` / `build_run_spec`. Reuses `ExecutionMode`/`ExecutionTarget` from `tools/tool_registry.py`; no new hierarchy or framework. Safe mode deliberately NOT in the snapshot (global user setting, enforced by the registry independently).
+- `tools/tool_registry.py` — `call(..., policy=None)` and `list_tool_specs(*, policy=None)` resolve mode/target/plan-guard from the snapshot when given, else the global state (unchanged legacy behaviour). `RunPolicy` imported only under `TYPE_CHECKING` (no runtime cycle: `run_contract` imports the mode/target types from here).
+- `core/tool_gateway.py` — `run_policy: RunPolicy | None = None` field (preserved by `replace()`); `call()` passes `policy=self.run_policy` to both `registry.call()` sites.
+- `core/agent_tools.py` — `_run_spec(*, budget=None)` derives the spec from runtime state; `_build_tool_gateway(..., budget=None)` builds the spec internally and attaches `run_policy=spec.policy`. The `set_execution_policy` call is REMOVED from the run path — the global registry mode is no longer mutated when a run starts. The only remaining `set_execution_policy` caller is `reset_runtime_transient_state` (resets to ask, intentional).
+- `core/auto_runtime.py` — builds one `RunBudget` from `AutoBudgets`, passes it to `_build_tool_gateway(budget=...)`, lists specs with `policy=gateway.run_policy`, builds the loop from `run_budget.loop_kwargs(started_monotonic=...)`.
+- `core/desktop_runtime.py` — `RunBudget(max_iterations=self.max_iterations)`, same wiring; `list_specs(policy=gateway.run_policy)`.
+- Chat sites (`core/agent_routing.py`) unchanged: `_build_tool_gateway()` with no args builds the spec internally (default budget); the loop stays `AgentToolLoop()`.
+- TYPE_CHECKING stubs (`core/agent_routing.py`, `core/agent_mwv.py`, `core/agent_memory.py`) and `DesktopAgentProtocol` declare the new `budget` param so mypy accepts the calls.
+- Test doubles updated to the new interface (fake `_build_tool_gateway` methods and `_OkRegistry`/`_BoomRegistry` accept `budget`/`policy`; 8 `_build_tool_gateway` monkeypatch lambdas accept `budget=None`).
+
+**Tests.** `tests/test_run_contract.py` (15 tests):
+- Contract: frozen spec/policy/budget, deep-copy of plan/task, intent/target derivation for all 5 modes, `loop_kwargs` (default unbounded; expiry from `started_monotonic`).
+- Acceptance positive (`test_two_gateways_with_different_policies_are_independent`, `test_loop_run_enforces_snapshot_policy`): ask gateway blocks the write while act gateway executes it on the same registry; same at the loop level.
+- Acceptance negative (`test_global_mode_mutation_does_not_change_run_policy`, `test_loop_run_ignores_global_mode_mutation`): mutating the global registry mode mid-run / between runs does not change the run's effective policy; a gateway without a snapshot (legacy path) still follows the global mode.
+- Target listing (`test_list_tool_specs_uses_snapshot_target`): a desktop-only tool is listed for a desktop snapshot even when the global target is sandbox, and hidden for a sandbox snapshot when the global target is desktop.
+- Agent wiring (`test_build_tool_gateway_snapshots_without_mutating_global_registry`): real `Agent._build_tool_gateway()` attaches the snapshot and leaves the global registry mode untouched.
+- Verified to fail on the old code: with the production changes stashed, the 6 isolation tests fail (the 9 contract unit tests pass — `core/run_contract.py` is a standalone new module).
+
+**Delete-vs-wrap.** Mode fields (`runtime_mode`, `runtime_active_plan`, `runtime_active_task`, `runtime_plan_guard_enabled`) remain only as the callers from which `_run_spec` derives the contract; the spec is the source of truth while the run executes. No UX changes.
+
+**Note (design fork, resolved).** The first wiring passed a pre-built `RunSpec` into `_build_tool_gateway(run_spec=...)` and had the runtimes call `parent._run_spec(...)`. That broke the test doubles: fake parent agents (`_AutoV1Agent`, `DesktopParent`) have no `_run_spec` and their `_build_tool_gateway` takes no kwargs, and 8 monkeypatch lambdas take no args. The final wiring passes only a `RunBudget` (`_build_tool_gateway(budget=...)`) and builds the spec inside, from runtime state — the spec's budget is the same `RunBudget` the runtime uses for the loop, so the contract stays coherent, and the only test-double updates are the new optional params.
 
 #### E01-T03 — перевести ToolRegistry listing на RunSpec
 
