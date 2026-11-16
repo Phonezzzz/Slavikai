@@ -417,7 +417,7 @@ Final outcome
 
 | Epic | Tickets | Статус |
 |---|---:|---|
-| E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 PR #152 review; E00-T03 pending |
+| E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
 | E01 — canonical execution | 9 | READY после нового preflight |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
@@ -487,6 +487,87 @@ Final outcome
 **Acceptance.** Каждое deletion ticket ниже ссылается либо на verified production call graph, либо сначала содержит discovery step.
 
 **Negative.** Нельзя помечать subsystem dead только по отсутствию упоминания в docs.
+
+##### Evidence checklist — verified 2026-11-16 (baseline `fca51c2`)
+
+**Baseline:** `/home/ki/Project/Slavikai-rebuild`, branch `muse/slavikai-rebuild`, HEAD `fca51c2`, clean tree (verified via `git rev-parse` + `git status --porcelain`). Audits were done on `pr-151` HEAD `728c04c` + 17 uncommitted files, so line numbers drifted slightly; current line numbers are reported below. Memory DB row counts are runtime data (gitignored) — verified against the **original** checkout's live DBs, since the rebuild tree has no runtime DBs (fresh worktree).
+
+###### Evidence table (40 claims)
+
+| # | Claim | Status | File:line / call path (fca51c2) | Test / E2E evidence | Notes |
+|---|---|---|---|---|---|
+| 1 | MWV `VerifierRuntime.run` always returns ERROR | verified | `core/mwv/verifier_runtime.py:304` `return sandbox_verification_unavailable(command or [])`; `core/mwv/manager.py:200-204` `_is_success` requires `work==SUCCESS and verification==PASSED` | No prod test without mock (audit: tests mock VerifierRuntime) | MWV PASS impossible in principle; `max_retries`/`MAX_MWV_ATTEMPTS` dead params |
+| 2 | Chat MWV path gives fake DONE without action | verified | `core/agent_mwv.py:450` one step, `allowed_tool_kinds=[]`; `:1228` `step.result = f"Выполнен: {step.description}"` | none | `grep -c "generate(" core/agent_mwv.py` = 0 → no LLM in chat MWV path |
+| 3 | `classify_request` is legacy, ignores context | verified | `core/mwv/routing.py:22-23` comment "Legacy chat/MWV gate only"; `:90` `_ = context` | none | Call sites: `core/agent_routing.py:346,539`, `server/http/handlers/ui_chat.py:242` |
+| 4 | Skill-match forces route=mwv | partial | `core/mwv/routing.py:95-108` | none | Deprecated/ambiguous skill → direct `RouteDecision(route="mwv")`; plain "matched" only adds a `skill` flag, downstream route decision not re-read — "always" is overstated (see W3) |
+| 5 | Chat `plan`/`act` are the same code; fresh Agent defaults to `act` | verified | `core/agent_routing.py:304` ask, `:306` auto, `:343` desktop — no plan/act branches; fall-through to `classify_request` at `:346`, `:539` (stream `:474/:482/:519` same); `core/agent.py:343` `self.runtime_mode = "act"` | none | Real plan/act live only in UI workflow (`/ui/api/plan/*`), not in chat |
+| 6 | One `AgentToolLoop` in chat/auto/desktop (KEEP) | verified | `core/agent_routing.py:803,892`; `core/auto_runtime.py:292`; `core/desktop_runtime.py:343` | none | Canonical loop candidate for E01 |
+| 7 | Auto: fake PASSED + planner/shard/merge theater | verified | `core/auto_runtime.py:698,711` `verifier_profile="response_only"`; `:741` `tool_outcomes`; `:266` single shard `tool-loop`; `:176,316` `merge` status idle/completed | none | Budgets real per audit (not re-read) |
+| 8 | `MWVSingleAttemptRuntime` / `CodingSkill` / `CodingTaskRuntime` test-only | verified | Defined in `core/mwv/single_attempt.py`, `coding_skill.py`, `coding_task.py`; 0 imports in `core/server/tools`; only `tests/test_coding_skill_e2e.py`, `tests/test_mwv_single_attempt_flow.py` | tests only | Delete candidates E08-T01 |
+| 9 | `SessionContext` / `ExecutionPolicy` are phantoms | verified | `grep -rn` → 0 matches in `core server tools llm memory shared config` | — | Docs-only entities |
+| 10 | `ExecutionMode` ask≡plan in registry | verified | `tools/tool_registry.py:28` `Literal["ask","plan","act","auto","desktop"]`; `:390` ask → read-only; `:392` plan → read-only (identical rule); plan guard `:403-408` (`plan_id`/`plan_hash`) | none | — |
+| 11 | KEEP anchors: Desktop `final_gate` + double `_verify`; UI plan→act workflow | verified | `core/desktop_runtime.py:335-336` `_final_gate`→`_verify`, `:356`, `:391` second `_verify`, `:412` def; `server/http/common/workflow_runtime.py:698` `run_plan_runner`; `server/http/handlers/plan.py:678`; `core/agent_mwv.py:895` | none | Only working verification in repo; plan workflow is the real plan mechanism |
+| 12 | Fake execution surface: `shell`, `terminal_run`, `workspace_run` | verified | `tools/shell_tool.py:75` `return sandbox_execution_failure()`; `tools/terminal_tool.py:138` same, `:148/:158/:167` `raise SandboxExecutionUnavailable`; `core/agent_tools.py:1091-1096` `workspace_run` special-case refusal (comment: new executor via gateway) | tests assert refusal (audit) | Podman executor never enabled (env absent per audit) — delete E08-T02 |
+| 13 | `fs` duplicates `workspace_*`, wider root, exec capability | verified | `tools/filesystem_tool.py:9` `SANDBOX_ROOT = Path("sandbox")`, `:13` mkdir side effect; `core/agent.py:476` `capability="exec"` | none | Root `sandbox/` wider than `sandbox/project`; bypasses workspace budget/`AutoFileEffects` |
+| 14 | `project` rebuilds `VectorIndex` per call | verified | `tools/project_tool.py:39-48` new `VectorIndex("memory/vectors.db")` + `close()` in `finally`, inside `handle_project_request` | none | Duplicates `workspace_list/read` + vector search |
+| 15 | `create`≈`write`, `rename`≈`move` | verified | `tools/workspace_tools.py:514` Write vs `:536` Create; `:563` Rename vs `:601` Move; `diff` shows only arg names/error strings differ | none | Merge 10 workspace tools → 8 |
+| 16 | Browser: no persistent context | verified | `tools/desktop_browser_tool.py:305` `chromium.launch`, `:306` `new_context`; 0 matches for `launch_persistent_context` | none | E02-T01/T02 dependency |
+| 17 | Gateway bypass: workspace read path | verified | `server/http/handlers/workspace.py:593` direct `tool.handle(ToolRequest(...))`, called at `:701`, `:788` | none | Second read path without approval/log/budget |
+| 18 | Container backend: unqualified mode touches host directly | verified | `core/container_computer_backend.py:120-175`: qualified → `_qualified_file_call`; else `_ensure_in_project` + direct host access | none | Qualified mode goes via gateway (2nd-audit correction confirmed) |
+| 19 | `SAFE_MODE_TOOLS_OFF` contains phantoms | verified | `core/agent.py:129-141`: `web_search`, `http_client` listed, no such registered tools | none | — |
+| 20 | `update_tools_enabled(persist=True)` TypeError mechanism | partial | `core/agent.py:765-769` `save_tools_config(ToolsConfig(**self.tools_enabled))`; `DEFAULT_TOOLS` (`agent.py:117-128`) contains `image_analyze`/`image_generate`/`workspace_run`; `ToolsConfig` fields (`config/tools_config.py:20-28`) lack them (but have dead `img`) | none | `save_tools_config` filter not re-checked; crash path end-to-end not executed |
+| 21 | `DesktopLaunchTool` gives fake success on instant crash | **wrong** | `tools/desktop_system_tools.py:298-303`: immediate `poll()`; if exited → `failure("Process exited before launch verification.")` | none | 1st audit §3.4 wrong; 2nd-audit correction confirmed. Residual: sub-second window + DEVNULL output remain |
+| 22 | `local-default` phantom model | verified | `server/http/common/ui_settings.py:422,433` fallback `os.getenv("LOCAL_LLM_DEFAULT_MODEL", "local-default")` | none | Unreachable endpoint returns a fake model instead of an error |
+| 23 | `api_key_valid: True` badge without check | verified | `server/http/handlers/settings.py:636` `"api_key_valid": True if key_is_saved else None` | none | Real check exists elsewhere (audit: `ui_settings.py:700-730`, not re-read) |
+| 24 | `ChatGPTPlanBrain`: no retry at all | verified | `grep -c RetryPolicy llm/chatgpt_plan_brain.py` = 0 | none | All other brains have retry (audit) |
+| 25 | Direct `requests.post` in 4 providers (11 places) | verified | deepseek 2, openrouter 2, xai 4, inception 2, local_http 1 | none | `provider_http` used only by `ChatGPTPlanBrain` + `LocalHttpBrain` (audit) |
+| 26 | `mercury-2` fake catalog | verified | `server/http/common/ui_settings.py:103` `INCEPTION_DOCS_MODELS = ["mercury-2"]`; `:408` returned directly | none | Mercury API closes 2026-12-28 (audit) |
+| 27 | `BrainManager` is a delegating stub | verified | `llm/brain_manager.py:11-18`: single `build()` → `create_brain`, no storage despite docstring | none | — |
+| 28 | `_inject_system` / parser duplication across brains | verified | `_inject_system` occurrences: deepseek 3, openrouter 3, xai 4, inception 2, local_http 3 | none | ~500–600 lines dupes is the audit's estimate, not re-measured |
+| 29 | Default model broken (frontend hardcode + no persisted model) | partial | `ui/src/app/components/Settings.tsx:383` `defaultModelProvider: 'deepseek'`; `config/model_store.py:45-48` `load_model_configs` returns `None` when file missing; `core/agent.py:432-434` `RuntimeError("Не выбрана модель...")` | none | File part is stale (see W2): `config/model_config.json` absent in main, not `{}` — outcome identical (`None` → error) |
+| 30 | Memory empty + junk vectors | verified | Original checkout live DBs: `canonical_atoms` 0, `memory` 0, `memory_item` 2, `vectors` 120 (all `length(embedding)=12`), `policy_rule` 0, `feedback_event` 0, `batch_review_run` 0, `interaction_log` 25 | none | Rebuild tree has no runtime DBs. Count drifted 117→120 since audit; all rows still 12-byte and dead for search |
+| 31 | Silent context deletion, no live compaction | verified | `core/agent_tools.py:88` `MAX_SHORT_TERM_MESSAGES = 20`; `:315-319` `del history[:overflow]`; `grep -rni "compact"` finds only `_compact_summary_text` (summary shortening) and JSON `compact_value` — no history compaction | none | — |
+| 32 | `BatchReviewer` / policy contour test-only | verified | `core/agent_memory.py:119` def `run_batch_review`; 0 callers in `core/server` outside tests | tests only | No endpoint/button/cron (audit) |
+| 33 | `FeedbackManager` dead | verified | 0 imports in `core/server/tools`; `memory/feedback.db` absent | none | Duplicates companion `feedback_event` |
+| 34 | Inbox/triage is write-only | verified | `list_items` consumers only UI pages (`server/http/handlers/memory.py:308`, `memory_management.py:90`); no context reader; store constructed `core/agent.py:308-310` | none | Path inbox → category → nowhere |
+| 35 | `decide_request` fail-open for unknown tools | verified | `core/approval_policy.py:186-187` `if not intents: return ApprovalDecision("allow", "no_intent", [], [])` | none | Tool without `risk_classes` bypasses approval in safe_mode |
+| 36 | Claims registry: gate checks existence only; counts 54/4/6/1; `openai_subscription` still `target`; 9 `read_view` / 19 projections | verified | `scripts/check_source_of_truth.py` 122 lines, imports `json`/`pathlib` only, `:42` path-exists check, no subprocess/pytest; JSON counter `{'implemented': 54, 'target': 6, 'partial': 4, 'legacy': 1}`; `docs/runtime_contract_claims.json:280-283` `openai_subscription` status `target`; python count: 9 `read_view` implemented | `make check` runs the gate (audit) | Claim stale post-merge: PR #151 merged, claim still `target`. 19 total projections = 10 settings + 6 ui + 1 session + 2 config (audit) |
+| 37 | `lane` as domain discriminator | verified | `server/ui_session_storage.py:104,105,151,152,569` (`_normalize_legacy_lane`, `_message_with_legacy_lane`, `_message_table_for_lane`) | none | Canon forbids lane driving storage/API/frontend; code does exactly that |
+| 38 | `/v1/chat/completions` is a fake | verified | `server/http/handlers/chat.py:110-113` plan\|act → 400; `:125-130` `stream=true` → 400 `streaming_not_supported`; single proxy model `PUBLIC_PROXY_MODEL_ID = "slavik"` (`server/http/common/proxy_model.py:5`) | none | Non-streaming single-model proxy, not OpenAI-compatible surface |
+| 39 | Deploy service example dead | verified | `/opt/slavikai` absent; `deploy/slavikai.service.example:10,14` `WorkingDirectory`/`ExecStart` → `/opt/slavikai` | none | — |
+| 40 | Routes 113; `/slavik/*` dupes; dead UI components; fake legacy-UI guard | verified | `grep -c add_* server/http/routes.py` = 113; `:59-60` `/ui/api/runtime/init` = `/ui/api/init`; 5 `slavik/` refs; `ChatArea.tsx`, `ChatCanvas.tsx`, `Sidebar.tsx`, `figma/ImageWithFallback.tsx` exist with 0 importers in `ui/src`; `scripts/check_no_legacy_ui.sh` checks only `ui/src/legacy` + `ui_archive/legacy-ui` | `make check` runs the guard (audit) | — |
+
+###### Also verified (minor, outside the table)
+
+- `config/settings.py` `AppSettings`: 0 references outside its own file + its test — dead.
+- `_COMPAT_EXPORTS` exists (`core/agent.py:148`); `img` key validated in `server/ui_hub.py:996` and present as a `ToolsConfig` field but never consumed as a tool.
+- `stt`: 0 `call_tool("stt")` callers in `core/server`.
+- SSE pseudo-streaming: `server/http/common/streaming.py:194` `_publish_chat_stream_from_text` → `:204` `_publish_chat_stream_delta` (replay semantics per audit's read).
+- `Agent.__init__` constructs multiple memory stores (`core/agent.py:306` MemoryManager, `:308-310` CategorizedMemoryStore, `:314` VectorIndex, plus CanonicalAtomStore/ClaimExtractor/SessionSummarizer imports).
+- Gate requires `LOCAL_LLM_URL` in `.env.example` (`scripts/check_source_of_truth.py:98`; `.env.example:30`) — removing it breaks `make check`; affects E08-T04.
+
+###### Claims that turned out WRONG
+
+- **W1 — `DesktopLaunchTool` fake success (deep audit §3.4).** Code does an immediate `poll()` after start and returns `failure("Process exited before launch verification.")` (`tools/desktop_system_tools.py:298-303`). Instant-crash fake success does not exist. The 2nd audit's correction is confirmed. Residual issue only: sub-second window + DEVNULL output.
+- **W2 — `config/model_config.json` is `{}` (3 bytes).** The file does **not exist** in main at `fca51c2`. `load_model_configs` returns `None` when missing (`config/model_store.py:45-48`), so the outcome is identical (no default → `RuntimeError`), but the file claim is stale — it described a working-tree local file on the pr-151 branch, not repo content. E01 tickets should cite "missing file → None", not "empty file".
+- **W3 — Skill-match "always forces route=mwv" (deep audit §1.4).** Overstated. Only `deprecated`/`ambiguous` skill decisions return `route="mwv"` directly (`core/mwv/routing.py:99-108`); a plain `matched` skill only adds a `skill` flag (`:97-98`) and the route is decided downstream (not re-read in this pass).
+
+###### Unknown / not re-verified in this pass (audit-only)
+
+- **U1** — "113 test files mention MWV" / tests mock `VerifierRuntime`: count not re-run (low value; E01-T08's grep test will re-derive it).
+- **U2** — `AgentComputerRuntime` / `LocalComputerBackend` have zero callers of `make_computer_runtime`: not re-verified.
+- **U3** — OpenRouter/Inception `raise` on tools: files exist and direct transport confirmed; the raise statements themselves not re-read.
+- **U4** — SSE replay line-by-line behavior: function exists; "slices ready text" per audit's read.
+- **U5** — `save_tools_enabled` filter behavior: `ToolsConfig(**self.tools_enabled)` with extra keys is confirmed in code; whether `save_tools_config` filters keys before construction was not checked, so the TypeError path is mechanism-confirmed, not end-to-end executed.
+
+###### Consequences for the deletion tickets
+
+- **E01-T08** (remove legacy classifier/MWV routing): fully grounded — claims 2, 3, 4 (partial), 5, 8, 10 are verified; no discovery step needed beyond the E01-T01 call-graph matrix.
+- **E08-T01** (MWV/legacy removal): grounded — claims 1, 2, 8, 37; plus the registry claim (36) needs a fix (claim `openai_subscription` → `implemented`) as part of the cleanup, not a deletion.
+- **E08-T02** (dead/fake shell + PTY): grounded — claim 12 verified; note W1 does **not** affect this ticket (`DesktopLaunchTool` is not part of it).
+- **E08-T03** (duplicate workspace tools): grounded — claims 13, 14, 15 verified.
+- **E08-T04** (provider cleanup): grounded with two corrections — claim 29's file part is stale (use "missing file → None"), and the `LOCAL_LLM_URL` gate requirement must be handled together with any `.env.example` change.
+- **E07 memory tickets**: grounded — claims 30–34 verified; vectors count is now 120, not 117.
 
 ### Epic E01 — canonical execution contract
 
