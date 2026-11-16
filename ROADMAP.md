@@ -8,9 +8,9 @@
 
 На момент исследования публичный `main` действительно содержит `AgentToolLoop`, `ToolGateway`, `ToolRegistry`, `DesktopRuntime` и generic Playwright-based `DesktopBrowserTool`. `AgentToolLoop` уже является реальным model→tool→observation loop; `ToolRegistry` всё ещё смешивает `ExecutionMode = ask|plan|act|auto|desktop` и `ExecutionTarget = sandbox|desktop`; `AgentRoutingMixin` всё ещё импортирует legacy `classify_request`; `DesktopRuntime` использует тот же `AgentToolLoop`; browser backend умеет generic navigation/read/snapshot/actions, но жизненный цикл браузера сейчас построен вокруг backend/context, а не вокруг отдельного durable Browser Session Resource.
 
-PR #151 по GPT subscription — **незавершённая работа Codex, а не Muse**. Владелец тестирует и сообщает найденные дефекты Codex. **Исправляет все дефекты PR #151 Codex**; Muse не изменяет эту ветку, незакоммиченные файлы, PR или merge без нового поручения. Архитектурные тикеты Muse могут начаться только после решения владельца по PR #151 и безопасного освобождения единственного worktree. Документы можно опубликовать раньше отдельным docs-only PR непосредственно в GitHub без переключения local worktree.
+PR #151 по GPT subscription **успешно merged** 2026-11-16 в `main` (`470a9a63280f9dac392f559a6fe99115db2e50d0`), включая исправления approvals и отмену auto-send. Эта интеграция работает и больше не блокирует архитектурный roadmap. Владелец согласовал **два linked Git worktree**: исходный `/home/ki/Project/Slavikai` (`main`), где Muse не работает, и выделенный `/home/ki/Project/Slavikai-rebuild` (`muse/slavikai-rebuild`) для всех её тикетов. Третье дерево нельзя создавать без разрешения. Muse выполняет только последовательные PR из второго дерева, не затрагивая исходное.
 
-**Read-only baseline проверен 2026-11-16:** GitHub `origin/main` = `092ba39dbd213c0256517caefb5ec0d924f2ed43`; ветка `pr-151-chatgpt-subscription` = `728c04cd0f9e8e9299ff56eaa6173ed407c3dfd8`. Единственный worktree `/home/ki/Project/Slavikai` сейчас **dirty** на PR #151. Перед каждым тикетом Muse должна перепроверить фактические status/branch/HEAD/origin/main и сверить их с `STATE.md`; эти SHA не являются вечным состоянием.
+**Read-only baseline обновлён 2026-11-16:** `origin/main` = `470a9a63280f9dac392f559a6fe99115db2e50d0` после merge PR #151. `git worktree list` подтвердил исходный `/home/ki/Project/Slavikai` (`main`, сохранён post-merge untracked-файл владельца) и новый `/home/ki/Project/Slavikai-rebuild` (`muse/slavikai-rebuild`, HEAD = `470a9a63280f9dac392f559a6fe99115db2e50d0`). Второй worktree создан, но **реализация там не начиналась**. Каждый новый тикет требует актуальной перепроверки HEAD/status/`origin/main` и [STATE.md](STATE.md); SHA приведён как исторический baseline, не вечная гарантия.
 
 Главное архитектурное решение: **SlavikAI становится одним агентом с независимыми параметрами Run, а не набором конкурирующих режимов**.
 
@@ -98,18 +98,17 @@ RunState
   outcome?
 ```
 
-Outcome:
+Outcome — **структура, а не плоский enum**, согласованная с [ADR-0002](docs/architecture/decisions/ADR-0002-terminal-outcome-and-partial-result.md):
 
 ```text
-DONE
-FAILED
-BLOCKED
-NEEDS_APPROVAL
-CANCELLED
-UNVERIFIED
+RunPhase: running | blocked | waiting_user_input | waiting_approval | terminal
+TerminalReason (только для terminal): completed | failed | cancelled | aborted
+Disposition: full | accepted_partial | none
+Verification: passed | failed | unknown | not_applicable
+Evidence: postconditions + observations + effect ledger
 ```
 
-`DONE` для state-changing задачи разрешён только если acceptance/postconditions подтверждены observations. `UNVERIFIED` нужен как отдельное честное состояние: невозможность проверить не является failure исполнения, но и не является success.
+Текстовые метки UI (`DONE`, `FAILED`, `CANCELLED`, `BLOCKED`, `UNVERIFIED`) — только **проекции этой структуры**, не источник истины и не подмена `TerminalReason`. `DONE` для state-changing задачи требует `completed + full + verification=passed`. `completed + accepted_partial` отражает частично принятый результат; его нельзя представить полным `DONE`. `aborted` сохраняется отдельно от `failed`, а `blocked/waiting_approval` не являются terminal completion. При `Verification=unknown` результат честно отображается как unverified **с сохранением причины завершения**, а не подменяет её. Никакой fake PASS из `tool.ok`. Точное mapping и acceptance authority проверяются в E01-T05.
 
 `AgentToolLoop` уже хранит iterations, executed tool calls, error/cancelled state, usage и continuation после approval; эти реальные свойства надо использовать, а не переписывать loop с нуля.
 
@@ -347,7 +346,7 @@ STOP received
 → BrowserService cancels current operation
 → HostBridge kills process group for run-owned process refs
 → persist partial effects
-→ outcome CANCELLED/PARTIAL
+→ terminal_reason=cancelled; disposition=accepted_partial|none (по результату); verification=passed|unknown
 ```
 
 Никакого обещания «rollback всего». Уже совершённый external side effect может быть необратим. UI должен показывать partial effects.
@@ -418,7 +417,7 @@ Final outcome
 
 | Epic | Tickets | Статус |
 |---|---:|---|
-| E00 — baseline/docs | 3 | READY; PR #151 blocker, docs bootstrap исключение |
+| E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 PR #152 review; E00-T03 pending |
 | E01 — canonical execution | 9 | READY после нового preflight |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
@@ -433,49 +432,49 @@ Final outcome
 
 Ни один следующий тикет не начинается до merge предыдущего. Это прямо следует из рабочего соглашения Muse.
 
-### Epic E00 — безопасный старт после PR #151
+### Epic E00 — baseline после merge PR #151 и разделение worktree
 
-#### E00-T01 — baseline и безопасное освобождение worktree
+#### E00-T01 — read-only baseline и разделение двух worktree
 
-**ЧТО.** Read-only проверить Git и PR #151. **Все дефекты PR #151 исправляет Codex, не Muse и не владелец.** Пользователь проводит тестирование и сообщает найденные проблемы Codex.
+**ЧТО.** Подтвердить успешный merge PR #151, актуальный `main` и существование ровно двух согласованных linked worktree. **Выполнено 2026-11-16:** PR #151 merged на `470a9a63280f9dac392f559a6fe99115db2e50d0`; второе дерево `/home/ki/Project/Slavikai-rebuild` создано от этого SHA, служебная ветка `muse/slavikai-rebuild`. Muse не выполняла там implementation.
 
-**ЗАЧЕМ.** Единственный worktree занят PR #151 и содержит чужие незакоммиченные изменения.
+**ЗАЧЕМ.** Исключить путаницу между исходным проектом владельца и специальным рабочим деревом Muse.
 
-**Dependencies.** Проверка возможна сразу. Реализация остальных тикетов ждёт владельца и завершения PR #151.
+**Dependencies.** PR #151 завершён и больше не blocker; исходное дерево остаётся за владельцем.
 
-**Steps.** Только `git status --porcelain=v1`, `git branch --show-current`, `git rev-parse HEAD`, `git rev-parse origin/main`, `git worktree list` и PR review/CI inspection.
+**Steps.** Read-only `git status --porcelain=v1`, `git worktree list --porcelain`, `git rev-parse` в обоих деревьях, remote `main`, GitHub статус PR #151. Не переключать ветки исходного дерева.
 
-**Acceptance.** В STATE есть фактические SHA, branch, dirty/clean state, статус PR #151, ответственный Codex, блокер и решение владельца. Muse не начинает архитектурные изменения до освобождения worktree.
+**Acceptance.** В [STATE.md](STATE.md) оба точных пути и branch/HEAD, запрет работы Muse в исходном дереве, запись merge PR #151 и исходный SHA.
 
-**Negative.** Ни один файл PR #151 не изменён; нет checkout, stash, reset, clean, rebase, merge.
+**Negative.** Muse не меняет исходный worktree, не чистит untracked, не создаёт третье дерево и не начинает параллельный тикет.
 
 **Delete-vs-wrap.** Не применимо.
 
-**Разрешено.** Только inspection и report.
+**Разрешено.** Read-only проверка и фиксация evidence.
 
-**Запрещено.** Muse не исправляет PR #151, не удаляет и не скрывает локальные изменения, не мержит его.
+**Запрещено.** `reset/clean/stash`, удаление чужих веток, изменение PR #151.
 
-**Evidence.** Sanitized Git status, exact SHA, PR URL, owner decision/блокер.
+**Evidence.** `git worktree list`, exact local/remote main SHA, PR #151 merged URL и commit.
 
 #### E00-T02 — канонические ROADMAP, STATE и рабочее соглашение в GitHub
 
-**ЧТО.** Опубликовать `ROADMAP.md`, `STATE.md`, `slavikai-how-to-work-with-muse.md` в одном docs-only PR; убрать весь внутренний ChatGPT citation markup.
+**ЧТО.** Опубликовать `ROADMAP.md`, `STATE.md`, `slavikai-how-to-work-with-muse.md`, `AGENTS.md` и `docs/workflow/dev_workflow.md` в одном docs-only PR #152; убрать весь внутренний ChatGPT citation markup, закрепить два worktree и согласовать merge workflow и Outcome с ADR-0002.
 
 **ЗАЧЕМ.** Muse, Codex и владелец должны читать согласованный source of truth непосредственно в репозитории.
 
-**Dependencies.** Docs bootstrap разрешён до завершения E00-T01, но **только отдельной GitHub-веткой от main без изменения локального dirty worktree**. Это не разрешение начать E01 параллельно PR #151.
+**Dependencies.** E00-T01 завершён. Docs PR #152 открыт; branch создан до merge PR #151 и обязан быть синхронизирован с новым `main` перед merge. Исходный и Muse worktree не использовать для публикации документации, если можно обновить docs-ветку через GitHub.
 
-**Steps.** Проверить main, создать docs branch, добавить три Markdown файла, проверить ссылки и 62 ticket IDs, открыть PR, дождаться Codex review/CI.
+**Steps.** Сверить новый main, обновить пять Markdown файлов в docs branch, проверить ссылки и 62 ticket IDs, провести Codex review/CI последнего commit, согласовать base (docs-branch от старого main → текущий main) без merge-коммитов.
 
-**Acceptance.** Ровно три docs-файла в PR; ссылки относительные; 62 уникальных тикета; E00–E03 обозначены READY с gates, E04–E08 NEEDS_REFINEMENT; нет служебных ChatGPT citation markers.
+**Acceptance.** Ровно пять Markdown docs-файлов в PR, без runtime code; ссылки относительные; 62 уникальных тикета; E00–E03 имеют исполнимые gates, E04–E08 NEEDS_REFINEMENT; нет ChatGPT citation markers; worktree и merge/Outcome правила согласованы с AGENTS, dev_workflow и ADR-0002; свежие CI+Codex review без blockers.
 
-**Negative.** GitHub auto-merge не включён; нет изменения runtime, Makefile, tests, PR #151 или local worktree.
+**Negative.** GitHub auto-merge не включён; нет изменения runtime, Makefile, tests или локальных worktree; Muse не работает в исходном дереве.
 
 **Delete-vs-wrap.** Не применимо.
 
 **Разрешено.** Только отдельный docs-only PR.
 
-**Запрещено.** Merge до чистого review/CI; auto-merge; E01+ до решения владельца по PR #151.
+**Запрещено.** Merge до чистого review/CI, `make git-check` и base synchronization; auto-merge; E01+ до закрытия E00.
 
 **Evidence.** Branch, commit SHA, PR, diffstat, citation scan, checks/review status (не заявлять заранее).
 
@@ -547,13 +546,13 @@ Final outcome
 
 #### E01-T05 — канонизировать Outcome
 
-**ЧТО.** Ввести `DONE/FAILED/BLOCKED/NEEDS_APPROVAL/CANCELLED/UNVERIFIED`.
+**ЧТО.** Канонизировать structured outcome, **не переписывая** принятый [ADR-0002](docs/architecture/decisions/ADR-0002-terminal-outcome-and-partial-result.md): отдельно `TerminalReason=completed|failed|cancelled|aborted`, `Disposition=full|accepted_partial|none`, `RunPhase` и `Verification` с evidence.
 
-**ЗАЧЕМ.** Исключить fake success.
+**ЗАЧЕМ.** Исключить fake success, не выдавать административный `aborted` за failure и не терять факт частично принятого результата.
 
-**Acceptance.** State-changing dummy task без postcondition не может вернуть DONE.
+**Acceptance.** State-changing dummy task без подтверждённой postcondition не может стать full `DONE`. Механизм сохраняет отдельно причину завершения и disposition для `aborted + none`, `failed + accepted_partial`, `cancelled + accepted_partial` и `completed + accepted_partial`; `final_partial` допустим только для `completed + accepted_partial`. Не-терминальные `blocked` / `waiting_approval` не выдаются за завершение; UI projection полностью проверена.
 
-**Negative.** Tool `ok=true` сам по себе не является proof of task completion.
+**Negative.** `tool.ok=true` сам по себе не proof of completion; `unknown verification` не превращается ни в full success, ни автоматически в failed, не переписывает terminal_reason. Контракт ADR-0002 нельзя менять молча; если нужна реальная развилка — `BLOCKED: REAL_IMPLEMENTATION_FORK` к владельцу.
 
 #### E01-T06 — Plan как artifact, Execute как обычный run
 
@@ -1091,8 +1090,10 @@ Updated: YYYY-MM-DD HH:MM Europe/Vilnius
 
 Main SHA:
 Origin/main SHA:
-Worktree:
-Current branch:
+Original worktree: /home/ki/Project/Slavikai (owner/main; Muse read-only)
+Muse worktree: /home/ki/Project/Slavikai-rebuild
+Muse service branch: muse/slavikai-rebuild
+Current ticket branch:
 Working tree: clean|dirty
 PR #151 status:
 Last merged roadmap ticket:
@@ -1202,16 +1203,17 @@ update STATE
 next ticket
 ```
 
-Рабочее соглашение владельца прямо требует один worktree, одну задачу/ветку/PR, Codex review и зелёный CI перед merge.  GitHub branch protection может enforce required reviews и status checks. **GitHub auto-merge и merge queue не включать. Muse выполняет обычный ручной merge после независимого чистого Codex review и зелёного CI.**
+Решением владельца от 2026-11-16 разрешены **ровно два linked worktree**: `/home/ki/Project/Slavikai` — исходный checkout владельца и `/home/ki/Project/Slavikai-rebuild` — единственная рабочая директория Muse. Один тикет/ветка/PR, без параллельной реализации. После Codex review последнего HEAD, зелёного CI и `make git-check` Muse выполняет **ручной fast-forward push** своей PR-ветки в `origin/main` из второго worktree, предварительно проверив что текущий `origin/main` — предок PR HEAD. Original checkout не трогать. При GitHub protection rejection или non-FF — STOP, решение владельца. **GitHub auto-merge и merge queue не включать.**
 
 Muse **не спрашивает владельца** о названиях внутренних функций, разбиении helper-ов, тестовой структуре, formatting, выборе очевидного стандартного Python API или локальном refactor внутри утверждённого тикета.
 
-Muse **обязана спросить при любой реальной развилке реализации «так или иначе»** (значимые варианты A/B, влияющие на архитектуру, контракты, security, продукт, backlog или поддержку), а также при расширении host roots, privileged operations, external send, root daemon, VM/container/OS-user, удалении пользовательских данных, вмешательстве в PR #151 и любом sudo с точной командой. Требуются trade-offs, рекомендация и последствия; до ответа — `BLOCKED: REAL_IMPLEMENTATION_FORK`.
+Muse **обязана спросить при любой реальной развилке реализации «так или иначе»** (значимые варианты A/B, влияющие на архитектуру, контракты, security, продукт, backlog или поддержку), а также при расширении host roots, privileged operations, external send, root daemon, VM/container/OS-user, удалении пользовательских данных, создании третьего worktree, вмешательстве в исходный checkout и любом sudo с точной командой. Требуются trade-offs, рекомендация и последствия; до ответа — `BLOCKED: REAL_IMPLEMENTATION_FORK`.
 
 Весь roadmap имеет один строгий critical path:
 
 ```text
-PR #151 resolved
+PR #151 merged (470a9a6) + two worktrees verified
+→ docs PR #152 accepted and E00 complete
 → repository baseline
 → canonical Run contract
 → one production execution loop
