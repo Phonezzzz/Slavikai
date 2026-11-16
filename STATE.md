@@ -18,7 +18,7 @@
 
 - Документы: `ROADMAP.md`, `STATE.md`, `slavikai-how-to-work-with-muse.md`.
 - Branch: `docs/muse-roadmap-2026-11-16`, создана напрямую в GitHub от указанного SHA `main`.
-- Docs PR: **PENDING — номер/URL указать после открытия**.
+- Docs PR: **#152** — https://github.com/Phonezzzz/Slavikai/pull/152, OPEN; ожидание CI и независимого Codex review.
 - CI: **PENDING**; Codex independent review: **PENDING**. Не объявлять зелёными до проверок.
 - Merge: **ручной merge Muse** только после независимого чистого Codex review, зелёного CI и отсутствия блокеров. **GitHub auto-merge и merge queue запрещены без нового решения владельца**.
 - Docs bootstrap разрешён без переключения текущего dirty worktree. Это исключение для публикации документов, не начало параллельного implementation.
