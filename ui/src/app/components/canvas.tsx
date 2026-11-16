@@ -76,25 +76,14 @@ export type CanvasSendPayload = {
   regenerationTargetId?: string;
 };
 
-export async function deliverTranscription(
+export function deliverTranscription(
   text: string,
-  runtimeMode: SessionMode,
-  onSendMessage: CanvasProps["onSendMessage"],
   insertIntoComposer: (value: string) => void,
-): Promise<"sent" | "composed"> {
-  const normalized = text.trim();
-  if (!normalized) {
+): void {
+  if (!text.trim()) {
     throw new Error("STT returned empty text.");
   }
-  if (runtimeMode === "desktop" && onSendMessage) {
-    const sent = await onSendMessage({ content: normalized, attachments: [] });
-    if (sent === false) {
-      throw new Error("Desktop voice request was not accepted.");
-    }
-    return "sent";
-  }
   insertIntoComposer(text);
-  return "composed";
 }
 
 interface CanvasProps {
@@ -667,7 +656,7 @@ export function Canvas({
       if (typeof text !== "string" || !text.trim()) {
         throw new Error("STT returned empty text.");
       }
-      await deliverTranscription(text, runtimeMode, onSendMessage, insertTextIntoComposer);
+      deliverTranscription(text, insertTextIntoComposer);
     } catch (error) {
       setSttError(error instanceof Error ? error.message : "STT failed.");
     } finally {

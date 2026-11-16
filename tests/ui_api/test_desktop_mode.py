@@ -364,15 +364,20 @@ def test_desktop_chat_approval_resumes_same_pipeline(tmp_path: Path, monkeypatch
             assert isinstance(current_decision, dict)
             assert current_decision.get("id") == decision_id, (decision, current_decision)
 
-            approve = await client.post(
-                "/ui/api/decision/respond",
-                headers={"X-Slavik-Session": session_id},
-                json={
-                    "session_id": session_id,
-                    "decision_id": decision_id,
-                    "choice": "approve_once",
-                },
-            )
+            def unexpected_reconfigure(*_args: object, **_kwargs: object) -> None:
+                pytest.fail("Desktop approval must preserve the paused Brain")
+
+            with monkeypatch.context() as paused:
+                paused.setattr(agent, "reconfigure_models", unexpected_reconfigure)
+                approve = await client.post(
+                    "/ui/api/decision/respond",
+                    headers={"X-Slavik-Session": session_id},
+                    json={
+                        "session_id": session_id,
+                        "decision_id": decision_id,
+                        "choice": "approve_once",
+                    },
+                )
 
             payload = await approve.json()
             assert approve.status == 200, (

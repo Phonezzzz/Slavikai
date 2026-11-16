@@ -15,6 +15,7 @@ from server import http_api as api
 from server.agent_provider import AgentApplyFailure, ScopedAgentProvider
 from server.http.common import ui_settings
 from server.http.common.auth import (
+    _request_identity,
     _request_principal_id,
     _require_owner,
     _resolve_ui_session_id_for_principal,
@@ -253,7 +254,15 @@ def _settings_response(request: web.Request) -> web.Response:
     settings["preferences_subject"] = snapshot.subject
     settings["can_manage_installation"] = owner
     if owner:
-        settings["chatgpt_plan_available"] = chatgpt_plan_context(request) is not None
+        available = chatgpt_plan_context(request) is not None
+        settings["chatgpt_plan_available"] = available
+        if not available:
+            identity = _request_identity(request)
+            settings["chatgpt_plan_unavailable_reason"] = (
+                "local_mode"
+                if identity is not None and identity.auth_method == "local"
+                else "disabled"
+            )
     response = json_response(payload)
     response.headers["Cache-Control"] = "no-store"
     return response

@@ -151,16 +151,28 @@ class DesktopRuntime:
         self,
         goal: str,
         *,
+        messages: Sequence[LLMMessage] = (),
         cancellation_token: asyncio.Event | None = None,
     ) -> DesktopRunOutcome:
-        return self._on_owner(lambda: self._run(goal, cancellation_token=cancellation_token))
+        conversation = tuple(
+            LLMMessage(role=message.role, content=message.content)
+            for message in messages
+            if message.role in {"user", "assistant"}
+        )
+        return self._on_owner(
+            lambda: self._run(goal, messages=conversation, cancellation_token=cancellation_token)
+        )
 
     def _on_owner(self, operation: Callable[[], _T]) -> _T:
         context = copy_context()
         return self._executor.submit(context.run, operation).result()
 
     def _run(
-        self, goal: str, *, cancellation_token: asyncio.Event | None = None
+        self,
+        goal: str,
+        *,
+        messages: Sequence[LLMMessage],
+        cancellation_token: asyncio.Event | None = None,
     ) -> DesktopRunOutcome:
         with self._state_lock:
             self._cancel_pending()
@@ -174,7 +186,9 @@ class DesktopRuntime:
                 )
             self._lease_held = True
             try:
-                return self._run_with_lease(goal, cancellation_token=cancellation_token)
+                return self._run_with_lease(
+                    goal, messages=messages, cancellation_token=cancellation_token
+                )
             finally:
                 if self._paused is None:
                     self._release_lease()
@@ -284,6 +298,7 @@ class DesktopRuntime:
         *,
         cancellation_token: asyncio.Event | None = None,
         continuation: ToolLoopContinuation | None = None,
+        messages: Sequence[LLMMessage] = (),
     ) -> DesktopRunOutcome:
         brain = self.parent._get_main_brain()
         capability = brain.native_tool_capability()
@@ -331,7 +346,7 @@ class DesktopRuntime:
                 messages=compose_response_preferences(
                     [
                         LLMMessage(role="system", content=DESKTOP_SYSTEM_PROMPT),
-                        LLMMessage(role="user", content=goal),
+                        *(messages or (LLMMessage(role="user", content=goal),)),
                     ],
                     self.parent.response_preferences,
                 ),

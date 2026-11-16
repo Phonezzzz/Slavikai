@@ -131,7 +131,8 @@ async def _trace_desktop_approval_choice(
     choice: str,
     scope: DesktopApprovalScope,
 ) -> None:
-    agent = await _resolve_agent(request, session_id)
+    provider = cast(ScopedAgentProvider[AgentProtocol], request.app["agent_provider"])
+    agent = await provider.get_existing_for_current_task(_agent_scope(request, session_id))
     if agent is None:
         return
     tracer = getattr(agent, "tracer", None)

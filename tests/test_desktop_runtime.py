@@ -137,9 +137,15 @@ def test_desktop_runtime_reuses_native_loop_and_requires_verification(tmp_path: 
     )
     parent = DesktopParent(brain, _desktop_registry(tmp_path))
 
-    outcome = DesktopRuntime(parent).run("create and verify")
+    conversation = [
+        LLMMessage(role="user", content="Create and verify a file"),
+        LLMMessage(role="assistant", content="I can verify its contents."),
+        LLMMessage(role="user", content="Do it again"),
+    ]
+    outcome = DesktopRuntime(parent).run("Do it again", messages=conversation)
 
     assert outcome.text == "completed"
+    assert brain.messages_seen[0][-3:] == conversation
     assert outcome.verification.status == VerificationStatus.PASSED
     assert path.read_text(encoding="utf-8") == "done"
     assert [item.call.name for item in outcome.loop_result.tool_calls] == [

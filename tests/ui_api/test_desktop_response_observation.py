@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 import pytest
 
@@ -10,6 +11,37 @@ from server.http.handlers.ui_chat import _iterate_stream_in_thread
 from shared.models import LLMMessage
 
 from .test_desktop_mode import DesktopApprovalAgent
+
+
+def test_cancelling_stream_waits_for_worker_before_closing_generator() -> None:
+    async def run() -> None:
+        started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+        cancellation = asyncio.Event()
+
+        def stream():
+            try:
+                started.set()
+                release.wait(2)
+                yield Done()
+            finally:
+                closed.set()
+
+        items = _iterate_stream_in_thread(stream(), cancellation)
+        task = asyncio.create_task(anext(items))
+        try:
+            assert await asyncio.to_thread(started.wait, 1)
+            task.cancel()
+            await asyncio.wait_for(cancellation.wait(), timeout=1)
+            assert not task.done() and not closed.is_set()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("entry", ["sync", "stream", "resume"])

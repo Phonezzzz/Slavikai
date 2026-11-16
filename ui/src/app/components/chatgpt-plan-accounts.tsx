@@ -74,10 +74,11 @@ function parseAuthorizationUrl(payload: unknown): string {
 
 type Props = {
   available: boolean;
+  unavailableReason?: string | null;
   onRefreshModels?: () => Promise<unknown>;
 };
 
-export function ChatGptPlanAccounts({ available, onRefreshModels }: Props) {
+export function ChatGptPlanAccounts({ available, unavailableReason, onRefreshModels }: Props) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -164,7 +165,15 @@ export function ChatGptPlanAccounts({ available, onRefreshModels }: Props) {
     });
   };
 
-  if (!available) return <p className="text-xs text-zinc-400">Подписка ChatGPT недоступна на этой установке.</p>;
+  if (!available) {
+    return <p className="text-xs text-zinc-400">
+      {unavailableReason === 'local_mode'
+        ? 'Сейчас SlavikAI открыт в режиме без входа. Откройте защищённый адрес SlavikAI на компьютере, где запущен сервер, и войдите владельцем через Cloudflare Access. После включения подписки на сервере здесь появится кнопка «Войти через ChatGPT».'
+        : unavailableReason === 'disabled'
+          ? 'Подписка ChatGPT выключена на сервере. Для локальной установки с Cloudflare Access задайте SLAVIK_CHATGPT_PLAN_LOCAL=true и перезапустите SlavikAI.'
+          : 'Подписка ChatGPT недоступна на этой установке.'}
+    </p>;
+  }
 
   const enabled = snapshot?.status === 'enabled';
   const authorizationStatus = AUTHORIZATION_STATUS.get(snapshot?.authorization_status ?? '');

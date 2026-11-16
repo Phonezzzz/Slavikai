@@ -127,7 +127,23 @@ async def _iterate_stream_in_thread(
 ) -> AsyncIterator[object]:
     try:
         while True:
-            item = await asyncio.to_thread(_next_stream_item, iterator)
+            worker = asyncio.create_task(asyncio.to_thread(_next_stream_item, iterator))
+            try:
+                item = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancellation_token.set()
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:  # noqa: BLE001
+                        break
+                if not worker.cancelled() and worker.exception() is not None:
+                    logger.warning(
+                        "Stream worker failed during cancellation", exc_info=worker.exception()
+                    )
+                raise
             if item is _STREAM_EXHAUSTED:
                 return
             if cancellation_token.is_set() and not isinstance(item, ResponseProduced):

@@ -12,7 +12,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function fakeSettings({ owner = true, available = true, loginUrl = authorizationUrl } = {}) {
+function fakeSettings({ owner = true, available = true, loginUrl = authorizationUrl, unavailableReason = '' } = {}) {
   let accounts: object[] = [];
   let authorizationStatus: string | null = null;
   const reply = (payload: unknown) => Response.json(payload);
@@ -21,6 +21,7 @@ function fakeSettings({ owner = true, available = true, loginUrl = authorization
       return reply({ settings: {
         can_manage_installation: owner,
         chatgpt_plan_available: available,
+        chatgpt_plan_unavailable_reason: unavailableReason,
         preferences_etag: '"fixture"',
       } });
     }
@@ -105,6 +106,13 @@ it('shows unavailable to the owner without starting account authorization', asyn
   await screen.findByText('Подписка ChatGPT недоступна на этой установке.');
   expect(screen.queryByRole('button', { name: 'Войти через ChatGPT' })).toBeNull();
   expect(fetchMock.mock.calls.some(([url]) => url.startsWith('/ui/api/chatgpt-plan'))).toBe(false);
+});
+
+it('explains where to sign in when SlavikAI is running without login', async () => {
+  fakeSettings({ available: false, unavailableReason: 'local_mode' });
+  fireEvent.click(await screen.findByRole('button', { name: 'Models and connections' }));
+  await screen.findByText(/Сейчас SlavikAI открыт в режиме без входа/);
+  expect(screen.getByText(/войдите владельцем через Cloudflare Access/)).toBeTruthy();
 });
 
 it('does not display subscription controls for members', async () => {

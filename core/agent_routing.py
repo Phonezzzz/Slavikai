@@ -341,7 +341,7 @@ class AgentRoutingMixin:
                     self._append_short_term([LLMMessage(role="assistant", content=result)])
                 return AgentResponse(result, runtime_result=outcome)
             if runtime_mode == "desktop":
-                return self._run_desktop_response(last_content, record_in_history)
+                return self._run_desktop_response(messages, last_content, record_in_history)
 
             decision = classify_request(
                 messages,
@@ -518,6 +518,7 @@ class AgentRoutingMixin:
                 return
             if runtime_mode == "desktop":
                 desktop_response = self._run_desktop_response(
+                    messages,
                     last_content,
                     record_in_history,
                     cancellation_token=cancellation_token,
@@ -723,12 +724,15 @@ class AgentRoutingMixin:
 
     def _run_desktop_response(
         self,
+        messages: list[LLMMessage],
         goal: str,
         record_in_history: bool,
         *,
         cancellation_token: asyncio.Event | None = None,
     ) -> AgentResponse:
-        outcome = self.desktop_runtime.run(goal, cancellation_token=cancellation_token)
+        outcome = self.desktop_runtime.run(
+            goal, messages=messages, cancellation_token=cancellation_token
+        )
         return self._finalize_desktop_response(outcome, goal, record_in_history)
 
     def _finalize_desktop_response(

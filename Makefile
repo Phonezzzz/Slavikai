@@ -28,6 +28,7 @@ UI_PID_FILE := $(RUN_DIR)/ui-server.pid
 UI_LOG_FILE := $(RUN_DIR)/ui-server.log
 PROD_HOST ?= 0.0.0.0
 PROD_PORT ?= 8000
+CLOUDFLARE_ORIGIN_PORT ?= 8000
 DEV_HOST ?= 127.0.0.1
 DEV_PORT ?= 8001
 DEPLOY_HOST ?= 127.0.0.1
@@ -71,6 +72,8 @@ help:
 	@echo "  make run-prod        Run server in foreground for production host/port"
 	@echo "  make smoke-prod      Check health and Bearer automation models on a running server"
 	@echo "  make up-prod         Run production server in background via venv-prod"
+	@echo "  make up-cloudflare   Start SlavikAI with Cloudflare Access and ChatGPT sign-in"
+	@echo "  make setup-cloudflare-token   Configure the tunnel token once"
 	@echo "  make down-prod       Stop background production server"
 	@echo "  make status-prod     Show background production server status"
 	@echo "  make logs-prod       Tail background production server log"
@@ -534,6 +537,47 @@ up-prod: venv-prod
 	@echo "Started production server: pid=$$(cat "$(PROD_APP_PID_FILE)")"
 	@echo "Logs: $(PROD_APP_LOG_FILE)"
 
+.PHONY: setup-cloudflare-token
+setup-cloudflare-token:
+	@cloudflared_binary="$$(command -v cloudflared)"; \
+	systemctl cat cloudflared >/dev/null; \
+	sudo -v; \
+	read -rs -p "Вставь токен туннеля Cloudflare и нажми Enter: " tunnel_token; echo; \
+	if [[ ! "$$tunnel_token" =~ ^[A-Za-z0-9_=-]+$$ ]]; then \
+		echo "Нужен только токен из Cloudflare, без команды установки." >&2; exit 1; \
+	fi; \
+	sudo mkdir -p /etc/cloudflared /etc/systemd/system/cloudflared.service.d; \
+	printf '%s' "$$tunnel_token" | sudo sh -c 'set -eu; umask 077; t=$$(mktemp /etc/cloudflared/.slavikai-token.XXXXXX); trap "rm -f \"$$t\"" EXIT; cat > "$$t"; mv -f "$$t" /etc/cloudflared/slavikai.token'; \
+	unset tunnel_token; \
+	printf '[Service]\nExecStart=\nExecStart=%s --no-autoupdate tunnel run --token-file /etc/cloudflared/slavikai.token\n' "$$cloudflared_binary" | \
+		sudo tee /etc/systemd/system/cloudflared.service.d/slavikai-token.conf >/dev/null; \
+	sudo systemctl daemon-reload; \
+	sudo systemctl restart cloudflared
+
+.PHONY: up-cloudflare
+up-cloudflare:
+	@test -f ui/dist/index.html || { echo "UI ещё не собран. Выполни make ui-build." >&2; exit 1; }
+	SLAVIK_ALLOW_UNAUTH_LOCAL=false SLAVIK_BROWSER_AUTH=cloudflare \
+		SLAVIK_CHATGPT_PLAN_LOCAL=true $(MAKE) up-prod \
+		PROD_HOST=127.0.0.1 PROD_PORT="$(CLOUDFLARE_ORIGIN_PORT)"
+	@origin="http://127.0.0.1:$(CLOUDFLARE_ORIGIN_PORT)"; \
+	for attempt in {1..20}; do \
+		if curl -fsS --max-time 1 "$$origin/healthz" >/dev/null 2>&1; then break; fi; \
+		sleep 1; \
+	done; \
+	if [[ "$$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$$origin/ui/api/settings")" != 401 ]]; then \
+		echo "SlavikAI не подтвердил защиту origin. Проверь make logs-prod." >&2; exit 1; \
+	fi
+	@if ! systemctl is-active --quiet cloudflared; then \
+		if ! sudo systemctl start cloudflared; then \
+			echo "Туннель не запустился. Проверь sudo journalctl -u cloudflared -n 30." >&2; exit 1; \
+		fi; \
+	fi; \
+	if ! systemctl is-active --quiet cloudflared; then \
+		echo "Туннель не активен. Проверь sudo journalctl -u cloudflared -n 30." >&2; exit 1; \
+	fi
+	@echo "SlavikAI слушает 127.0.0.1:$(CLOUDFLARE_ORIGIN_PORT). Открой защищённый адрес через Cloudflare Access."
+
 .PHONY: down-prod
 down-prod:
 	@if [[ ! -f "$(PROD_APP_PID_FILE)" ]]; then \
@@ -552,7 +596,7 @@ down-prod:
 		*) echo "Refusing to stop pid=$$pid (unexpected cmd: $$cmd)"; exit 1;; \
 	esac; \
 	kill "$$pid"; \
-	for _ in {1..30}; do \
+	for _ in {1..150}; do \
 		if kill -0 "$$pid" 2>/dev/null; then sleep 0.1; else break; fi; \
 	done; \
 	if kill -0 "$$pid" 2>/dev/null; then \

@@ -92,6 +92,7 @@ type ParsedSettings = {
   preferencesSubject: string | null;
   canManageInstallation: boolean;
   chatGptPlanAvailable: boolean | null;
+  chatGptPlanUnavailableReason: string | null;
   providers: ProviderSettings[];
   providerInstances: ProviderInstance[];
   ttsBackend: TtsBackendSettings;
@@ -356,6 +357,7 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     preferencesSubject: null,
     canManageInstallation: false,
     chatGptPlanAvailable: null,
+    chatGptPlanUnavailableReason: null,
     providers: DEFAULT_PROVIDER_SETTINGS,
     providerInstances: [],
     ttsBackend: DEFAULT_TTS_BACKEND,
@@ -570,12 +572,13 @@ const parseSettingsPayload = (payload: unknown): ParsedSettings => {
     }
   }
 
-  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; chatgpt_plan_available?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown; runtime_context_limits_snapshot?: unknown; search_backend_defaults_snapshot?: unknown; speech_tool_defaults_snapshot?: unknown; shell_numeric_defaults_snapshot?: unknown };
+  const metadata = settings as { preferences_etag?: unknown; preferences_subject?: unknown; can_manage_installation?: unknown; chatgpt_plan_available?: unknown; chatgpt_plan_unavailable_reason?: unknown; context_budget_snapshot?: unknown; model_config_snapshot?: unknown; attachment_limits_snapshot?: unknown; runtime_context_limits_snapshot?: unknown; search_backend_defaults_snapshot?: unknown; speech_tool_defaults_snapshot?: unknown; shell_numeric_defaults_snapshot?: unknown };
   return {
     preferencesEtag: typeof metadata.preferences_etag === 'string' ? metadata.preferences_etag : null,
     preferencesSubject: typeof metadata.preferences_subject === 'string' ? metadata.preferences_subject : null,
     canManageInstallation: metadata.can_manage_installation === true,
     chatGptPlanAvailable: typeof metadata.chatgpt_plan_available === 'boolean' ? metadata.chatgpt_plan_available : null,
+    chatGptPlanUnavailableReason: typeof metadata.chatgpt_plan_unavailable_reason === 'string' ? metadata.chatgpt_plan_unavailable_reason : null,
     contextBudgetSnapshot: metadata.context_budget_snapshot ?? null,
     modelConfigSnapshot: metadata.model_config_snapshot ?? null,
     attachmentLimitsSnapshot: metadata.attachment_limits_snapshot ?? null,
@@ -846,6 +849,7 @@ export function Settings({
   const [showMemoryAdvanced, setShowMemoryAdvanced] = useState(false);
   const [canManageInstallation, setCanManageInstallation] = useState(false);
   const [chatGptPlanAvailable, setChatGptPlanAvailable] = useState<boolean | null>(null);
+  const [chatGptPlanUnavailableReason, setChatGptPlanUnavailableReason] = useState<string | null>(null);
   const [settingsReady, setSettingsReady] = useState(false);
   const preferencesEtag = useRef<string | null>(null);
   const preferencesSubject = useRef<string | null>(null);
@@ -989,6 +993,7 @@ export function Settings({
     setSpeechToolDefaultsSnapshot(parsed.speechToolDefaultsSnapshot);
     setCanManageInstallation(parsed.canManageInstallation);
     setChatGptPlanAvailable(parsed.chatGptPlanAvailable);
+    setChatGptPlanUnavailableReason(parsed.chatGptPlanUnavailableReason);
     const privateDirty = ['tone', 'systemPrompt', 'appearanceTheme', 'longPasteToFileEnabled', 'longPasteThresholdChars'].some((key) => dirtyFields.current.has(key));
     if (!preserveDraft || !privateDirty) preferencesEtag.current = parsed.preferencesEtag;
     applyCredentialSnapshot(parsed);
@@ -1878,11 +1883,12 @@ export function Settings({
                       {chatGptPlanAvailable !== null ? (
                         <SectionCard
                           title="Подписка ChatGPT"
-                          description="Войдите в ChatGPT и выберите модель этого аккаунта в чате. Доступ определяется подпиской аккаунта."
+                          description="Модели из вашего аккаунта ChatGPT для чата SlavikAI."
                         >
                           <ChatGptPlanAccounts
                             key={preferencesSubject.current}
                             available={chatGptPlanAvailable}
+                            unavailableReason={chatGptPlanUnavailableReason}
                             onRefreshModels={onRefreshModels}
                           />
                         </SectionCard>
