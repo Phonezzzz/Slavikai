@@ -413,7 +413,7 @@ Final outcome
 
 ## Critical path and ordered epics
 
-**Программа: 62 тикета, строго последовательно**, один тикет = одна ветка = один PR. Список пересматривается по подтверждённым фактам после эпиков: sunk cost не является основанием сохранять механизм.
+**Программа: 63 тикета, строго последовательно**, один тикет = одна ветка = один PR. Список пересматривается по подтверждённым фактам после эпиков: sunk cost не является основанием сохранять механизм.
 
 | Epic | Tickets | Статус |
 |---|---:|---|
@@ -425,8 +425,8 @@ Final outcome
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
 | E07 — memory/context | 5 | NEEDS_REFINEMENT |
-| E08 — cleanup/operations | 7 | NEEDS_REFINEMENT |
-| **Всего** | **62** | **31 READY, 31 предварительный** |
+| E08 — cleanup/operations | 8 | NEEDS_REFINEMENT |
+| **Всего** | **63** | **31 READY, 32 предварительный** |
 
 **E04–E08 — не исполнимые ticket specs до refinement.** Перед соответствующим эпиком Muse доводит каждый до полного шаблона: ЧТО, ЗАЧЕМ, проверенный code touchpoint/unknown, зависимости, scope, steps, delete-vs-wrap, positive/negative/E2E acceptance, postconditions, разрешения/запреты, evidence, `make check`, CI и независимый Codex review. До этого в `STATE.md` фиксируется `BLOCKED: ROADMAP_REFINEMENT`, в том числе E07-T04 и однострочные E08.
 
@@ -768,7 +768,7 @@ Only three places in `server/` call `agent.respond` at all: `project.py:418`, `u
 
 ##### E01-T04 implementation — verified 2026-11-17 (baseline 637d3ed)
 
-**Status:** DONE (acceptance met) — with one open fork, see below. `make check` green on branch `pr-e01-t04-gateway` (2488 passed, coverage 83.54%).
+**Status:** DONE (acceptance met). Fork resolved by owner decision 2026-11-17 (option C); see below. `make check` green on branch `pr-e01-t04-gateway` (2488 passed, coverage 83.54%).
 
 **Audit — every production tool call, verified by reading the code.** Model-originated calls go through `ToolGateway` on all paths:
 - The one loop: `AgentToolLoop` dispatches only via `gateway.call` / `gateway.call_approved_once` (`core/tool_loop.py:840`, `:344`) — chat (`core/agent_routing.py:803,892`), auto (`core/auto_runtime.py:292`), desktop (`core/desktop_runtime.py:343`).
@@ -789,13 +789,13 @@ Only three places in `server/` call `agent.respond` at all: `project.py:418`, `u
 - `handle_project_request` direct call from `github_import.index_imported_project` — reachable only after a clone that unconditionally returns False (`server/http/common/github_import.py:99-105`); both call sites (`server/http/handlers/project.py:321`, `server/http/handlers/decision.py:729`) unreachable in production. Latent if the clone fence is ever lifted.
 - PTY terminal endpoints (no Agent, always 503); `/project find/index` (disabled command lane).
 
-**Open fork — UI workspace reads (BLOCKED: REAL_IMPLEMENTATION_FORK, owner decision needed).** The single remaining live direct `tool.handle()` call is `_call_workspace_read_tool` (`server/http/handlers/workspace.py:593`): it constructs `ListFilesTool()` / `ReadFileTool()` fresh and calls `.handle()` directly, bypassing approval policy, budget, logging and RunSpec. Called from three UI handlers: tree GET (`:701`), file GET (`:788`), pre-write version check (`:874`). It is user-originated (the user's browser on click), read-only, and unreachable by the model (the model has no HTTP path to these handlers; model reads go through the loop → gateway). Routing it through `agent.call_tool` — the write path's shape — requires an agent, but tree/file GET provably work with `agent=None` (`tests/ui_api/test_workspace_and_tools.py::test_ui_workspace_tree_and_file_get_without_selected_model`): the file browser is usable before model selection, a deliberate product behavior. Options, none chosen silently:
-- (A) Route reads through `agent.call_tool` — breaks no-model file browsing (tested behavior + UX regression). Needs the owner's explicit call.
-- (B) Build a second, agent-less read gateway in the handler (fresh registry + gateway) — a second gate, violates "one policy/approval/effect point", risks safe-mode ApprovalRequired on plain file browsing; wrapping, not deleting (forbidden by this ticket's delete-vs-wrap).
-- (C) Keep the direct read path as a documented bounded exception (user-originated, read-only, model-unreachable, own controls: session root + sandbox path checks) and unify it in a later ticket with a session-scoped read gateway that does not need a model.
-- This ticket's acceptance (instrumentation test for model-originated state-changing calls) is met regardless of the fork; the read path is NOT a model-originated call.
+**Resolved fork — UI workspace reads (owner decision 2026-11-17, option C).** The single remaining live direct `tool.handle()` call is `_call_workspace_read_tool` (`server/http/handlers/workspace.py:593`): it constructs `ListFilesTool()` / `ReadFileTool()` fresh and calls `.handle()` directly, bypassing approval policy, budget, logging and RunSpec. Called from three UI handlers: tree GET (`:701`), file GET (`:788`), pre-write version check (`:874`). It is user-originated (the user's browser on click), read-only, and unreachable by the model (the model has no HTTP path to these handlers; model reads go through the loop → gateway). Tree/file GET provably work with `agent=None` (`tests/ui_api/test_workspace_and_tools.py::test_ui_workspace_tree_and_file_get_without_selected_model`): the file browser is usable before model selection, a deliberate product behavior.
 
-**Files.** No production code changed in this ticket (the read bypass stays pending the fork decision). New: `tests/test_tool_gateway_gate.py` (4 tests).
+**Owner decision (2026-11-17): option C.** The UI file browser is a separate user-initiated read-only path. No second ToolGateway is created, and file browsing is NOT bound to the selected model. Existing access checks are preserved as the path's own controls: the session workspace root (`_workspace_root_for_session` + `set_runtime_workspace_root`, cleared after the call), paths resolved inside the session root (`tools/workspace_tools.py::_ensure_in_workspace` — outside-workspace paths rejected, private runtime paths rejected), read size capped (`MAX_FILE_BYTES`). Rejected: (A) routing reads through `agent.call_tool` would break no-model file browsing; (B) a second agent-less read gateway would be a second gate and wrapping, not deleting. Follow-up: E08-T08 (UI read authorization audit) verifies this path's authorization explicitly instead of assuming it.
+
+This ticket's acceptance (instrumentation test for model-originated state-changing calls) is met; the read path is NOT a model-originated call.
+
+**Files.** No production code changed in this ticket (the read path stays as the documented option-C exception; see the resolved fork above). New: `tests/test_tool_gateway_gate.py` (4 tests).
 
 **Tests.** `tests/test_tool_gateway_gate.py` (4 tests):
 - Acceptance (`test_loop_dispatch_goes_through_gateway`): the one AgentToolLoop dispatches a model write + read via the gateway (recording pre_call); covers chat/auto/desktop loop sites (same class, same dispatch helper).
@@ -807,7 +807,7 @@ Only three places in `server/` call `agent.respond` at all: `project.py:418`, `u
 **Delete-vs-wrap.** No production code deleted. No bypass path wrapped. No UX changes.
 
 **E08 candidates (not deleted here).**
-- `_call_workspace_read_tool` (`server/http/handlers/workspace.py:593`) — the open fork above; unify in a later ticket once the owner decides.
+- `_call_workspace_read_tool` (`server/http/handlers/workspace.py:593`) — resolved fork above (owner decision 2026-11-17, option C): separate user-initiated read-only path, no second gateway, no model binding; authorization audit is E08-T08.
 - `make_computer_runtime` / `AgentComputerRuntime` (`core/agent.py:402`) — zero production callers; dead code, remove in cleanup.
 - `index_imported_project` (`server/http/common/github_import.py:108`) — direct `handle_project_request` call, dead while the clone is fenced; route through the gateway if the clone fence is ever lifted, else delete with the fenced flow.
 - `ToolRegistry._execution_target` — still write-only (E01-T03); remove once `set_execution_policy`'s last caller is gone.
@@ -1295,6 +1295,16 @@ custom_command
 Scheduler разрешено проектировать **только когда** browser, owner-host bridge, durable run state и recovery прошли acceptance.
 
 Только тогда monitoring становится настоящим, а не cron вокруг ненадёжного агента.
+
+#### E08-T08 — UI read authorization audit
+
+**ЧТО.** Аудит отдельного user-initiated read-only пути файлового браузера (`_call_workspace_read_tool`, `server/http/handlers/workspace.py:593`): session workspace root, sandbox path checks (`_ensure_in_workspace`), private-runtime guard, read size cap; кто может вызвать tree/file GET и pre-write version check, что видит сессия без выбранной модели.
+
+**ЗАЧЕМ.** Путь намеренно вне ToolGateway (решение владельца 2026-11-17, опция В) — его authorization должна быть проверена явно, а не подразумеваться.
+
+**Acceptance.** Перечислены все проверки доступа на пути + негативные тесты (путь вне workspace, private runtime, чужая сессия).
+
+**Forbidden.** Не создавать второй ToolGateway и не привязывать просмотр файлов к выбранной модели.
 
 ## Verification matrix and deletion rules
 

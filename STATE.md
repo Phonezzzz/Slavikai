@@ -78,10 +78,10 @@
 - **E01-T01 — DONE** (матрица production entrypoints: 23 строки, каждый path помечен production/production (broken)/dead, baseline `c5e5543`). Evidence: таблица в ROADMAP.md (E01-T01 execution entrypoints matrix), 10 ключевых выводов, 3 unknown; ветка `pr-e01-t01-entrypoints`.
 - **E01-T02 — DONE** (immutable RunSpec/RunPolicy contract: `core/run_contract.py`, snapshot policy в `ToolGateway`, `set_execution_policy` убран из run path; baseline `58ce9f4`). Evidence: запись в ROADMAP.md (E01-T02 implementation), 17 тестов в `tests/test_run_contract.py` (оба acceptance-критерия + fail-on-old-code проверка), `make check` зелёный (2478 passed, coverage 83.52%); ветка `pr-e01-t02-runspec`.
 - **E01-T03 — DONE** (ToolRegistry listing на RunSpec: доступность инструментов вычисляется из target/policy/qualification, legacy no-policy path — sandbox catalog и не следует глобальному target; baseline `c198659`). Evidence: запись в ROADMAP.md (E01-T03 implementation), 6 новых тестов в `tests/test_tool_registry_listing.py` (все acceptance-критерии + fail-on-old-code проверка), `make check` зелёный (2484 passed, coverage 83.53%); ветка `pr-e01-t03-registry-listing`.
-- **E01-T04 — DONE** (ToolGateway — единственная execution gate для model-originated вызовов: аудит всех production tool calls + instrumentation gate-тесты; baseline `637d3ed`). Evidence: запись в ROADMAP.md (E01-T04 implementation + open fork по UI workspace reads), 4 новых теста в `tests/test_tool_gateway_gate.py` (acceptance по трём механизмам dispatch + negative gate), `make check` зелёный (2488 passed, coverage 83.54%); ветка `pr-e01-t04-gateway`.
+- **E01-T04 — DONE** (ToolGateway — единственная execution gate для model-originated вызовов: аудит всех production tool calls + instrumentation gate-тесты; baseline `637d3ed`). Evidence: запись в ROADMAP.md (E01-T04 implementation; fork по UI workspace reads resolved решением владельца 2026-11-17, опция В — отдельный user-initiated read-only path, аудит — E08-T08), 4 новых теста в `tests/test_tool_gateway_gate.py` (acceptance по трём механизмам dispatch + negative gate), `make check` зелёный (2488 passed, coverage 83.54%); ветка `pr-e01-t04-gateway`.
 - **E01-T05 — READY**. Следующий тикет — канонизировать Outcome.
 
-## Readiness: 62 последовательных тикета
+## Readiness: 63 последовательных тикета
 
 | Epic | IDs | Count | Status |
 |---|---|---:|---|
@@ -93,7 +93,7 @@
 | E05 | T01–T07 | 7 | NEEDS_REFINEMENT |
 | E06 | T01–T06 | 6 | NEEDS_REFINEMENT |
 | E07 | T01–T05 | 5 | NEEDS_REFINEMENT |
-| E08 | T01–T07 | 7 | NEEDS_REFINEMENT |
+| E08 | T01–T08 | 8 | NEEDS_REFINEMENT |
 
 ## Обязательный цикл Muse
 
