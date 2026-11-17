@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -120,6 +121,84 @@ def test_run_policy_deep_copies_plan_and_task() -> None:
     task["task_id"] = "t2"
     assert policy.active_plan == {"plan_id": "p1", "steps": [{"tool": "workspace_write"}]}
     assert policy.active_task == {"task_id": "t1"}
+
+
+def test_run_policy_nested_collections_immutable() -> None:
+    """Codex review (PR #156, P2): nested plan/task data must be immutable too.
+
+    frozen=True only blocks field reassignment, and the old deepcopy only
+    protected against mutating the source dicts — the snapshot's own nested
+    lists/dicts were still mutable through the policy, so a caller could
+    change the gateway's effective policy mid-run.
+    """
+    plan = {
+        "plan_id": "p1",
+        "steps": [{"step_id": "s1", "allowed_tool_kinds": ["workspace_read"]}],
+    }
+    task = {"task_id": "t1"}
+    policy = RunPolicy(
+        mode="act",
+        execution_target="sandbox",
+        active_plan=plan,
+        active_task=task,
+    )
+    snapshot: Any = policy.active_plan
+    # The finding's exact repro: appending a tool kind to the snapshot.
+    with pytest.raises(TypeError):
+        snapshot["steps"][0]["allowed_tool_kinds"].append("workspace_write")
+    with pytest.raises(TypeError):
+        snapshot["steps"].append({"step_id": "s2"})
+    with pytest.raises(TypeError):
+        snapshot["steps"][0]["allowed_tool_kinds"][0] = "workspace_write"
+    with pytest.raises(TypeError):
+        snapshot["plan_id"] = "p2"
+    task_snapshot: Any = policy.active_task
+    with pytest.raises(TypeError):
+        task_snapshot["task_id"] = "t2"
+    # Reads still work and the snapshot is unchanged.
+    assert policy.active_plan == {
+        "plan_id": "p1",
+        "steps": [{"step_id": "s1", "allowed_tool_kinds": ["workspace_read"]}],
+    }
+    assert policy.active_task == {"task_id": "t1"}
+
+
+def test_snapshot_nested_mutation_cannot_change_gateway_policy(tmp_path: Path) -> None:
+    """Gateway level: a failed nested mutation leaves the policy enforced.
+
+    With the plan guard on, workspace_write is blocked for the current step;
+    attempting the finding's mutation must raise and the gateway must keep
+    blocking the write afterwards.
+    """
+    registry, dispatched = _registry(tmp_path)
+    plan = {
+        "plan_id": "p1",
+        "plan_hash": "h1",
+        "steps": [{"step_id": "s1", "allowed_tool_kinds": ["workspace_read"]}],
+    }
+    task = {"plan_id": "p1", "plan_hash": "h1", "current_step_id": "s1"}
+    policy = RunPolicy(
+        mode="act",
+        execution_target="sandbox",
+        active_plan=plan,
+        active_task=task,
+        enforce_plan_guard=True,
+    )
+    gateway = ToolGateway(registry, run_policy=policy)
+    blocked = gateway.call(ToolRequest(name="workspace_write"))
+    assert not blocked.ok
+    assert "BLOCKED_OUTSIDE_PLAN" in (blocked.error or "")
+    assert dispatched == []
+    snapshot: Any = policy.active_plan
+    with pytest.raises(TypeError):
+        snapshot["steps"][0]["allowed_tool_kinds"].append("workspace_write")
+    still_blocked = gateway.call(ToolRequest(name="workspace_write"))
+    assert not still_blocked.ok
+    assert "BLOCKED_OUTSIDE_PLAN" in (still_blocked.error or "")
+    assert dispatched == []
+    # The allowed read still goes through.
+    assert gateway.call(ToolRequest(name="workspace_read")).ok
+    assert dispatched == ["workspace_read"]
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,8 @@ truth for a single run:
 - policy: RunPolicy — an immutable snapshot of the policy-relevant
   ToolRegistry state (mode, execution target, active plan/task, plan
   guard) taken at run start. Later global ToolRegistry mutations cannot
-  change a running run's effective policy.
+  change a running run's effective policy, and the snapshot's own nested
+  data cannot be mutated through the policy either (recursively frozen).
 - budget: RunBudget — the run's loop budgets.
 
 The contract reuses existing types (ExecutionMode / ExecutionTarget from
@@ -29,9 +30,9 @@ independently of the policy snapshot.
 from __future__ import annotations
 
 import time
-from copy import deepcopy
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Literal, TypedDict
+from typing import Any, Literal, NoReturn, SupportsIndex, TypedDict
 
 from shared.models import JSONValue
 from tools.tool_registry import ExecutionMode, ExecutionTarget
@@ -46,6 +47,106 @@ class LoopKwargs(TypedDict):
     max_tool_calls: int | None
     max_model_tokens: int | None
     expires_at_monotonic: float | None
+
+
+class FrozenDict(dict[str, JSONValue]):
+    """A dict that refuses every mutation attempt.
+
+    A MappingProxyType would break ToolRegistry._plan_guard_error, which
+    requires isinstance(active_plan, dict); a dict subclass keeps the
+    isinstance/== behaviour of a plain dict and only blocks writes.
+    Construction still works: dict.__init__ fills the storage directly
+    and does not go through the overridden __setitem__.
+    """
+
+    def __setitem__(self, key: str, value: JSONValue) -> NoReturn:
+        raise TypeError("FrozenDict is immutable")
+
+    def __delitem__(self, key: str) -> NoReturn:
+        raise TypeError("FrozenDict is immutable")
+
+    def clear(self) -> NoReturn:
+        raise TypeError("FrozenDict is immutable")
+
+    def pop(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("FrozenDict is immutable")
+
+    def popitem(self) -> NoReturn:
+        raise TypeError("FrozenDict is immutable")
+
+    def setdefault(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("FrozenDict is immutable")
+
+    def update(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("FrozenDict is immutable")
+
+    # NOTE: mypy requires a single-signature __ior__ to match the overloaded
+    # dict.__or__ arg-for-arg, which is unsatisfiable; the override exists
+    # to block |= (it bypasses __setitem__ at C level).
+    def __ior__(self, other: object) -> NoReturn:  # type: ignore[misc]
+        raise TypeError("FrozenDict is immutable")
+
+
+class FrozenList(list[JSONValue]):
+    """A list that refuses every mutation attempt.
+
+    Same rationale as FrozenDict: _plan_guard_error requires
+    isinstance(steps, list) and isinstance(allowed_tool_kinds, list),
+    so the frozen form must stay a list subclass.
+    """
+
+    def __setitem__(self, index: Any, value: Any) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def __delitem__(self, index: Any) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def append(self, value: JSONValue) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def extend(self, values: Iterable[JSONValue]) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def insert(self, index: SupportsIndex, value: JSONValue) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def remove(self, value: JSONValue) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def pop(self, index: SupportsIndex = -1) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def clear(self) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def sort(self, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    def reverse(self) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+    # NOTE: see __ior__; a single-signature __iadd__ cannot match the
+    # overloaded list.__add__ arg-for-arg; the override blocks +=.
+    def __iadd__(self, values: object) -> NoReturn:  # type: ignore[misc]
+        raise TypeError("FrozenList is immutable")
+
+    # NOTE: see __ior__; the override blocks *=.
+    def __imul__(self, count: object) -> NoReturn:
+        raise TypeError("FrozenList is immutable")
+
+
+def _freeze_json(value: JSONValue | None) -> JSONValue | None:
+    """Recursively convert a JSON value into immutable containers.
+
+    dict -> FrozenDict, list -> FrozenList; scalars pass through.
+    Builds new containers, so the source is never aliased.
+    """
+
+    if isinstance(value, dict):
+        return FrozenDict({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return FrozenList(_freeze_json(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -82,8 +183,13 @@ class RunPolicy:
 
     Captures exactly what ToolRegistry.set_execution_policy used to set
     globally (mode, execution target, active plan/task, plan guard).
-    The active plan/task are deep-copied at construction so later
-    mutation of the source dicts cannot change this run's policy.
+    The active plan/task are recursively frozen at construction
+    (dict -> FrozenDict, list -> FrozenList), so neither later mutation
+    of the source dicts nor mutation through the snapshot itself can
+    change this run's policy. A MappingProxyType/tuple freeze would
+    break ToolRegistry._plan_guard_error, which requires
+    isinstance(active_plan, dict) and isinstance(steps, list); dict/list
+    subclasses keep those checks (and ==) working and only block writes.
     """
 
     mode: ExecutionMode
@@ -93,8 +199,8 @@ class RunPolicy:
     enforce_plan_guard: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "active_plan", deepcopy(self.active_plan))
-        object.__setattr__(self, "active_task", deepcopy(self.active_task))
+        object.__setattr__(self, "active_plan", _freeze_json(self.active_plan))
+        object.__setattr__(self, "active_task", _freeze_json(self.active_task))
 
 
 @dataclass(frozen=True)
