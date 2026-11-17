@@ -4,6 +4,7 @@ from pathlib import Path
 
 from core.agent import Agent
 from core.desktop_policy import DesktopPolicyStore
+from core.run_contract import RunPolicy
 from llm.brain_base import Brain
 from llm.types import LLMResult, ModelConfig, ToolSpec
 from shared.models import LLMMessage
@@ -40,16 +41,35 @@ def test_phase2_tools_are_registered_only_for_desktop_execution_target(tmp_path:
         "desktop_gui",
     }
 
-    agent.tool_registry.set_execution_policy(mode="ask")
-    chat = {spec.name for spec in agent.tool_registry.list_tool_specs()}
-    agent.tool_registry.set_execution_policy(mode="auto")
-    sandbox_agent = {spec.name for spec in agent.tool_registry.list_tool_specs()}
-    agent.tool_registry.set_execution_policy(mode="desktop")
-    desktop = {spec.name for spec in agent.tool_registry.list_tool_specs()}
+    # E01-T03: target isolation is between run policies, not the global
+    # mutable mode — the listing derives from the RunSpec.
+    chat = {
+        spec.name
+        for spec in agent.tool_registry.list_tool_specs(
+            policy=RunPolicy(mode="ask", execution_target="sandbox")
+        )
+    }
+    sandbox_agent = {
+        spec.name
+        for spec in agent.tool_registry.list_tool_specs(
+            policy=RunPolicy(mode="auto", execution_target="sandbox")
+        )
+    }
+    desktop = {
+        spec.name
+        for spec in agent.tool_registry.list_tool_specs(
+            policy=RunPolicy(mode="desktop", execution_target="desktop")
+        )
+    }
 
     assert phase2.isdisjoint(chat)
     assert phase2.isdisjoint(sandbox_agent)
     assert phase2 <= desktop
+    # The legacy no-policy listing is the sandbox catalog: it hides the
+    # phase2 tools even with the global target set to desktop.
+    agent.tool_registry.set_execution_policy(mode="desktop")
+    legacy = {spec.name for spec in agent.tool_registry.list_tool_specs()}
+    assert phase2.isdisjoint(legacy)
     assert "desktop_launch" not in desktop
     assert "desktop_cleanup_unverified_launches" not in desktop
     assert agent.tool_registry.get_descriptor("desktop_cleanup_unverified_launches") is not None

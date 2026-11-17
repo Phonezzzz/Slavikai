@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from core.approval_policy import ApprovalContext, ApprovalRequired
+from core.run_contract import RunPolicy
 from core.tool_gateway import ToolGateway
 from shared.models import ToolRequest, ToolResult
 from tools.tool_registry import ToolRegistry
@@ -151,7 +152,6 @@ def test_confirmed_server_tool_bypasses_only_desktop_action_policy() -> None:
         capability="write",
         execution_targets={"desktop"},
     )
-    registry.set_execution_policy(mode="desktop")
     context = ApprovalContext(
         safe_mode=True,
         session_id="s1",
@@ -159,15 +159,20 @@ def test_confirmed_server_tool_bypasses_only_desktop_action_policy() -> None:
         execution_target="desktop",
     )
 
+    # E01-T03: the desktop target comes from the run policy, not the
+    # global mutable mode. The test is about the approval gate, not the
+    # target, so the gateway carries an explicit desktop policy.
     confirmed = ToolGateway(
         registry,
         approval_context=context,
         confirmed_decision=True,
+        run_policy=RunPolicy(mode="desktop", execution_target="desktop"),
     ).call(ToolRequest(name="memory_save_confirmed"))
     unrelated = ToolGateway(
         registry,
         approval_context=context,
         confirmed_decision=True,
+        run_policy=RunPolicy(mode="desktop", execution_target="desktop"),
     ).call(ToolRequest(name="unrelated_write"))
 
     assert confirmed.ok is True

@@ -313,7 +313,10 @@ def test_list_tool_specs_uses_snapshot_target(tmp_path: Path) -> None:
     assert "desktop_only" not in {
         spec.name for spec in registry.list_tool_specs(policy=sandbox_gateway.run_policy)
     }
-    assert "desktop_only" in {spec.name for spec in registry.list_tool_specs()}
+    # E01-T03: the legacy no-policy listing is the sandbox catalog and
+    # never follows the global target, so it hides desktop-only tools
+    # even with the global target set to desktop.
+    assert "desktop_only" not in {spec.name for spec in registry.list_tool_specs()}
 
 
 # --- loop level ------------------------------------------------------------
@@ -331,8 +334,12 @@ def test_loop_run_enforces_snapshot_policy(tmp_path: Path) -> None:
     ask_result = _run_loop(registry, ask_gateway)
     assert dispatched == []
     assert len(ask_result.tool_calls) == 1
-    assert "ASK_READ_ONLY_BLOCK" in (ask_result.tool_calls[0].result.error or "")
-    assert ask_result.error is None  # blocked call is recorded, not fatal to the loop
+    # E01-T03: the ask listing no longer exposes the write tool, so the loop
+    # refuses the call before the gateway (MODEL_TOOL_NOT_EXPOSED) and stops
+    # the run as a policy denial. The gateway-level ASK_READ_ONLY_BLOCK is
+    # still covered by test_two_gateways_with_different_policies_are_independent.
+    assert "MODEL_TOOL_NOT_EXPOSED" in (ask_result.tool_calls[0].result.error or "")
+    assert ask_result.error == "tool_policy_denied"
     act_result = _run_loop(registry, act_gateway)
     assert dispatched == ["workspace_write"]
     assert act_result.tool_calls[0].result.ok

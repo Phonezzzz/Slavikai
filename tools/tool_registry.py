@@ -137,7 +137,45 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def list_tool_specs(self, *, policy: RunPolicy | None = None) -> list[ToolSpec]:
-        target = policy.execution_target if policy is not None else self._execution_target
+        """Tools the model may see in this run.
+
+        With a policy (the run path), availability is computed from the
+        RunSpec: the execution target, the mode capability (ask/plan list
+        read-only tools) and, when the plan guard is on, the current
+        step's allowed tools. The policy check is the same one `call()`
+        applies (`_mode_policy_error`), so listing and calling can never
+        disagree. An unknown target lists nothing (fail-closed).
+
+        Without a policy (legacy: plan drafting), the listing is the
+        sandbox catalog — the least-privilege target — and never follows
+        the registry's global mutable target, so a stale global desktop
+        mode cannot smuggle desktop tools into a listing. Plan drafting
+        needs the full sandbox catalog (write tools included): drafting
+        is planning, not execution; the plan guard enforces the steps
+        at execution time.
+        """
+        if policy is not None:
+            target = policy.execution_target
+            if target not in ("sandbox", "desktop"):
+                self._logger.warning("tool_list_unknown_target", extra={"target": str(target)})
+                return []
+            return [
+                ToolSpec(
+                    name=descriptor.name,
+                    description=descriptor.description,
+                    parameters_schema=dict(descriptor.parameters_schema),
+                )
+                for descriptor in self._tools.values()
+                if (
+                    descriptor.enabled
+                    and descriptor.model_exposed
+                    and target in descriptor.execution_targets
+                    and self._mode_policy_error(
+                        descriptor.name, descriptor.capability, policy=policy
+                    )
+                    is None
+                )
+            ]
         return [
             ToolSpec(
                 name=descriptor.name,
@@ -148,7 +186,7 @@ class ToolRegistry:
             if (
                 descriptor.enabled
                 and descriptor.model_exposed
-                and target in descriptor.execution_targets
+                and "sandbox" in descriptor.execution_targets
             )
         ]
 
@@ -184,7 +222,13 @@ class ToolRegistry:
             self._log_call(request.name, ok=False, error=error, args=request.args)
             return ToolResult.failure(error)
 
-        effective_target = policy.execution_target if policy is not None else self._execution_target
+        # Without a policy there is no run to authorize a desktop target:
+        # the least-privilege default (sandbox) applies. A desktop tool
+        # requires an explicit desktop policy, so a stale global desktop
+        # mode cannot be used to smuggle a desktop call past the target
+        # check. The global mode still governs the legacy call path's
+        # capability check (see _mode_policy_error).
+        effective_target = policy.execution_target if policy is not None else "sandbox"
         if effective_target not in descriptor.execution_targets:
             error = (
                 f"EXECUTION_TARGET_BLOCK: tool '{request.name}' недоступен для {effective_target}."

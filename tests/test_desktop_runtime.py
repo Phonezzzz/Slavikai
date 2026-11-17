@@ -13,6 +13,7 @@ from core.desktop_security import DesktopPathSecurity
 from core.mwv.models import VerificationStatus
 from core.mwv.verifier_runtime import VerifierRuntime
 from core.response_preferences import ResponsePreferences
+from core.run_contract import RunPolicy
 from core.tool_gateway import ToolGateway
 from llm.brain_base import Brain
 from llm.types import LLMResult, ToolCall
@@ -55,9 +56,13 @@ class DesktopParent:
 
     def _build_tool_gateway(self, *, budget=None) -> ToolGateway:
         del budget
+        # E01-T03: the desktop run carries a desktop policy, like the real
+        # Agent._build_tool_gateway does when runtime_mode == "desktop".
+        # The global registry mode no longer authorizes desktop tools.
         return ToolGateway(
             self.tool_registry,
             pre_call=lambda request: self.gateway_requests.append(request),
+            run_policy=RunPolicy(mode="desktop", execution_target="desktop"),
         )
 
 
@@ -101,7 +106,6 @@ def _desktop_registry(tmp_path: Path) -> ToolRegistry:
         execution_targets={"desktop"},
     )
     registry.register("sandbox_only", lambda _request: ToolResult.success({}), capability="read")
-    registry.set_execution_policy(mode="desktop")
     return registry
 
 
@@ -322,31 +326,41 @@ def test_failed_attempt_can_be_corrected_and_verified(tmp_path: Path) -> None:
 
 
 def test_execution_target_isolation_between_chat_agent_and_desktop(tmp_path: Path) -> None:
+    """E01-T03: target isolation is between run policies, not global state.
+
+    A sandbox run (chat or agent) cannot list or call a desktop-only tool,
+    a desktop run can, and a direct call without a policy cannot smuggle
+    a desktop tool even when the global target is desktop.
+    """
     registry = _desktop_registry(tmp_path)
     path = tmp_path / "blocked.txt"
 
-    registry.set_execution_policy(mode="ask")
-    chat_specs = {spec.name for spec in registry.list_tool_specs()}
+    chat_policy = RunPolicy(mode="ask", execution_target="sandbox")
+    agent_policy = RunPolicy(mode="auto", execution_target="sandbox")
+    desktop_policy = RunPolicy(mode="desktop", execution_target="desktop")
+
+    chat_specs = {spec.name for spec in registry.list_tool_specs(policy=chat_policy)}
     chat_result = registry.call(
         ToolRequest(
             "desktop_file_write",
             {"path": str(path), "content": "chat must not write"},
-        )
+        ),
+        policy=chat_policy,
     )
-    registry.set_execution_policy(mode="auto")
-    agent_specs = {spec.name for spec in registry.list_tool_specs()}
+    agent_specs = {spec.name for spec in registry.list_tool_specs(policy=agent_policy)}
     agent_result = registry.call(
         ToolRequest(
             "desktop_file_write",
             {"path": str(path), "content": "agent must not write"},
-        )
+        ),
+        policy=agent_policy,
     )
-    registry.set_execution_policy(mode="desktop")
-    desktop_specs = {spec.name for spec in registry.list_tool_specs()}
+    desktop_specs = {spec.name for spec in registry.list_tool_specs(policy=desktop_policy)}
     desktop_result = registry.call(
-        ToolRequest("desktop_file_write", {"path": str(path), "content": "desktop"})
+        ToolRequest("desktop_file_write", {"path": str(path), "content": "desktop"}),
+        policy=desktop_policy,
     )
-    sandbox_result = registry.call(ToolRequest("sandbox_only"))
+    sandbox_result = registry.call(ToolRequest("sandbox_only"), policy=desktop_policy)
 
     assert not chat_result.ok and "EXECUTION_TARGET_BLOCK" in (chat_result.error or "")
     assert not agent_result.ok and "EXECUTION_TARGET_BLOCK" in (agent_result.error or "")
@@ -355,6 +369,18 @@ def test_execution_target_isolation_between_chat_agent_and_desktop(tmp_path: Pat
     assert desktop_specs == {"desktop_file_write", "desktop_verify"}
     assert desktop_result.ok
     assert not sandbox_result.ok and "EXECUTION_TARGET_BLOCK" in (sandbox_result.error or "")
+
+    # E01-T03 negative: a direct call without a policy cannot bypass the
+    # target check, even with the global target set to desktop.
+    registry.set_execution_policy(mode="desktop")
+    assert "desktop_file_write" not in {spec.name for spec in registry.list_tool_specs()}
+    smuggled = registry.call(
+        ToolRequest(
+            "desktop_file_write",
+            {"path": str(path), "content": "smuggled"},
+        )
+    )
+    assert not smuggled.ok and "EXECUTION_TARGET_BLOCK" in (smuggled.error or "")
 
 
 def test_mode_switch_cancellation_stops_before_host_tool_call(tmp_path: Path) -> None:
@@ -429,8 +455,6 @@ def test_unverified_launched_process_is_cleaned_up_through_gateway(tmp_path: Pat
         model_exposed=False,
         execution_targets={"desktop"},
     )
-    registry.set_execution_policy(mode="desktop")
-
     outcome = DesktopRuntime(parent, max_iterations=2).run("launch")
 
     assert not outcome.verification.ok
@@ -451,7 +475,6 @@ def test_unverified_launch_cleanup_trace_preserves_failure_meta(tmp_path: Path) 
         model_exposed=False,
         execution_targets={"desktop"},
     )
-    registry.set_execution_policy(mode="desktop")
     parent = DesktopParent(ScriptedBrain([]), registry)
     parent.tracer = RecordingTracer()
     runtime = DesktopRuntime(parent)
@@ -569,7 +592,6 @@ def test_real_host_filesystem_workflow_runs_through_desktop_loop(tmp_path: Path)
             capability=capability,  # type: ignore[arg-type]
             execution_targets={"desktop"},
         )
-    registry.set_execution_policy(mode="desktop")
     brain = ScriptedBrain(
         [
             LLMResult(

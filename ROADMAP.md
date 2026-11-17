@@ -418,7 +418,7 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01-T02 DONE; E01-T03 next |
+| E01 — canonical execution | 9 | E01-T03 DONE; E01-T04 next |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | NEEDS_REFINEMENT |
@@ -728,6 +728,31 @@ Only three places in `server/` call `agent.respond` at all: `project.py:418`, `u
 **Acceptance.** `answer` не получает write tools; `execute` получает только qualified tools target-а; unknown target fail-closed.
 
 **Negative.** Нельзя вручную вызвать tool через registry и обойти target check.
+
+##### E01-T03 implementation — verified 2026-11-17 (baseline c198659)
+
+**Status:** DONE. `make check` green on branch `pr-e01-t03-registry-listing` (2484 passed, coverage 83.53%).
+
+**Files.**
+- `tools/tool_registry.py` — `list_tool_specs(*, policy=None)` now derives availability from the RunSpec: the execution target, the mode capability (ask/plan list read-only tools) and, when the plan guard is on, the current step's allowed tools. The policy check is the same `_mode_policy_error` `call()` applies, so listing and calling can never disagree. An unknown target lists nothing (fail-closed, warning `tool_list_unknown_target` logged). Without a policy (legacy: plan drafting) the listing is the sandbox catalog and never follows the global mutable target. `call(..., policy=None)` no longer uses the global target: without a policy the effective target is sandbox, so a desktop tool requires an explicit desktop policy. `RunPolicy` still imported only under `TYPE_CHECKING`.
+- No other production file changed. `core/agent.py:164` (`compile_plan_steps`) keeps using the legacy listing (plan drafting needs the full sandbox catalog); the chat loop keeps its own `_chat_read_tool_specs` (read-only + `chat_exposed`).
+
+**Tests.** `tests/test_tool_registry_listing.py` (6 tests):
+- Acceptance (a) (`test_answer_spec_lists_no_write_tools`): ask and plan specs list no write/exec tools, read tools listed.
+- Acceptance (b) (`test_execute_spec_lists_only_target_qualified_tools`): act/auto on sandbox list only sandbox-qualified tools; desktop lists only desktop-qualified tools (+ both-targets tools).
+- Acceptance (c) (`test_unknown_target_lists_nothing_and_call_is_blocked`): a bogus target lists nothing and the call is EXECUTION_TARGET_BLOCK.
+- Acceptance (d) (`test_manual_call_without_policy_cannot_bypass_target`): with the global target set to desktop, a direct no-policy call, a sandbox-policy call and a sandbox-gateway call all refuse the desktop-only tool; an explicit desktop policy allows it.
+- Plan guard (`test_plan_guard_narrows_listing_to_current_step`): with the guard on, the listing is narrowed to the current step's allowed tools; a broken plan lists nothing; without the guard the write tool is listed.
+- Legacy (`test_legacy_listing_is_sandbox_catalog`): the no-policy listing is the sandbox catalog whatever the global target is, and a legacy no-policy sandbox call still works.
+- Verified to fail on the old code: with the production change stashed, 8 tests fail (4 new behaviour tests + 4 updated tests: snapshot target, loop policy, desktop isolation, phase2 registration); the 2 remaining new tests (execute-spec target qualification, unknown target) already passed on the old code — they pin acceptance (b)/(c) that E01-T02 already provided.
+- Updated existing tests to the new listing contract: `test_run_contract.py::test_list_tool_specs_uses_snapshot_target` (legacy listing no longer follows the global target), `test_run_contract.py::test_loop_run_enforces_snapshot_policy` (the ask loop now refuses the write at the listing layer: MODEL_TOOL_NOT_EXPOSED + `tool_policy_denied`; the gateway-level ASK_READ_ONLY_BLOCK is still covered by `test_two_gateways_with_different_policies_are_independent`), `test_desktop_runtime.py::test_execution_target_isolation_between_chat_agent_and_desktop` (rewritten to drive isolation via RunPolicies + the no-policy bypass negative), `test_desktop_agent_registration.py::test_phase2_tools_are_registered_only_for_desktop_execution_target` (rewritten to use RunPolicies + a legacy-listing assertion), `test_approval_gate.py::test_confirmed_server_tool_bypasses_only_desktop_action_policy` (setup change only: the gateway now carries an explicit desktop policy instead of relying on the global mode; passes on both old and new code). The `DesktopParent` test double in `test_desktop_runtime.py` now builds a desktop policy (like the real `Agent._build_tool_gateway` when `runtime_mode == "desktop"`); the global-mode setup was removed from the desktop-loop tests and the fixture.
+
+**Delete-vs-wrap.** No production code deleted. Mode fields remain only as callers; the spec is the source of truth for listing and calling. No UX changes.
+
+**E08 candidates (not deleted here).**
+- `ToolRegistry._execution_target` is now write-only (set by `set_execution_policy`, read by nothing on the run path) — remove once `set_execution_policy`'s last caller (`reset_runtime_transient_state`) is gone.
+- `Agent._chat_read_tool_specs` (`core/agent_routing.py:812`) is a parallel hand-rolled listing (read-only + `chat_exposed`) that bypasses `list_tool_specs` — unify it with the registry listing (e.g. a `chat_exposed` filter in the listing) in a later ticket; the chat loop is the only run path not deriving its listing from the RunSpec.
+- `_call_workspace_read_tool` (`server/http/handlers/workspace.py:593`) bypasses the gateway for reads — already recorded in E01-T01; E01-T04 owns the gateway unification.
 
 #### E01-T04 — сделать ToolGateway единственной execution gate
 
