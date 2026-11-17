@@ -108,7 +108,7 @@ Verification: passed | failed | unknown | not_applicable
 Evidence: postconditions + observations + effect ledger
 ```
 
-Текстовые метки UI (`DONE`, `FAILED`, `CANCELLED`, `BLOCKED`, `UNVERIFIED`) — только **проекции этой структуры**, не источник истины и не подмена `TerminalReason`. `DONE` для state-changing задачи требует `completed + full + verification=passed`. `completed + accepted_partial` отражает частично принятый результат; его нельзя представить полным `DONE`. `aborted` сохраняется отдельно от `failed`, а `blocked/waiting_approval` не являются terminal completion. При `Verification=unknown` результат честно отображается как unverified **с сохранением причины завершения**, а не подменяет её. Никакой fake PASS из `tool.ok`. Точное mapping и acceptance authority проверяются в E01-T05.
+Текстовые метки UI — только **проекции этой структуры**, не источник истины и не подмена `TerminalReason`. Проверенный набор меток (`core/run_outcome.py::RunOutcome.ui_label`, E01-T05): `RUNNING`, `WAITING`, `BLOCKED`, `DONE`, `PARTIAL`, `FAILED`, `CANCELLED`, `ABORTED`, `UNVERIFIED`. `DONE` — тогда и только тогда, когда `completed + full + verification=passed` (для задачи без изменения состояния допустимо `verification=not_applicable`). `completed + accepted_partial` — `PARTIAL`, его нельзя представить полным `DONE`; `final_partial` — только для `completed + accepted_partial`. `aborted` — отдельная метка `ABORTED`, не `FAILED`. `blocked` — `BLOCKED`, `waiting_user_input` / `waiting_approval` — `WAITING`: не-терминальные фазы никогда не выдаются за завершение. При `Verification=unknown` state-changing задача — `UNVERIFIED` **с сохранением причины завершения** (не `DONE`, не автоматический `FAILED`); при `Verification=failed` проверка опровергла заявленный результат — run считается `failed`. Никакой fake PASS из `tool.ok`. `final_success` публикуется только при подтверждённой postcondition (gate принятия по ADR-0002 §4, не изменение таблицы §3): для неподтверждённого full claim финал удерживается, а не публикуется.
 
 `AgentToolLoop` уже хранит iterations, executed tool calls, error/cancelled state, usage и continuation после approval; эти реальные свойства надо использовать, а не переписывать loop с нуля.
 
@@ -418,7 +418,7 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01-T04 DONE; E01-T05 next |
+| E01 — canonical execution | 9 | E01-T05 DONE; E01-T06 next |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | NEEDS_REFINEMENT |
@@ -822,6 +822,21 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 **Acceptance.** State-changing dummy task без подтверждённой postcondition не может стать full `DONE`. Механизм сохраняет отдельно причину завершения и disposition для `aborted + none`, `failed + accepted_partial`, `cancelled + accepted_partial` и `completed + accepted_partial`; `final_partial` допустим только для `completed + accepted_partial`. Не-терминальные `blocked` / `waiting_approval` не выдаются за завершение; UI projection полностью проверена.
 
 **Negative.** `tool.ok=true` сам по себе не proof of completion; `unknown verification` не превращается ни в full success, ни автоматически в failed, не переписывает terminal_reason. Контракт ADR-0002 нельзя менять молча; если нужна реальная развилка — `BLOCKED: REAL_IMPLEMENTATION_FORK` к владельцу.
+
+##### E01-T05 implementation — verified 2026-11-17 (baseline 125da46)
+
+**Status:** DONE (acceptance met). ADR-0002 не переписан: таблица §3 сохранена как есть; добавлен только gate публикации `final_success` (не публикуется без подтверждённой postcondition, по §4 — acceptance transaction проверяет критерии до публикации финала).
+
+**Новый модуль `core/run_outcome.py`.** `TerminalReason`, `Disposition`, `RunPhase`, `VerificationOutcome` (`passed|failed|unknown|not_applicable`) + `PostconditionCheck` / `Verification` с evidence + frozen `RunOutcome` с инвариантами в `__post_init__` (terminal <=> reason; `completed+none` и не-completed `+full` — invalid; `accepted_partial` требует `accepted_by`). `communication_class` — маппинг ADR-0002 §3; `is_full_done` — `completed + full + verification=passed` (или `not_applicable` для задачи без изменения состояния); `ui_label` — полная проекция (9 меток), `DONE` тогда и только тогда, когда `is_full_done`. Деривации: `outcome_from_mwv` (work SUCCESS + verification PASSED -> `completed+full`; SUCCESS + FAILED -> `failed+none` — проверка опровергла результат; SUCCESS + ERROR -> `completed+full+unknown` — `UNVERIFIED`, финал удерживается; FAILURE -> `failed`) и `outcome_from_loop_result` (cancelled/error -> причина из loop, verification unknown; чистый финиш state-changing задачи без проверки -> `UNVERIFIED`, не `DONE`).
+
+**Production wiring.** `AgentMWVMixin._mwv_outcome_label` (`core/agent_mwv.py`) теперь выводит русскую строку из `RunOutcome.ui_label` через `outcome_from_mwv` (state-changing); поведение на достижимом пути не изменилось (`"Итог: проверки пройдены"` при work SUCCESS + verification PASSED — закреплено тестом).
+
+**Anti-pseudo audit (до implementation).** Проверен контур outcome: типы — строго типизированные, без парсинга прозы; проекция — чистая функция структуры, не классификатор; fallback/адаптеров/миграций не добавлено; `_is_success` в `core/mwv/manager.py` (work SUCCESS + verification PASSED) — не дубль, а то же условие, что и в `outcome_from_mwv`; `RunOutcome` — единственный канонический outcome, старых параллельных путей не осталось, кроме известного ниже.
+
+**Известный остающийся fake-DONE (не в scope тикета, E01-T08).** `Agent._execute_mwv_plan_step` (`core/agent_mwv.py`) ставит `PlanStepStatus.DONE` из одного `result.ok` и из прозы при отсутствии operation (`acceptance_checks` из `TaskStepContract` не проверяются). Это step-level статус legacy MWV-роутинга чата, а не `RunOutcome`; исправление — в рамках удаления legacy MWV routing (E01-T08), не здесь. Претензия ADR-0002 (`docs/runtime_contract_claims.json`) остаётся `target`: полный lifecycle-контракт (durable task identity, acceptance transaction) — это E05, этот тикет канонизирует только структуру outcome.
+
+**Files.** Новый `core/run_outcome.py`; `core/agent_mwv.py` (rewire `_mwv_outcome_label` + русские метки); новый `tests/test_run_outcome.py` (36 тестов: инварианты, маппинг `communication_class`, `final_partial` только для `completed+accepted_partial`, state-changing dummy без postcondition — не DONE, `tool.ok` alone — не proof, unknown verification не переписывает причину, exhaustive UI projection matrix, деривации из MWV/loop, зафиксированная строка `"Итог: проверки пройдены"`).
+
 
 #### E01-T06 — Plan как artifact, Execute как обычный run
 

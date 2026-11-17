@@ -40,6 +40,7 @@ from core.mwv.verifier_runtime import (
 )
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.mwv.worker import WorkerRuntime
+from core.run_outcome import outcome_from_mwv
 from llm.brain_base import Brain
 from llm.cancellation import cancellation_requested
 from shared.models import (
@@ -59,6 +60,22 @@ _ACTION_ORIENTED_RISK_FLAGS = frozenset({"code_change", "filesystem", "git", "in
 _NO_OBSERVABLE_ACTION_ERROR = (
     "MWV route требует наблюдаемого действия, но tool calls/diffs отсутствуют."
 )
+
+
+# Russian presentation of the canonical RunOutcome.ui_label (E01-T05).
+# The strings are UI text only; the label choice comes from the
+# canonical outcome, never from ad-hoc status checks.
+_MWV_OUTCOME_RUSSIAN_LABELS = {
+    "DONE": "проверки пройдены",
+    "PARTIAL": "частичный результат принят",
+    "FAILED": "ошибка выполнения",
+    "CANCELLED": "выполнение отменено",
+    "ABORTED": "выполнение прервано",
+    "UNVERIFIED": "результат не подтверждён проверкой",
+    "BLOCKED": "выполнение заблокировано",
+    "WAITING": "ожидание пользователя",
+    "RUNNING": "выполняется",
+}
 
 
 @dataclass(frozen=True)
@@ -1413,15 +1430,17 @@ class AgentMWVMixin:
         return StopReasonCode.WORKER_FAILED
 
     def _mwv_outcome_label(self, result: MWVRunResult) -> str:
-        if result.work_result.status == WorkStatus.FAILURE:
-            return "ошибка выполнения"
-        if result.verification_result.status == VerificationStatus.ERROR:
-            return "ошибка проверки"
-        if result.verification_result.status == VerificationStatus.FAILED:
-            if result.retry_decision and result.retry_decision.reason == "retry_limit_reached":
-                return "проверки не прошли (лимит попыток исчерпан)"
-            return "проверки не прошли"
-        return "проверки пройдены"
+        """User-facing outcome line, derived from the canonical RunOutcome
+        (E01-T05). MWV plan execution runs tools, so it is treated as
+        state-changing: without a confirmed postcondition the run can
+        never read as done. The Russian strings are presentation only;
+        the label choice comes from RunOutcome.ui_label."""
+        outcome = outcome_from_mwv(
+            result.work_result.status,
+            result.verification_result,
+            state_changing=True,
+        )
+        return _MWV_OUTCOME_RUSSIAN_LABELS[outcome.ui_label]
 
     def _mwv_verifier_label(self, verification: VerificationResult) -> str:
         if verification.status == VerificationStatus.PASSED:
