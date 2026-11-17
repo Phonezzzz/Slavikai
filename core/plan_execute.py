@@ -52,11 +52,17 @@ from core.run_outcome import (
     outcome_from_loop_result,
 )
 from core.tool_gateway import ToolGateway
-from core.tool_loop import AgentToolLoop, AgentToolLoopResult, ToolLoopContinuation
+from core.tool_loop import (
+    AgentToolLoop,
+    AgentToolLoopResult,
+    ToolLoopContinuation,
+    ToolLoopExecutionError,
+)
 from llm.brain_base import Brain
 from llm.types import ModelConfig
 from shared.models import JSONValue, LLMMessage
 from tools.tool_registry import ToolRegistry
+from tools.workspace_tools import workspace_root_context
 
 StepStatus = Literal["done", "failed", "waiting_approval"]
 
@@ -74,6 +80,7 @@ class PlanExecuteAgentProtocol(Protocol):
 
     tool_registry: ToolRegistry
     main_config: ModelConfig | None
+    runtime_workspace_root: str | None
 
     def set_runtime_state(
         self,
@@ -398,15 +405,20 @@ def _run_step_loop(
         raise PlanExecutionBindingError(
             f"plan_step_tool_unavailable: инструмент шага {tool_name!r} недоступен в loop."
         )
-    return AgentToolLoop(**budget.loop_kwargs()).run(
-        brain=agent._get_main_brain(),
-        gateway=gateway,
-        messages=_step_messages(plan=plan, step=step),
-        tools=specs,
-        config=agent.main_config,
-        continuation=continuation,
-        cancellation_token=cancellation_token,
-    )
+    # Выполнять loop в контексте проверенного workspace сессии/пакета:
+    # workspace tools и ToolGateway._workspace_binding читают root из
+    # ContextVar, а apply_agent_runtime_state ставит только атрибут
+    # агента (как было у MWV worker через workspace_root_context).
+    with workspace_root_context(agent.runtime_workspace_root):
+        return AgentToolLoop(**budget.loop_kwargs()).run(
+            brain=agent._get_main_brain(),
+            gateway=gateway,
+            messages=_step_messages(plan=plan, step=step),
+            tools=specs,
+            config=agent.main_config,
+            continuation=continuation,
+            cancellation_token=cancellation_token,
+        )
 
 
 def _step_execution(
@@ -416,8 +428,9 @@ def _step_execution(
 
     Шаг done — только при чистом завершении loop и ``is_full_done`` его
     outcome. Любой упавший вызов, ноль вызовов или loop-ошибка — failed.
-    Отмена (cancelled) здесь не отображается: executor останавливает план
-    и возвращает общий outcome CANCELLED без этого шага.
+    Отмена (cancelled) здесь не отображается: её обрабатывает
+    ``_cancelled_step_execution`` в executor — частичный шаг сохраняется
+    как failed с фактическим числом вызовов, а общий исход — CANCELLED.
     """
     step_id = str(step.get("step_id"))
     description = str(step.get("description"))
@@ -509,6 +522,35 @@ def _step_execution(
         result=f"Шаг выполнен, но результат не подтверждён ({outcome.ui_label}).",
         tool_calls_used=tool_calls_used,
         outcome=outcome,
+    )
+
+
+def _cancelled_step_execution(
+    *, step: dict[str, JSONValue], loop_result: AgentToolLoopResult, state_changing: bool
+) -> PlanStepExecution:
+    """Частичный шаг, отменённый после уже выполненных вызовов.
+
+    Отмена не откатывает произведённые эффекты: выполненные вызовы
+    сохраняются с фактическим числом, а шаг НЕ объявляется done —
+    он failed, и план завершается CANCELLED.
+    """
+    calls = len(loop_result.tool_calls)
+    return PlanStepExecution(
+        step_id=str(step.get("step_id")),
+        description=str(step.get("description")),
+        status="failed",
+        operation=_step_tool(step),
+        result=(
+            f"Шаг отменён после {calls} выполненных вызовов; произведённые эффекты не откатываются."
+        ),
+        tool_calls_used=calls,
+        outcome=RunOutcome(
+            phase=RunPhase.TERMINAL,
+            terminal_reason=TerminalReason.CANCELLED,
+            disposition=Disposition.NONE,
+            verification=Verification.unknown(source="plan_execute"),
+            state_changing=state_changing,
+        ),
     )
 
 
@@ -675,6 +717,28 @@ def _execute_remaining_steps(
                 cancellation_token=cancellation_token,
                 continuation=continuation,
             )
+        except ToolLoopExecutionError as exc:
+            # Loop начался и упал (следующий запрос к модели после
+            # выполненных вызовов). Отказ валидации до dispatch —
+            # PlanExecutionBindingError/PlanLoopContinuationUnavailable —
+            # сюда не попадает и чекпоинт resume сохраняет. А здесь
+            # continuation уже недействительна как повтор: выполненный
+            # prefix сохраняется как failed-шаг, план завершается FAILED,
+            # и runner потребляет чекпоинт — повторное подтверждение не
+            # воспроизведёт выполненные вызовы.
+            executed = _step_execution(
+                step=step, loop_result=exc.result, state_changing=step_changing
+            )
+            done.append(executed)
+            return _finish_result(
+                plan_id=plan_id,
+                plan_hash=plan_hash,
+                plan_revision=plan_revision,
+                task_id=task_id,
+                steps=tuple(done),
+                any_state_changing=state_changing,
+                cancelled=False,
+            )
         except ApprovalRequired as exc:
             if exc.continuation is None:
                 raise RuntimeError("plan_loop_approval_without_continuation") from exc
@@ -695,6 +759,14 @@ def _execute_remaining_steps(
             checkpoints.create(checkpoint)
             raise PlanLoopApprovalPending(checkpoint=checkpoint, approval=exc.request) from exc
         if loop_result.cancelled:
+            if loop_result.tool_calls:
+                # Отмена не откатывает эффекты: сохранить частичный шаг
+                # с фактическим числом вызовов, не объявляя его done.
+                done.append(
+                    _cancelled_step_execution(
+                        step=step, loop_result=loop_result, state_changing=step_changing
+                    )
+                )
             return _finish_result(
                 plan_id=plan_id,
                 plan_hash=plan_hash,

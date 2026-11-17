@@ -48,6 +48,32 @@ class ScriptedBrain:
         return LLMResult(text="Готово")
 
 
+class ToggleBrain:
+    """Brain для resume-теста: сначала утверждённый вызов, потом ошибка."""
+
+    def __init__(self, call: tuple[str, dict[str, JSONValue]]) -> None:
+        self._call = call
+        self.fail_generate = False
+        self.generate_calls = 0
+
+    def generate(self, messages, config=None, tools=None):
+        del messages, config, tools
+        self.generate_calls += 1
+        if self.fail_generate:
+            raise RuntimeError("provider boom")
+        name, args = self._call
+        return LLMResult(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    id=f"call-{self.generate_calls}",
+                    name=name,
+                    arguments=dict(args),
+                )
+            ],
+        )
+
+
 class FakePlanAgent:
     """Минимальный агент для executor: тот же ToolGateway-путь, что у Agent."""
 
@@ -65,6 +91,7 @@ class FakePlanAgent:
         self.runtime_active_task: dict[str, JSONValue] | None = None
         self.runtime_auto_state: dict[str, JSONValue] | None = None
         self.runtime_plan_guard_enabled = False
+        self.runtime_workspace_root: str | None = None
         # Как в UI runner при профиле sandbox: safe_mode включён.
         self.tools_enabled: dict[str, bool] = {"safe_mode": True}
         self._approved_categories: set[str] = set()
@@ -516,3 +543,163 @@ def test_cancelled_plan_returns_cancelled_outcome() -> None:
     assert result.outcome.terminal_reason is TerminalReason.CANCELLED
     assert result.steps == ()
     assert calls == []
+
+
+def test_plan_step_args_mismatch_blocked_by_plan_guard() -> None:
+    # Finding 3 (P1): модель подменяет аргументы при том же имени
+    # инструмента — guard обязан сверить args с утверждёнными в шаге.
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        return ToolResult.success({})
+
+    brain = ScriptedBrain([("workspace_write", {"path": "unapproved.txt", "content": "wrong"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    plan, task = _approved_plan(
+        [_step("step-1", "workspace_write", {"path": "approved.txt", "content": "right"})]
+    )
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+    )
+
+    assert write_calls == []
+    assert len(result.steps) == 1
+    assert result.steps[0].status == "failed"
+    assert result.outcome.terminal_reason is TerminalReason.FAILED
+    assert "BLOCKED_OUTSIDE_PLAN" in result.steps[0].result
+
+
+def test_resume_loop_error_after_executed_call_does_not_replay() -> None:
+    # Finding 1 (P1): resume после approval выполняет утверждённый вызов,
+    # а следующий запрос к модели падает. Ошибка loop не должна
+    # выбрасываться наружу с живым чекпоинтом: выполненный prefix
+    # сохраняется как failed-шаг, план FAILED, повтор не воспроизводит
+    # уже выполненный вызов.
+    net_calls: list = []
+
+    def net_read(request):
+        net_calls.append(request)
+        return ToolResult.success({"output": "observed"})
+
+    brain = ToggleBrain(("net_read", {"index": 1}))
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("net_read", net_read, "read", ["network"])],
+    )
+    plan, task = _approved_plan([_step("step-1", "net_read", {"index": 1})])
+    checkpoints = PlanLoopCheckpoints()
+    agent.set_session_context("s1", set())
+
+    with pytest.raises(PlanLoopApprovalPending) as excinfo:
+        execute_approved_plan(
+            agent=agent,
+            plan=plan,
+            task=task,
+            session_id="s1",
+            plan_hash_fn=plan_hash_payload,
+            checkpoints=checkpoints,
+        )
+    checkpoint = excinfo.value.checkpoint
+    assert net_calls == []
+
+    agent.set_session_context("s1", {"NETWORK_RISK"})
+    brain.fail_generate = True
+    taken = checkpoints.take(checkpoint.checkpoint_id)
+    assert taken is checkpoint
+    result = resume_approved_plan(
+        agent=agent,
+        checkpoint=checkpoint,
+        plan=plan,
+        task=task,
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=checkpoints,
+    )
+
+    assert result.outcome.terminal_reason is TerminalReason.FAILED
+    assert result.cancelled is False
+    assert len(net_calls) == 1
+    assert len(result.steps) == 1
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].tool_calls_used == 1
+    assert result.tool_calls_used == 1
+
+
+def test_plan_loop_runs_inside_verified_workspace_context(tmp_path) -> None:
+    # Finding 2 (P1): loop шага выполняется в контексте проверенного
+    # workspace, а не глобального sandbox/project.
+    seen_roots: list = []
+
+    def workspace_list(request):
+        from tools.workspace_tools import get_workspace_root
+
+        seen_roots.append(get_workspace_root())
+        return ToolResult.success({"files": []})
+
+    brain = ScriptedBrain([("workspace_list", {"path": "."})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_list", workspace_list, "read", [])],
+    )
+    agent.runtime_workspace_root = str(tmp_path)
+    plan, task = _approved_plan([_step("step-1", "workspace_list", {"path": "."})])
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+    )
+
+    assert result.outcome.is_full_done is True
+    assert seen_roots == [tmp_path.resolve()]
+
+
+def test_cancelled_step_keeps_executed_calls() -> None:
+    # Finding 4 (P2): отмена после выполненной записи не должна терять
+    # вызов: частичный шаг сохраняется как failed с фактическим числом.
+    token = asyncio.Event()
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        token.set()
+        return ToolResult.success({})
+
+    brain = ScriptedBrain([("workspace_write", {"path": "x.txt"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    plan, task = _approved_plan([_step("step-1", "workspace_write", {"path": "x.txt"})])
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+        cancellation_token=token,
+    )
+
+    assert result.cancelled is True
+    assert result.outcome.terminal_reason is TerminalReason.CANCELLED
+    assert len(write_calls) == 1
+    assert len(result.steps) == 1
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].tool_calls_used == 1
+    assert result.tool_calls_used == 1

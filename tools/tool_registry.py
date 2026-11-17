@@ -245,6 +245,7 @@ class ToolRegistry:
             descriptor.capability,
             confirmed_decision=(confirmed_decision and descriptor.confirmed_decision_only),
             policy=policy,
+            tool_args=request.args,
         )
         if mode_error is not None:
             effective_mode = policy.mode if policy is not None else self._mode
@@ -438,6 +439,7 @@ class ToolRegistry:
         *,
         confirmed_decision: bool = False,
         policy: RunPolicy | None = None,
+        tool_args: dict[str, JSONValue] | None = None,
     ) -> str | None:
         mode = policy.mode if policy is not None else self._mode
         enforce_plan_guard = (
@@ -451,9 +453,15 @@ class ToolRegistry:
             return "PLAN_READ_ONLY_BLOCK: plan-режим допускает только read-only инструменты."
         if mode not in {"act", "auto"} or not enforce_plan_guard:
             return None
-        return self._plan_guard_error(tool_name, policy=policy)
+        return self._plan_guard_error(tool_name, policy=policy, tool_args=tool_args)
 
-    def _plan_guard_error(self, tool_name: str, *, policy: RunPolicy | None = None) -> str | None:
+    def _plan_guard_error(
+        self,
+        tool_name: str,
+        *,
+        policy: RunPolicy | None = None,
+        tool_args: dict[str, JSONValue] | None = None,
+    ) -> str | None:
         active_plan = policy.active_plan if policy is not None else self._active_plan
         active_task = policy.active_task if policy is not None else self._active_task
         if not isinstance(active_plan, dict) or not isinstance(active_task, dict):
@@ -496,4 +504,18 @@ class ToolRegistry:
         allowed = {item.strip() for item in allowed_raw if isinstance(item, str) and item.strip()}
         if tool_name not in allowed:
             return f"BLOCKED_OUTSIDE_PLAN: tool '{tool_name}' не разрешён в текущем шаге."
+        if tool_args is not None:
+            # Аргументы вызова сверяются с утверждёнными в шаге:
+            # hash/approval плана не ограничивают реальные эффекты,
+            # если модель может подменить path/content при том же имени.
+            # Сверка — только когда шаг декларирует inputs.tool_args:
+            # шаги без объявленных аргументов (MWV, legacy) остаются
+            # под прежней проверкой только по имени инструмента.
+            inputs = step_payload.get("inputs")
+            approved_args = inputs.get("tool_args") if isinstance(inputs, dict) else None
+            if isinstance(approved_args, dict) and tool_args != approved_args:
+                return (
+                    "BLOCKED_OUTSIDE_PLAN: аргументы вызова не совпадают "
+                    "с утверждёнными в шаге; требуется перепланирование."
+                )
         return None

@@ -123,6 +123,7 @@ class PlanRunnerAgentProtocol(Protocol):
     tools_enabled: dict[str, bool]
     tool_registry: ToolRegistry
     main_config: ModelConfig | None
+    runtime_workspace_root: str | None
 
     def set_session_context(self, session_id: str, approved_categories: set[object]) -> None: ...
 

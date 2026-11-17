@@ -161,7 +161,8 @@ def create_app(
     owner_principal_id = _owner_principal_id(resolved_auth_config)
     desktop_run_coordinator = DesktopRunCoordinator()
     app["desktop_run_coordinator"] = desktop_run_coordinator
-    app["plan_loop_checkpoints"] = PlanLoopCheckpoints()
+    plan_loop_checkpoints = PlanLoopCheckpoints()
+    app["plan_loop_checkpoints"] = plan_loop_checkpoints
     resolved_desktop_policy_store = desktop_policy_store or DesktopPolicyStore(
         api.PROJECT_ROOT / ".run" / "desktop_approvals.json",
         legacy_subject_principal_id=owner_principal_id,
@@ -301,15 +302,20 @@ def create_app(
         config = runtime_model_state.peek_global_main()
         return (config.provider, config.model) if config is not None else None
 
+    def _on_session_pruned(principal_id: str, session_id: str) -> None:
+        provider.schedule_release(AgentScope(principal_id=principal_id, session_id=session_id))
+        # Паузы canonical plan loop хранятся отдельно от Agent: без
+        # очистки store накапливал бы недоступное состояние при удалении
+        # и автоматическом вытеснении сессий.
+        plan_loop_checkpoints.clear_session(session_id)
+
     app["ui_hub"] = UIHub(
         storage=resolved_ui_storage,
         default_model_getter=_default_session_model,
         workspace_root_policy=_workspace_root_policy if workspace_pool is not None else None,
         legacy_principal_id=owner_principal_id,
         legacy_principal_aliases=_legacy_owner_principal_aliases(),
-        on_session_pruned=lambda principal_id, session_id: provider.schedule_release(
-            AgentScope(principal_id=principal_id, session_id=session_id)
-        ),
+        on_session_pruned=_on_session_pruned,
     )
 
     async def _load_session_model(session_id: str) -> ModelConfig | None:

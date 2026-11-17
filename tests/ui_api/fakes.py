@@ -102,6 +102,7 @@ class DummyAgent:
         self.main_config = None
         self._plan_brain = _DummyPlanBrain()
         self.runtime_plan_guard_enabled = False
+        self.runtime_workspace_root: str | None = None
 
     def set_runtime_state(
         self, *, mode, active_plan=None, active_task=None, auto_state=None, enforce_plan_guard=False
@@ -176,7 +177,7 @@ class DummyAgent:
         self.tools_enabled = dict(state)
 
     def apply_runtime_workspace_root(self, workspace_root: str | None) -> None:
-        del workspace_root
+        self.runtime_workspace_root = workspace_root
 
     def compile_plan_steps(
         self,

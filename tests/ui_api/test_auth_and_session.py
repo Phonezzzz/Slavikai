@@ -3,6 +3,9 @@ from __future__ import annotations
 import sqlite3
 
 from core.agent_response import AgentResponse
+from core.approval_policy import ApprovalPrompt, ApprovalRequest
+from core.plan_execute import PlanLoopCheckpoint, PlanLoopCheckpoints
+from core.tool_loop import ToolLoopContinuation
 from llm.types import ModelConfig
 from server.http.common.auth import UI_AUTH_COOKIE, _ui_auth_cookie_value
 from tests.ui_api.fakes import _session_security_headers
@@ -2313,6 +2316,89 @@ def test_foreign_session_returns_403_consistently(monkeypatch) -> None:
                 json={"command": "find", "args": "README.md"},
             )
             await assert_forbidden(project_resp)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def _plan_loop_checkpoint(session_id: str) -> PlanLoopCheckpoint:
+    """Минимальный реальный чекпоинт паузы canonical loop для сессии."""
+    approval = ApprovalRequest(
+        category="NETWORK_RISK",
+        required_categories=["NETWORK_RISK"],
+        prompt=ApprovalPrompt(what="Сетевой вызов", why="Шаг плана", risk="Сеть", changes=[]),
+        tool="net_read",
+        details={},
+        session_id=session_id,
+    )
+    continuation = ToolLoopContinuation(
+        history=[],
+        executed=[],
+        pending_calls=[],
+        approval=approval,
+        text="",
+        iteration=1,
+        max_iterations=10,
+        tools=[],
+        config=None,
+    )
+    return PlanLoopCheckpoint(
+        checkpoint_id="plan-loop-test",
+        plan_id="plan-1",
+        plan_hash="0" * 64,
+        task_id="task-1",
+        session_id=session_id,
+        step_id="step-1",
+        step_index=0,
+        completed_steps=(),
+        continuation=continuation,
+        main_config=None,
+        plan_revision=1,
+        brain=object(),
+    )
+
+
+def test_ui_session_delete_clears_plan_loop_checkpoints() -> None:
+    # Finding 5 (P2): DELETE /ui/api/sessions/{id} обязан сбрасывать
+    # паузы canonical loop сессии, а не только approvals и Agent.
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+            checkpoints = client.server.app["plan_loop_checkpoints"]
+            assert isinstance(checkpoints, PlanLoopCheckpoints)
+            checkpoints.create(_plan_loop_checkpoint(session_id))
+            assert len(checkpoints) == 1
+
+            delete_resp = await client.delete(f"/ui/api/sessions/{session_id}")
+            assert delete_resp.status == 200
+            assert (await delete_resp.json()).get("deleted") is True
+            assert len(checkpoints) == 0
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ui_session_prune_clears_plan_loop_checkpoints() -> None:
+    # Finding 5 (P2): автоматическое вытеснение сессии (тот же
+    # on_session_pruned callback, что и удаление) тоже чистит store.
+    async def run() -> None:
+        client = await _create_client(DummyAgent())
+        try:
+            status_resp = await client.get("/ui/api/status")
+            session_id = (await status_resp.json()).get("session_id")
+            assert isinstance(session_id, str)
+            checkpoints = client.server.app["plan_loop_checkpoints"]
+            checkpoints.create(_plan_loop_checkpoint(session_id))
+            assert len(checkpoints) == 1
+
+            hub = client.server.app["ui_hub"]
+            hub._drop_sessions_locked([session_id])
+            assert len(checkpoints) == 0
         finally:
             await client.close()
 

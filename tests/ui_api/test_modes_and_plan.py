@@ -676,15 +676,16 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                     "status"
                 ] == "cancelled"
                 assert len(executed) == 1
-                # Отмена прервала шаг до завершения: snapshot не записан,
-                # шаг остаётся todo, а терминальная проекция loop — cancelled.
+                # Отмена прервала шаг после выполненного вызова: частичный
+                # шаг сохраняется как failed с фактическим числом вызовов,
+                # а терминальная проекция loop — cancelled.
                 execution = await _wait_loop_execution()
                 state = await hub.get_session_workflow(session_id)
                 assert state["active_task"]["status"] == "cancelled"
                 assert state["active_plan"]["status"] == "cancelled"
-                assert state["active_plan"]["steps"][0]["status"] == "todo"
+                assert state["active_plan"]["steps"][0]["status"] == "failed"
                 assert execution.get("terminal_reason") == "cancelled"
-                assert execution.get("tool_calls_used") == 0
+                assert execution.get("tool_calls_used") == 1
                 assert len(_loop_checkpoints()) == 0
                 return
 
@@ -983,17 +984,17 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 state = await hub.get_session_workflow(session_id)
                 assert state["active_task"]["status"] == "cancelled"
                 assert len(executed) == 1
-                # Отмена прервала шаг до завершения: snapshot не записан.
-                # Последний опубликованный статус шага — waiting_approval
-                # (пауза на approval); MWV здесь ставил фейковый done.
+                # Отмена прервала шаг после выполненного вызова: частичный
+                # шаг сохраняется как failed с фактическим числом вызовов
+                # (не waiting_approval и не done), план — cancelled.
                 state = await hub.get_session_workflow(session_id)
                 assert state["active_task"]["status"] == "cancelled"
-                assert state["active_plan"]["steps"][0]["status"] == "waiting_approval"
+                assert state["active_plan"]["steps"][0]["status"] == "failed"
                 execution = state["active_task"].get("execution")
                 assert isinstance(execution, dict)
                 assert execution.get("runner") == "canonical_tool_loop"
                 assert execution.get("terminal_reason") == "cancelled"
-                assert execution.get("tool_calls_used") == 0
+                assert execution.get("tool_calls_used") == 1
                 assert len(_loop_checkpoints()) == 0
                 assert (await hub.get_session_decision(session_id))["status"] == "resolved"
                 return
