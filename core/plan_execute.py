@@ -163,6 +163,7 @@ class PlanLoopCheckpoint:
     continuation: ToolLoopContinuation
     main_config: ModelConfig | None
     plan_revision: int
+    workspace_root: str | None
     brain: object = field(compare=False, repr=False)
 
 
@@ -894,6 +895,7 @@ def _execute_remaining_steps(
                 continuation=exc.continuation,
                 main_config=agent.main_config,
                 plan_revision=plan_revision,
+                workspace_root=agent.runtime_workspace_root,
                 brain=agent._get_main_brain(),
             )
             checkpoints.create(checkpoint)
@@ -986,7 +988,8 @@ def resume_approved_plan(
 ) -> PlanExecuteResult:
     """Продолжает loop-выполнение плана с сохранённого чекпоинта.
 
-    Проверяет scope паузы (план/контент/шаг/модель) до первого вызова:
+    Проверяет scope паузы (план/контент/шаг/модель/workspace root) до
+    первого вызова:
     несовпадение — ``PlanLoopContinuationUnavailable``, а не молчаливый
     перезапуск с другим планом. Ревизия в scope не сравнивается на
     равенство: она растёт при каждом обновлении статуса шага, поэтому
@@ -1010,6 +1013,15 @@ def resume_approved_plan(
         or agent.main_config != checkpoint.main_config
     ):
         raise PlanLoopContinuationUnavailable("plan_loop_continuation_unavailable")
+    if checkpoint.workspace_root != agent.runtime_workspace_root:
+        # Привязка паузы к исходному workspace root (паритет
+        # validate_mwv_approval: checkpoint.workspace_root обязан
+        # совпадать с текущим root агента): подтверждение, данное в
+        # root A, не разрешает эффекты в root B, если root сессии
+        # сменили во время ожидания approval. Отказ — до любого
+        # эффекта: чекпоинт и decision остаются pending, вернуться
+        # можно переключением root обратно и повторным подтверждением.
+        raise PlanLoopContinuationUnavailable("plan_loop_continuation_workspace_root_changed")
     completed = list(checkpoint.completed_steps)
     any_state_changing = False
     for done_step in completed:

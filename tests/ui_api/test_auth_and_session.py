@@ -2355,6 +2355,7 @@ def _plan_loop_checkpoint(session_id: str) -> PlanLoopCheckpoint:
         continuation=continuation,
         main_config=None,
         plan_revision=1,
+        workspace_root=None,
         brain=object(),
     )
 

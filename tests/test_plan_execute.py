@@ -21,6 +21,7 @@ from llm.types import LLMResult, ToolCall
 from server.http.common.workflow_state import plan_hash_payload
 from shared.models import JSONValue, ToolResult
 from tools.tool_registry import ToolRegistry
+from tools.workspace_tools import WriteFileTool
 
 
 class ScriptedBrain:
@@ -964,3 +965,72 @@ def test_unverified_step_truncates_blob_output() -> None:
     assert "обрезано" in step.result
     assert blob not in step.result
     assert len(step.result) < 5000
+
+
+def test_resume_rejects_workspace_root_switch(tmp_path) -> None:
+    # Finding (P1): продолжение после approval не должно выполнять
+    # утверждённый write в другом workspace root. Пауза случилась в
+    # root A; пока шло ожидание, root сессии переключили на B (как
+    # handle_ui_workspace_root_select + apply_agent_runtime_state в
+    # run_plan_runner); resume обязан отклонить продолжение до любого
+    # эффекта, а не записать файл в B.
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    brain = ScriptedBrain([("workspace_write", {"path": "approved.txt", "content": "x"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", WriteFileTool(), "write", [])],
+    )
+    agent.runtime_workspace_root = str(root_a)
+    plan, task = _approved_plan(
+        [_step("step-1", "workspace_write", {"path": "approved.txt", "content": "x"})]
+    )
+    checkpoints = PlanLoopCheckpoints()
+    agent.set_session_context("s1", set())
+
+    with pytest.raises(PlanLoopApprovalPending) as excinfo:
+        execute_approved_plan(
+            agent=agent,
+            plan=plan,
+            task=task,
+            session_id="s1",
+            plan_hash_fn=plan_hash_payload,
+            checkpoints=checkpoints,
+        )
+    checkpoint = excinfo.value.checkpoint
+    assert checkpoint.workspace_root == str(root_a)
+    assert not (root_a / "approved.txt").exists()
+    assert not (root_b / "approved.txt").exists()
+
+    # Root сессии сменили во время ожидания approval.
+    agent.runtime_workspace_root = str(root_b)
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    with pytest.raises(PlanLoopContinuationUnavailable):
+        resume_approved_plan(
+            agent=agent,
+            checkpoint=checkpoint,
+            plan=plan,
+            task=task,
+            plan_hash_fn=plan_hash_payload,
+            checkpoints=checkpoints,
+        )
+    assert not (root_a / "approved.txt").exists()
+    assert not (root_b / "approved.txt").exists()
+
+    # Возврат в исходный root — resume проходит, файл ложится в A.
+    agent.runtime_workspace_root = str(root_a)
+    result = resume_approved_plan(
+        agent=agent,
+        checkpoint=checkpoint,
+        plan=plan,
+        task=task,
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=checkpoints,
+    )
+    assert result.outcome.terminal_reason is TerminalReason.COMPLETED
+    assert result.outcome.is_full_done is False
+    assert result.outcome.verification.outcome is VerificationOutcome.UNKNOWN
+    assert (root_a / "approved.txt").read_text(encoding="utf-8") == "x"
+    assert not (root_b / "approved.txt").exists()
