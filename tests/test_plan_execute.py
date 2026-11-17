@@ -767,3 +767,200 @@ def test_binding_error_before_any_effect_propagates() -> None:
             plan_hash_fn=plan_hash_payload,
             checkpoints=PlanLoopCheckpoints(),
         )
+
+
+def test_step_repeat_dispatch_blocked_by_one_call_limit() -> None:
+    # Finding (P1, re-review): модель повторяет вызов текущего шага с теми
+    # же аргументами — второй dispatch блокируется лимитом шага до Gateway,
+    # первый результат сохраняется, запись выполняется ровно один раз.
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        return ToolResult.success({"written": "x.txt"})
+
+    brain = ScriptedBrain(
+        [
+            ("workspace_write", {"path": "x.txt"}),
+            ("workspace_write", {"path": "x.txt"}),
+        ]
+    )
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    plan, task = _approved_plan([_step("step-1", "workspace_write", {"path": "x.txt"})])
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+    )
+
+    assert len(write_calls) == 1
+    assert result.outcome.terminal_reason is TerminalReason.FAILED
+    assert len(result.steps) == 1
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].tool_calls_used == 1
+    assert result.tool_calls_used == 1
+    assert "tool_call_budget_exhausted" in result.steps[0].result
+    assert "written" in result.steps[0].result
+
+
+def test_resume_repeat_dispatch_blocked_after_approval() -> None:
+    # То же ограничение после approval: продолжение loop несёт лимит,
+    # поэтому утверждённый вызов выполняется один раз, а его повтор
+    # моделью блокируется, а не диспатчится заново.
+    net_calls: list = []
+
+    def net_read(request):
+        net_calls.append(request)
+        return ToolResult.success({"output": "observed"})
+
+    brain = ScriptedBrain(
+        [
+            ("net_read", {"index": 1}),
+            ("net_read", {"index": 1}),
+        ]
+    )
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("net_read", net_read, "read", ["network"])],
+    )
+    plan, task = _approved_plan([_step("step-1", "net_read", {"index": 1})])
+    checkpoints = PlanLoopCheckpoints()
+    agent.set_session_context("s1", set())
+
+    with pytest.raises(PlanLoopApprovalPending) as excinfo:
+        execute_approved_plan(
+            agent=agent,
+            plan=plan,
+            task=task,
+            session_id="s1",
+            plan_hash_fn=plan_hash_payload,
+            checkpoints=checkpoints,
+        )
+    assert net_calls == []
+    checkpoint = excinfo.value.checkpoint
+
+    agent.set_session_context("s1", {"NETWORK_RISK"})
+    taken = checkpoints.take(checkpoint.checkpoint_id)
+    assert taken is checkpoint
+    result = resume_approved_plan(
+        agent=agent,
+        checkpoint=checkpoint,
+        plan=plan,
+        task=task,
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=checkpoints,
+    )
+
+    assert len(net_calls) == 1
+    assert result.outcome.terminal_reason is TerminalReason.FAILED
+    assert len(result.steps) == 1
+    assert result.steps[0].status == "failed"
+    assert result.steps[0].tool_calls_used == 1
+    assert "tool_call_budget_exhausted" in result.steps[0].result
+    assert "observed" in result.steps[0].result
+
+
+def test_unverified_step_preserves_output() -> None:
+    # Finding (P2, re-review): state-changing шаг без postcondition даёт
+    # UNVERIFIED, но его вывод не заменяется фиксированным предупреждением:
+    # URL изображения остаётся и в результате шага, и в snapshot для
+    # execution payload — и из данных вызова, и из текста модели.
+    image_calls: list = []
+
+    def image_generate(request):
+        image_calls.append(request)
+        return ToolResult.success(
+            {
+                "output": "https://example.invalid/img.png",
+                "url": "https://example.invalid/img.png",
+                "prompt": "cat",
+                "model": "grok-2-image",
+            }
+        )
+
+    class _UrlBrain:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, messages, config=None, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResult(
+                    text="",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-1",
+                            name="image_generate",
+                            arguments={"prompt": "cat"},
+                        )
+                    ],
+                )
+            return LLMResult(text="Готово: https://example.invalid/img.png")
+
+    agent = FakePlanAgent(
+        brain=_UrlBrain(),
+        tools=[("image_generate", image_generate, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    plan, task = _approved_plan([_step("step-1", "image_generate", {"prompt": "cat"})])
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+    )
+
+    assert len(image_calls) == 1
+    assert result.outcome.is_full_done is False
+    step = result.steps[0]
+    assert step.status == "done"
+    assert "не подтверждён" in step.result
+    assert "https://example.invalid/img.png" in step.result
+    assert "https://example.invalid/img.png" in step.snapshot()["result"]
+
+
+def test_unverified_step_truncates_blob_output() -> None:
+    # base64 целиком в результат шага не влезает: сохраняется структура
+    # данных с явной пометкой обрезки, а не молчаливая потеря.
+    blob = "A" * 5000
+    image_calls: list = []
+
+    def image_generate(request):
+        image_calls.append(request)
+        return ToolResult.success({"base64": blob, "format": "PNG"})
+
+    brain = ScriptedBrain([("image_generate", {"prompt": "cat"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("image_generate", image_generate, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    plan, task = _approved_plan([_step("step-1", "image_generate", {"prompt": "cat"})])
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+    )
+
+    assert len(image_calls) == 1
+    step = result.steps[0]
+    assert step.status == "done"
+    assert "base64" in step.result
+    assert "обрезано" in step.result
+    assert blob not in step.result
+    assert len(step.result) < 5000

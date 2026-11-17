@@ -23,6 +23,15 @@ RunSpec с ``intent=execute``, plan guard привязывает каждый в
 - Подмена plan hash/revision блокируется в ``validate_approved_plan``:
   хеш пересчитывается из содержимого плана, id/hash/revision
   сверяются с task-привязкой.
+- Шаг выполняет ровно один вызов утверждённого инструмента: loop шага
+  ограничен ``max_tool_calls=1``, поэтому повторный dispatch блокируется
+  лимитом до Gateway, а первый результат сохраняется в результате шага.
+  Continuation несёт лимит дальше, так что продолжение после approval
+  тоже не даёт второго вызова. Второй вызов с другими аргументами уже
+  отсекается plan guard, а с теми же — это чистый повтор эффекта.
+- Вывод шага (текст модели и результаты успешных вызовов) сохраняется
+  в результате шага отдельно от его статуса: UNVERIFIED означает лишь
+  отсутствие подтверждённого postcondition, а не отсутствие данных.
 - Approval внутри шага не проглатывается: loop поднимает
   ``ApprovalRequired`` с continuation, executor сохраняет чекпоинт
   и поднимает ``PlanLoopApprovalPending`` — runner публикует UI decision,
@@ -36,7 +45,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 
 from core.approval_policy import ApprovalRequest, ApprovalRequired
@@ -379,6 +388,11 @@ def _run_step_loop(
     Gateway строит замороженный RunSpec; listing при включённом guard
     возвращает ровно allowed tools шага, а loop не может вызвать
     инструмент вне listing.
+
+    Loop шага ограничен одним вызовом инструмента (``max_tool_calls=1``):
+    повторный dispatch блокируется лимитом до Gateway, а continuation
+    несёт лимит дальше — продолжение после approval тоже не даёт второго
+    вызова.
     """
     step_id = str(step.get("step_id"))
     task_snapshot: dict[str, JSONValue] = {
@@ -409,8 +423,15 @@ def _run_step_loop(
     # workspace tools и ToolGateway._workspace_binding читают root из
     # ContextVar, а apply_agent_runtime_state ставит только атрибут
     # агента (как было у MWV worker через workspace_root_context).
+    # Шаг выполняет ровно один вызов утверждённого инструмента: лимит
+    # loop блокирует второй dispatch до Gateway (второй вызов с теми же
+    # аргументами — чистый повтор эффекта, с другими его уже отсекает
+    # plan guard). Лимит несёт сам loop: continuation сохраняет
+    # max_tool_calls, поэтому продолжение после approval тоже не даёт
+    # второго dispatch.
+    step_budget = replace(budget, max_tool_calls=1)
     with workspace_root_context(agent.runtime_workspace_root):
-        return AgentToolLoop(**budget.loop_kwargs()).run(
+        return AgentToolLoop(**step_budget.loop_kwargs()).run(
             brain=agent._get_main_brain(),
             gateway=gateway,
             messages=_step_messages(plan=plan, step=step),
@@ -419,6 +440,48 @@ def _run_step_loop(
             continuation=continuation,
             cancellation_token=cancellation_token,
         )
+
+
+_MAX_STEP_OUTPUT_VALUE_CHARS = 2000
+
+
+def _truncate_step_value(value: JSONValue) -> JSONValue:
+    """Обрезает длинные строковые значения вывода шага с явной пометкой.
+
+    Результат шага — читаемый артефакт (evidence плана, execution
+    payload), а не blob-хранилище: base64 изображения целиком сюда не
+    влезает. Структура данных сохраняется, а обрезанное значение явно
+    помечается своей полной длиной.
+    """
+    if isinstance(value, str) and len(value) > _MAX_STEP_OUTPUT_VALUE_CHARS:
+        return value[:_MAX_STEP_OUTPUT_VALUE_CHARS] + f"…[обрезано, всего {len(value)} символов]"
+    if isinstance(value, dict):
+        return {key: _truncate_step_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_truncate_step_value(item) for item in value]
+    return value
+
+
+def _step_output_text(loop_result: AgentToolLoopResult) -> str:
+    """Полезный вывод шага: текст модели и результаты успешных вызовов.
+
+    Сохраняется отдельно от статуса шага: UNVERIFIED (или ошибка loop
+    после выполненных вызовов) не означает отсутствия данных — например,
+    URL сгенерированного изображения живёт в финальном тексте модели,
+    а данные вызова — в ToolResult. Пустые результаты не шумят.
+    """
+    parts: list[str] = []
+    text = loop_result.text.strip()
+    if text:
+        parts.append(f"Вывод модели: {text}")
+    for executed in loop_result.tool_calls:
+        if not executed.result.ok or not executed.result.data:
+            continue
+        data = _truncate_step_value(executed.result.data)
+        parts.append(
+            f"{executed.call.name}: {json.dumps(data, ensure_ascii=False, sort_keys=True)}"
+        )
+    return " ".join(parts)
 
 
 def _step_execution(
@@ -438,12 +501,18 @@ def _step_execution(
     tool_calls_used = len(loop_result.tool_calls)
     if loop_result.error is not None:
         outcome = outcome_from_loop_result(loop_result, state_changing=state_changing)
+        result_text = f"Ошибка loop: {loop_result.error}"
+        preserved = _step_output_text(loop_result)
+        if preserved:
+            # Ошибка после выполненных вызовов (в т.ч. блокировка
+            # повторного dispatch лимитом шага) не должна терять их вывод.
+            result_text += f" Сохранённый вывод: {preserved}"
         return PlanStepExecution(
             step_id=step_id,
             description=description,
             status="failed",
             operation=tool_name,
-            result=f"Ошибка loop: {loop_result.error}",
+            result=result_text,
             tool_calls_used=tool_calls_used,
             outcome=outcome,
         )
@@ -514,12 +583,19 @@ def _step_execution(
             tool_calls_used=tool_calls_used,
             outcome=outcome,
         )
+    result_text = f"Шаг выполнен, но результат не подтверждён ({outcome.ui_label})."
+    preserved = _step_output_text(loop_result)
+    if preserved:
+        # Отсутствие postcondition — не отсутствие данных: вывод шага
+        # (текст модели, результаты вызовов) сохраняется отдельно от
+        # статуса UNVERIFIED.
+        result_text += f" Сохранённый вывод: {preserved}"
     return PlanStepExecution(
         step_id=step_id,
         description=description,
         status="done",
         operation=tool_name,
-        result=f"Шаг выполнен, но результат не подтверждён ({outcome.ui_label}).",
+        result=result_text,
         tool_calls_used=tool_calls_used,
         outcome=outcome,
     )
