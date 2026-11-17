@@ -241,6 +241,20 @@ def test_state_changing_task_with_passed_postcondition_is_done() -> None:
     assert outcome.communication_class == "final_success"
 
 
+def test_mwv_success_passed_with_accepted_partial() -> None:
+    # Same rule as the loop converter (fix 22a8a46): an accepted partial
+    # result must not be upgraded to full DONE by the MWV converter.
+    outcome = outcome_from_mwv(
+        WorkStatus.SUCCESS, _passed_verification(), state_changing=True, accepted_by="user"
+    )
+    assert outcome.terminal_reason is TerminalReason.COMPLETED
+    assert outcome.disposition is Disposition.ACCEPTED_PARTIAL
+    assert outcome.accepted_by == "user"
+    assert outcome.is_full_done is False
+    assert outcome.ui_label == "PARTIAL"
+    assert outcome.communication_class == "final_partial"
+
+
 def test_tool_ok_alone_is_not_proof_of_completion() -> None:
     call = ToolCall(id="write-0", name="write_file", arguments={})
     loop_result = AgentToolLoopResult(

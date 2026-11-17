@@ -292,7 +292,9 @@ def outcome_from_mwv(
 ) -> RunOutcome:
     """Derive a terminal outcome from an MWV run (work + verifier).
 
-    - work SUCCESS + verification PASSED -> completed + full.
+    - work SUCCESS + verification PASSED -> completed + full, or
+      completed + accepted_partial when the caller passes an acceptance
+      authority (the user accepted an incomplete result; ADR-0002 §2–3).
     - work SUCCESS + verification FAILED -> failed + none: the check ran
       and disproved the claimed result, so the run failed its acceptance
       (consistent with ManagerRuntime._is_success, which requires both).
@@ -307,12 +309,14 @@ def outcome_from_mwv(
     """
     verification = Verification.from_verification_result(verification_result)
     if work_status is WorkStatus.SUCCESS and verification.outcome is VerificationOutcome.PASSED:
+        disposition = Disposition.ACCEPTED_PARTIAL if accepted_by else Disposition.FULL
         return RunOutcome(
             phase=RunPhase.TERMINAL,
             terminal_reason=TerminalReason.COMPLETED,
-            disposition=Disposition.FULL,
+            disposition=disposition,
             verification=verification,
             state_changing=state_changing,
+            accepted_by=accepted_by if disposition is Disposition.ACCEPTED_PARTIAL else None,
         )
     if work_status is WorkStatus.SUCCESS and verification.outcome is VerificationOutcome.FAILED:
         disposition = Disposition.ACCEPTED_PARTIAL if accepted_by else Disposition.NONE
