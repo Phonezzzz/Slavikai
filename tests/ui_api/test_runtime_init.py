@@ -261,10 +261,10 @@ def test_plan_shutdown_retains_active_agent_until_worker_finishes(
             marker.set("owned-scope")
             assert await provider.get_for_current_task(scope, None) is owner
             async with registry.running(scope, "task", None) as token, provider.lock_for(scope):
-                from server.http.common.workflow_runtime import _run_owned_packet_thread
+                from server.http.common.workflow_runtime import _run_owned_sync_thread
 
                 token_seen.append(token)
-                await _run_owned_packet_thread(worker, token)
+                await _run_owned_sync_thread(worker, token)
 
         async def plan_timeout(awaitable, *, timeout):
             if timeout == 10:

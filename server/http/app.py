@@ -30,6 +30,7 @@ from core.managed_workspace import (
     WorkspaceAccess,
     WorkspaceLimits,
 )
+from core.plan_execute import PlanLoopCheckpoints
 from core.rootless_podman import QUALIFIED_PYTHON_IMAGE, RootlessPodmanProfile
 from core.rootless_staging import RootlessStagePool, StagingLimits
 from core.task_run_storage import TaskRunStore, open_task_run_server
@@ -160,6 +161,7 @@ def create_app(
     owner_principal_id = _owner_principal_id(resolved_auth_config)
     desktop_run_coordinator = DesktopRunCoordinator()
     app["desktop_run_coordinator"] = desktop_run_coordinator
+    app["plan_loop_checkpoints"] = PlanLoopCheckpoints()
     resolved_desktop_policy_store = desktop_policy_store or DesktopPolicyStore(
         api.PROJECT_ROOT / ".run" / "desktop_approvals.json",
         legacy_subject_principal_id=owner_principal_id,

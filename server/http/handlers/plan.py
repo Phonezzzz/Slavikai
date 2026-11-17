@@ -27,6 +27,7 @@ from server.http.common.runtime_contract import (
     _set_model_bound_decision,
     _validate_chatgpt_plan_grant,
 )
+from server.http.common.workflow_runtime import get_plan_loop_checkpoints
 from server.http.handlers.chatgpt_plan import chatgpt_plan_error
 from server.http_api import (
     UI_SESSION_HEADER,
@@ -674,9 +675,12 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
     approved_categories = sorted(
         await session_store.get_categories(_agent_scope(request, session_id))
     )
+    # Пакет компилируется из running-плана: plan_with_status инкрементит
+    # ревизию, и контекст пакета должен совпадать с сохранённым планом.
+    running_plan = _plan_with_status(plan, status="running")
     try:
         compiled_packet = _compile_plan_to_task_packet(
-            plan=plan,
+            plan=running_plan,
             session_id=session_id,
             trace_id=str(uuid.uuid4()),
             workspace_root=str(workspace_root),
@@ -697,7 +701,6 @@ async def handle_ui_plan_execute(request: web.Request) -> web.Response:
             code="plan_contract_invalid",
         )
     task["task_packet"] = _serialize_task_packet_payload(compiled_packet)
-    running_plan = _plan_with_status(plan, status="running")
     started, updated_workflow, start_error = await hub.start_plan_task_if_possible(
         session_id,
         expected_mode="act",
@@ -863,6 +866,9 @@ async def handle_ui_plan_cancel(request: web.Request) -> web.Response:
             )
         if isinstance(checkpoint_id, str) and agent is not None:
             agent.cancel_mwv_approval(checkpoint_id)
+        if isinstance(checkpoint_id, str):
+            # Пауза canonical loop (E01-T06) хранится отдельно от MWV.
+            get_plan_loop_checkpoints(request.app).take(checkpoint_id)
     updated = await hub.get_session_workflow(session_id)
     response = json_response(
         {

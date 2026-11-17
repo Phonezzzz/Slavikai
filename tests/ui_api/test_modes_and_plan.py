@@ -5,7 +5,12 @@ import pytest
 
 from core.agent_response import AgentResponse
 from core.tool_gateway import ToolGateway
-from server.http.common.workflow_runtime import compute_plan_completion_state
+from llm.brain_base import Brain
+from llm.types import LLMResult, ToolCall
+from server.http.common.workflow_runtime import (
+    compute_plan_completion_state,
+    get_plan_loop_checkpoints,
+)
 from server.http_api import PLAN_AUDIT_MAX_READ_FILES
 from shared.models import ToolRequest
 from tools.tool_registry import ToolRegistry
@@ -266,7 +271,7 @@ def test_ui_plan_lifecycle_endpoints() -> None:
             steps = task_packet.get("steps")
             assert isinstance(steps, list) and steps
 
-            # реальный packet runner доходит до completed асинхронно
+            # canonical loop доходит до completed асинхронно
             completed = False
             for _ in range(20):
                 await asyncio.sleep(0.02)
@@ -280,9 +285,10 @@ def test_ui_plan_lifecycle_endpoints() -> None:
                 if isinstance(next_task, dict) and next_task.get("status") == "completed":
                     execution = next_task.get("execution")
                     assert isinstance(execution, dict)
-                    assert execution.get("runner") == "mwv_packet_runner"
-                    assert execution.get("work_status") == "success"
-                    assert execution.get("verifier_status") == "passed"
+                    assert execution.get("runner") == "canonical_tool_loop"
+                    assert execution.get("terminal_reason") == "completed"
+                    assert execution.get("disposition") == "full"
+                    assert execution.get("verification") == "not_applicable"
                     completed = True
                     break
             assert completed is True
@@ -292,6 +298,61 @@ def test_ui_plan_lifecycle_endpoints() -> None:
     asyncio.run(run())
 
 
+def test_ui_plan_draft_and_approve_never_call_write_tools() -> None:
+    """Drafting/approval плана никогда не вызывает write-инструменты."""
+
+    class RecordingAgent(DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool_calls: list[str] = []
+
+        def call_tool(self, name, *args, **kwargs):
+            self.tool_calls.append(name)
+            return super().call_tool(name, *args, **kwargs)
+
+    async def run() -> None:
+        agent = RecordingAgent()
+        client = await _create_client(agent)
+        try:
+            status_resp = await client.get("/ui/api/status")
+            status_payload = await status_resp.json()
+            session_id = status_payload.get("session_id")
+            assert isinstance(session_id, str)
+
+            mode_resp = await client.post(
+                "/ui/api/mode",
+                headers={"X-Slavik-Session": session_id},
+                json={"mode": "plan"},
+            )
+            assert mode_resp.status == 200
+
+            draft_resp = await client.post(
+                "/ui/api/plan/draft",
+                headers={"X-Slavik-Session": session_id},
+                json={"goal": "Проверить, что drafting не пишет"},
+            )
+            assert draft_resp.status == 200
+            draft_plan = (await draft_resp.json())["active_plan"]
+
+            approve_resp = await client.post(
+                "/ui/api/plan/approve",
+                headers={"X-Slavik-Session": session_id},
+                json=_plan_binding(draft_plan),
+            )
+            assert approve_resp.status == 200
+
+            # Readonly audit при drafting ходит только в read-инструменты.
+            assert set(agent.tool_calls) <= {"workspace_list", "workspace_read"}
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+# changed_root исключён: кейс проверял привязку MWV packet scope
+# (validate_mwv_approval по workspace_root). Canonical loop разрешает
+# workspace из сессии при каждом запуске, смена root между паузой и
+# resume — не отказ; привязка покрыта hash/revision (см. E01-T06).
 @pytest.mark.behavior
 @pytest.mark.parametrize(
     "choice,cleanup",
@@ -299,7 +360,6 @@ def test_ui_plan_lifecycle_endpoints() -> None:
         ("approve_once", None),
         ("approve_session", None),
         ("approve_session", "claim_fault"),
-        ("approve_once", "changed_root"),
         ("approve_once", "reject"),
         ("approve_once", "reject_no_model"),
         ("approve_once", "reject_storage_fault"),
@@ -323,9 +383,31 @@ def test_ui_plan_execute_waiting_approval_then_resume(
 ) -> None:
     from core.agent import Agent
     from shared.models import ToolResult
-    from tests.test_agent_response import SimpleBrain
 
-    provider_brain = SimpleBrain("unused")
+    class LoopNetworkBrain(Brain):
+        """Scripted brain для canonical loop: нечётный generate — вызов
+        mwv_network с индексом шага, чётный — финальный текст."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, messages, config=None, tools=None):
+            del messages, config, tools
+            self.calls += 1
+            if self.calls % 2 == 1:
+                return LLMResult(
+                    text="",
+                    tool_calls=[
+                        ToolCall(
+                            id=f"call-{self.calls}",
+                            name="mwv_network",
+                            arguments={"index": (self.calls + 1) // 2},
+                        )
+                    ],
+                )
+            return LLMResult(text="Готово")
+
+    provider_brain = LoopNetworkBrain()
 
     class MWVNativeAgent(Agent):
         brain_builds = 0
@@ -337,7 +419,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "Makefile").write_text("check:\n\t@true\n")
     agent = MWVNativeAgent(
-        brain=SimpleBrain("unused"),
+        brain=provider_brain,
         enable_tools={"safe_mode": True},
         memory_companion_db_path=str(tmp_path / "mc.db"),
         memory_inbox_db_path=str(tmp_path / "inbox.db"),
@@ -371,6 +453,20 @@ def test_ui_plan_execute_waiting_approval_then_resume(
 
     async def run() -> None:
         client = await _create_client(agent)
+
+        def _loop_checkpoints():
+            return get_plan_loop_checkpoints(client.server.app)
+
+        async def _wait_loop_execution() -> dict:
+            hub = client.server.app["ui_hub"]
+            for _ in range(50):
+                workflow = await hub.get_session_workflow(session_id)
+                execution = workflow["active_task"].get("execution")
+                if isinstance(execution, dict) and execution.get("runner") == "canonical_tool_loop":
+                    return execution
+                await asyncio.sleep(0.01)
+            raise AssertionError("canonical_tool_loop execution не опубликован")
+
         try:
             status_resp = await client.get("/ui/api/status")
             status_payload = await status_resp.json()
@@ -421,13 +517,17 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 monkeypatch.setattr(registry, "request_cancel", cancel_queued_and_release)
 
             if cleanup == "initial_pre_dispatch_cancel":
-                original_run = agent.run_task_packet
+                import server.http.common.workflow_runtime as workflow_runtime_module
 
-                def cancel_before_dispatch(packet, context, *, cancellation_token):
-                    cancellation_token.set()
-                    return original_run(packet, context, cancellation_token=cancellation_token)
+                original_execute = workflow_runtime_module.execute_approved_plan
 
-                monkeypatch.setattr(agent, "run_task_packet", cancel_before_dispatch)
+                def cancel_before_dispatch(*args, **kwargs):
+                    kwargs["cancellation_token"].set()
+                    return original_execute(*args, **kwargs)
+
+                monkeypatch.setattr(
+                    workflow_runtime_module, "execute_approved_plan", cancel_before_dispatch
+                )
 
             if cleanup == "approval_publication_fault":
                 hub = client.server.app["ui_hub"]
@@ -512,7 +612,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                     await asyncio.sleep(0.01)
                 assert state["active_task"]["status"] == "cancelled"
                 assert executed == []
-                assert agent._mwv_checkpoints == {}
+                assert len(_loop_checkpoints()) == 0
                 return
 
             if cleanup == "queued_cancel":
@@ -530,7 +630,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert state["active_plan"]["status"] == "cancelled"
                 assert state["active_task"]["status"] == "cancelled"
                 assert executed == []
-                assert agent._mwv_checkpoints == {}
+                assert len(_loop_checkpoints()) == 0
                 return
 
             if cleanup == "initial_model_conflict":
@@ -549,7 +649,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert state["active_task"]["status"] == "failed"
                 assert state["active_plan"]["status"] == "failed"
                 assert executed == []
-                assert agent._mwv_checkpoints == {}
+                assert len(_loop_checkpoints()) == 0
                 return
 
             if cleanup == "approval_publication_fault":
@@ -561,7 +661,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert failed_publication == [True]
                 assert state["active_task"]["status"] == "failed"
                 assert await hub.get_session_decision(session_id) is None
-                assert agent._mwv_checkpoints == {}
+                assert len(_loop_checkpoints()) == 0
                 assert executed == []
                 return
 
@@ -576,13 +676,16 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                     "status"
                 ] == "cancelled"
                 assert len(executed) == 1
-                assert len(agent.last_mwv_result.tool_observations) == 1
-                result = agent.last_mwv_result.work_result
-                assert result.tool_calls_used == 1
-                assert result.diagnostics["step_results"][0]["status"] == "done"
+                # Отмена прервала шаг до завершения: snapshot не записан,
+                # шаг остаётся todo, а терминальная проекция loop — cancelled.
+                execution = await _wait_loop_execution()
                 state = await hub.get_session_workflow(session_id)
-                assert state["active_plan"]["steps"][0]["status"] == "done"
-                assert agent._mwv_checkpoints == {}
+                assert state["active_task"]["status"] == "cancelled"
+                assert state["active_plan"]["status"] == "cancelled"
+                assert state["active_plan"]["steps"][0]["status"] == "todo"
+                assert execution.get("terminal_reason") == "cancelled"
+                assert execution.get("tool_calls_used") == 0
+                assert len(_loop_checkpoints()) == 0
                 return
 
             waiting = False
@@ -623,7 +726,9 @@ def test_ui_plan_execute_waiting_approval_then_resume(
             if cleanup == "cancel_storage_fault":
                 before_workflow = await hub.get_session_workflow(session_id)
                 before_decision = await hub.get_session_decision(session_id)
-                before_checkpoints = dict(agent._mwv_checkpoints)
+                before_checkpoint_id = before_workflow["active_task"]["execution"]["checkpoint_id"]
+                before_checkpoint = _loop_checkpoints().peek(before_checkpoint_id)
+                assert before_checkpoint is not None
                 original_save = hub._storage.save_session
 
                 def fail_cancel_save(state, *, expected_security_revision=None):
@@ -638,7 +743,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                     "/ui/api/plan/cancel", headers={"X-Slavik-Session": session_id}
                 )
                 assert response.status == 500
-                assert agent._mwv_checkpoints == before_checkpoints
+                assert _loop_checkpoints().peek(before_checkpoint_id) is before_checkpoint
                 assert await hub.get_session_workflow(session_id) == before_workflow
                 assert await hub.get_session_decision(session_id) == before_decision
                 assert executed == []
@@ -647,7 +752,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                     "/ui/api/plan/cancel", headers={"X-Slavik-Session": session_id}
                 )
                 assert response.status == 200
-                assert agent._mwv_checkpoints == {}
+                assert len(_loop_checkpoints()) == 0
                 assert await hub.get_session_decision(session_id) is None
                 assert (await hub.get_session_workflow(session_id))["active_task"][
                     "status"
@@ -657,7 +762,9 @@ def test_ui_plan_execute_waiting_approval_then_resume(
             if cleanup == "reject_storage_fault":
                 before_workflow = await hub.get_session_workflow(session_id)
                 before_decision = await hub.get_session_decision(session_id)
-                before_checkpoints = dict(agent._mwv_checkpoints)
+                before_checkpoint_id = before_workflow["active_task"]["execution"]["checkpoint_id"]
+                before_checkpoint = _loop_checkpoints().peek(before_checkpoint_id)
+                assert before_checkpoint is not None
                 assert not await hub.set_session_workflow_and_decision(
                     session_id,
                     mode="act",
@@ -696,7 +803,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert response.status == 500
                 assert await hub.get_session_workflow(session_id) == before_workflow
                 assert await hub.get_session_decision(session_id) == before_decision
-                assert agent._mwv_checkpoints == before_checkpoints
+                assert _loop_checkpoints().peek(before_checkpoint_id) is before_checkpoint
                 assert executed == []
                 monkeypatch.setattr(hub._storage, "save_session", original_save)
                 response = await client.post(
@@ -708,7 +815,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 state = await hub.get_session_workflow(session_id)
                 assert state["active_task"]["status"] == "failed"
                 assert (await hub.get_session_decision(session_id))["status"] == "rejected"
-                assert agent._mwv_checkpoints == {}
+                assert len(_loop_checkpoints()) == 0
                 assert executed == []
                 return
 
@@ -743,15 +850,17 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                         json={"confirm": True, "force": True},
                     )
                 assert response.status == 200
-                assert agent._mwv_checkpoints == {}
+                assert len(_loop_checkpoints()) == 0
                 assert executed == []
                 return
-            if cleanup in {"claim_fault", "changed_root"}:
-                from core.agent_mwv import MWVContinuationUnavailable
+            if cleanup == "claim_fault":
+                import server.http.common.workflow_runtime as workflow_runtime_module
+                from core.plan_execute import PlanLoopContinuationUnavailable
                 from server.agent_provider import AgentScope
 
-                identity = next(iter(agent._mwv_checkpoints))
-                checkpoint = agent._mwv_checkpoints[identity]
+                checkpoint_id = active_task["execution"]["checkpoint_id"]
+                checkpoint = _loop_checkpoints().peek(checkpoint_id)
+                assert checkpoint is not None
                 store = client.server.app["session_store"]
                 scope = AgentScope(
                     principal_id=await hub.get_session_principal_id(session_id),
@@ -759,29 +868,25 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 )
                 await store.approve(scope, {"SUDO"})
                 prior_categories = await store.get_categories(scope)
-                original_resume = agent.resume_task_packet
-                if cleanup == "claim_fault":
+                original_resume = workflow_runtime_module.resume_approved_plan
 
-                    def fail_claim(*args, **kwargs):
-                        raise MWVContinuationUnavailable("approval_continuation_not_started")
+                def fail_claim(*args, **kwargs):
+                    raise PlanLoopContinuationUnavailable("plan_loop_continuation_unavailable")
 
-                    monkeypatch.setattr(agent, "resume_task_packet", fail_claim)
-                else:
-                    changed = tmp_path / "changed-root"
-                    changed.mkdir()
-                    await hub.set_workspace_root(session_id, str(changed))
+                monkeypatch.setattr(workflow_runtime_module, "resume_approved_plan", fail_claim)
                 rejected = await client.post(
                     "/ui/api/decision/respond",
                     headers={"X-Slavik-Session": session_id},
                     json={"session_id": session_id, "decision_id": decision_id, "choice": choice},
                 )
                 assert rejected.status == 409
-                assert agent._mwv_checkpoints[identity] is checkpoint
+                assert _loop_checkpoints().peek(checkpoint_id) is checkpoint
                 assert executed == []
                 assert await store.get_categories(scope) == prior_categories
                 assert (await hub.get_session_decision(session_id))["status"] == "pending"
-                monkeypatch.setattr(agent, "resume_task_packet", original_resume)
-                await hub.set_workspace_root(session_id, str(tmp_path))
+                monkeypatch.setattr(
+                    workflow_runtime_module, "resume_approved_plan", original_resume
+                )
 
             if cleanup == "projection_fault":
                 from server.http.common import workflow_runtime
@@ -789,7 +894,9 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 def fail_projection(**kwargs):
                     raise RuntimeError("projection fault")
 
-                monkeypatch.setattr(workflow_runtime, "_task_execution_payload", fail_projection)
+                monkeypatch.setattr(
+                    workflow_runtime, "_plan_loop_execution_payload", fail_projection
+                )
             elif cleanup == "publication_fault":
                 original_publish = hub.set_session_workflow
 
@@ -876,13 +983,18 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 state = await hub.get_session_workflow(session_id)
                 assert state["active_task"]["status"] == "cancelled"
                 assert len(executed) == 1
-                assert len(agent.last_mwv_result.tool_observations) == 1
-                result = agent.last_mwv_result.work_result
-                assert result.tool_calls_used == 1
-                assert result.diagnostics["step_results"][0]["status"] == "done"
+                # Отмена прервала шаг до завершения: snapshot не записан.
+                # Последний опубликованный статус шага — waiting_approval
+                # (пауза на approval); MWV здесь ставил фейковый done.
                 state = await hub.get_session_workflow(session_id)
-                assert state["active_plan"]["steps"][0]["status"] == "done"
-                assert agent._mwv_checkpoints == {}
+                assert state["active_task"]["status"] == "cancelled"
+                assert state["active_plan"]["steps"][0]["status"] == "waiting_approval"
+                execution = state["active_task"].get("execution")
+                assert isinstance(execution, dict)
+                assert execution.get("runner") == "canonical_tool_loop"
+                assert execution.get("terminal_reason") == "cancelled"
+                assert execution.get("tool_calls_used") == 0
+                assert len(_loop_checkpoints()) == 0
                 assert (await hub.get_session_decision(session_id))["status"] == "resolved"
                 return
 
@@ -900,7 +1012,7 @@ def test_ui_plan_execute_waiting_approval_then_resume(
             if cleanup == "resume_approval_publication_fault":
                 assert failed_publication == [True]
                 assert len(executed) == 1
-                assert agent._mwv_checkpoints == {}
+                assert len(_loop_checkpoints()) == 0
                 assert (await hub.get_session_decision(session_id))["status"] == "resolved"
                 assert (await hub.get_session_workflow(session_id))["active_task"][
                     "status"
@@ -923,14 +1035,21 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 )
                 assert next_response.status == 200
             assert [item.args["index"] for item in executed] == [1, 2]
-            assert agent._mwv_checkpoints == {}
+            assert len(_loop_checkpoints()) == 0
             assert agent.brain_builds == builds_before_resume
             if cleanup in {"projection_fault", "publication_fault"}:
                 assert (await hub.get_session_decision(session_id))["status"] == "resolved"
-                result = agent.last_mwv_result
-                assert result is not None
-                assert len(result.tool_observations) == 2
-                assert result.task.task_id == active_task["task_packet"]["task_id"]
+                state = await hub.get_session_workflow(session_id)
+                if cleanup == "projection_fault":
+                    # Проекция упала: план failed с честной причиной.
+                    assert state["active_task"]["status"] == "failed"
+                    execution = state["active_task"].get("execution")
+                    assert isinstance(execution, dict)
+                    assert execution.get("runner") == "canonical_tool_loop"
+                    assert execution.get("error") == "terminal_projection_failed"
+                else:
+                    # Публикация терминала упала: состояние так и не село.
+                    assert state["active_task"]["status"] == "running"
                 return
             completed = False
             for _ in range(30):
@@ -942,11 +1061,12 @@ def test_ui_plan_execute_waiting_approval_then_resume(
                 assert state_resp.status == 200
                 state_payload = await state_resp.json()
                 active_task = state_payload.get("active_task")
-                if isinstance(active_task, dict) and active_task.get("status") == "failed":
+                if isinstance(active_task, dict) and active_task.get("status") == "completed":
                     execution = active_task.get("execution")
                     assert isinstance(execution, dict)
-                    assert execution.get("runner") == "mwv_packet_runner"
-                    assert execution.get("work_status") == "success"
+                    assert execution.get("runner") == "canonical_tool_loop"
+                    assert execution.get("terminal_reason") == "completed"
+                    assert execution.get("verification") == "not_applicable"
                     completed = True
                     break
             assert completed is True

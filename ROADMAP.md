@@ -418,7 +418,7 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01-T05 DONE; E01-T06 next |
+| E01 — canonical execution | 9 | E01-T06 DONE; E01-T07 next |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | NEEDS_REFINEMENT |
@@ -849,6 +849,24 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 **Acceptance.** `plan` не вызывает write tools; approved plan запускается как `intent=execute` через тот же loop.
 
 **Negative.** Подмена plan hash/revision блокируется.
+
+##### E01-T06 implementation — verified 2026-11-17 (baseline 09cbd53)
+
+**Status:** DONE (acceptance met).
+
+**Mini-audit (read-only, до implementation).** Предпосылки тикета держатся. Plan drafting/version/approval живут в `server/http/handlers/plan.py` + `server/http/common/workflow_runtime.py` (`build_plan_draft`, `compile_plan_to_task_packet`, `plan_with_status`, `run_plan_runner`) с хешем sha256 по контенту плана и CAS-привязкой plan_id/hash/revision; execution сегодня — MWV packet runner (`run_plan_runner` → `agent.run_task_packet` → `_execute_mwv_plan_step`, DONE из одного `result.ok`); canonical loop — `core/tool_loop.py` `AgentToolLoop` с gateway из RunSpec (`intent=execute`, plan guard в `tools/tool_registry.py:443-520`); outcome — `core/run_outcome.py` `outcome_from_loop_result`. Пробелы, найденные аудитом: `_compile_plan_to_task_packet` не пересчитывает plan_hash из содержимого (полагается на привязку вызывающего); `normalize_task_payload` не несёт `plan_revision` — ревизия только в `task_packet.context`; `plan_revision` — CAS-счётчик, растёт при каждом обновлении статуса шага (`plan_mark_step`, `plan_with_status`), а не привязка контента.
+
+**Новый модуль `core/plan_execute.py`.** `ValidatedPlan`, `PlanStepExecution`, `PlanExecuteResult`, `PlanLoopCheckpoint`/`PlanLoopCheckpoints`, `PlanLoopApprovalPending`, `validate_approved_plan` (статус approved/running; task-привязка plan_id/hash; хеш пересчитан из содержимого; структура шагов как в compile — ровно один инструмент на шаг, operation совпадает; ревизия пакета — только монотонность: пакет из ревизии новее живой отклоняется), `execute_approved_plan`/`resume_approved_plan` (один `AgentToolLoop` на шаг; runtime state mode=act + active_plan/active_task + guard; gateway из RunSpec; done — только чистый loop + `is_full_done`; write-шаг без postcondition — не full_done, это E05; scope resume — plan_id/hash/task_id/step_id + идентичность brain/main_config, ревизия на равенство не сравнивается, контент привязан хешем).
+
+**Production wiring.** `run_plan_runner` (`server/http/common/workflow_runtime.py`): свежие запуски — только canonical loop, без fallback на MWV; resume старых MWV-чекпоинтов — legacy-ветка (E01-T08 удалит); resume loop-пауз — `resume_approved_plan`; отмена/reject/reset забирают loop-чекпоинт (`plan.py`, `decision.py`, `workflow.py`); store `plan_loop_checkpoints` регистрируется в `create_app` (`server/http/app.py`), а не ленивой записью в запущенный app. `_run_owned_packet_thread` переименован в `_run_owned_sync_thread` (generic, PEP 695).
+
+**Исправленный баг (найден тестами тикета).** Прямой act-путь `handle_ui_plan_execute` компилировал пакет из approved-плана, а сохранял running-план с инкрементированной ревизией — контекст пакета отставал от сохранённого плана. Порядок исправлен как в decision-пути: сначала `running_plan`, потом compile из него.
+
+**Scope.** MWV не удаляется (E01-T08). Dual-path (свежие запуски canonical, resume старых MWV-чекпоинтов) — осознанно, как legacy-ветка; если Codex сочтёт недопустимым — развилка, не молчаливая правка. Fake step-level DONE (`_execute_mwv_plan_step`) не тронут — E01-T08.
+
+**Files.** Новый `core/plan_execute.py` (820 строк); `server/http/common/workflow_runtime.py` (перепроводка runner); `server/http/app.py` (store); `server/http/handlers/plan.py` (cancel + порядок compile); `server/http/handlers/decision.py` (reject); `server/http/handlers/workflow.py` (reset); новый `tests/test_plan_execute.py` (11 тестов: read-шаг через canonical loop, тот же gateway, что прямой execute, подмена hash/task hash/пакета из будущего, рост ревизии после compile — норма, guard, approval pause/resume, resume отклоняет правку контента, write-шаг не full_done, отмена до старта); `tests/ui_api/test_modes_and_plan.py` (20-кейсовый тест переведён на canonical loop, `changed_root` исключён — привязки packet scope у loop нет; lifecycle + draft/approve никогда не вызывает write tools); `tests/ui_api/fakes.py` (DummyAgent для canonical loop); `tests/ui_api/test_runtime_init.py` (rename `_run_owned_packet_thread` → `_run_owned_sync_thread`).
+
+**Tests.** `make check` зелёный (2538 passed, coverage 83.73%).
 
 #### E01-T07 — Auto → policy preset
 

@@ -24,7 +24,12 @@ from config.tools_config import (
     save_tools_config as save_tools_config_to_path,
 )
 from core.agent_response import AgentResponse, ResponseProduced
-from core.approval_policy import ApprovalPrompt, ApprovalRequest, ApprovalRequired
+from core.approval_policy import (
+    ApprovalContext,
+    ApprovalPrompt,
+    ApprovalRequest,
+    ApprovalRequired,
+)
 from core.desktop_policy import DesktopPolicyStore
 from core.mwv.manager import MWVRunResult
 from core.mwv.models import (
@@ -35,8 +40,11 @@ from core.mwv.models import (
     WorkResult,
     WorkStatus,
 )
+from core.run_contract import build_run_spec
+from core.tool_gateway import ToolGateway
 from core.tracer import Tracer
 from llm.stream_model import Done, TextDelta
+from llm.types import LLMResult, ToolCall
 from memory.categorized_memory_store import CategorizedMemoryStore
 from server.http.common.auth import UI_AUTH_COOKIE, _ui_auth_cookie_value
 from server.http_api import _resolve_workspace_root_candidate, create_app
@@ -49,9 +57,33 @@ from server.ui_session_storage import (
 from shared.memory_category_models import MemoryCategory
 from shared.models import JSONValue, ToolRequest, ToolResult
 from tools.tool_logger import ToolCallLogger
+from tools.tool_registry import ToolRegistry
 
 TEST_API_TOKEN = "test-ui-api-token"
 TEST_AUTH_HEADERS = {"Cookie": f"{UI_AUTH_COOKIE}={_ui_auth_cookie_value(TEST_API_TOKEN)}"}
+
+
+class _DummyPlanBrain:
+    """Scripted brain для DummyAgent: workspace_list, затем финальный текст."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, messages, config=None, tools=None):
+        del messages, config, tools
+        self.calls += 1
+        if self.calls % 2 == 1:
+            return LLMResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id=f"call-{self.calls}",
+                        name="workspace_list",
+                        arguments={"path": "."},
+                    )
+                ],
+            )
+        return LLMResult(text="Список файлов получен")
 
 
 class DummyAgent:
@@ -59,6 +91,17 @@ class DummyAgent:
         self._session_id: str | None = None
         self._approved_categories: set[str] = set()
         self.tools_enabled: dict[str, bool] = {}
+        self.tool_registry = ToolRegistry()
+        self.tool_registry.register(
+            "workspace_list",
+            lambda request: ToolResult.success({"files": ["a.py"]}),
+            capability="read",
+            description="Тестовый список файлов",
+            parameters_schema={"type": "object"},
+        )
+        self.main_config = None
+        self._plan_brain = _DummyPlanBrain()
+        self.runtime_plan_guard_enabled = False
 
     def set_runtime_state(
         self, *, mode, active_plan=None, active_task=None, auto_state=None, enforce_plan_guard=False
@@ -67,6 +110,29 @@ class DummyAgent:
         self.runtime_active_plan = active_plan
         self.runtime_active_task = active_task
         self.runtime_auto_state = auto_state
+        self.runtime_plan_guard_enabled = enforce_plan_guard
+
+    def _build_tool_gateway(self, *, budget=None):
+        spec = build_run_spec(
+            mode=getattr(self, "runtime_mode", "ask"),
+            active_plan=getattr(self, "runtime_active_plan", None),
+            active_task=getattr(self, "runtime_active_task", None),
+            enforce_plan_guard=bool(getattr(self, "runtime_plan_guard_enabled", False)),
+            budget=budget,
+        )
+        return ToolGateway(
+            self.tool_registry,
+            approval_context=ApprovalContext(
+                safe_mode=bool(self.tools_enabled.get("safe_mode", False)),
+                session_id=self._session_id,
+                approved_categories=set(self._approved_categories),
+                execution_target="sandbox",
+            ),
+            run_policy=spec.policy,
+        )
+
+    def _get_main_brain(self):
+        return self._plan_brain
 
     def set_session_context(self, session_id: str | None, approved_categories: set[str]) -> None:
         self._session_id = session_id

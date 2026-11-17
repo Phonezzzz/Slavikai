@@ -8,6 +8,7 @@ from core.mwv.verifier_runtime import has_canonical_repo_verifier
 from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import SessionApprovalStore
+from server.http.common.workflow_runtime import get_plan_loop_checkpoints
 from server.http_api import (
     SESSION_MODES,
     UI_SESSION_HEADER,
@@ -329,6 +330,9 @@ async def handle_ui_runtime_init(request: web.Request) -> web.Response:
         auto_state=None,
     )
     await hub.set_session_decision(session_id, None)
+    # Паузы canonical loop сессии сбрасываются вместе с workflow (паритет
+    # reset_runtime_transient_state у MWV-чекпоинтов).
+    get_plan_loop_checkpoints(request.app).clear_session(session_id)
     await hub.set_session_status(session_id, "ok")
 
     reset_report: dict[str, JSONValue] = {

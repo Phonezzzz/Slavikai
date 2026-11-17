@@ -24,6 +24,7 @@ from server.http.common.mode_transitions import build_mode_transitions
 from server.http.common.responses import error_response, json_response
 from server.http.common.runtime_contract import AgentProtocol
 from server.http.common.session_end import resolve_session_end
+from server.http.common.workflow_runtime import get_plan_loop_checkpoints
 from server.http.common.workspace_git import (
     git_commit,
     git_stage,
@@ -1545,6 +1546,9 @@ async def _complete_ui_decision(
                 checkpoint_id = resume_payload.get("checkpoint_id")
                 if updated and agent is not None and isinstance(checkpoint_id, str):
                     await asyncio.to_thread(agent.cancel_mwv_approval, checkpoint_id)
+                if updated and isinstance(checkpoint_id, str):
+                    # Пауза canonical loop (E01-T06) хранится отдельно от MWV.
+                    get_plan_loop_checkpoints(request.app).take(checkpoint_id)
                 latest = await hub.get_session_decision(session_id)
         else:
             updated, latest = await hub.transition_session_decision(
