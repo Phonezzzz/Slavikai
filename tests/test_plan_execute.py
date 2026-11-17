@@ -21,7 +21,7 @@ from llm.types import LLMResult, ToolCall
 from server.http.common.workflow_state import plan_hash_payload
 from shared.models import JSONValue, ToolResult
 from tools.tool_registry import ToolRegistry
-from tools.workspace_tools import WriteFileTool
+from tools.workspace_tools import ReadFileTool, WriteFileTool
 
 
 class ScriptedBrain:
@@ -1034,3 +1034,37 @@ def test_resume_rejects_workspace_root_switch(tmp_path) -> None:
     assert result.outcome.verification.outcome is VerificationOutcome.UNKNOWN
     assert (root_a / "approved.txt").read_text(encoding="utf-8") == "x"
     assert not (root_b / "approved.txt").exists()
+
+
+def test_full_done_read_step_preserves_tool_output(tmp_path) -> None:
+    # Finding (P2, re-review): read-only шаг завершается is_full_done, но
+    # ветка сохраняла только текст модели: при кратком ответе «Готово»
+    # прочитанный текст файла терялся из результата шага, evidence и
+    # execution payload. Прежний _execute_mwv_plan_step сохранял данные
+    # инструмента независимо от пересказа моделью.
+    content = "секретный текст для проверки"
+    (tmp_path / "notes.txt").write_text(content, encoding="utf-8")
+    brain = ScriptedBrain([("workspace_read", {"path": "notes.txt"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_read", ReadFileTool(), "read", [])],
+    )
+    agent.runtime_workspace_root = str(tmp_path)
+    agent.set_session_context("s1", set())
+    plan, task = _approved_plan([_step("step-1", "workspace_read", {"path": "notes.txt"})])
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+    )
+
+    assert result.outcome.terminal_reason is TerminalReason.COMPLETED
+    assert result.outcome.is_full_done is True
+    step = result.steps[0]
+    assert step.status == "done"
+    assert content in step.result
+    assert content in step.snapshot()["result"]

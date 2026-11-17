@@ -463,6 +463,23 @@ def _truncate_step_value(value: JSONValue) -> JSONValue:
     return value
 
 
+def _step_tool_output_text(loop_result: AgentToolLoopResult) -> str:
+    """Результаты успешных вызовов шага (без текста модели).
+
+    Данные вызова — часть evidence шага независимо от того, пересказала
+    ли их модель: краткий ответ «Готово» не должен их терять.
+    """
+    parts: list[str] = []
+    for executed in loop_result.tool_calls:
+        if not executed.result.ok or not executed.result.data:
+            continue
+        data = _truncate_step_value(executed.result.data)
+        parts.append(
+            f"{executed.call.name}: {json.dumps(data, ensure_ascii=False, sort_keys=True)}"
+        )
+    return " ".join(parts)
+
+
 def _step_output_text(loop_result: AgentToolLoopResult) -> str:
     """Полезный вывод шага: текст модели и результаты успешных вызовов.
 
@@ -475,13 +492,9 @@ def _step_output_text(loop_result: AgentToolLoopResult) -> str:
     text = loop_result.text.strip()
     if text:
         parts.append(f"Вывод модели: {text}")
-    for executed in loop_result.tool_calls:
-        if not executed.result.ok or not executed.result.data:
-            continue
-        data = _truncate_step_value(executed.result.data)
-        parts.append(
-            f"{executed.call.name}: {json.dumps(data, ensure_ascii=False, sort_keys=True)}"
-        )
+    tool_output = _step_tool_output_text(loop_result)
+    if tool_output:
+        parts.append(tool_output)
     return " ".join(parts)
 
 
@@ -575,12 +588,18 @@ def _step_execution(
         )
     outcome = outcome_from_loop_result(loop_result, state_changing=state_changing)
     if outcome.is_full_done:
+        result_text = loop_result.text.strip() or "Шаг выполнен."
+        tool_output = _step_tool_output_text(loop_result)
+        if tool_output:
+            # Данные read-only вызова (например, текст прочитанного файла)
+            # — часть результата шага: краткий ответ модели их не заменяет.
+            result_text += f" Сохранённый вывод: {tool_output}"
         return PlanStepExecution(
             step_id=step_id,
             description=description,
             status="done",
             operation=tool_name,
-            result=loop_result.text.strip() or "Шаг выполнен.",
+            result=result_text,
             tool_calls_used=tool_calls_used,
             outcome=outcome,
         )
