@@ -693,7 +693,7 @@ Only three places in `server/` call `agent.respond` at all: `project.py:418`, `u
 
 ##### E01-T02 implementation — verified 2026-11-17 (baseline 58ce9f4)
 
-**Status:** DONE. `make check` green on branch `pr-e01-t02-runspec` (2476 passed, coverage 83.56%).
+**Status:** DONE. `make check` green on branch `pr-e01-t02-runspec` (2478 passed, coverage 83.52%), incl. the Codex review P2 fix (recursive freeze of nested plan/task data).
 
 **Files.**
 - New: `core/run_contract.py` — `RunIntent` (`"answer" | "plan" | "execute"`), `RunBudget` (frozen; `loop_kwargs()` → `AgentToolLoop` kwargs, `expires_at_monotonic` from `started_monotonic + max_runtime_seconds`), `RunPolicy` (frozen; recursively freezes `active_plan`/`active_task` in `__post_init__` — `FrozenDict`/`FrozenList`, dict/list subclasses so `ToolRegistry._plan_guard_error` `isinstance` checks still work), `RunSpec` (frozen: `intent/target/policy/budget`), `intent_for_mode` / `target_for_mode` / `build_run_spec`. Reuses `ExecutionMode`/`ExecutionTarget` from `tools/tool_registry.py`; no new hierarchy or framework. Safe mode deliberately NOT in the snapshot (global user setting, enforced by the registry independently).
