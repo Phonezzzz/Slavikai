@@ -1,20 +1,20 @@
 # SlavikAI Worker State
 
-**Source of truth:** [ROADMAP.md](ROADMAP.md) · [Рабочее соглашение Muse](slavikai-how-to-work-with-muse.md) · [Git workflow](docs/workflow/dev_workflow.md). Это зафиксированный снимок от 2026-11-17, синхронизирован с merge PR #156 (main `c198659`); перед любым действием Muse перепроверяет Git, CI, review и актуальный `main`.
+**Source of truth:** [ROADMAP.md](ROADMAP.md) · [Рабочее соглашение Muse](slavikai-how-to-work-with-muse.md) · [Git workflow](docs/workflow/dev_workflow.md). Это зафиксированный снимок от 2026-11-17, синхронизирован с merge PR #157 (main `637d3ed`); перед любым действием Muse перепроверяет Git, CI, review и актуальный `main`.
 
 ## Два Git worktree — подтверждено на ПК владельца 2026-11-16
 
 | Назначение | Путь | Ветка на момент фиксации | HEAD | Право Muse |
 |---|---|---|---|---|
 | Исходный проект владельца | `/home/ki/Project/Slavikai` | `main` | `fca51c2fdcecd5d2b37c554105af44e3d925f348` | **Только read-only без изменения checkout** |
-| Перестройка под Muse | `/home/ki/Project/Slavikai-rebuild` | `muse/slavikai-rebuild` | `c1986596cafc558921a8748d4eda84c221c5597e` | **Единственная рабочая директория для roadmap** |
+| Перестройка под Muse | `/home/ki/Project/Slavikai-rebuild` | `muse/slavikai-rebuild` | `637d3ed1bf89d92452d70f924ac3ab83bd315a43` | **Единственная рабочая директория для roadmap** |
 
-- Команда `git worktree list --porcelain` подтвердила обе записи. Второе дерево создано от `main` на `470a9a6` и синхронизировано самой Мусей fast-forward до `fca51c2`, затем до `4c9515a` (merge PR #153) 2026-11-16, до `c5e5543` (merge PR #154) 2026-11-17 и до `58ce9f4` (merge PR #155) 2026-11-17 и до `c198659` (merge PR #156) 2026-11-17; **никаких implementation-изменений внутри не выполнялось**.
-- `origin/main` на момент проверки: `c1986596cafc558921a8748d4eda84c221c5597e`; локальный `main` оригинального checkout — `fca51c2` (на восемь коммитов позади remote; владелец подтянет сам, Muse исходный checkout не трогает).
+- Команда `git worktree list --porcelain` подтвердила обе записи. Второе дерево создано от `main` на `470a9a6` и синхронизировано самой Мусей fast-forward до `fca51c2`, затем до `4c9515a` (merge PR #153) 2026-11-16, до `c5e5543` (merge PR #154) 2026-11-17 и до `58ce9f4` (merge PR #155) 2026-11-17 и до `c198659` (merge PR #156) 2026-11-17 и до `637d3ed` (merge PR #157) 2026-11-17; **никаких implementation-изменений внутри не выполнялось**.
+- `origin/main` на момент проверки: `637d3ed1bf89d92452d70f924ac3ab83bd315a43`; локальный `main` оригинального checkout — `fca51c2` (на девять коммитов позади remote; владелец подтянет сам, Muse исходный checkout не трогает).
 - Исходный checkout: tracked-файлы clean, имеется один **посторонний untracked** `ystemctl status cloudflared.service`. Не удалять, не включать в PR и не пытаться очищать.
 - Ветку `muse/slavikai-rebuild` использовать как служебную точку возвращения, не коммитить тикеты в неё. На каждый тикет Muse создаёт новую PR-ветку от актуального `origin/main`.
 - Третьи worktree или копии без отдельного согласования не создавать; параллельные implementation-тикеты запрещены.
-- **Worktree не backup**: исходный code baseline зафиксирован immutable commit `470a9a63280f9dac392f559a6fe99115db2e50d0` (merge PR #151); текущий `main` — `c1986596cafc558921a8748d4eda84c221c5597e` (E01-T02 RunSpec PR #156 поверх 58ce9f4). Историю и изменения исходного checkout не переписывать.
+- **Worktree не backup**: исходный code baseline зафиксирован immutable commit `470a9a63280f9dac392f559a6fe99115db2e50d0` (merge PR #151); текущий `main` — `637d3ed1bf89d92452d70f924ac3ab83bd315a43` (E01-T03 ToolRegistry listing PR #157 поверх c198659). Историю и изменения исходного checkout не переписывать.
 
 ## PR #151 — завершён
 
@@ -62,6 +62,14 @@
 - Служебная ветка `muse/slavikai-rebuild` обновлена fast-forward `58ce9f4..c198659`.
 - **Статус:** `DONE`. E01-T02 done.
 
+## E01-T03: PR #157 — merged
+
+- [PR #157](https://github.com/Phonezzzz/Slavikai/pull/157), branch `pr-e01-t03-registry-listing`: **MERGED** 2026-11-17, ручной fast-forward push, новый `main` — `637d3ed1bf89d92452d70f924ac3ab83bd315a43`.
+- Содержимое: ToolRegistry listing на RunSpec (`tools/tool_registry.py`; legacy no-policy path — sandbox catalog, `call()` без policy — effective target sandbox), 6 новых тестов в `tests/test_tool_registry_listing.py`, 5 обновлённых тестов, ROADMAP.md record + STATE.md sync.
+- Gates пройдены на последнем HEAD `637d3ed`: GitHub CI success (оба `quality` pass), независимое Codex review без замечаний (`has_any_findings: false`, `status: completed`), `make check` зелёный (2484 passed, coverage 83.53%), `make git-check` OK. Qodo недоступен (подписка неактивна) — необязательный reviewer, merge не блокирует.
+- Служебная ветка `muse/slavikai-rebuild` обновлена fast-forward `c198659..637d3ed`.
+- **Статус:** `DONE`. E01-T03 done.
+
 ## Текущая очередь
 
 - **E00-T01 — DONE** (read-only baseline, разрешение PR #151, проверка двух worktree). Evidence: Git `worktree list`, local/remote `main` SHA, merge status PR #151.
@@ -70,14 +78,15 @@
 - **E01-T01 — DONE** (матрица production entrypoints: 23 строки, каждый path помечен production/production (broken)/dead, baseline `c5e5543`). Evidence: таблица в ROADMAP.md (E01-T01 execution entrypoints matrix), 10 ключевых выводов, 3 unknown; ветка `pr-e01-t01-entrypoints`.
 - **E01-T02 — DONE** (immutable RunSpec/RunPolicy contract: `core/run_contract.py`, snapshot policy в `ToolGateway`, `set_execution_policy` убран из run path; baseline `58ce9f4`). Evidence: запись в ROADMAP.md (E01-T02 implementation), 17 тестов в `tests/test_run_contract.py` (оба acceptance-критерия + fail-on-old-code проверка), `make check` зелёный (2478 passed, coverage 83.52%); ветка `pr-e01-t02-runspec`.
 - **E01-T03 — DONE** (ToolRegistry listing на RunSpec: доступность инструментов вычисляется из target/policy/qualification, legacy no-policy path — sandbox catalog и не следует глобальному target; baseline `c198659`). Evidence: запись в ROADMAP.md (E01-T03 implementation), 6 новых тестов в `tests/test_tool_registry_listing.py` (все acceptance-критерии + fail-on-old-code проверка), `make check` зелёный (2484 passed, coverage 83.53%); ветка `pr-e01-t03-registry-listing`.
-- **E01-T04 — READY**. Следующий тикет — сделать ToolGateway единственной execution gate.
+- **E01-T04 — DONE** (ToolGateway — единственная execution gate для model-originated вызовов: аудит всех production tool calls + instrumentation gate-тесты; baseline `637d3ed`). Evidence: запись в ROADMAP.md (E01-T04 implementation + open fork по UI workspace reads), 4 новых теста в `tests/test_tool_gateway_gate.py` (acceptance по трём механизмам dispatch + negative gate), `make check` зелёный (2488 passed, coverage 83.54%); ветка `pr-e01-t04-gateway`.
+- **E01-T05 — READY**. Следующий тикет — канонизировать Outcome.
 
 ## Readiness: 62 последовательных тикета
 
 | Epic | IDs | Count | Status |
 |---|---|---:|---|
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
-| E01 | T01–T09 | 9 | E01-T03 done; E01-T04 next |
+| E01 | T01–T09 | 9 | E01-T04 done; E01-T05 next |
 | E02 | T01–T08 | 8 | READY после E01 |
 | E03 | T01–T11 | 11 | READY после E02 |
 | E04 | T01–T06 | 6 | NEEDS_REFINEMENT |
@@ -98,4 +107,4 @@
 
 ## Resume
 
-**Next active:** E01-T04 — сделать ToolGateway единственной execution gate. **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E01-T05 — канонизировать Outcome. **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.

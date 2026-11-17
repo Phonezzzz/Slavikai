@@ -418,7 +418,7 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01-T03 DONE; E01-T04 next |
+| E01 — canonical execution | 9 | E01-T04 DONE; E01-T05 next |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | NEEDS_REFINEMENT |
@@ -765,6 +765,53 @@ Only three places in `server/` call `agent.respond` at all: `project.py:418`, `u
 **Negative.** Добавленный synthetic tool, вызываемый напрямую, должен падать test gate.
 
 **Delete-vs-wrap.** Прямые обходные paths удалять, не оборачивать.
+
+##### E01-T04 implementation — verified 2026-11-17 (baseline 637d3ed)
+
+**Status:** DONE (acceptance met) — with one open fork, see below. `make check` green on branch `pr-e01-t04-gateway` (2488 passed, coverage 83.54%).
+
+**Audit — every production tool call, verified by reading the code.** Model-originated calls go through `ToolGateway` on all paths:
+- The one loop: `AgentToolLoop` dispatches only via `gateway.call` / `gateway.call_approved_once` (`core/tool_loop.py:840`, `:344`) — chat (`core/agent_routing.py:803,892`), auto (`core/auto_runtime.py:292`), desktop (`core/desktop_runtime.py:343`).
+- `Agent.call_tool` → `_call_tool_logged` → `_build_tool_gateway` → `gateway.call` (`core/agent_tools.py:1094-1140`) — plan audit (`server/http/handlers/plan.py:172`), workspace writes (`server/http/handlers/workspace.py:623`), decision resume (`server/http/handlers/decision.py:87,884`), settings TTS (`server/http/handlers/settings.py:994`), agent TTS/STT (`core/agent.py:733,739`), confirmed memory save (`core/agent_memory.py:337`).
+- MWV packet runner: `_execute_mwv_plan_step` → `gateway.call` / `call_approved_once` (`core/agent_mwv.py:1217-1221`).
+- Computer backends: `LocalComputerBackend` → `gateway.call` (`core/computer_backend.py:72-95`); `ContainerComputerBackend._qualified_file_call` → `file_gateway.call` (`core/container_computer_backend.py:83-89`); `execute_local_commit` → `gateway.call` (`core/agent_computer.py:127,134`).
+- `AgentComputerRuntime` / `make_computer_runtime` have zero production callers (verified by grep) — the direct-FS methods of `ContainerComputerBackend` are unreachable from model paths. Resolves E00-T03 unknown U2 as ABSENT in production.
+- Verifiers (`_run_verifier`, `DesktopRuntime._verify`, `verify_desktop_observations`) analyze already-executed calls and invoke no tools.
+
+**Proven not-a-bypass (listing-only or tool-internal):**
+- `_chat_read_tool_specs` (`core/agent_routing.py:812`) — builds the chat loop's read-only ToolSpec list; execution still goes through the gateway.
+- `compile_plan_steps` (`core/agent.py:164`) — passes the legacy listing to the plan compiler as `available_tools`; no execution; plan execution goes through the MWV runner → gateway.
+- `DesktopBrowserTool.handle` → `backend.handle` (`tools/desktop_browser_tool.py:63`) and `DesktopProcessTool.handle` (op=launch) → `DesktopLaunchTool.start` (`tools/desktop_system_tools.py:266-267`) — tool-internal composition; `desktop_launch` is NOT a registered tool (only constructed at `core/agent.py:592` and passed to the process tool); the model-visible entry `desktop_process` is gateway-evaluated (capability exec, risk [execute]).
+- `CodingSkill` / `CodingTaskRuntime` / `MWVSingleAttemptRuntime` — test-only, no production callers (confirms E00-T03 claim 8); the skill itself routes through its own gateway (`build_workspace_gateway`, `core/mwv/coding_skill.py:124`).
+
+**Dead/fenced (not bypasses in production):**
+- `Agent.call_tool("workspace_run")` fence — refuses before the gateway; the real executor is reachable only via loop → gateway.
+- `handle_project_request` direct call from `github_import.index_imported_project` — reachable only after a clone that unconditionally returns False (`server/http/common/github_import.py:99-105`); both call sites (`server/http/handlers/project.py:321`, `server/http/handlers/decision.py:729`) unreachable in production. Latent if the clone fence is ever lifted.
+- PTY terminal endpoints (no Agent, always 503); `/project find/index` (disabled command lane).
+
+**Open fork — UI workspace reads (BLOCKED: REAL_IMPLEMENTATION_FORK, owner decision needed).** The single remaining live direct `tool.handle()` call is `_call_workspace_read_tool` (`server/http/handlers/workspace.py:593`): it constructs `ListFilesTool()` / `ReadFileTool()` fresh and calls `.handle()` directly, bypassing approval policy, budget, logging and RunSpec. Called from three UI handlers: tree GET (`:701`), file GET (`:788`), pre-write version check (`:874`). It is user-originated (the user's browser on click), read-only, and unreachable by the model (the model has no HTTP path to these handlers; model reads go through the loop → gateway). Routing it through `agent.call_tool` — the write path's shape — requires an agent, but tree/file GET provably work with `agent=None` (`tests/ui_api/test_workspace_and_tools.py::test_ui_workspace_tree_and_file_get_without_selected_model`): the file browser is usable before model selection, a deliberate product behavior. Options, none chosen silently:
+- (A) Route reads through `agent.call_tool` — breaks no-model file browsing (tested behavior + UX regression). Needs the owner's explicit call.
+- (B) Build a second, agent-less read gateway in the handler (fresh registry + gateway) — a second gate, violates "one policy/approval/effect point", risks safe-mode ApprovalRequired on plain file browsing; wrapping, not deleting (forbidden by this ticket's delete-vs-wrap).
+- (C) Keep the direct read path as a documented bounded exception (user-originated, read-only, model-unreachable, own controls: session root + sandbox path checks) and unify it in a later ticket with a session-scoped read gateway that does not need a model.
+- This ticket's acceptance (instrumentation test for model-originated state-changing calls) is met regardless of the fork; the read path is NOT a model-originated call.
+
+**Files.** No production code changed in this ticket (the read bypass stays pending the fork decision). New: `tests/test_tool_gateway_gate.py` (4 tests).
+
+**Tests.** `tests/test_tool_gateway_gate.py` (4 tests):
+- Acceptance (`test_loop_dispatch_goes_through_gateway`): the one AgentToolLoop dispatches a model write + read via the gateway (recording pre_call); covers chat/auto/desktop loop sites (same class, same dispatch helper).
+- Acceptance (`test_agent_call_tool_goes_through_gateway`): real Agent; `call_tool("workspace_write")` writes the file and is observed by a monkeypatched `ToolGateway.call`; `call_tool("workspace_read")` likewise; the `workspace_run` fence refuses before the gateway (never observed).
+- Acceptance (`test_mwv_plan_step_goes_through_gateway`): `_execute_mwv_plan_step` with an operation executes via the passed gateway; step DONE.
+- Negative (`test_direct_tool_call_fails_gateway_gate`): a synthetic tool called directly via its handler DOES execute (dispatched proves it) but the gate trips (AssertionError "gateway gate"); the same tool through `gateway.call` passes the gate.
+- Fail-on-old-code: N/A as a stash round-trip — no production code changed, so there is nothing to stash. Gate sensitivity is proven directly by the negative test (a direct call trips the gate).
+
+**Delete-vs-wrap.** No production code deleted. No bypass path wrapped. No UX changes.
+
+**E08 candidates (not deleted here).**
+- `_call_workspace_read_tool` (`server/http/handlers/workspace.py:593`) — the open fork above; unify in a later ticket once the owner decides.
+- `make_computer_runtime` / `AgentComputerRuntime` (`core/agent.py:402`) — zero production callers; dead code, remove in cleanup.
+- `index_imported_project` (`server/http/common/github_import.py:108`) — direct `handle_project_request` call, dead while the clone is fenced; route through the gateway if the clone fence is ever lifted, else delete with the fenced flow.
+- `ToolRegistry._execution_target` — still write-only (E01-T03); remove once `set_execution_policy`'s last caller is gone.
+- `Agent._chat_read_tool_specs` — parallel hand-rolled listing (E01-T03); unify with the registry listing in a later ticket.
 
 #### E01-T05 — канонизировать Outcome
 
