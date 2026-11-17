@@ -554,6 +554,43 @@ def _cancelled_step_execution(
     )
 
 
+def _binding_failed_step_execution(
+    *, step: dict[str, JSONValue], error: str, state_changing: bool
+) -> PlanStepExecution:
+    """Шаг, чей инструмент стал недоступен после уже выполненных шагов.
+
+    Привязка проверяется перед dispatch шага, но отказ может прийти уже
+    после эффектов предыдущих шагов (инструмент отключили после
+    утверждения плана). Терять выполненный prefix нельзя: текущий шаг
+    сохраняется как failed с причиной отказа, а план завершается FAILED.
+    """
+    return PlanStepExecution(
+        step_id=str(step.get("step_id")),
+        description=str(step.get("description")),
+        status="failed",
+        operation=_step_tool(step),
+        result=f"Инструмент шага недоступен: {error}",
+        tool_calls_used=0,
+        outcome=RunOutcome(
+            phase=RunPhase.TERMINAL,
+            terminal_reason=TerminalReason.FAILED,
+            disposition=Disposition.NONE,
+            verification=Verification(
+                outcome=VerificationOutcome.UNKNOWN,
+                checks=(
+                    PostconditionCheck(
+                        name="step_tool_available",
+                        passed=False,
+                        detail=error,
+                    ),
+                ),
+                source="plan_execute",
+            ),
+            state_changing=state_changing,
+        ),
+    )
+
+
 def _overall_outcome(
     *,
     steps: tuple[PlanStepExecution, ...],
@@ -719,10 +756,11 @@ def _execute_remaining_steps(
             )
         except ToolLoopExecutionError as exc:
             # Loop начался и упал (следующий запрос к модели после
-            # выполненных вызовов). Отказ валидации до dispatch —
-            # PlanExecutionBindingError/PlanLoopContinuationUnavailable —
-            # сюда не попадает и чекпоинт resume сохраняет. А здесь
-            # continuation уже недействительна как повтор: выполненный
+            # выполненных вызовов). Отказ валидации до dispatch
+            # (PlanExecutionBindingError / PlanLoopContinuationUnavailable)
+            # ловится отдельным handler ниже: без выполненных шагов
+            # чекпоинт resume сохраняется. А здесь continuation уже
+            # недействительна как повтор: выполненный
             # prefix сохраняется как failed-шаг, план завершается FAILED,
             # и runner потребляет чекпоинт — повторное подтверждение не
             # воспроизведёт выполненные вызовы.
@@ -730,6 +768,32 @@ def _execute_remaining_steps(
                 step=step, loop_result=exc.result, state_changing=step_changing
             )
             done.append(executed)
+            return _finish_result(
+                plan_id=plan_id,
+                plan_hash=plan_hash,
+                plan_revision=plan_revision,
+                task_id=task_id,
+                steps=tuple(done),
+                any_state_changing=state_changing,
+                cancelled=False,
+            )
+        except PlanExecutionBindingError as exc:
+            # Привязка шага сломалась после уже выполненных в этом запуске
+            # шагов (инструмент отключили после утверждения плана): терять
+            # выполненный prefix нельзя — текущий шаг сохраняется как failed
+            # с причиной, план завершается FAILED, runner потребляет
+            # чекпоинт (тот же класс, что отмена и ошибка loop после
+            # выполненных вызовов). Если в этом запуске ещё ничего не
+            # выполнено (done == completed), отказ — до любого эффекта:
+            # пробросить наружу, чтобы resume сохранил чекпоинт, а свежий
+            # запуск упал общей ошибкой без потерянных эффектов.
+            if len(done) == len(completed):
+                raise
+            done.append(
+                _binding_failed_step_execution(
+                    step=step, error=str(exc), state_changing=step_changing
+                )
+            )
             return _finish_result(
                 plan_id=plan_id,
                 plan_hash=plan_hash,

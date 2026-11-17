@@ -703,3 +703,67 @@ def test_cancelled_step_keeps_executed_calls() -> None:
     assert result.steps[0].status == "failed"
     assert result.steps[0].tool_calls_used == 1
     assert result.tool_calls_used == 1
+
+
+def test_binding_error_after_executed_step_keeps_prefix() -> None:
+    # Finding (P2, re-review): инструмент второго шага отключён после
+    # утверждения плана. Выполненный первый шаг не должен теряться:
+    # терминальный результат с done-prefix и failed текущим шагом.
+    write_calls: list = []
+
+    def workspace_write(request):
+        write_calls.append(request)
+        return ToolResult.success({})
+
+    brain = ScriptedBrain([("workspace_write", {"path": "x.txt"})])
+    agent = FakePlanAgent(
+        brain=brain,
+        tools=[("workspace_write", workspace_write, "write", [])],
+    )
+    agent.set_session_context("s1", {"FS_DELETE_OVERWRITE"})
+    plan, task = _approved_plan(
+        [
+            _step("step-1", "workspace_write", {"path": "x.txt"}),
+            _step("step-2", "workspace_read", {"path": "x.txt"}),
+        ]
+    )
+
+    result = execute_approved_plan(
+        agent=agent,
+        plan=plan,
+        task=task,
+        session_id="s1",
+        plan_hash_fn=plan_hash_payload,
+        checkpoints=PlanLoopCheckpoints(),
+    )
+
+    assert len(write_calls) == 1
+    assert result.outcome.terminal_reason is TerminalReason.FAILED
+    assert result.cancelled is False
+    assert len(result.steps) == 2
+    assert result.steps[0].status == "done"
+    assert result.steps[0].tool_calls_used == 1
+    assert result.steps[1].status == "failed"
+    assert result.steps[1].operation == "workspace_read"
+    assert result.steps[1].tool_calls_used == 0
+    assert "plan_step_tool_unavailable" in result.steps[1].result
+    assert result.tool_calls_used == 1
+
+
+def test_binding_error_before_any_effect_propagates() -> None:
+    # Обратная сторона: отказ привязки до любого эффекта не превращается
+    # в терминальный результат — пробрасывается наружу, чтобы resume
+    # сохранил чекпоинт (round-1 P1), а свежий запуск упал общей ошибкой.
+    brain = ScriptedBrain([])
+    agent = FakePlanAgent(brain=brain, tools=[])
+    plan, task = _approved_plan([_step("step-1", "workspace_read", {"path": "x.txt"})])
+
+    with pytest.raises(PlanExecutionBindingError, match="plan_step_tool_unavailable"):
+        execute_approved_plan(
+            agent=agent,
+            plan=plan,
+            task=task,
+            session_id="s1",
+            plan_hash_fn=plan_hash_payload,
+            checkpoints=PlanLoopCheckpoints(),
+        )
