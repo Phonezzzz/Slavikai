@@ -345,6 +345,12 @@ def outcome_from_mwv(
     )
 
 
+# Loop errors that are administrative/policy stops, not subject failures
+# (ADR-0002 §1: aborted, not failed). Produced by AgentToolLoop when a
+# tool call is refused by policy (core/tool_loop.py).
+_POLICY_STOP_ERRORS = frozenset({"tool_policy_denied"})
+
+
 def outcome_from_loop_result(
     loop_result: AgentToolLoopResult,
     *,
@@ -353,13 +359,17 @@ def outcome_from_loop_result(
 ) -> RunOutcome:
     """Derive a terminal outcome from an AgentToolLoopResult.
 
-    - cancelled -> cancelled; a loop error -> failed. In both cases the
-      verification is unknown: the loop stopping says nothing about the
-      postcondition, and unknown never rewrites the reason.
-    - A clean finish is completed + full, but full DONE still requires a
-      confirmed postcondition: for a state-changing task the verification
-      stays unknown (UNVERIFIED, not DONE) until a real check passes;
-      for a task that changes no state, not_applicable confirms it.
+    - cancelled -> cancelled; a loop error -> failed, except a known
+      policy stop (``tool_policy_denied``) -> aborted (ADR-0002 §1: an
+      administrative stop without an asserted subject error). In all
+      cases the verification is unknown: the loop stopping says nothing
+      about the postcondition, and unknown never rewrites the reason.
+    - A clean finish is completed + full, or completed + accepted_partial
+      when the caller passes an acceptance authority (the user accepted
+      an incomplete result). Full DONE still requires a confirmed
+      postcondition: for a state-changing task the verification stays
+      unknown (UNVERIFIED, not DONE) until a real check passes; for a
+      task that changes no state, not_applicable confirms it.
     """
     disposition = Disposition.ACCEPTED_PARTIAL if accepted_by else Disposition.NONE
     if loop_result.cancelled:
@@ -373,9 +383,14 @@ def outcome_from_loop_result(
         )
     if loop_result.error is not None:
         check = PostconditionCheck(name="loop_error", passed=False, detail=loop_result.error)
+        reason = (
+            TerminalReason.ABORTED
+            if loop_result.error in _POLICY_STOP_ERRORS
+            else TerminalReason.FAILED
+        )
         return RunOutcome(
             phase=RunPhase.TERMINAL,
-            terminal_reason=TerminalReason.FAILED,
+            terminal_reason=reason,
             disposition=disposition,
             verification=Verification(
                 outcome=VerificationOutcome.UNKNOWN,
@@ -390,10 +405,12 @@ def outcome_from_loop_result(
         if state_changing
         else Verification.not_applicable(source="tool_loop")
     )
+    disposition = Disposition.ACCEPTED_PARTIAL if accepted_by else Disposition.FULL
     return RunOutcome(
         phase=RunPhase.TERMINAL,
         terminal_reason=TerminalReason.COMPLETED,
-        disposition=Disposition.FULL,
+        disposition=disposition,
         verification=verification,
         state_changing=state_changing,
+        accepted_by=accepted_by if disposition is Disposition.ACCEPTED_PARTIAL else None,
     )

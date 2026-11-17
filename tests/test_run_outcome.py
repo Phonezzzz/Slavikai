@@ -427,6 +427,53 @@ def test_outcome_from_loop_result_cancelled_with_accepted_partial() -> None:
     assert outcome.ui_label == "CANCELLED"
 
 
+def test_outcome_from_loop_result_clean_finish_with_accepted_partial() -> None:
+    # Codex review (PR #159, P2): the clean-finish branch dropped
+    # accepted_by and always returned FULL, so an accepted partial
+    # became DONE / final_success instead of PARTIAL / final_partial.
+    loop_result = AgentToolLoopResult(text="partial", messages=[])
+    outcome = outcome_from_loop_result(loop_result, state_changing=False, accepted_by="user")
+    assert outcome.terminal_reason is TerminalReason.COMPLETED
+    assert outcome.disposition is Disposition.ACCEPTED_PARTIAL
+    assert outcome.accepted_by == "user"
+    assert outcome.ui_label == "PARTIAL"
+    assert outcome.communication_class == "final_partial"
+    assert outcome.is_full_done is False
+
+    # State-changing: still PARTIAL, never DONE — the user accepted the
+    # partial result, and unknown verification does not rewrite it.
+    outcome = outcome_from_loop_result(loop_result, state_changing=True, accepted_by="user")
+    assert outcome.disposition is Disposition.ACCEPTED_PARTIAL
+    assert outcome.verification.outcome is VerificationOutcome.UNKNOWN
+    assert outcome.ui_label == "PARTIAL"
+    assert outcome.communication_class == "final_partial"
+
+
+def test_outcome_from_loop_result_policy_stop_is_aborted_not_failed() -> None:
+    # Codex review (PR #159, P2): tool_policy_denied is an administrative
+    # stop (ADR-0002 §1), not a subject failure — it must map to ABORTED.
+    denied = AgentToolLoopResult(text="", messages=[], error="tool_policy_denied")
+    outcome = outcome_from_loop_result(denied, state_changing=True)
+    assert outcome.terminal_reason is TerminalReason.ABORTED
+    assert outcome.disposition is Disposition.NONE
+    assert outcome.verification.outcome is VerificationOutcome.UNKNOWN
+    assert outcome.ui_label == "ABORTED"
+    assert outcome.communication_class == "final_aborted"
+    assert "tool_policy_denied" in outcome.verification.checks[0].detail
+
+    # With an acceptance authority, the disposition is preserved too.
+    outcome = outcome_from_loop_result(denied, state_changing=True, accepted_by="user")
+    assert outcome.terminal_reason is TerminalReason.ABORTED
+    assert outcome.disposition is Disposition.ACCEPTED_PARTIAL
+    assert outcome.accepted_by == "user"
+
+    # Any other loop error is still a subject failure.
+    errored = AgentToolLoopResult(text="", messages=[], error="provider down")
+    outcome = outcome_from_loop_result(errored, state_changing=True)
+    assert outcome.terminal_reason is TerminalReason.FAILED
+    assert outcome.ui_label == "FAILED"
+
+
 # --- Production wiring: MWV response label derives from the canonical outcome. ---
 
 

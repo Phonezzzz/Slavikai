@@ -838,6 +838,8 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 **Files.** Новый `core/run_outcome.py`; `core/agent_mwv.py` (rewire `_mwv_outcome_label` + русские метки); новый `tests/test_run_outcome.py` (36 тестов: инварианты, маппинг `communication_class`, `final_partial` только для `completed+accepted_partial`, state-changing dummy без postcondition — не DONE, `tool.ok` alone — не proof, unknown verification не переписывает причину, exhaustive UI projection matrix, деривации из MWV/loop, зафиксированная строка `"Итог: проверки пройдены"`).
 
 
+**Codex review fix (2 P2 findings, 2026-11-17).** `outcome_from_loop_result`: clean finish with an explicit `accepted_by` now keeps `accepted_partial` (was unconditionally `FULL` — an accepted partial became DONE/`final_success`); a known policy stop (`error="tool_policy_denied"`, `core/tool_loop.py`) now maps to `ABORTED` (was unconditionally `FAILED`, per ADR-0002 §1). New tests: clean finish with accepted partial (state-changing and not), policy stop aborted (with and without acceptance), other loop errors still failed.
+
 #### E01-T06 — Plan как artifact, Execute как обычный run
 
 **ЧТО.** Сохранить plan drafting/version/approval, но execution approved plan направить в canonical loop.
