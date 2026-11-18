@@ -54,7 +54,7 @@ def _default_runner() -> VerifierRunnerProtocol:
 
 
 _DEFAULT_TIMEOUT_SECONDS = 60 * 30
-CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "-B", "-f", "Makefile", "check")
+CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "-B", "-r", "-f", "Makefile", "check")
 
 DEFAULT_FALLBACK_COMMANDS: tuple[tuple[str, ...], ...] = (CANONICAL_CHECK_COMMAND,)
 SCRIPT_NOT_FOUND_PREFIX = "Verifier script not found:"

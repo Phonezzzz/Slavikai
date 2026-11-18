@@ -144,7 +144,7 @@ terminal acceptance остаются target. Required process verifier оста�
 ## Узкое исключение: штатный process verifier (make check)
 
 Второе явное исключение — только штатный `VerifierRuntime` с canonical check
-`["make", "-B", "-f", "Makefile", "check"]` в managed workspace. Все остальные process paths из списка
+`["make", "-B", "-r", "-f", "Makefile", "check"]` в managed workspace. Все остальные process paths из списка
 выше остаются закрыты; shell tools модели не публикуются (это E04-T04),
 полная семантика UNVERIFIED/BLOCKED — E05-T03.
 
@@ -154,12 +154,20 @@ terminal acceptance остаются target. Required process verifier оста�
   отдельный профиль `i1-ubuntu-podman-5.7-command-bounded-v1`. Python-профиль
   (`…-python-bounded-v3`) не трогается; command-ревизия квалифицируется
   независимо — её отсутствие не ломает Python-путь.
-- Allowlist ровно `["make", "-B", "-f", "Makefile", "check"]`: любой другой argv отклоняется до
+- Allowlist ровно `["make", "-B", "-r", "-f", "Makefile", "check"]`: любой другой argv отклоняется до
   любого обращения к engine. Явный `-f Makefile` фиксирует проверяемый
   файл: без него make сам выбрал бы `GNUmakefile`/`makefile`, и хэш
   `Makefile` ничего бы не гарантировал. `-B` заставляет make всегда
   выполнять recipe цели: файл или каталог `check` в workspace больше
-  не даёт `up to date` без проверки. Confinement — тот же, что у Python-пути
+  не даёт `up to date` без проверки. `-r` отключает встроенные правила
+  make: `Makefile.sh` и любой другой файл больше не могут пересоздать
+  доверенный `Makefile` внутри stage через неявное правило `%: %.sh`.
+  Точная гарантия `-r`: отключены только встроенные правила. Для
+  произвольных Makefile с собственными явными правилами пересборки
+  самого себя или с `include` файлов, которые может писать агент,
+  этой гарантии недостаточно — такой критерий требует отдельной
+  проверки. Срез покрывает только E2E-fixture Makefile без собственных
+  правил пересборки и без include. Confinement — тот же, что у Python-пути
   (network none, private namespaces, cap-drop ALL, no-new-privileges,
   readonly rootfs, 256 МиБ / 64 PID, ровно один bind mount staged копии,
   ровно те же 7 env-записей), реальный exit code — через `finished_exit`.
