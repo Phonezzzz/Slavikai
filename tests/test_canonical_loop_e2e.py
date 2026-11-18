@@ -19,28 +19,38 @@ observation возвращается модели, а исход выводит�
   phase / terminal_reason / disposition вычисляет production-код,
   а не сам тест; ``is_full_done``, final_success.
 - preset + canonical verifier -> DONE: тот же сценарий через
-  ``AutoPresetRunner`` с настоящим canonical verifier (``make check``
-  проверяет result.txt); DONE берётся из ``canonical_outcome`` раннера,
-  а не из проверки в самом тесте.
+  ``AutoPresetRunner`` со штатным canonical verifier (``make check``
+  на staged snapshot через квалифицированный rootless backend из
+  среза E04-T03); DONE берётся из ``canonical_outcome`` раннера,
+  а не из проверки в самом тесте. Real-backend ветвь — opt-in
+  (``SLAVIK_RUN_QUALIFIED_VERIFIER_E2E=1``), в CI пропускается.
+- нет backend -> ERROR без DONE: Makefile есть, критерий
+  зафиксирован до loop, но qualified executor не подключён —
+  preset останавливается FAILED_VERIFIER
+  (``sandbox_execution_unavailable``), процесс не запускается.
 
 Замокано только одно: сама модель (scripted Brain). Loop, gateway,
-registry, tools, workspace, postcondition-check и деривация outcome —
-настоящие, без стабов.
+registry, tools, workspace, postcondition-check, деривация outcome
+и исполнение verifier — настоящие, без стабов и без test-only
+executor: подменённый ``_ExecutingVerifierRuntime`` удалён вместе
+со срезом E04-T03.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
-import time
+import os
 from pathlib import Path
 
-from core import auto_preset
+import pytest
+
 from core.approval_policy import ApprovalContext
 from core.auto_preset import AutoPresetRunner
-from core.managed_workspace import ManagedWorkspace, WorkspaceAccess
-from core.mwv.models import StopReasonCode, VerificationResult, VerificationStatus
+from core.managed_workspace import ManagedWorkspace, WorkspaceAccess, WorkspaceLimits
+from core.mwv.models import StopReasonCode, VerificationStatus
 from core.response_preferences import ResponsePreferences
+from core.rootless_podman import RootlessPodmanProfile
+from core.rootless_staging import RootlessStagePool, StagingLimits
 from core.run_outcome import (
     Disposition,
     PostconditionCheck,
@@ -52,10 +62,12 @@ from core.run_outcome import (
 )
 from core.tool_gateway import ToolGateway
 from core.tool_loop import AgentToolLoop
+from core.workspace_python_execution import RootlessPythonExecutor
 from llm.brain_base import Brain
 from llm.types import LLMResult, LLMUsage, ToolCall
 from shared.auto_models import AutoRunStatus
 from shared.models import LLMMessage, ToolRequest, ToolResult
+from tests.test_verifier_command_execution import _qualified_state
 from tools.tool_registry import ToolRegistry
 from tools.workspace_tools import ReadFileTool, WriteFileTool, workspace_root_context
 
@@ -161,6 +173,11 @@ class _E2EAgent:
         self.last_auto_state = None
         self.tool_registry = registry
         self._workspace = workspace
+        # Production wiring (server/http/app.py): _verifier_command_executor
+        # выводит command executor из этих атрибутов. По умолчанию их нет
+        # (как у stub-родителей без backend) — тогда verifier недоступен.
+        self._workspace_executor: RootlessPythonExecutor | None = None
+        self._workspace_access: WorkspaceAccess | None = None
 
     def _get_main_brain(self):  # noqa: ANN202
         return self._brain
@@ -357,51 +374,13 @@ def test_e2e_preset_run_completes_without_fake_verification(tmp_path, monkeypatc
     assert state["verifier"] is None
 
 
-class _ExecutingVerifierRuntime:
-    """Test-only VerifierRuntime-compatible executor.
-
-    Production VerifierRuntime.run() never executes the check command:
-    it returns sandbox_verification_unavailable (ERROR) by design, so
-    no repo-workspace run can pass verification through it today. This
-    double keeps the whole production verification path — the task
-    packet with the canonical command, cwd = run root, the
-    VerificationResult mapping, the FAILED_VERIFIER gate — and only
-    replaces the unimplemented execution backend with a real
-    subprocess run of the same command. It returns canned nothing:
-    PASSED iff the command exits 0.
-    """
-
-    def __init__(self, project_root):  # noqa: ANN001
-        del project_root
-
-    def run(self, task, context):  # noqa: ANN001
-        del context
-        command = list(task.verifier["command"])
-        cwd = task.verifier["cwd"]
-        started = time.monotonic()
-        proc = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=60)
-        duration = time.monotonic() - started
-        passed = proc.returncode == 0
-        return VerificationResult(
-            status=VerificationStatus.PASSED if passed else VerificationStatus.FAILED,
-            command=command,
-            exit_code=proc.returncode,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-            duration_seconds=duration,
-            error=None if passed else "canonical check failed",
-            fail_type=None if passed else "check_failed",
-            excerpt=(proc.stdout + proc.stderr)[-500:],
-            verifier_profile="canonical",
-        )
-
-
 def _build_verified_e2e(tmp_path: Path) -> tuple[ManagedWorkspace, ToolRegistry]:
     """E2E workspace with a real canonical verifier: a Makefile whose
     ``check`` target verifies result.txt — the file the tool loop
-    creates. has_canonical_repo_verifier() qualifies the workspace
-    (Makefile present + make installed), so _verify_after_loop takes
-    the real VerifierRuntime path instead of returning None.
+    creates. ``AutoPresetRunner.run()`` фиксирует хэш этого Makefile
+    до loop (bounded read), а ``_verify_after_loop`` исполняет его
+    штатным ``VerifierRuntime`` на staged snapshot — никакого
+    test-only executor больше нет.
     """
     workspace, registry = _build_e2e(tmp_path)
     (workspace.root / "Makefile").write_text(
@@ -448,20 +427,52 @@ class _WrongContentBrain(Brain):
         return LLMResult(usage=LLMUsage(0, 0, 0), text="Готово")
 
 
+def _attach_stock_verifier(
+    agent: _E2EAgent,
+    workspace: ManagedWorkspace,
+    profile: RootlessPodmanProfile,
+    pool: RootlessStagePool,
+) -> None:
+    """Production wiring (server/http/app.py): агент несёт
+    RootlessPythonExecutor и WorkspaceAccess, привязанный к execution
+    revision пула; _verifier_command_executor выводит из них command
+    executor и сверяет binding с frame run (principal/session)."""
+    agent._workspace_executor = RootlessPythonExecutor(
+        profile,
+        workspace,
+        WorkspaceLimits(1024, 65536, 50, 8),
+        65536,
+        staging_pool=pool,
+    )
+    agent._workspace_access = WorkspaceAccess(
+        workspace, "test-principal", "session-test", pool.execution_revision
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("SLAVIK_RUN_QUALIFIED_VERIFIER_E2E") != "1",
+    reason="qualified verifier E2E needs a real rootless Podman state (opt-in)",
+)
 def test_e2e_preset_run_with_canonical_verifier_is_done(tmp_path, monkeypatch) -> None:
     """DONE comes from the runner's canonical outcome, not from a
-    test-side check: the preset runs the real canonical verifier
-    (make check over result.txt) and the attached verification flows
-    into outcome_from_loop_result. _check_result_file() is deliberately
-    NOT called here: it would prove nothing about the runner.
+    test-side check: the preset runs the STOCK VerifierRuntime
+    (canonical make check in a container, on the staged snapshot) and
+    the attached verification flows into outcome_from_loop_result.
+    _check_result_file() is deliberately NOT called here: it would
+    prove nothing about the runner.
     """
-    workspace, registry = _build_verified_e2e(tmp_path)
-    monkeypatch.chdir(workspace.root)
-    monkeypatch.setattr(auto_preset, "VerifierRuntime", _ExecutingVerifierRuntime)
-    brain = _ReadWriteBrain()
-    agent = _E2EAgent(brain, registry, workspace)
-    with workspace_root_context(workspace.root):
-        outcome = AutoPresetRunner(agent, workspace_root=workspace.root).run(GOAL)
+    profile = _qualified_state()
+    pool = RootlessStagePool.open(profile, StagingLimits(16 * 1024 * 1024, 1024, 2))
+    try:
+        workspace, registry = _build_verified_e2e(tmp_path)
+        monkeypatch.chdir(workspace.root)
+        brain = _ReadWriteBrain()
+        agent = _E2EAgent(brain, registry, workspace)
+        _attach_stock_verifier(agent, workspace, profile, pool)
+        with workspace_root_context(workspace.root):
+            outcome = AutoPresetRunner(agent, workspace_root=workspace.root).run(GOAL)
+    finally:
+        pool.close()
 
     assert (workspace.root / "result.txt").read_text(encoding="utf-8") == EXPECTED_CONTENT
     assert brain.observed_source == SOURCE_CONTENT
@@ -469,6 +480,8 @@ def test_e2e_preset_run_with_canonical_verifier_is_done(tmp_path, monkeypatch) -
     assert outcome.stop_reason_code is None
     assert outcome.verifier is not None
     assert outcome.verifier.status is VerificationStatus.PASSED
+    assert outcome.verifier.command == ["make", "-B", "-r", "-f", "Makefile", "check"]
+    assert outcome.verifier.exit_code == 0
     assert outcome.canonical_outcome is not None
     assert outcome.canonical_outcome.is_full_done is True
     assert outcome.canonical_outcome.ui_label == "DONE"
@@ -479,26 +492,69 @@ def test_e2e_preset_run_with_canonical_verifier_is_done(tmp_path, monkeypatch) -
     assert state["verifier"]["status"] == VerificationStatus.PASSED.value
     assert state["execution_metrics"]["tool_calls_used"] == 2
     assert state["execution_metrics"]["files_touched"] == 1
+    # Verifier работал на staged snapshot без публикации обратно:
+    # живой workspace не изменился, кроме созданного loop result.txt.
+    assert sorted(p.name for p in workspace.root.iterdir()) == [
+        "Makefile",
+        "result.txt",
+        "source.txt",
+    ]
 
 
-def test_e2e_preset_run_with_failing_canonical_verifier_is_failed_verifier(
+def test_e2e_preset_run_with_unavailable_verifier_backend_is_failed_verifier(
     tmp_path, monkeypatch
 ) -> None:
-    """The canonical verifier really checks result.txt: wrong content
-    fails make check, and the runner stops with FAILED_VERIFIER instead
-    of completing. A canned-PASSED verifier double would pass this.
-    """
+    """Fail-closed без backend: Makefile есть, критерий зафиксирован
+    до loop, но qualified executor агенту не подключён —
+    _verifier_command_executor возвращает (None, None), и preset
+    останавливается FAILED_VERIFIER (sandbox_execution_unavailable),
+    а не DONE и не тихим pass. Процесс не запускается."""
     workspace, registry = _build_verified_e2e(tmp_path)
     monkeypatch.chdir(workspace.root)
-    monkeypatch.setattr(auto_preset, "VerifierRuntime", _ExecutingVerifierRuntime)
-    brain = _WrongContentBrain()
+    brain = _ReadWriteBrain()
     agent = _E2EAgent(brain, registry, workspace)
     with workspace_root_context(workspace.root):
         outcome = AutoPresetRunner(agent, workspace_root=workspace.root).run(GOAL)
+
+    assert (workspace.root / "result.txt").read_text(encoding="utf-8") == EXPECTED_CONTENT
+    assert outcome.status == AutoRunStatus.FAILED_VERIFIER
+    assert outcome.stop_reason_code == StopReasonCode.VERIFIER_FAILED
+    assert outcome.verifier is not None
+    assert outcome.verifier.status is VerificationStatus.ERROR
+    assert outcome.verifier.error == "sandbox_execution_unavailable"
+    assert outcome.canonical_outcome is None
+
+
+@pytest.mark.skipif(
+    os.environ.get("SLAVIK_RUN_QUALIFIED_VERIFIER_E2E") != "1",
+    reason="qualified verifier E2E needs a real rootless Podman state (opt-in)",
+)
+def test_e2e_preset_run_with_failing_canonical_verifier_is_failed_verifier(
+    tmp_path, monkeypatch
+) -> None:
+    """The stock canonical verifier really checks result.txt: wrong
+    content fails make check in the container, and the runner stops
+    with FAILED_VERIFIER instead of completing. A canned-PASSED
+    verifier double would pass this.
+    """
+    profile = _qualified_state()
+    pool = RootlessStagePool.open(profile, StagingLimits(16 * 1024 * 1024, 1024, 2))
+    try:
+        workspace, registry = _build_verified_e2e(tmp_path)
+        monkeypatch.chdir(workspace.root)
+        brain = _WrongContentBrain()
+        agent = _E2EAgent(brain, registry, workspace)
+        _attach_stock_verifier(agent, workspace, profile, pool)
+        with workspace_root_context(workspace.root):
+            outcome = AutoPresetRunner(agent, workspace_root=workspace.root).run(GOAL)
+    finally:
+        pool.close()
 
     assert (workspace.root / "result.txt").read_text(encoding="utf-8") == "не то\n"
     assert outcome.status == AutoRunStatus.FAILED_VERIFIER
     assert outcome.stop_reason_code == StopReasonCode.VERIFIER_FAILED
     assert outcome.verifier is not None
     assert outcome.verifier.status is VerificationStatus.FAILED
+    assert outcome.verifier.command == ["make", "-B", "-r", "-f", "Makefile", "check"]
+    assert outcome.verifier.exit_code != 0
     assert outcome.canonical_outcome is None
