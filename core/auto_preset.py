@@ -68,7 +68,7 @@ from core.mwv.verifier_runtime import (
 from core.mwv.verifier_summary import extract_verifier_excerpt
 from core.response_preferences import compose_response_preferences
 from core.run_contract import RunBudget
-from core.run_outcome import TerminalReason, outcome_from_loop_result
+from core.run_outcome import RunOutcome, TerminalReason, Verification, outcome_from_loop_result
 from core.skills.index import SkillResolution
 from core.skills.runtime import skill_run_metadata, skill_run_report
 from core.tool_gateway import AutoFileEffects
@@ -124,6 +124,11 @@ class AutoRunOutcome:
     stop_reason_code: StopReasonCode | None
     verifier: VerificationResult | None
     next_steps: list[str]
+    # The canonical outcome the completion gate derived (None when no
+    # derivation ran: early exits before the canonical gate). Exposed so
+    # callers — and the E2E regression test — can tell DONE apart from a
+    # clean loop that merely terminated normally.
+    canonical_outcome: RunOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -673,9 +678,18 @@ class AutoPresetRunner:
             # is exactly what the derivation says — NOT_APPLICABLE when the
             # run changed nothing, UNKNOWN when it may have changed state
             # without a confirmed postcondition. COMPLETED here means the
-            # run terminated normally, not that full done is proven.
+            # run terminated normally, not that full done is proven. When
+            # the canonical verifier ran, its result is attached to the
+            # derivation, so a passed postcondition yields full DONE and
+            # a lost verification can never silently become DONE.
             canonical = outcome_from_loop_result(
-                loop_result, state_changing=bool(loop_result.tool_calls)
+                loop_result,
+                state_changing=bool(loop_result.tool_calls),
+                verification=(
+                    Verification.from_verification_result(verification)
+                    if verification is not None
+                    else None
+                ),
             )
             if canonical.terminal_reason is not TerminalReason.COMPLETED:
                 state["error"] = "canonical_outcome_not_completed"
@@ -696,6 +710,7 @@ class AutoPresetRunner:
                     stop_reason_code=StopReasonCode.MWV_INTERNAL_ERROR,
                     verifier=verification,
                     next_steps=["Проверь логи и trace.", "Повтори запуск auto после исправления."],
+                    canonical_outcome=canonical,
                 )
             self._set_status(state, AutoRunStatus.COMPLETED)
             response_only = not loop_result.tool_calls
@@ -728,6 +743,7 @@ class AutoPresetRunner:
                 stop_reason_code=None,
                 verifier=verification,
                 next_steps=[],
+                canonical_outcome=canonical,
             )
         except ApprovalRequired as exc:
             if exc.continuation is None:
