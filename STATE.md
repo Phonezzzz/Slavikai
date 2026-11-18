@@ -102,7 +102,7 @@
 
 - **Статус:** `DONE`. E01-T08 done; E01-T09 next.
 
-## E01-T09: ветка pr-e01-t09-e2e-canonical-loop — PR (открыт, gates pending)
+## E01-T09: ветка pr-e01-t09-e2e-canonical-loop — PR #163 (открыт, gates pending)
 
 - Ветка `pr-e01-t09-e2e-canonical-loop` от `origin/main` `d36fd64` (merge PR #162). PR открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
 - Содержимое: первый немоканный acceptance test канонического цикла — новый `tests/test_canonical_loop_e2e.py` (4 теста): scripted brain вызывает настоящие read/write tools через настоящие ToolRegistry + ToolGateway + AgentToolLoop; ветви acceptance: fail tool → FAILED_WORKER (preset, fail-closed gate), missing verifier → UNVERIFIED (не DONE), confirmed postcondition → DONE (настоящая перепроверка чтением файла); preset-level: COMPLETED + `verifier=None`, без fake verification. ROADMAP.md record + STATE.md sync; E01 закрыт 9/9, gate перед E02 пройден.
