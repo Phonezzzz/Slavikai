@@ -54,7 +54,7 @@ def _default_runner() -> VerifierRunnerProtocol:
 
 
 _DEFAULT_TIMEOUT_SECONDS = 60 * 30
-CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "-f", "Makefile", "check")
+CANONICAL_CHECK_COMMAND: tuple[str, ...] = ("make", "-B", "-f", "Makefile", "check")
 
 DEFAULT_FALLBACK_COMMANDS: tuple[tuple[str, ...], ...] = (CANONICAL_CHECK_COMMAND,)
 SCRIPT_NOT_FOUND_PREFIX = "Verifier script not found:"
@@ -437,6 +437,25 @@ def _map_command_outcome(
     stdout = _truncate_command_text(outcome.stdout)
     stderr = _truncate_command_text(outcome.stderr)
     excerpt = (stdout + stderr)[-500:]
+    if outcome.state == "finished" and (
+        outcome.cleanup_warning or outcome.retained_stage is not None
+    ):
+        # Settlement провалился после того, как проверка отработала:
+        # exit code известен и сохраняется, но результат — ERROR, а не
+        # тихий PASSED. Retained stage блокирует следующие запуски
+        # principal и требует вмешательства оператора.
+        return VerificationResult(
+            status=VerificationStatus.ERROR,
+            command=command,
+            exit_code=outcome.exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_seconds=duration,
+            error="workspace_cleanup_failed",
+            fail_type="settlement_failed",
+            excerpt=excerpt,
+            verifier_profile="canonical",
+        )
     if outcome.state == "finished" and outcome.exit_code == 0:
         return VerificationResult(
             status=VerificationStatus.PASSED,

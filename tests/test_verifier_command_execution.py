@@ -124,10 +124,12 @@ def test_command_container_refuses_without_qualified_command_profile(tmp_path, m
     profile = _profile(tmp_path, command_revision=None)
     monkeypatch.setattr("subprocess.run", _forbidden_engine)
     with pytest.raises(WorkspaceUnavailable, match="not qualified"):
-        profile.create_command_container(SimpleNamespace(), ["make", "-f", "Makefile", "check"])
+        profile.create_command_container(
+            SimpleNamespace(), ["make", "-B", "-f", "Makefile", "check"]
+        )
 
 
-def _command_prepared(tmp_path, *, command=("make", "-f", "Makefile", "check")):
+def _command_prepared(tmp_path, *, command=("make", "-B", "-f", "Makefile", "check")):
     stage_root = tmp_path / "stage"
     stage_root.mkdir(mode=0o700)
     info = os.stat(stage_root)
@@ -170,7 +172,7 @@ def test_verify_created_command_passes_canonical_cmd_then_checks_rest(tmp_path, 
     # уже на следующем отсутствующем поле (другое сообщение).
     profile = _profile(tmp_path)
     prepared = _command_prepared(tmp_path)
-    record = _inspect_record(tmp_path, command=["make", "-f", "Makefile", "check"])
+    record = _inspect_record(tmp_path, command=["make", "-B", "-f", "Makefile", "check"])
     monkeypatch.setattr(RootlessPodmanProfile, "json_control", lambda self, args: [record])
     with pytest.raises(WorkspaceUnavailable, match="incomplete effective container profile"):
         profile.verify_created_command(prepared)
@@ -233,7 +235,9 @@ def test_command_executor_unavailable_returns_error_without_staging(tmp_path, mo
         staging_pool=None,
     )
     monkeypatch.setattr("subprocess.run", _forbidden_engine)
-    outcome = executor.execute_command(binding, ["make", "-f", "Makefile", "check"], timeout=60)
+    outcome = executor.execute_command(
+        binding, ["make", "-B", "-f", "Makefile", "check"], timeout=60
+    )
     assert outcome.state == "unavailable"
     assert outcome.execution_started is False
     assert outcome.reason_code == "sandbox_execution_unavailable"
@@ -244,7 +248,7 @@ def test_command_executor_unavailable_returns_error_without_staging(tmp_path, mo
 
 
 def test_canonical_check_commands_agree():
-    assert CANONICAL_CHECK_COMMAND == ("make", "-f", "Makefile", "check")
+    assert CANONICAL_CHECK_COMMAND == ("make", "-B", "-f", "Makefile", "check")
     assert VERIFIER_CANONICAL_CHECK_COMMAND == CANONICAL_CHECK_COMMAND
 
 
@@ -252,12 +256,14 @@ def test_verifier_maps_finished_zero_to_passed(tmp_path):
     executor = _fake_executor(_finished(0, stdout=b"ok\n"))
     runtime, _ = _runtime_with_executor(tmp_path, executor)
     result = runtime.run(
-        _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"], "cwd": str(tmp_path)}),
+        _task(
+            tmp_path, {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(tmp_path)}
+        ),
         _context(tmp_path),
     )
     assert result.status == VerificationStatus.PASSED
     assert result.exit_code == 0
-    assert result.command == ["make", "-f", "Makefile", "check"]
+    assert result.command == ["make", "-B", "-f", "Makefile", "check"]
     assert result.stdout == "ok\n"
     assert result.verifier_profile == "canonical"
     assert result.error is None
@@ -267,7 +273,9 @@ def test_verifier_maps_finished_nonzero_to_failed(tmp_path):
     executor = _fake_executor(_finished(2, stderr=b"make: *** [Makefile:2: check] Error 1\n"))
     runtime, _ = _runtime_with_executor(tmp_path, executor)
     result = runtime.run(
-        _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"], "cwd": str(tmp_path)}),
+        _task(
+            tmp_path, {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(tmp_path)}
+        ),
         _context(tmp_path),
     )
     assert result.status == VerificationStatus.FAILED
@@ -284,7 +292,9 @@ def test_verifier_maps_unavailable_to_error(tmp_path):
     )
     runtime, _ = _runtime_with_executor(tmp_path, executor)
     result = runtime.run(
-        _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"], "cwd": str(tmp_path)}),
+        _task(
+            tmp_path, {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(tmp_path)}
+        ),
         _context(tmp_path),
     )
     assert result.status == VerificationStatus.ERROR
@@ -306,7 +316,10 @@ def test_verifier_maps_unknown_and_conflict_to_error_never_failed(tmp_path):
         )
         runtime, _ = _runtime_with_executor(tmp_path, executor)
         result = runtime.run(
-            _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"], "cwd": str(tmp_path)}),
+            _task(
+                tmp_path,
+                {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(tmp_path)},
+            ),
             _context(tmp_path),
         )
         assert result.status == VerificationStatus.ERROR
@@ -325,7 +338,7 @@ def test_verifier_without_executor_unchanged(tmp_path, monkeypatch):
             raise AssertionError("unqualified fallback runner")
 
     result = VerifierRuntime(runner=Runner()).run(
-        _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"]}), _context(tmp_path)
+        _task(tmp_path, {"command": ["make", "-B", "-f", "Makefile", "check"]}), _context(tmp_path)
     )
     assert calls == []
     assert result.status == VerificationStatus.ERROR
@@ -351,7 +364,9 @@ def test_verifier_requires_binding_with_executor(tmp_path):
     executor = _fake_executor(_finished(0), calls=calls)
     runtime, _ = _runtime_with_executor(tmp_path, executor, binding=False)
     result = runtime.run(
-        _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"], "cwd": str(tmp_path)}),
+        _task(
+            tmp_path, {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(tmp_path)}
+        ),
         _context(tmp_path),
     )
     assert calls == []
@@ -366,7 +381,7 @@ def test_verifier_rejects_cwd_outside_workspace_root(tmp_path):
     subdir = tmp_path / "sub"
     subdir.mkdir()
     result = runtime.run(
-        _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"], "cwd": str(subdir)}),
+        _task(tmp_path, {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(subdir)}),
         _context(tmp_path),
     )
     assert calls == []
@@ -378,7 +393,9 @@ def test_verifier_truncates_long_output(tmp_path):
     executor = _fake_executor(_finished(0, stdout=b"x" * 9000))
     runtime, _ = _runtime_with_executor(tmp_path, executor)
     result = runtime.run(
-        _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"], "cwd": str(tmp_path)}),
+        _task(
+            tmp_path, {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(tmp_path)}
+        ),
         _context(tmp_path),
     )
     assert result.status == VerificationStatus.PASSED
@@ -476,7 +493,7 @@ def test_verify_after_loop_passes_with_fake_executor_when_hash_matches(tmp_path,
     assert result is not None
     assert result.status == VerificationStatus.PASSED
     assert len(calls) == 1
-    assert calls[0][1] == ["make", "-f", "Makefile", "check"]
+    assert calls[0][1] == ["make", "-B", "-f", "Makefile", "check"]
 
 
 def test_verify_after_loop_rejects_changed_makefile(tmp_path, monkeypatch):
@@ -642,12 +659,133 @@ def test_verifier_maps_criterion_changed_to_error(tmp_path):
     binding = workspace.bind(principal_id="alice", session_id="chat-a")
     runtime = VerifierRuntime(executor=executor, binding=binding, criterion_sha256="abc")
     result = runtime.run(
-        _task(tmp_path, {"command": ["make", "-f", "Makefile", "check"], "cwd": str(tmp_path)}),
+        _task(
+            tmp_path, {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(tmp_path)}
+        ),
         _context(tmp_path),
     )
     assert result.status == VerificationStatus.ERROR
     assert result.error == "verifier_criterion_changed"
     assert result.fail_type == "criterion_changed"
+
+
+def test_verifier_maps_cleanup_failure_to_settlement_error(tmp_path):
+    # Settlement провалился после отработанной проверки: exit code
+    # известен и сохраняется, но результат — ERROR, а не тихий PASSED.
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    workspace = ManagedWorkspace.create(parent, principal_id="alice")
+    binding = workspace.bind(principal_id="alice", session_id="chat-a")
+    for exit_code in (0, 2):
+        outcome = WorkspacePythonOutcome(
+            "finished",
+            b"ok\n",
+            b"",
+            exit_code,
+            True,
+            None,
+            "none",
+            tmp_path / "retained-stage",
+            cleanup_warning=True,
+        )
+        runtime = VerifierRuntime(
+            executor=_fake_executor(outcome), binding=binding, criterion_sha256="abc"
+        )
+        result = runtime.run(
+            _task(
+                tmp_path,
+                {"command": ["make", "-B", "-f", "Makefile", "check"], "cwd": str(tmp_path)},
+            ),
+            _context(tmp_path),
+        )
+        assert result.status == VerificationStatus.ERROR
+        assert result.error == "workspace_cleanup_failed"
+        assert result.fail_type == "settlement_failed"
+        assert result.exit_code == exit_code
+
+
+def test_command_executor_rejects_stale_workspace_after_execution(tmp_path, monkeypatch):
+    # Другая сессия того же principal пишет в workspace, пока идёт
+    # проверка: PASSED обязан относиться к актуальному workspace, а не
+    # к устаревшему snapshot — исход conflict, а не finished.
+    from core.rootless_podman import PreparedCommandContainer
+    from core.rootless_staging import BoundedStage
+
+    parent = tmp_path / "managed"
+    parent.mkdir(mode=0o700)
+    workspace = ManagedWorkspace.create(parent, principal_id="alice")
+    (workspace.root / "Makefile").write_text(CHECK_MAKEFILE)
+    (workspace.root / "result.txt").write_text(CORRECT_RESULT)
+    access = WorkspaceAccess(workspace, "alice", "chat-a", "env")
+    binding = access.bind()
+    profile = _profile(tmp_path)
+    prepared = []
+
+    def prepare(workspace_arg, snapshot):
+        stage = workspace_arg.stage(snapshot)
+        info = stage.root.stat()
+        bounded = BoundedStage(stage, pool, stage.root, stage.root, (info.st_dev, info.st_ino))
+        prepared.append(bounded)
+        return bounded
+
+    pool = SimpleNamespace(
+        profile=profile,
+        execution_revision="env",
+        check_current=lambda: None,
+        check_stage=lambda bounded: None,
+        prepare=prepare,
+        release_unpublished=lambda bounded: None,
+    )
+    executor = RootlessCommandExecutor(
+        profile=profile,
+        workspace=workspace,
+        limits=WorkspaceLimits(1024, 4096, 20, 8),
+        max_output_bytes=1024,
+        staging_pool=pool,
+    )
+    monkeypatch.setattr(RootlessPodmanProfile, "check_current", lambda *args: None)
+    monkeypatch.setattr(RootlessPodmanProfile, "verify_created_command", lambda *args: None)
+    monkeypatch.setattr(RootlessPodmanProfile, "finished_exit", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(RootlessPodmanProfile, "remove_owned", lambda *args: True)
+    monkeypatch.setattr(RootlessPodmanProfile, "argv", lambda *args: ["synthetic-podman"])
+    monkeypatch.setattr(RootlessPodmanProfile, "environment", lambda *args: {})
+    monkeypatch.setattr(
+        RootlessPodmanProfile,
+        "create_command_container",
+        lambda self, bounded, argv: PreparedCommandContainer(
+            "c" * 64, "slavikai-workspace-test", bounded, list(argv), "cmd-rev"
+        ),
+    )
+
+    def start(*args, **kwargs):
+        # Мутация — во время исполнения процесса, после предстартовой
+        # проверки свежести.
+        with workspace.mutation(binding):
+            (workspace.root / "result.txt").write_text(WRONG_RESULT)
+        streams = []
+        for raw in (b"", b""):
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, raw)
+            os.close(write_fd)
+            streams.append(os.fdopen(read_fd, "rb"))
+        return SimpleNamespace(
+            stdout=streams[0],
+            stderr=streams[1],
+            returncode=0,
+            poll=lambda: 0,
+            wait=lambda **kw: 0,
+        )
+
+    monkeypatch.setattr("subprocess.Popen", start)
+    criterion = hashlib.sha256(CHECK_MAKEFILE.encode()).hexdigest()
+    outcome = executor.execute_command(
+        binding, ["make", "-B", "-f", "Makefile", "check"], timeout=60, criterion_sha256=criterion
+    )
+    assert prepared != []
+    assert outcome.state == "conflict"
+    assert outcome.reason_code == "workspace_conflict"
+    assert outcome.execution_started is True
+    assert outcome.publication == "none"
 
 
 def test_command_executor_rejects_snapshot_criterion_mismatch(tmp_path, monkeypatch):
@@ -682,7 +820,7 @@ def test_command_executor_rejects_snapshot_criterion_mismatch(tmp_path, monkeypa
     monkeypatch.setattr("subprocess.run", _forbidden_engine)
     wrong = hashlib.sha256(b"check:\n\t@true\n").hexdigest()
     outcome = executor.execute_command(
-        binding, ["make", "-f", "Makefile", "check"], timeout=60, criterion_sha256=wrong
+        binding, ["make", "-B", "-f", "Makefile", "check"], timeout=60, criterion_sha256=wrong
     )
     assert outcome.state == "conflict"
     assert outcome.reason_code == "verifier_criterion_changed"
@@ -801,7 +939,7 @@ def test_qualified_command_executor_verifies_fixture_makefile(tmp_path):
         binding = access.bind()
 
         outcome = executor.execute_command(
-            binding, ["make", "-f", "Makefile", "check"], timeout=120
+            binding, ["make", "-B", "-f", "Makefile", "check"], timeout=120
         )
         assert outcome.state == "finished"
         assert outcome.exit_code == 0
@@ -813,7 +951,7 @@ def test_qualified_command_executor_verifies_fixture_makefile(tmp_path):
 
         (workspace.root / "result.txt").write_text(WRONG_RESULT)
         outcome = executor.execute_command(
-            binding, ["make", "-f", "Makefile", "check"], timeout=120
+            binding, ["make", "-B", "-f", "Makefile", "check"], timeout=120
         )
         assert outcome.state == "finished"
         assert outcome.exit_code != 0
@@ -826,10 +964,29 @@ def test_qualified_command_executor_verifies_fixture_makefile(tmp_path):
         # проваливает проверку.
         (workspace.root / "GNUmakefile").write_text("check:\n\t@true\n")
         outcome = executor.execute_command(
-            binding, ["make", "-f", "Makefile", "check"], timeout=120
+            binding, ["make", "-B", "-f", "Makefile", "check"], timeout=120
         )
         assert outcome.state == "finished"
         assert outcome.exit_code != 0
+        assert outcome.publication == "none"
+
+        # Файл `check` в workspace: без -B make решил бы, что цель
+        # up to date, и вернул бы 0, не выполняя recipe. С -B recipe
+        # выполняется всегда: неверный результат проваливается, а
+        # верный — проходит.
+        (workspace.root / "check").write_text("")
+        outcome = executor.execute_command(
+            binding, ["make", "-B", "-f", "Makefile", "check"], timeout=120
+        )
+        assert outcome.state == "finished"
+        assert outcome.exit_code != 0
+        assert outcome.publication == "none"
+        (workspace.root / "result.txt").write_text(CORRECT_RESULT)
+        outcome = executor.execute_command(
+            binding, ["make", "-B", "-f", "Makefile", "check"], timeout=120
+        )
+        assert outcome.state == "finished"
+        assert outcome.exit_code == 0
         assert outcome.publication == "none"
 
         names = profile.control(["ps", "--all", "--format", "{{.Names}}"]).stdout.decode().split()

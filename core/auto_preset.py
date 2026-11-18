@@ -929,9 +929,10 @@ class AutoPresetRunner:
         decision gate); запись о нём — ``_RunFrame`` этого run (run_id,
         principal, session). Здесь разрешение проверяется, а не
         предполагается: binding обязан принадлежать principal/session
-        этого run, указывать ровно на run_root и нести environment
-        revision квалифицированного executor. Parent держит
-        ``_workspace_executor``/``_workspace_access`` как приватные
+        этого run и указывать ровно на run_root, а его environment
+        revision — совпадать с текущей revision квалифицированного
+        executor (live, в самом frame revision не хранится). Parent
+        держит ``_workspace_executor``/``_workspace_access`` как приватные
         атрибуты; stub-родители в тестах их не имеют — getattr.
         """
         python_executor = getattr(self.parent, "_workspace_executor", None)

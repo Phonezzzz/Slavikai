@@ -384,6 +384,42 @@ class _IsolatedRunner:
                     stage.root,
                     cleanup_warning=True,
                 )
+            # Freshness после исполнения: успешный результат обязан
+            # относиться к актуальному workspace, а не к устаревшему
+            # snapshot. Другая сессия того же principal может писать
+            # напрямую, без staging slot, пока идёт проверка.
+            try:
+                fresh = self.workspace.capture(binding, limits=self.limits)
+            except WorkspaceConflict as exc:
+                return WorkspacePythonOutcome(
+                    "conflict",
+                    attached.stdout,
+                    attached.stderr,
+                    child_exit,
+                    True,
+                    exc.reason_code,
+                    "none",
+                )
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return WorkspacePythonOutcome(
+                    "unavailable",
+                    attached.stdout,
+                    attached.stderr,
+                    child_exit,
+                    True,
+                    "workspace_unavailable",
+                    "none",
+                )
+            if fresh != snapshot:
+                return WorkspacePythonOutcome(
+                    "conflict",
+                    attached.stdout,
+                    attached.stderr,
+                    child_exit,
+                    True,
+                    "workspace_conflict",
+                    "none",
+                )
             return WorkspacePythonOutcome(
                 "finished",
                 attached.stdout,

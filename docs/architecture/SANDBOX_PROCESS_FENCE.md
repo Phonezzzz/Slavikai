@@ -144,7 +144,7 @@ terminal acceptance остаются target. Required process verifier оста�
 ## Узкое исключение: штатный process verifier (make check)
 
 Второе явное исключение — только штатный `VerifierRuntime` с canonical check
-`["make", "-f", "Makefile", "check"]` в managed workspace. Все остальные process paths из списка
+`["make", "-B", "-f", "Makefile", "check"]` в managed workspace. Все остальные process paths из списка
 выше остаются закрыты; shell tools модели не публикуются (это E04-T04),
 полная семантика UNVERIFIED/BLOCKED — E05-T03.
 
@@ -154,10 +154,12 @@ terminal acceptance остаются target. Required process verifier оста�
   отдельный профиль `i1-ubuntu-podman-5.7-command-bounded-v1`. Python-профиль
   (`…-python-bounded-v3`) не трогается; command-ревизия квалифицируется
   независимо — её отсутствие не ломает Python-путь.
-- Allowlist ровно `["make", "-f", "Makefile", "check"]`: любой другой argv отклоняется до
+- Allowlist ровно `["make", "-B", "-f", "Makefile", "check"]`: любой другой argv отклоняется до
   любого обращения к engine. Явный `-f Makefile` фиксирует проверяемый
   файл: без него make сам выбрал бы `GNUmakefile`/`makefile`, и хэш
-  `Makefile` ничего бы не гарантировал. Confinement — тот же, что у Python-пути
+  `Makefile` ничего бы не гарантировал. `-B` заставляет make всегда
+  выполнять recipe цели: файл или каталог `check` в workspace больше
+  не даёт `up to date` без проверки. Confinement — тот же, что у Python-пути
   (network none, private namespaces, cap-drop ALL, no-new-privileges,
   readonly rootfs, 256 МиБ / 64 PID, ровно один bind mount staged копии,
   ровно те же 7 env-записей), реальный exit code — через `finished_exit`.
@@ -165,13 +167,15 @@ terminal acceptance остаются target. Required process verifier оста�
   освобождается через `release_unpublished`, артефакты проверки никогда
   не пишутся обратно в workspace.
 - Условие 1 (явное разрешение на run): запуск `make check` привязан к
-  доверенному `WorkspaceBinding` — principal, session, environment revision
-  и квалифицированный профиль/staging pool обязаны совпадать с run; само
-  наличие Makefile разрешения не даёт. Источник разрешения — вызов auto
-  run владельцем (`handle_auto_command` после routing decision gate);
-  запись о нём — `_RunFrame` этого run, и `_verifier_command_executor`
-  сверяет binding именно с ним перед возвратом executor. Без binding или
-  без доступного backend `VerifierRuntime.run()` возвращает ERROR
+  доверенному `WorkspaceBinding`; само наличие Makefile разрешения не
+  даёт. Источник разрешения — вызов auto run владельцем
+  (`handle_auto_command` после routing decision gate); запись о нём —
+  `_RunFrame` этого run. `_verifier_command_executor` сверяет binding
+  с frame (principal/session) и с текущей revision квалифицированного
+  executor (live; в самом frame environment revision не хранится),
+  а также требует совпадения run_root и квалифицированного профиля/
+  staging pool. Без binding или без доступного backend
+  `VerifierRuntime.run()` возвращает ERROR
   `sandbox_execution_unavailable`, процесс не запускается.
 - Условие 2 (критерий задаёт доверенная сторона): содержимое `Makefile`
   (цель `check`) задаётся до запуска агента; его sha256 фиксируется
@@ -189,6 +193,17 @@ terminal acceptance остаются target. Required process verifier оста�
   критерия (verifier) выполняются до `pool.prepare()`, поэтому
   предзапусковой отказ не занимает staging slot и не блокирует следующие
   запуски principal.
+- Свежесть после исполнения: успешный результат verifier обязан
+  относиться к актуальному workspace, а не к устаревшему snapshot.
+  После освобождения stage executor повторно захватывает workspace и
+  сравнивает его с проверенным snapshot: изменение (в т.ч. запись
+  другой сессии того же principal во время проверки) даёт conflict
+  (`workspace_conflict` → ERROR), а не PASSED.
+- Ошибка settlement не теряется: если освобождение stage провалилось
+  (`cleanup_warning`, retained stage), маппинг возвращает ERROR
+  (`workspace_cleanup_failed` / `settlement_failed`) с сохранённым exit
+  code проверки, а не тихий PASSED. Retained stage блокирует следующие
+  запуски principal и требует вмешательства оператора.
 - Маппинг исходов: finished+0 → PASSED; finished+≠0 → FAILED
   (`check_failed`); unavailable → ERROR зеркалом
   `sandbox_verification_unavailable`; unknown/conflict → ERROR, никогда
