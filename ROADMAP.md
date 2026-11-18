@@ -418,15 +418,15 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01-T08 DONE; E01-T09 waits for E04-T03 slice |
-| E02 — persistent browser | 8 | READY после E01 |
+| E01 — canonical execution | 9 | E01 T01–T08 DONE, T09 BLOCKED; E02 blocked |
+| E02 — persistent browser | 8 | BLOCKED (E01-T09 blocked) |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | T03 slice IN_PROGRESS (prerequisite E01-T09); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
 | E07 — memory/context | 5 | NEEDS_REFINEMENT |
 | E08 — cleanup/operations | 8 | NEEDS_REFINEMENT |
-| **Всего** | **63** | **31 READY, 32 предварительный** |
+| **Всего** | **63** | **23 READY, 32 предварительный, 8 заблокировано** |
 
 **E04–E08 — не исполнимые ticket specs до refinement.** Перед соответствующим эпиком Muse доводит каждый до полного шаблона: ЧТО, ЗАЧЕМ, проверенный code touchpoint/unknown, зависимости, scope, steps, delete-vs-wrap, positive/negative/E2E acceptance, postconditions, разрешения/запреты, evidence, `make check`, CI и независимый Codex review. До этого в `STATE.md` фиксируется `BLOCKED: ROADMAP_REFINEMENT`, в том числе E07-T04 и однострочные E08.
 
@@ -951,7 +951,7 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 ##### E01-T09 implementation — verified 2026-11-18 (baseline d36fd64)
 
-**Status:** DONE (acceptance met). E01 закрыт 9/9; gate перед E02 пройден.
+**Status:** BLOCKED (Codex P1 round 5, 2026-11-18, комментарий 4617540542). E01 T01–T08 DONE, T09 BLOCKED; gate перед E02 НЕ пройден. Проводка и тесты в ветке сохранены (см. ниже); merge не делать до решения Technical Director.
 
 **Что сделано.** Новый `tests/test_canonical_loop_e2e.py` (6 тестов): scripted brain (fixture модели) вызывает настоящие `workspace_read`/`workspace_write` через настоящие `ToolRegistry` + `ToolGateway` + `AgentToolLoop` во временном managed workspace; observation возвращается модели (write делается из прочитанного содержимого). Production-проводка: `_execute_frame()` (`AutoPresetRunner.run()` и `resume()`) передаёт результат `_verify_after_loop()` в каноническую деривацию `outcome_from_loop_result()` через `Verification.from_verification_result()`; `verifier=None` и ранний выход `FAILED_VERIFIER` при провале проверки сохранены; деривация доступна наружу как `AutoRunOutcome.canonical_outcome`. Новый E2E успеха доказывает цепочку runner → verifier result → DONE: сценарий идёт через `AutoPresetRunner.run()` с реальным canonical verifier, а DONE проверяется на outcome самого runner.
 
@@ -963,7 +963,7 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 **Находка при реализации (не баг продукта, зафиксирована тестом).** `ManagedWorkspace.create` выделяет подкаталог внутри tmp_path — `workspace.root`, а не сам tmp_path; source.txt пишется в `workspace.root`. `workspace_read` обязан регистрироваться с `capability="read"`: с capability по умолчанию (`exec`) gateway считает эффекты чтения неизвестными (`AutoFileEffects.complete=False`), и последующий write через preset отклоняется (`workspace_file_effects_unknown`). В production-регистрации read-инструментов capability уже read; тест фиксирует это требование.
 
-**Намеренно оставлено.** BLOCKED как отдельный исход не покрыт: `RunPhase.BLOCKED` — нетерминальная фаза, loop её как терминал не выдаёт; approval-пауза (WAITING_APPROVAL) покрыта портированными тестами `tests/test_auto_preset.py`. Замокана только модель (scripted Brain); canonical verifier в новом E2E — тестовый executor (`_ExecutingVerifierRuntime`), гоняющий реальную canonical команду (`make check` по `result.txt`) через subprocess: штатный `VerifierRuntime.run()` команду не исполняет вообще и всегда возвращает `sandbox_verification_unavailable` — это отдельный пробел исполнения, зафиксирован здесь без расширения PR #163 (кандидат в E02/E05, не в этот тикет).
+**Намеренно оставлено.** BLOCKED как отдельный исход не покрыт: `RunPhase.BLOCKED` — нетерминальная фаза, loop её как терминал не выдаёт; approval-пауза (WAITING_APPROVAL) покрыта портированными тестами `tests/test_auto_preset.py`. Замокана только модель (scripted Brain); canonical verifier в новом E2E — тестовый executor (`_ExecutingVerifierRuntime`), гоняющий реальную canonical команду (`make check` по `result.txt`) через subprocess: штатный `VerifierRuntime.run()` команду не исполняет вообще и всегда возвращает `sandbox_verification_unavailable` — это отдельный пробел исполнения, зафиксирован здесь без расширения PR #163 (ближайшая зависимость — E04-T03 real workspace executor; поведение при недоступном executor — E05-T03; не в этот тикет).
 
 **Tests.** `make check` зелёный (2446 passed, coverage 83.18%). Новый `tests/test_canonical_loop_e2e.py` (6 тестов: missing verifier → UNVERIFIED, confirmed postcondition → DONE через production-деривацию, failing tool → FAILED_WORKER, preset run без fake verification, preset run с canonical verifier → DONE на `canonical_outcome`, failing canonical verifier → FAILED_VERIFIER). Чувствительность нового E2E проверена двумя красными прогонами по отдельности: verifier пропущен (`verification=None`) — тест падает при COMPLETED с UNKNOWN; результат verifier потерян до деривации — тест падает при PASSED verifier и UNKNOWN canonical outcome.
 
