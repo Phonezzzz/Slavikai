@@ -5,7 +5,6 @@ import mimetypes
 import os
 import uuid
 from collections.abc import Callable
-from typing import Protocol
 from urllib.parse import urlparse
 
 from playwright.sync_api import (
@@ -20,55 +19,64 @@ from playwright.sync_api import (
     Error as PlaywrightError,
 )
 
+from core.browser_service import (
+    BrowserAutomationBackend,
+    BrowserProfile,
+    BrowserService,
+)
 from core.desktop_security import DesktopPathSecurity
 from shared.models import JSONValue, ToolRequest, ToolResult
+
+__all__ = ["BrowserAutomationBackend", "DesktopBrowserTool", "PlaywrightBrowserBackend"]
 
 MAX_BROWSER_TEXT_CHARS = 30_000
 MAX_BROWSER_FIND_RESULTS = 50
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
 
 
-class BrowserAutomationBackend(Protocol):
-    def handle(self, request: ToolRequest) -> ToolResult: ...
-
-    def close(self) -> None: ...
-
-
 class DesktopBrowserTool:
+    """Thin adapter: request validation and cancellation, then the service.
+
+    Session lifecycle (which backend serves which profile, creation on first
+    use, teardown on close) lives in :class:`BrowserService`; this tool
+    holds no backend itself. ``service``/``profile`` are injectable so one
+    service can be shared; by default the tool builds its own service with
+    the owner's default profile.
+    """
+
     def __init__(
         self,
         security: DesktopPathSecurity,
         *,
         backend_factory: Callable[[], BrowserAutomationBackend] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        service: BrowserService | None = None,
+        profile: BrowserProfile | None = None,
     ) -> None:
         self._security = security
         self._cancelled = cancelled or (lambda: False)
-        self._backend_factory = backend_factory or (
-            lambda: PlaywrightBrowserBackend(
-                security,
-                cancelled=self._cancelled,
+        self._profile = profile or BrowserProfile.default()
+        if service is not None:
+            self._service = service
+        else:
+            factory = backend_factory or (
+                lambda: PlaywrightBrowserBackend(
+                    security,
+                    cancelled=self._cancelled,
+                )
             )
-        )
-        self._backend: BrowserAutomationBackend | None = None
+            self._service = BrowserService(lambda _profile: factory())
 
     def handle(self, request: ToolRequest) -> ToolResult:
         if self._cancelled():
             return ToolResult.failure("Browser operation cancelled before execution.")
         try:
-            backend = self._backend
-            if backend is None:
-                backend = self._backend_factory()
-                self._backend = backend
-            return backend.handle(request)
+            return self._service.handle(self._profile, request)
         except (OSError, RuntimeError, ValueError, PlaywrightError) as exc:
             return ToolResult.failure(f"Browser automation failed: {exc}")
 
     def close(self) -> None:
-        backend = self._backend
-        self._backend = None
-        if backend is not None:
-            backend.close()
+        self._service.close(self._profile)
 
 
 class PlaywrightBrowserBackend:

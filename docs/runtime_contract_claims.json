@@ -983,6 +983,18 @@
         "tests/ui_api/test_qualified_workspace_capture.py"
       ],
       "summary": "Only admitted synchronous Auto UI/API workspace_run and its captured native approval carry the original scoped run binding to the qualified rootless byte boundary. Existing guards precede durable operation intent, which is required before container start. Raw separate prefixes (1MiB/stream), observed counts/EOF, actual child exit or unknown, timeout/capture errors and digests commit atomically before opaque refs and bounded 32KiB UTF-8 views. Capture/store faults stop subsequent dispatch without replay; late historical observations cannot resurrect aborted runs. Additive Store v3-to-v4 preserves prior producer reports and history; sensitive raw bytes may remain indefinitely without aggregate DB quota or GC. Other tools/entrypoints, full canonical capture, acceptance and recovery remain target. Pytest stubs OS/engine boundaries; actual qualified synthetic evidence is separate."
+    },
+    {
+      "id": "runtime.browser.session_service",
+      "scope": "runtime",
+      "status": "partial",
+      "owner": "runtime",
+      "version": 1,
+      "source": "core/browser_service.py",
+      "verified_by": [
+        "tests/test_browser_service.py"
+      ],
+      "summary": "Browser session lifecycle is owned by BrowserService (core/browser_service.py), not by DesktopBrowserTool: a BrowserProfile (profile_id + owner_id, default profile bound to the agent user_id in core/agent.py) keys one lazily created BrowserAutomationBackend, reused across operations and dropped on close, so the next operation starts a fresh session; profiles (and owners sharing a profile id) are isolated; close_all shuts every session down best-effort. DesktopBrowserTool is a thin adapter (request validation, cancellation, delegation, error mapping) and accepts an injectable service/profile so one service can be shared. All generic Playwright actions run unchanged through the service via the reused PlaywrightBrowserBackend. Partial because the session is still disposable: no persistent context (E02-T02), no lease (E02-T03), no login handoff (E02-T04)."
     }
   ]
 }

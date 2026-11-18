@@ -16,6 +16,7 @@ from core.agent_routing import AgentRoutingMixin
 from core.agent_tools import AgentToolsMixin, PendingChatApproval
 from core.approval_policy import ApprovalCategory, ApprovalRequest
 from core.auto_preset import AutoPresetRunner
+from core.browser_service import BrowserProfile
 from core.computer_activity_log import ComputerActivityLog
 from core.computer_backend import ComputerBackend, LocalComputerBackend
 from core.container_computer_backend import ContainerComputerBackend
@@ -588,6 +589,7 @@ class Agent(AgentRoutingMixin, AgentToolsMixin, AgentMemoryMixin):
         self.desktop_browser_tool = DesktopBrowserTool(
             self.desktop_security,
             cancelled=self.desktop_execution_control.cancelled,
+            profile=BrowserProfile.default(owner_id=self.user_id),
         )
         self.desktop_gui_tool = DesktopGuiTool()
         desktop_process = DesktopProcessTool(
