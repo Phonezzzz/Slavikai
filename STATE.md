@@ -150,4 +150,4 @@
 
 ## Resume
 
-**Next active:** E04-T03 (slice) — штатный process verifier, prerequisite перед E01-T09. E01-T09 — следующий после merge среза (PR #163 открыт и ждёт prerequisite; до этого не закрывается, E02 на паузе). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E01-T09 — BLOCKED, ждём решения Technical Director по BLOCKED report (разрешённый backend для verifier или E04-T03 как prerequisite); merge не делать. E02 на паузе до разблокировки E01-T09. **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
