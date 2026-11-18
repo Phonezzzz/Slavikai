@@ -418,10 +418,10 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01-T08 DONE; E01-T09 next |
+| E01 — canonical execution | 9 | E01-T08 DONE; E01-T09 waits for E04-T03 slice |
 | E02 — persistent browser | 8 | READY после E01 |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
-| E04 — workspace/executor | 6 | NEEDS_REFINEMENT |
+| E04 — workspace/executor | 6 | T03 slice IN_PROGRESS (prerequisite E01-T09); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
 | E07 — memory/context | 5 | NEEDS_REFINEMENT |
@@ -951,6 +951,8 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 **Статус:** READY.
 
+**Зависимость.** Gate требует штатного process verifier: узкий срез E04-T03 — prerequisite; до его merge E01-T09 не закрывается, E02 не начинается. Работа по тикету сохранена в PR #163 (ветка `pr-e01-t09-e2e-canonical-loop`); после merge среза — возврат к #163 и прогон E2E без `_ExecutingVerifierRuntime` через штатный `VerifierRuntime`.
+
 ### Epic E02 — Persistent Browser Session Resource
 
 #### E02-T01 — отделить browser session lifecycle от DesktopBrowserTool
@@ -1172,6 +1174,8 @@ upload → external/write
 
 **Owner gate.** Только здесь окончательный выбор.
 
+**Решение владельца 2026-11-18 (для среза E04-T03, не для всего эпика).** Deployment штатного process verifier — rootless container на уже квалифицированной boundary (`core/rootless_podman.py`): агент исполняет произвольный код workspace, поэтому isolated OS user для process execution не выбран. Отдельный pinned image с make — `python:3.12.16-bookworm` (тот же Python 3.12.16 и та же Debian bookworm база, что и квалифицированный Python-образ, плюс build tools; `make` 4.3 проверен на хосте, Id `28d30c15b9e9c3b1d557441aad9592226e852f7716451d6c8df5b4f0c3ce3d1b`, digest `sha256:3c3ba8ad4c85eb63b7568f806434f14e33370056985da7fdf2673621cb1d7e93`). Python profile (`…-python-bounded-v3`, образ `37ccb536…`) не трогается. Выбор образа для полного `make check` репозитория (node/venv) — отдельное решение, не этот срез.
+
 **Не выбирать VM без измеренной необходимости.**
 
 #### E04-T02 — canonical workspace filesystem
@@ -1189,6 +1193,22 @@ upload → external/write
 **Acceptance.** `argv`, cwd, timeout, stdout, stderr, exit code.
 
 **Negative.** Если backend health-check fails, tool вообще не показывается модели.
+
+##### E04-T03 slice — штатный process verifier (prerequisite E01-T09, узкий срез, 2026-11-18)
+
+**Решение владельца 2026-11-18.** Разрешён отдельный pinned image с make и его квалификация в рамках узкого среза; scope — только штатный process verifier (`VerifierRuntime` + `make check` в managed workspace). Переиспользуются существующие rootless Podman boundary и staging; Python profile сохраняется; verifier запускается на staged snapshot без записи артефактов обратно в workspace (no-publish).
+
+**Условие 1 — явное разрешение на конкретный run.** Запуск `make check` должен быть явно разрешён для конкретного run и привязан к его principal, workspace и qualified environment (доверенный `WorkspaceBinding`: principal/session/environment revision + квалифицированный профиль и staging pool). Само наличие Makefile такого разрешения не даёт: без квалифицированного backend и без binding, совпадающего с run, `VerifierRuntime.run()` возвращает ERROR `sandbox_execution_unavailable`, процесс не запускается.
+
+**Условие 2 — критерий задаёт доверенная сторона.** Критерий успешной проверки (содержимое `Makefile`, цель `check`) задаётся доверенной стороной до запуска агента и защищён от подмены агентом: хэш `Makefile` фиксируется доверенным кодом раннера до начала loop и хранится вне agent-writable workspace; при проверке хэш staged snapshot обязан совпасть с предзапусковым — несовпадение даёт ERROR (`verifier_criterion_changed`), никогда PASSED. Агент может писать `result.txt`, но не может переопределить, что считается пройденной проверкой.
+
+**Механизм.** Отдельный pinned image `python:3.12.16-bookworm` (см. E04-T01), отдельный профиль `i1-ubuntu-podman-5.7-command-bounded-v1`, `create_command_container` с allowlist ровно `["make", "check"]` (отказ до любого обращения к engine при любом другом argv), тот же confinement, что у Python-пути (network none, private namespaces, cap-drop ALL, no-new-privileges, readonly rootfs, 256 МиБ / 64 PID, ровно один bind mount staged копии, ровно те же 7 env-записей), `finished_exit` для реального exit code, no-publish освобождение stage (`release_unpublished`). `VerifierRuntime`: опциональный `executor` (default `None` — поведение без исполнителя не меняется); маппинг: finished+0 → PASSED, finished+≠0 → FAILED (`check_failed`), unavailable/unknown/conflict → ERROR, никогда фейковый PASSED. `_verify_after_loop`: canonical verifier есть, но backend недоступен → ERROR, а не `None` (fail-closed в FAILED_VERIFIER вместо COMPLETED).
+
+**Доказательство (отдельный PR).** Штатный `VerifierRuntime` на реальном квалифицированном backend: верный `result.txt` → PASSED, неверный → FAILED, недоступный backend → ERROR без запуска процесса. Полный `make check` самого SlavikAI внутри sandbox — вне scope среза (репозиторий нельзя заснять в managed workspace: symlink/размеры; в образе нет node/venv). Публикация shell tools модели — E04-T04, полная семантика UNVERIFIED/BLOCKED — E05-T03.
+
+**Порядок.** Срез — prerequisite перед закрытием E01-T09: после merge среза возврат к PR #163, E2E без `_ExecutingVerifierRuntime` через штатный путь; E01-T09 закрывается только после DONE через штатный путь + негативные сценарии без DONE. До этого #163 остаётся BLOCKED, E02 ждёт.
+
+**Статус:** IN_PROGRESS, ветка `pr-e04-t03-slice-process-verifier` от `origin/main` `d36fd64`.
 
 #### E04-T04 — tool qualification
 

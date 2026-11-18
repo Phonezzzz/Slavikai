@@ -92,7 +92,13 @@
 - Ветка `pr-e01-t08-remove-legacy-mwv-routing` от `origin/main` `9a431ed` (merge PR #161). PR #162 открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
 - Содержимое: удаление legacy classifier/MWV production routing — удалены `core/agent_mwv.py`, `core/mwv/routing.py`, `core/mwv/manager.py`, `core/mwv/coding_skill.py`, `coding_task.py`, `single_attempt.py`, `worker.py`, `interfaces.py`; `classify_request`/`ManagerRuntime`/`MWVRunResult`/`run_task_packet`/`cancel_mwv_approval` удалены из production; default `runtime_mode` — `ask`, fallthrough — в обычный chat loop; root-gate больше не срабатывает (его триггером был legacy classifier); новый gate-тест `tests/test_legacy_mwv_routing_removed.py`; claims registry sync (3 claims); доки переписаны (`ROUTING_POLICY.md`, `MWV_FLOW.md` — stub); ROADMAP.md record + STATE.md sync.
 - Локальные гейты: `make check` зелёный (2435 passed, coverage 83.19%).
-- **Статус:** IN_REVIEW. E01-T08 done (по локальным гейтам); E01-T09 next.
+- **Статус:** IN_REVIEW. E01-T08 done (по локальным гейтам); E01-T09 — после merge среза E04-T03.
+
+## E04-T03 (slice): штатный process verifier — ветка pr-e04-t03-slice-process-verifier (IN_PROGRESS)
+
+- Ветка `pr-e04-t03-slice-process-verifier` от `origin/main` `d36fd64`. Узкий срез E04-T03 как prerequisite перед закрытием E01-T09; один активный тикет.
+- Содержимое: отдельный pinned image `python:3.12.16-bookworm` с make (Id `28d30c15…`, digest `sha256:3c3ba8ad…`) и его квалификация (профиль `i1-ubuntu-podman-5.7-command-bounded-v1`, Python profile не тронут); `create_command_container` с allowlist ровно `["make", "check"]`; no-publish исполнитель на staged snapshot (`release_unpublished`); опциональный `executor` в `VerifierRuntime` с маппингом PASSED/FAILED/ERROR; fail-closed `_verify_after_loop` (backend недоступен → ERROR, не `None`); два условия владельца в спеках: (1) запуск `make check` явно разрешён для конкретного run и привязан к principal/workspace/qualified environment — наличие Makefile разрешения не даёт; (2) критерий проверки задаёт доверенная сторона до запуска агента, хэш `Makefile` фиксируется до loop, несовпадение → ERROR. Доказательство: верный `result.txt` → PASSED, неверный → FAILED, недоступный backend → ERROR без запуска процесса; полный `make check` репозитория в sandbox — вне scope. ROADMAP.md record (E04-T01 решение, E04-T03 slice, E01-T09 зависимость) + STATE.md sync.
+- **Статус:** IN_PROGRESS. После merge — возврат к PR #163 и E2E без `_ExecutingVerifierRuntime`; E01-T09 закрывается только после DONE через штатный путь + негативные сценарии без DONE.
 
 ## Текущая очередь
 
@@ -113,10 +119,10 @@
 | Epic | IDs | Count | Status |
 |---|---|---:|---|
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
-| E01 | T01–T09 | 9 | E01-T08 done; E01-T09 next |
+| E01 | T01–T09 | 9 | E01-T08 done; E01-T09 waits for E04-T03 slice |
 | E02 | T01–T08 | 8 | READY после E01 |
 | E03 | T01–T11 | 11 | READY после E02 |
-| E04 | T01–T06 | 6 | NEEDS_REFINEMENT |
+| E04 | T01–T06 | 6 | T03 slice IN_PROGRESS (prerequisite E01-T09); остальное NEEDS_REFINEMENT |
 | E05 | T01–T07 | 7 | NEEDS_REFINEMENT |
 | E06 | T01–T06 | 6 | NEEDS_REFINEMENT |
 | E07 | T01–T05 | 5 | NEEDS_REFINEMENT |
@@ -134,4 +140,4 @@
 
 ## Resume
 
-**Next active:** E01-T09 — regression E2E canonical loop. **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E04-T03 (slice) — штатный process verifier, prerequisite перед E01-T09. E01-T09 — следующий после merge среза (PR #163 открыт и ждёт prerequisite; до этого не закрывается, E02 на паузе). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
