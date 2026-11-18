@@ -418,15 +418,15 @@ Final outcome
 | Epic | Tickets | Статус |
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
-| E01 — canonical execution | 9 | E01 T01–T08 DONE, T09 IN_REVIEW (stock verifier); E02 blocked |
-| E02 — persistent browser | 8 | BLOCKED (E01-T09 blocked) |
+| E01 — canonical execution | 9 | E01 T01–T09 DONE (PR #163, main 0f894c6) |
+| E02 — persistent browser | 8 | READY (E01 9/9 DONE) |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
 | E06 — modes/policy/UI | 6 | NEEDS_REFINEMENT |
 | E07 — memory/context | 5 | NEEDS_REFINEMENT |
 | E08 — cleanup/operations | 8 | NEEDS_REFINEMENT |
-| **Всего** | **63** | **23 READY, 32 предварительный, 8 заблокировано** |
+| **Всего** | **63** | **31 READY, 32 предварительный, 0 заблокировано** |
 
 **E04–E08 — не исполнимые ticket specs до refinement.** Перед соответствующим эпиком Muse доводит каждый до полного шаблона: ЧТО, ЗАЧЕМ, проверенный code touchpoint/unknown, зависимости, scope, steps, delete-vs-wrap, positive/negative/E2E acceptance, postconditions, разрешения/запреты, evidence, `make check`, CI и независимый Codex review. До этого в `STATE.md` фиксируется `BLOCKED: ROADMAP_REFINEMENT`, в том числе E07-T04 и однострочные E08.
 
@@ -951,7 +951,7 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 ##### E01-T09 implementation — verified 2026-11-19 (baseline 7affb3f)
 
-**Status:** IN_REVIEW (prerequisite E04-T03 slice MERGED, PR #164, main 7affb3f). E01 T01–T08 DONE, T09 — E2E через штатный verifier; gate перед E02 НЕ пройден до merge PR #163.
+**Status:** DONE (PR #163 MERGED 2026-11-19, main 0f894c6). E01 T01–T09 DONE; E02 READY.
 
 **Что сделано.** Новый `tests/test_canonical_loop_e2e.py` (7 тестов): scripted brain (fixture модели) вызывает настоящие `workspace_read`/`workspace_write` через настоящие `ToolRegistry` + `ToolGateway` + `AgentToolLoop` во временном managed workspace; observation возвращается модели (write делается из прочитанного содержимого). Production-проводка: `_execute_frame()` (`AutoPresetRunner.run()` и `resume()`) передаёт результат `_verify_after_loop()` в каноническую деривацию `outcome_from_loop_result()` через `Verification.from_verification_result()`; `verifier=None` и ранний выход `FAILED_VERIFIER` при провале проверки сохранены; деривация доступна наружу как `AutoRunOutcome.canonical_outcome`. Новый E2E успеха доказывает цепочку runner → verifier result → DONE: сценарий идёт через `AutoPresetRunner.run()` со штатным `VerifierRuntime` (canonical make check в контейнере на staged snapshot через квалифицированный rootless backend среза E04-T03; executor + binding выводятся из production wiring агента), а DONE проверяется на outcome самого runner. Плюс отдельный тест без backend: Makefile есть, критерий зафиксирован, executor не подключён → FAILED_VERIFIER (`sandbox_execution_unavailable`), процесс не запускается.
 
@@ -967,7 +967,7 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 
 **Tests.** `make check` зелёный (2486 passed, coverage 83.11%). Новый `tests/test_canonical_loop_e2e.py` (7 тестов: missing verifier → UNVERIFIED, confirmed postcondition → DONE через production-деривацию, failing tool → FAILED_WORKER, preset run без fake verification, preset run со штатным canonical verifier → DONE на `canonical_outcome`, preset run без backend → FAILED_VERIFIER (`sandbox_execution_unavailable`), failing canonical verifier → FAILED_VERIFIER). Real-backend E2E на хосте (opt-in `SLAVIK_RUN_QUALIFIED_VERIFIER_E2E=1`): верный result.txt → DONE (36.48s), неверный → FAILED_VERIFIER (37.08s); живой workspace не изменён, кроме созданного loop result.txt. Чувствительность перепроверена на штатном пути двумя красными прогонами по отдельности: verifier пропущен (`verification=None`) — тест падает (`outcome.verifier is None`); аргумент `verification=` убран из деривации — тест падает (`canonical_outcome` не DONE).
 
-**Зависимость.** Prerequisite выполнен: срез E04-T03 MERGED (PR #164, 2026-11-19, main 7affb3f); E2E в PR #163 идёт штатным `VerifierRuntime` без test-only executor. E01-T09 закрывается merge PR #163 после зелёного CI и чистого Codex review; E02 начинается только после этого.
+**Зависимость.** Prerequisite выполнен: срез E04-T03 MERGED (PR #164, 2026-11-19, main 7affb3f); E2E в PR #163 идёт штатным `VerifierRuntime` без test-only executor. E01-T09 закрыт merge PR #163 (2026-11-19, main 0f894c6; CI зелёный, Codex review без findings); E02 READY.
 
 ### Epic E02 — Persistent Browser Session Resource
 
@@ -1222,7 +1222,7 @@ upload → external/write
 
 **Доказательство (отдельный PR).** Штатный `VerifierRuntime` на реальном квалифицированном backend: верный `result.txt` → PASSED, неверный → FAILED, недоступный backend → ERROR без запуска процесса. Полный `make check` самого SlavikAI внутри sandbox — вне scope среза (репозиторий нельзя заснять в managed workspace: symlink/размеры; в образе нет node/venv). Публикация shell tools модели — E04-T04, полная семантика UNVERIFIED/BLOCKED — E05-T03.
 
-**Порядок.** Срез MERGED (PR #164, 2026-11-19, main 7affb3f); возврат к PR #163 выполнен — E2E идёт штатным путём без `_ExecutingVerifierRuntime`. E01-T09 закрывается только после DONE через штатный путь + негативные сценарии без DONE; до merge #163 E02 ждёт.
+**Порядок.** Срез MERGED (PR #164, 2026-11-19, main 7affb3f); возврат к PR #163 выполнен — E2E идёт штатным путём без `_ExecutingVerifierRuntime`. E01-T09 закрыт: DONE через штатный путь + негативные сценарии без DONE подтверждены, PR #163 MERGED (main 0f894c6); E02 READY.
 
 **Статус:** DONE — PR #164 MERGED 2026-11-19 ручным fast-forward push, новый `main` — `7affb3f`.
 
