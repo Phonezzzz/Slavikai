@@ -419,7 +419,7 @@ Final outcome
 |---|---:|---|
 | E00 — baseline/docs | 3 | E00-T01 DONE; E00-T02 DONE; E00-T03 DONE |
 | E01 — canonical execution | 9 | E01 T01–T09 DONE (PR #163, main 0f894c6) |
-| E02 — persistent browser | 8 | READY (E01 9/9 DONE) |
+| E02 — persistent browser | 8 | T01 IN_REVIEW (PR #166) |
 | E03 — Host Bridge / Desktop Commander | 11 | READY после E02 |
 | E04 — workspace/executor | 6 | T03 slice DONE (PR #164, main 7affb3f); остальное NEEDS_REFINEMENT |
 | E05 — verification/recovery | 7 | NEEDS_REFINEMENT |
@@ -511,7 +511,7 @@ Final outcome
 | 13 | `fs` duplicates `workspace_*`, wider root, exec capability | verified | `tools/filesystem_tool.py:9` `SANDBOX_ROOT = Path("sandbox")`, `:13` mkdir side effect; `core/agent.py:476` `capability="exec"` | none | Root `sandbox/` wider than `sandbox/project`; bypasses workspace budget/`AutoFileEffects` |
 | 14 | `project` rebuilds `VectorIndex` per call | verified | `tools/project_tool.py:39-48` new `VectorIndex("memory/vectors.db")` + `close()` in `finally`, inside `handle_project_request` | none | Duplicates `workspace_list/read` + vector search |
 | 15 | `create`≈`write`, `rename`≈`move` | partial | `tools/workspace_tools.py:514` Write vs `:536` Create; `:563` Rename vs `:601` Move | none | `create` ≠ `write`: `CreateFileTool` defaults `overwrite=False` and refuses existing files before writing (`:540,551-552`); `WriteFileTool` unconditionally overwrites (`:528`). Merge must preserve create-only semantics in the acceptance of the merged tool (E08-T03) |
-| 16 | Browser: no persistent context | verified | `tools/desktop_browser_tool.py:305` `chromium.launch`, `:306` `new_context`; 0 matches for `launch_persistent_context` | none | E02-T01/T02 dependency |
+| 16 | Browser: no persistent context | verified | `tools/desktop_browser_tool.py:313` `chromium.launch`, `:314` `new_context`; 0 matches for `launch_persistent_context` | none | E02-T01/T02 dependency |
 | 17 | Gateway bypass: workspace read path | verified | `server/http/handlers/workspace.py:593` direct `tool.handle(ToolRequest(...))`, called at `:701`, `:788` | none | Second read path without approval/log/budget |
 | 18 | Container backend: unqualified mode touches host directly | verified | `core/container_computer_backend.py:120-175`: qualified → `_qualified_file_call`; else `_ensure_in_project` + direct host access | none | Qualified mode goes via gateway (2nd-audit correction confirmed) |
 | 19 | `SAFE_MODE_TOOLS_OFF` contains phantoms | verified | `core/agent.py:129-141`: `web_search`, `http_client` listed, no such registered tools | none | — |
@@ -982,6 +982,18 @@ This ticket's acceptance (instrumentation test for model-originated state-changi
 **Acceptance.** Existing generic actions работают через service.
 
 **Delete-vs-wrap.** Action implementation reuse; lifecycle ownership заменить.
+
+##### E02-T01 implementation — verified 2026-11-19 (baseline eed97a7)
+
+**Status:** IN_REVIEW (PR #166).
+
+**Что сделано.** Новый `core/browser_service.py`: `BrowserProfile` (frozen dataclass: `profile_id` + `owner_id`, пустые значения отклоняются; `default(owner_id)` — профиль по умолчанию) и `BrowserService` (сессии keyed by `(owner_id, profile_id)`; backend создаётся лениво на первой операции профиля и переиспользуется; `close(profile)` и `close`-операция сбрасывают сессию, следующий вызов стартует заново; `close_all()` — best-effort shutdown всех сессий; `is_active`/`active_profiles`). Протокол `BrowserAutomationBackend` переехал из `tools/desktop_browser_tool.py` в сервис (tool его реэкспортирует). `DesktopBrowserTool` — тонкий адаптер: проверка отмены, делегирование в сервис, прежний маппинг ошибок; backend'ом больше не владеет; принимает injectable `service`/`profile`. Production wiring (`core/agent.py`): tool получает `BrowserProfile.default(owner_id=self.user_id)`. Generic actions не переписывались — `PlaywrightBrowserBackend` reused как есть (pages, navigate, snapshot/read, find, click, input, select, submit, wait, tabs, download). Claim `runtime.browser.session_service` (partial — сессия пока disposable: persistent context — E02-T02, lease — E02-T03, login handoff — E02-T04).
+
+**Мини-аудит lifecycle (до изменений).** `DesktopBrowserTool` создавался один раз в `Agent` (`core/agent.py:588`), лениво создавал один backend на первом `handle()` и кэшировал его; `PlaywrightBrowserBackend` владел всей сессией (`_playwright`, `_browser`, `_context`, `_pages`, `_active_page_id`); `_ensure_started()` на каждой операции делал `chromium.launch` + `new_context(accept_downloads=True)` — disposable, без `launch_persistent_context` в репо; идентичности сессии не было (ни profile id, ни owner, ни session id); `headless` читался из аргументов каждого запроса; `close` молча пересоздавал браузер при следующей операции. Тесты `tests/test_desktop_browser_tool.py` (8 тестов) покрывали backend через fake page/context и wrapper через FakeBackend, но не lifecycle между инстансами и не изоляцию сессий.
+
+**Tests.** Новый `tests/test_browser_service.py` (11 тестов: reuse backend для одного профиля, изоляция профилей и владельцев, close сбрасывает сессию, close-операция сбрасывает сессию, close_all + best-effort при падении close, factory failure не оставляет сессии, tool ведёт generic actions через shared service, отмена не создаёт backend, реальный PlaywrightBackend через сервис с fake page). `make check` зелёный (2497 passed, coverage 83.16%).
+
+**Намеренно не в тикете.** Persistent context (`user_data_dir`, `launch_persistent_context`) — E02-T02; lease — E02-T03; login handoff — E02-T04; эффект-классификация — E02-T05. Service не знает про headless (остаётся per-start-request в backend) и не хранит профиль на диске.
 
 #### E02-T02 — dedicated persistent Chromium profile
 

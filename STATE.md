@@ -109,6 +109,14 @@
 - Локальные гейты: `make check` зелёный (2486 passed, coverage 83.11%); real-backend E2E: DONE 36.48s, failing 37.08s; оба sensitivity-красных прогона на штатном пути падают.
 - **Статус:** DONE. PR #163 MERGED 2026-11-19 (main 0f894c6; CI зелёный, Codex review без findings). E01 9/9 DONE; E02 READY.
 
+
+## E02-T01: ветка pr-e02-t01-browser-service — PR #166 (IN_REVIEW)
+
+- Ветка `pr-e02-t01-browser-service` от `origin/main` (`eed97a7`, docs E01 9/9 DONE, E02 READY; PR #165 MERGED).
+- Содержимое: новый `core/browser_service.py` (`BrowserProfile` + `BrowserService`, протокол `BrowserAutomationBackend` переехал из tool); `DesktopBrowserTool` — тонкий адаптер над сервисом (injectable `service`/`profile`); production wiring — `BrowserProfile.default(owner_id=self.user_id)` в `core/agent.py`; generic actions reused без переписывания; claim `runtime.browser.session_service` (partial). ROADMAP.md record (implementation + мини-аудит) + STATE.md sync.
+- Локальные гейты: `make check` зелёный (2497 passed, coverage 83.16%); новый `tests/test_browser_service.py` (11 тестов).
+- **Статус:** IN_REVIEW. PR #166 открыт; merge — после GitHub CI и чистого Codex review, ручной fast-forward push по соглашению.
+
 ## Текущая очередь
 
 - **E00-T01 — DONE** (read-only baseline, разрешение PR #151, проверка двух worktree). Evidence: Git `worktree list`, local/remote `main` SHA, merge status PR #151.
@@ -123,6 +131,7 @@
 - **E01-T07 — DONE** (Auto → policy preset: новый `core/auto_preset.py` — Auto как policy preset поверх canonical loop; удалены `core/auto_runtime.py`, `core/auto_agent.py`, `tests/test_auto_runtime.py` (театр planner/coders/merge и фейковые PASSED); честный verifier `_verify_after_loop` + завершение по канонической деривации `outcome_from_loop_result`; baseline `649bf90`). Evidence: запись в ROADMAP.md (E01-T07 implementation + mini-audit; parity-тест `test_auto_preset_parity_write_scenario` — настоящий `WriteFileTool` через canonical loop, файл создан, COMPLETED, `verifier is None`, `files_touched == 1`; claims registry: `runtime.auto.v1_tool_loop` → `runtime.auto.preset_canonical_loop`), новый `tests/test_auto_preset.py` + 9 портированных тестовых файлов, `make check` зелёный (2553 passed, coverage 83.75%); ветка `pr-e01-t07-auto-policy-preset`.
 - **E01-T08 — DONE** (удалён legacy classifier/MWV production routing: `core/agent_mwv.py`, `core/mwv/routing.py`, `core/mwv/manager.py` и MWV-путь чата удалены; default `runtime_mode` — `ask`; root-gate больше не срабатывает). Evidence: запись в ROADMAP.md (E01-T08 implementation + mini-audit; отступления от брифа — `set_runtime_state` не нормализует режимы, root-gate не срабатывает), новый `tests/test_legacy_mwv_routing_removed.py` (9 тестов) + переведённые тесты, `make check` зелёный (2435 passed, coverage 83.19%); ветка `pr-e01-t08-remove-legacy-mwv-routing`, PR #162.
 - **E01-T09 — DONE** (regression E2E canonical loop: первый немоканный acceptance test — scripted brain, настоящие read/write tools, ToolRegistry + ToolGateway + AgentToolLoop, observation, postcondition; ветви: fail tool → FAILED_WORKER, missing verifier → UNVERIFIED, confirmed postcondition → DONE; preset run со штатным canonical verifier → DONE на `canonical_outcome`). Evidence: запись в ROADMAP.md (E01-T09 implementation; находка — `workspace_read` обязан регистрироваться с `capability="read"`, иначе file-effects accounting preset'а отклоняет write; BLOCKED как терминал не покрыт — нетерминальная фаза, approval-пауза в `tests/test_auto_preset.py`; P1 round 5 закрыт — E2E на штатном пути без подмены), новый `tests/test_canonical_loop_e2e.py` (7 тестов), `make check` зелёный (2486 passed, coverage 83.11%); ветка `pr-e01-t09-e2e-canonical-loop`; PR #163 MERGED (main 0f894c6), см. ROADMAP.md.
+- **E02-T01 — IN_REVIEW** (BrowserProfile + BrowserService minimal API: lifecycle сессии отделён от DesktopBrowserTool; generic actions идут через service; persistent context — E02-T02). Evidence: запись в ROADMAP.md (E02-T01 implementation + мини-аудит), новый `tests/test_browser_service.py` (11 тестов), `make check` зелёный (2497 passed, coverage 83.16%); ветка `pr-e02-t01-browser-service`; PR #166.
 
 ## Readiness: 63 последовательных тикета
 
@@ -130,7 +139,7 @@
 |---|---|---:|---|
 | E00 | T01–T03 | 3 | E00-T01 done; E00-T02 done; E00-T03 done |
 | E01 | T01–T09 | 9 | E01 T01–T09 DONE |
-| E02 | T01–T08 | 8 | READY |
+| E02 | T01–T08 | 8 | T01 IN_REVIEW (PR #166) |
 | E03 | T01–T11 | 11 | READY после E02 |
 | E04 | T01–T06 | 6 | T03 slice DONE (PR #164); остальное NEEDS_REFINEMENT |
 | E05 | T01–T07 | 7 | NEEDS_REFINEMENT |
@@ -150,4 +159,4 @@
 
 ## Resume
 
-**Next active:** E02-T01 — READY (E01 9/9 DONE, PR #163 MERGED, main 0f894c6). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
+**Next active:** E02-T01 — IN_REVIEW (PR #166). **Do not repeat:** PR #151, `git reset`, `git clean`, `git stash`, GitHub auto-merge, создание третьего worktree, правки в исходном дереве.
